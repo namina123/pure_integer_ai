@@ -14,17 +14,15 @@ If any of the following resonates with you, you might consider supporting:
 - you want independent research to have a little more breathing room;
 - you'd like to cast a small vote of confidence for "things without immediate ROI."
 
-### Domestic (China) channels
+### Ways to support
 
-Scan to support:
+Scan a QR code, or use Ko-fi — whichever is convenient:
 
 | WeChat | Alipay |
 |:---:|:---:|
 | ![WeChat](docs/images/wechat_qr.jpg) | ![Alipay](docs/images/alipay_qr.jpg) |
 
-### International channels
-
-An international payment channel is **not yet available**. I am working on it — once I have assessed a feasible option (compliance, exchange rates, fees), I will add it as soon as possible. If you are outside China and wish to support, for now you may use the QR codes above (if convenient), or reach me by email; I will let you know the moment an international channel opens.
+**Ko-fi** ☕: [ko-fi.com/namina123](https://ko-fi.com/namina123) — accepts credit cards, PayPal, and more; works from anywhere.
 
 ### On the amount
 
