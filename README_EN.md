@@ -8,20 +8,33 @@
 
 This repository is its reference implementation.
 
+## Motivation
+
+Mainstream intelligent systems are built almost entirely on floating-point arithmetic — neural-network weights are floats, and training is the iteration of floating-point gradients. This project explores a different path: what if the storage and computation of an intelligent system were placed entirely on top of integers?
+
+The point is not to argue against floating point. It is to clarify one question: can a system built wholly from integers — runnable on an ordinary personal computer, reproducible bit-for-bit, and auditable — actually stand up as a self-learning system.
+
 ## What this is
 
-This is an **existence exploration of an architecture**, not a finished AI product. The research attempts to use pure integers (no floating-point operations) as the storage and computational substrate of cognition, and takes "edge-count reinforcement" as the learning primitive — the strength of a relation is a monotonically non-decreasing integer, promoted when co-occurrence counts cross a threshold.
+The research uses pure integers (no floating-point operations) as the storage and computational substrate of cognition. Its core includes:
 
 - **Pure-integer core**: concepts, relations, and strengths are all integers; reproducible bit-for-bit across machines.
-- **Six interlocking invariants**: constrain reproducibility and auditability.
-- **Arithmetic domain**: an end-to-end demonstration of the mechanism (compile → integer-VM execution → self-check → six gates).
-- **Language domain**: a second domain under active construction — mechanisms are wired but no usable capability yet.
+- **Edge-count reinforcement (learning primitive)**: the strength of a relation is a monotonically non-decreasing integer, promoted when co-occurrence counts cross a threshold (tally-to-promote).
+- **Six interlocking invariants**: pure-integer, bit-identical, monotone-with-overwrite, append-only-audit, teacher boundary, downward-only dependency — together constraining reproducibility and auditability.
+- **Structure induction**: a shared skeleton is extracted by aligning multiple samples, as a form of template abstraction.
+- **Constructive self-check**: for teacher-declared inverse transformations, B∘A is checked against identity, yielding a three-valued verdict.
+- **Anti-theater discipline**: every mechanism is labeled with its real status (production-live / opt-in gate / test-only / dead), so that "the mechanism is wired" does not silently mean "the capability is achieved".
 
-Honestly, it **cannot yet hold a conversation or generate coherent sentences**. That capability is still being built; the paper states these boundaries in full.
+## Current status
+
+- **Arithmetic domain**: the end-to-end demonstration is complete — given a symbolic arithmetic specification, the system compiles it into an integer COMPOSES graph, executes it on an integer virtual machine using exact rational arithmetic, self-checks the result by recomputation, and passes six falsifiable gates.
+- **Language domain**: the corpus-driven learning mechanisms are wired (cue emergence, correspondence bridge, floor measurement), but coherent sentence generation and conversational ability are still under construction.
+
+Capability boundaries are stated in full in the paper.
 
 ## Paper
 
-The paper gives a complete account of the architecture and an honest statement of capability boundaries.
+The paper gives a complete account of the architecture and its capability boundaries.
 
 The author is an **independent researcher** and currently cannot obtain the endorsement required to submit a preprint to arXiv. The paper is therefore archived on **Zenodo**, which issues a formal, citable DOI without an endorsement barrier:
 
@@ -29,7 +42,7 @@ The author is an **independent researcher** and currently cannot obtain the endo
 - 📝 Paper sources (LaTeX): [`paper/`](paper/)
 - 🔗 **Zenodo archive & DOI**: [10.5281/zenodo.21431532](https://doi.org/10.5281/zenodo.21431532) (permanently citable)
 
-To discuss the paper on [alphaXiv](https://www.alphaxiv.org): once the paper is on Zenodo, you can upload the same PDF to alphaXiv to start an open discussion (alphaXiv supports uploading non-arXiv papers as PDFs for discussion).
+To discuss the paper on [alphaXiv](https://www.alphaxiv.org), upload the same PDF there (alphaXiv supports uploading non-arXiv papers as PDFs for discussion).
 
 ## Quick start
 
@@ -42,7 +55,7 @@ python -m pure_integer_ai.crosscut.guards.lint
 
 ## Support this research
 
-This is **independent research with no institutional backing and no commercial funding**, carried out in the author's spare time. If you find it valuable, you are welcome (**entirely optional**) to offer support → [Support the research (donate)](DONATE_EN.md).
+This is independent research with no institutional backing and no commercial funding, carried out in the author's spare time. If you find it valuable, you are welcome to offer support → [Support the research (donate)](DONATE_EN.md).
 
 ## License
 
@@ -53,7 +66,3 @@ This is **independent research with no institutional backing and no commercial f
 ## Contact
 
 Email: 2698801855@qq.com
-
----
-
-*This project is an honest record of an exploration in progress, not a claim of achieved results.*
