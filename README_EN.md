@@ -27,7 +27,7 @@ The author is an **independent researcher** and currently cannot obtain the endo
 
 - 📄 Paper PDF (in this repo): [`paper/main.pdf`](paper/main.pdf)
 - 📝 Paper sources (LaTeX): [`paper/`](paper/)
-- 🔗 **Zenodo archive & DOI**: *(the paper will be uploaded to Zenodo shortly; the link will be added here)*
+- 🔗 **Zenodo archive & DOI**: [10.5281/zenodo.21431532](https://doi.org/10.5281/zenodo.21431532) (permanently citable)
 
 To discuss the paper on [alphaXiv](https://www.alphaxiv.org): once the paper is on Zenodo, you can upload the same PDF to alphaXiv to start an open discussion (alphaXiv supports uploading non-arXiv papers as PDFs for discussion).
 

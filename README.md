@@ -27,7 +27,7 @@
 
 - 📄 论文 PDF（仓库内）：[`paper/main.pdf`](paper/main.pdf)
 - 📝 论文源码（LaTeX）：[`paper/`](paper/)
-- 🔗 **Zenodo 存档与 DOI**：*（论文即将上传至 Zenodo，链接随后补充于此）*
+- 🔗 **Zenodo 存档与 DOI**：[10.5281/zenodo.21431532](https://doi.org/10.5281/zenodo.21431532)（可永久引用）
 
 若希望在 [alphaXiv](https://www.alphaxiv.org) 上就论文发起公开讨论，可在 Zenodo 上传完成后，将同一份 PDF 上传至 alphaXiv 即可（alphaXiv 支持上传非 arXiv 来源的论文 PDF 用于讨论）。
 
