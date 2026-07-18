@@ -32,6 +32,26 @@ The research uses pure integers (no floating-point operations) as the storage an
 
 Capability boundaries are stated in full in the paper.
 
+## Roadmap
+
+Directions currently under attack and planned for the future:
+
+**Near-term (in progress)**
+
+- **Coherent sentence generation**: the language domain currently produces only word-level fragments; the goal is end-to-end readable sentence generation.
+- **First statistical evidence**: get the floor measurement to run end-to-end and yield measured=True (currently blocked by the performance wall and several wiring gaps).
+- **Performance optimization**: bring large-corpus training down from roughly 15 minutes per round to a size that allows repeated experimentation.
+- **Conversation shell**: online single-sentence input, Chinese tokenization, sentence rendering, REPL interaction — so the system can be used in direct dialogue.
+
+**Mid-term**
+
+- **Statistical weaning verdict**: reach a falsifiable criterion of "the system still produces after the teacher withdraws" in the language domain.
+- **More domains and modalities**: code generation, further extension of symbolic mathematics.
+
+**Long-term**
+
+- Test the boundaries and applicability of the pure-integer path on more tasks.
+
 ## Paper
 
 The paper gives a complete account of the architecture and its capability boundaries.
