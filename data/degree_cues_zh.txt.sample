@@ -1,0 +1,14 @@
+# ChineseSemanticKB 程度副词 sample（degree adverb + Rational intensity num/den·#1134·示意格式）
+# 全量 214 cue 在 data_llm/degree_cues_zh.txt（ZERO_AI_LOCAL_DIR 本地·禁二次分发·仅本 .sample 入仓）
+# schema: cue<TAB>num/den  （intensity 正缩放·Rational·非 float·很/非常=2/1·较=3/2·稍=2/5）
+# loader: collection.resolve_degree_facts(lang) + load_degree_cues_file → cue_words.populate_degree_cues
+非常	2/1
+极其	2/1
+最	2/1
+很	2/1
+较	3/2
+比较	6/5
+稍微	2/5
+有点	2/5
+稍	3/5
+略微	13/10

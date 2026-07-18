@@ -1,0 +1,50 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# --- 本地训练数据 ---
+# 全量语料/知识库放外部 (K:/)，本仓仅携带 *.sample 示意文件。
+# 全量数据源于 ChineseSemanticKB / ConceptNet 派生，禁止二次分发。
+data/*.txt
+data/*.json
+data/*.jsonl
+data/*.tsv
+!data/*.sample
+
+# 本地实验产物 / dump / sqlite
+*.sqlite
+*.sqlite3
+*.db
+experiments/_out/
+experiments/out/
+
+# --- 凭据 / 密钥（永不提交）---
+*.env
+*.key
+*.pem
+.config/
+
+# --- 编辑器 / 系统 ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- 临时 / scratch ---
+*.log
+*.tmp
+scratch/
