@@ -62,7 +62,7 @@ The author is an **independent researcher** and currently cannot obtain the endo
 - 📝 Paper sources (LaTeX): [`paper/`](paper/)
 - 🔗 **Zenodo archive & DOI**: [10.5281/zenodo.21431532](https://doi.org/10.5281/zenodo.21431532) (permanently citable)
 
-To discuss the paper on [alphaXiv](https://www.alphaxiv.org), upload the same PDF there (alphaXiv supports uploading non-arXiv papers as PDFs for discussion).
+Open review and discussion are welcome — you can join via [PREreview](https://prereview.org) using the paper's DOI.
 
 ## Quick start
 

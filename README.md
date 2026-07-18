@@ -62,7 +62,7 @@
 - 📝 论文源码（LaTeX）：[`paper/`](paper/)
 - 🔗 **Zenodo 存档与 DOI**：[10.5281/zenodo.21431532](https://doi.org/10.5281/zenodo.21431532)（可永久引用）
 
-若希望在 [alphaXiv](https://www.alphaxiv.org) 上就论文发起公开讨论，可将同一份 PDF 上传至 alphaXiv（它支持上传非 arXiv 来源的论文 PDF 用于讨论）。
+欢迎公开评议与讨论——可在 [PREreview](https://prereview.org) 用本论文的 DOI 参与开放评议。
 
 ## 快速开始
 
