@@ -544,13 +544,34 @@ class LanguageGenerationConnectorRegistry:
             selection: AnswerContentSelection,
             ) -> tuple[LanguageGenerationConnectorTemplate, object]:
         """返回唯一模板和候选；多命题或多模板时拒绝私下排序。"""
+        key, candidate = self.match_input(selection)
+        matches = tuple(
+            template for template in self.templates
+            if template.match_key() == key
+        )
+        if not matches:
+            raise LanguageGenerationConnectorError(
+                "当前 predicate/structure/LanguageBranch 没有课程模板")
+        if len(matches) != 1:
+            raise LanguageGenerationConnectorError(
+                "当前 predicate/structure/LanguageBranch 存在歧义模板")
+        return matches[0], candidate
+
+    def match_input(
+            self,
+            selection: AnswerContentSelection,
+            ) -> tuple[
+                tuple[ObjectIdentity, ObjectIdentity, ObjectIdentity],
+                object,
+            ]:
+        """从 G-01 实际选择恢复精确 connector 匹配键和唯一命题候选。"""
         if not isinstance(selection, AnswerContentSelection):
             raise TypeError("connector registry 只接受 AnswerContentSelection")
+        selected_keys = set(selection.selected_candidate_keys)
         selected = tuple(
             candidate
             for candidate in selection.request.candidates
-            if candidate.stable_key() in set(
-                selection.selected_candidate_keys)
+            if candidate.stable_key() in selected_keys
         )
         if len(selected) != 1:
             raise LanguageGenerationConnectorError(
@@ -565,17 +586,7 @@ class LanguageGenerationConnectorRegistry:
             candidate.proposition.structure,
             candidate.proposition.predicate,
         )
-        matches = tuple(
-            template for template in self.templates
-            if template.match_key() == key
-        )
-        if not matches:
-            raise LanguageGenerationConnectorError(
-                "当前 predicate/structure/LanguageBranch 没有课程模板")
-        if len(matches) != 1:
-            raise LanguageGenerationConnectorError(
-                "当前 predicate/structure/LanguageBranch 存在歧义模板")
-        return matches[0], candidate
+        return key, candidate
 
     def values(
             self,

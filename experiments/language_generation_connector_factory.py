@@ -76,6 +76,9 @@ from pure_integer_ai.experiments.language_generation_connector_graph import (
     LanguageConnectorGraphPredicates,
     LanguageGenerationConnectorGraph,
 )
+from pure_integer_ai.experiments.language_generation_connector_scheduler import (
+    ScheduledLanguageGenerationConnectorRegistry,
+)
 from pure_integer_ai.experiments.language_generation_connector_stage4 import (
     LanguageConnectorStage4Policy,
     LanguageConnectorStage4Runtime,
@@ -429,13 +432,142 @@ class TrialLanguageConnectorFactory:
         )
 
 
+@dataclass(frozen=True)
+class ScheduledLanguageConnectorAssembly:
+    """保存同一启动快照中的 active 与 exact forming trial connector。"""
+
+    connector: LanguageGenerationConnector
+    candidates: LanguageConnectorCandidateRuntime
+    order_graph: StructureOrderGraph
+
+    def __post_init__(self) -> None:
+        """核验 scheduled registry、候选 owner 和 S-07 facade 属于同次装配。"""
+        if not isinstance(self.connector, LanguageGenerationConnector):
+            raise TypeError("scheduled connector assembly connector 类型错误")
+        if not isinstance(
+                self.connector.registry,
+                ScheduledLanguageGenerationConnectorRegistry):
+            raise TypeError("scheduled connector assembly 缺少动态调度 registry")
+        if not isinstance(self.candidates, LanguageConnectorCandidateRuntime):
+            raise TypeError("scheduled connector assembly candidates 类型错误")
+        if not isinstance(self.order_graph, StructureOrderGraph):
+            raise TypeError("scheduled connector assembly order graph 类型错误")
+        if self.candidates.definition_graph.order_graph is not self.order_graph:
+            raise ValueError("scheduled connector 未绑定同一 S-07 facade")
+
+    def state_key(self) -> tuple:
+        """返回调度快照、候选 owner 和 S-07 图身份。"""
+        return (
+            self.connector.stable_key(),
+            self.candidates.state_key(),
+            self.order_graph.ontology.space_identity.stable_key(),
+        )
+
+
+class ScheduledLanguageConnectorFactory(ActiveLanguageConnectorFactory):
+    """从当前 owner 一次恢复 active/forming 索引并建立混合 production connector。"""
+
+    def __init__(
+            self,
+            candidates: LanguageConnectorCandidateRuntime,
+            runtime_policy: LanguageGenerationConnectorRuntimePolicy,
+            surface_protocol: GenerationSurfaceProtocol,
+            active_purpose: ObjectIdentity,
+            trial_purpose: ObjectIdentity,
+            ) -> None:
+        """保存候选恢复协议、全部运行策略和互异的 active/trial purpose。"""
+        super().__init__(
+            candidates,
+            runtime_policy,
+            surface_protocol,
+            active_purpose,
+        )
+        if (not isinstance(trial_purpose, ObjectIdentity)
+                or trial_purpose.object_kind != OBJECT_MINIMAL_INSTRUCTION):
+            raise TypeError("scheduled connector trial purpose 类型错误")
+        if active_purpose == trial_purpose:
+            raise ValueError("scheduled connector active/trial purpose 必须互异")
+        self._trial_purpose = trial_purpose
+
+    def build(self, ctx: TrainContext) -> ScheduledLanguageConnectorAssembly:
+        """恢复启动快照并建立 active 优先、唯一 forming 才 trial 的局部索引。"""
+        if not isinstance(ctx, TrainContext):
+            raise TypeError("scheduled connector factory ctx 类型错误")
+        candidates, order_graph = _rebuild_candidate_owner(
+            ctx,
+            self._candidates,
+            self._order_predicates,
+            self._connector_predicates,
+        )
+        active_entries = candidates.active_template_hypotheses()
+        trial_entries = candidates.trial_template_hypotheses()
+        registry = ScheduledLanguageGenerationConnectorRegistry(
+            candidates.definition_graph.value_protocol,
+            active_entries,
+            trial_entries,
+        )
+        connectors = {item.connector for item in registry.templates}
+        policies = tuple(
+            item for item in self._runtime_policy.templates
+            if item.connector in connectors
+        )
+        runtime_policy = replace(self._runtime_policy, templates=policies)
+        attributions = tuple(
+            GenerationSurfaceAttribution(
+                template.connector,
+                hypothesis,
+                self._production_purpose,
+            )
+            for template, hypothesis in registry.active_entries
+        ) + tuple(
+            GenerationSurfaceAttribution(
+                template.connector,
+                hypothesis,
+                self._trial_purpose,
+            )
+            for template, hypothesis in registry.trial_entries
+        )
+        connector = LanguageGenerationConnector(
+            registry,
+            runtime_policy,
+            self._surface_protocol,
+            attributions,
+        )
+        return ScheduledLanguageConnectorAssembly(
+            connector,
+            candidates,
+            order_graph,
+        )
+
+    def clone_for_evaluation(self) -> "ScheduledLanguageConnectorFactory":
+        """复制候选 owner，评测 build 时从 clone 图重建独立调度索引。"""
+        cloned_candidates = self._candidates.clone_for_graphs(
+            self._candidates.definition_graph,
+            self._candidates.learning.graph,
+        )
+        return ScheduledLanguageConnectorFactory(
+            cloned_candidates,
+            self._runtime_policy,
+            self._surface_protocol,
+            self._production_purpose,
+            self._trial_purpose,
+        )
+
+    def state_key(self) -> tuple:
+        """返回跨图协议、候选快照、运行策略和两个 purpose。"""
+        return *super().state_key(), self._trial_purpose.stable_key()
+
+
 class LanguageConnectorAssemblyFactory(Protocol):
     """重建一个 active 或 exact trial connector assembly。"""
 
     def build(
             self,
             ctx: TrainContext,
-            ) -> ActiveLanguageConnectorAssembly | TrialLanguageConnectorAssembly:
+            ) -> (
+                ActiveLanguageConnectorAssembly
+                | TrialLanguageConnectorAssembly
+                | ScheduledLanguageConnectorAssembly):
         """返回绑定当前 context 图的 connector 组件。"""
         ...
 
@@ -476,7 +608,8 @@ class LanguageConnectorProductionRuntimeBuilder(Protocol):
             self,
             ctx: TrainContext,
             assembly: ActiveLanguageConnectorAssembly
-            | TrialLanguageConnectorAssembly,
+            | TrialLanguageConnectorAssembly
+            | ScheduledLanguageConnectorAssembly,
             ) -> LanguageConnectorProductionRuntimeBinding:
         """返回显式携带 connector、S-07 和 R-01 owner 的 runtime binding。"""
         ...
@@ -578,14 +711,16 @@ class DefaultLanguageConnectorProductionRuntimeBuilder:
             self,
             ctx: TrainContext,
             assembly: ActiveLanguageConnectorAssembly
-            | TrialLanguageConnectorAssembly,
+            | TrialLanguageConnectorAssembly
+            | ScheduledLanguageConnectorAssembly,
             ) -> LanguageConnectorProductionRuntimeBinding:
         """按同一 owner 装配六层 planner、延迟提交 surface 和 G-04 复核。"""
         if not isinstance(ctx, TrainContext):
             raise TypeError("connector production builder ctx 类型错误")
         if not isinstance(assembly, (
                 ActiveLanguageConnectorAssembly,
-                TrialLanguageConnectorAssembly)):
+                TrialLanguageConnectorAssembly,
+                ScheduledLanguageConnectorAssembly)):
             raise TypeError("connector production builder assembly 类型错误")
         precedence = ctx.precedence_relation_runtime
         if precedence is None:
@@ -777,6 +912,53 @@ class LanguageConnectorProductionFactory:
         self._runtime_builder = runtime_builder
         self._stage4_policy = stage4_policy
 
+    def _expected_attributions(
+            self,
+            assembly: ActiveLanguageConnectorAssembly
+            | TrialLanguageConnectorAssembly
+            | ScheduledLanguageConnectorAssembly,
+            ) -> tuple[GenerationSurfaceAttribution, ...]:
+        """从装配快照重建 exact theory/Hypothesis/purpose 归属集合。"""
+        if isinstance(assembly, ActiveLanguageConnectorAssembly):
+            entries = tuple(
+                (
+                    template,
+                    assembly.candidates.learning.hypothesis_for_candidate(
+                        template.connector),
+                    self._stage4_policy.active_purpose,
+                )
+                for template in assembly.connector.registry.templates
+            )
+        elif isinstance(assembly, TrialLanguageConnectorAssembly):
+            entries = ((
+                assembly.connector.registry.templates[0],
+                assembly.hypothesis,
+                self._stage4_policy.trial_purpose,
+            ),)
+        else:
+            registry = assembly.connector.registry
+            if not isinstance(
+                    registry, ScheduledLanguageGenerationConnectorRegistry):
+                raise TypeError("scheduled assembly registry 类型错误")
+            entries = tuple(
+                (template, hypothesis, self._stage4_policy.active_purpose)
+                for template, hypothesis in registry.active_entries
+            ) + tuple(
+                (template, hypothesis, self._stage4_policy.trial_purpose)
+                for template, hypothesis in registry.trial_entries
+            )
+        return tuple(sorted(
+            (
+                GenerationSurfaceAttribution(
+                    template.connector,
+                    hypothesis,
+                    purpose,
+                )
+                for template, hypothesis, purpose in entries
+            ),
+            key=lambda item: item.stable_key(),
+        ))
+
     def build_installation(
             self,
             ctx: TrainContext,
@@ -787,28 +969,20 @@ class LanguageConnectorProductionFactory:
         assembly = self._connector_factory.build(ctx)
         if not isinstance(assembly, (
                 ActiveLanguageConnectorAssembly,
-                TrialLanguageConnectorAssembly)):
+                TrialLanguageConnectorAssembly,
+                ScheduledLanguageConnectorAssembly)):
             raise TypeError("connector assembly factory 返回类型错误")
         binding = self._runtime_builder.build(ctx, assembly)
         if not isinstance(binding, LanguageConnectorProductionRuntimeBinding):
             raise TypeError("connector runtime builder 返回类型错误")
         if binding.connector is not assembly.connector:
             raise ValueError("production runtime 未使用本次恢复的 connector")
-        expected_purpose = (
-            self._stage4_policy.active_purpose
-            if isinstance(assembly, ActiveLanguageConnectorAssembly)
-            else self._stage4_policy.trial_purpose
-        )
-        attributions = tuple(
-            assembly.connector.attribution_mapper.attributions.values())
-        if (not attributions
-                or any(item.purpose != expected_purpose
-                       for item in attributions)):
+        attributions = tuple(sorted(
+            assembly.connector.attribution_mapper.attributions.values(),
+            key=lambda item: item.stable_key(),
+        ))
+        if attributions != self._expected_attributions(assembly):
             raise ValueError("production connector purpose 与 stage4 policy 不一致")
-        if isinstance(assembly, TrialLanguageConnectorAssembly) and (
-                len(attributions) != 1
-                or attributions[0].hypothesis != assembly.hypothesis):
-            raise ValueError("production trial connector 未归属 exact Hypothesis")
         if binding.order_lifecycle.order_graph is not assembly.order_graph:
             raise ValueError("production runtime 未使用本次恢复的 S-07 lifecycle")
         if (binding.alias.closure.semantic_graph.ontology
@@ -856,6 +1030,8 @@ __all__ = [
     "LanguageConnectorProductionFactory",
     "LanguageConnectorProductionRuntimeBinding",
     "LanguageConnectorProductionRuntimeBuilder",
+    "ScheduledLanguageConnectorAssembly",
+    "ScheduledLanguageConnectorFactory",
     "TrialLanguageConnectorAssembly",
     "TrialLanguageConnectorFactory",
 ]
