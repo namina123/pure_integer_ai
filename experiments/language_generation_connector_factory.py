@@ -603,6 +603,9 @@ class DefaultLanguageConnectorProductionRuntimeBuilder:
                 or closure.candidate_runtime.graph.ontology
                 is not ctx.graph_ontology):
             raise ValueError("connector production R-01 组件未绑定当前图")
+        if closure.use_owner is None:
+            raise RuntimeError(
+                "connector production R-01 必须配置 PH2 Core Use owner")
 
         connector = assembly.connector
         structure_planner = connector.structure_planner()
