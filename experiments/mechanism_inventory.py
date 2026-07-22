@@ -1742,8 +1742,11 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
         readers=(
             "experiments.language_generation_connector_candidate:LanguageConnectorCandidateRuntime.active_registry",
             "experiments.language_generation_connector_candidate:LanguageConnectorCandidateRuntime.trial_template",
+            "experiments.language_generation_connector_candidate:LanguageConnectorCandidateRuntime.trial_template_hypotheses",
             "experiments.language_generation_connector_factory:ActiveLanguageConnectorFactory.build",
             "experiments.language_generation_connector_factory:TrialLanguageConnectorFactory.build",
+            "experiments.language_generation_connector_factory:ScheduledLanguageConnectorFactory.build",
+            "experiments.language_generation_connector_scheduler:ScheduledLanguageGenerationConnectorRegistry.match",
             "experiments.language_generation_connector_factory:LanguageConnectorProductionFactory.build_installation",
             "experiments.language_generation_connector_factory:DefaultLanguageConnectorProductionRuntimeBuilder.build",
             "experiments.formal_train:formal_train",
@@ -1771,7 +1774,7 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
             "V06_cloned_candidate_owner_and_event_log",
         ),
         readiness_eligible=False,
-        limitation="connector 理论已作为一等图定义持久化，运行预算不入图；forming/trial/active/inactive/superseded 由 H-00/H-04 owner 管理，typed stage4 按 exact Hypothesis 批聚合多维反馈且 refute 优先，同次 production factory 共享候选 owner。PH2 Core 与 PH3 Memory 历史已分流，stage4 processed 可从 Evidence/decision/图 Event 派生恢复；connector、R-01 与 G-04 版本化内容锁课程 loader 都在宿主首写前预演，并由真实默认 builder 支持 V-06 重建。G-04 尚只有设施 fixture、未编入真实语言 parser/verifier 内容；正式 D-01 relation 资料、forming trial 动态调度、多命题与全局旧链退役仍缺，因此不计 readiness。",
+        limitation="connector 理论已作为一等图定义持久化，运行预算不入图；forming/trial/active/inactive/superseded 由 H-00/H-04 owner 管理，typed stage4 按 exact Hypothesis 批聚合多维反馈且 refute 优先，同次 production factory 共享候选 owner。PH2 Core 与 PH3 Memory 历史已分流，stage4 processed 可从 Evidence/decision/图 Event 派生恢复；connector、R-01 与 G-04 版本化内容锁课程 loader 都在宿主首写前预演，并由真实默认 builder 支持 V-06 重建。启动调度已按 G-01 实际选择建立 active 优先、唯一 exact forming 才 trial 的局部索引，多 active/多 forming 均拒绝且 round 内不扫描历史。G-04 尚只有设施 fixture、未编入真实语言 parser/verifier 内容；正式 D-01 relation 资料、多命题、G-05 Memory signal、延迟 outcome 与全局旧链退役仍缺，因此不计 readiness。",
     ),
     MechanismRecord(
         mechanism_id="generation.typed_production_bridge",

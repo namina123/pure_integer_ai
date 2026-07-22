@@ -358,6 +358,20 @@ class LanguageConnectorCandidateRuntime:
             key=lambda item: item.connector.stable_key(),
         ))
 
+    def active_template_hypotheses(
+            self,
+            ) -> tuple[
+                tuple[LanguageGenerationConnectorTemplate, HypothesisKey], ...
+            ]:
+        """返回启动时 active 理论及其 exact Hypothesis，不从模板键反推身份。"""
+        return tuple(
+            (
+                template,
+                self.learning.hypothesis_for_candidate(template.connector),
+            )
+            for template in self.active_templates()
+        )
+
     def active_registry(self) -> LanguageGenerationConnectorRegistry:
         """用当前 active 理论重建 registry；无 active 候选时 fail closed。"""
         templates = self.active_templates()
@@ -399,6 +413,32 @@ class LanguageConnectorCandidateRuntime:
             raise LanguageConnectorCandidateError(
                 "connector trial 与权威理论或 H-00 定义不一致")
         return restored
+
+    def trial_template_hypotheses(
+            self,
+            ) -> tuple[
+                tuple[LanguageGenerationConnectorTemplate, HypothesisKey], ...
+            ]:
+        """一次扫描恢复全部合法 forming trial，退出或已有投影的候选不进入索引。"""
+        result = []
+        for definition in self.learning.engine.definitions():
+            hypothesis = self.learning.hypothesis_for_candidate(
+                definition.candidate)
+            projection = self.learning.lifecycle_projection_if_available(
+                definition.candidate)
+            if projection is not None:
+                continue
+            snapshot = self.learning.engine.ledger.snapshot(hypothesis)
+            if (snapshot.lifecycle != LIFECYCLE_ACTIVE
+                    or snapshot.epistemic_status != EPISTEMIC_UNKNOWN
+                    or self.learning.engine.active(hypothesis) is not None):
+                raise LanguageConnectorCandidateError(
+                    "无 lifecycle 投影的 connector 不是合法 forming 状态")
+            result.append((self.trial_template(hypothesis), hypothesis))
+        return tuple(sorted(
+            result,
+            key=lambda item: item[1].stable_key(),
+        ))
 
     def clone_for_graphs(
             self,

@@ -22,7 +22,11 @@ from pure_integer_ai.cognition.shared.evidence_candidate import (
     EvidenceCandidateEngine,
     EvidenceCandidateProtocol,
 )
-from pure_integer_ai.cognition.shared.hypothesis import HypothesisLedger
+from pure_integer_ai.cognition.shared.hypothesis import (
+    EPISTEMIC_UNKNOWN,
+    LIFECYCLE_ACTIVE,
+    HypothesisLedger,
+)
 from pure_integer_ai.cognition.shared.identity import (
     OBJECT_CONCEPT,
     ObjectIdentity,
@@ -50,7 +54,7 @@ from pure_integer_ai.experiments.language_generation_connector_candidate import 
     LanguageConnectorCandidateRuntime,
 )
 from pure_integer_ai.experiments.language_generation_connector_factory import (
-    ActiveLanguageConnectorFactory,
+    ScheduledLanguageConnectorFactory,
 )
 from pure_integer_ai.experiments.language_generation_connector_graph import (
     LanguageConnectorGraphPredicates,
@@ -192,11 +196,10 @@ class LanguageConnectorCourseTemplate:
         if type(self.timestamp_base) is not int or self.timestamp_base < 0:
             raise ValueError("connector timestamp_base 必须为非负严格整数")
         if (not isinstance(self.recognitions, tuple)
-                or not self.recognitions
                 or any(not isinstance(
                     item, LanguageConnectorCourseRecognition)
                        for item in self.recognitions)):
-            raise TypeError("connector 课程 recognitions 必须是非空声明 tuple")
+            raise TypeError("connector 课程 recognitions 必须是声明 tuple")
         if any(item.connector != self.template.connector
                for item in self.recognitions):
             raise ValueError("connector 课程 recognition 指向其他理论")
@@ -288,8 +291,6 @@ class LanguageGenerationCourseManifest:
         definitions = tuple(item.template for item in self.templates)
         if len({item.connector for item in definitions}) != len(definitions):
             raise ValueError("connector course 不得重复理论身份")
-        if len({item.match_key() for item in definitions}) != len(definitions):
-            raise ValueError("默认 connector course 不得声明歧义匹配模板")
         owned = tuple(
             identity
             for definition in definitions
@@ -388,9 +389,9 @@ class LanguageGenerationCourseReport:
 
 @dataclass(frozen=True)
 class LoadedLanguageGenerationCourse:
-    """返回可交给 production 装配的 active factory、stage4 策略和报告。"""
+    """返回可交给 production 装配的启动调度 factory、stage4 策略和报告。"""
 
-    connector_factory: ActiveLanguageConnectorFactory
+    connector_factory: ScheduledLanguageConnectorFactory
     stage4_policy: LanguageConnectorStage4Policy
     candidates: LanguageConnectorCandidateRuntime
     report: LanguageGenerationCourseReport
@@ -550,7 +551,13 @@ class LanguageGenerationCourseLoader:
                     definition,
                     timestamp_base=item.timestamp_base,
                 )
-        self._preflight_lifecycle(definitions, engine, verifier)
+        self._preflight_lifecycle(
+            definitions,
+            engine,
+            verifier,
+            source_graph=(
+                None if base_runtime is None else base_runtime.learning.graph),
+        )
         return _PreflightCourseState(
             definition_graph,
             candidate_graph,
@@ -562,6 +569,8 @@ class LanguageGenerationCourseLoader:
             definitions,
             engine: EvidenceCandidateEngine,
             verifier: IndependentObjectVerifier,
+            *,
+            source_graph: CandidateProjectionGraph | None,
             ) -> None:
         """在小型临时图真实执行候选定义和 lifecycle，验证全部 projection 原子前置。"""
         backend = DictBackend()
@@ -571,12 +580,38 @@ class LanguageGenerationCourseLoader:
                 ctx.graph_ontology,
                 self.manifest.candidate_projection,
             )
-            runtime = CandidateLearningRuntime(
-                engine,
-                graph,
-                verifier,
-                self.manifest.projection_metadata,
-            )
+            metadata = self.manifest.projection_metadata
+            if source_graph is None:
+                runtime = CandidateLearningRuntime(
+                    engine,
+                    graph,
+                    verifier,
+                    metadata,
+                )
+            else:
+                for definition in engine.definitions():
+                    hypothesis = definition.hypothesis(engine.protocol)
+                    graph.define(
+                        definition,
+                        hypothesis,
+                        **metadata.kwargs(),
+                    )
+                    candidate = source_graph.ontology.resolve(
+                        definition.candidate)
+                    if candidate is None:
+                        raise LanguageGenerationCourseError(
+                            "connector course 预演源图缺少候选定义")
+                    for event in source_graph.history(candidate):
+                        graph.append_event(
+                            event.definition,
+                            **metadata.kwargs(),
+                        )
+                runtime = CandidateLearningRuntime.from_history(
+                    engine,
+                    graph,
+                    verifier,
+                    metadata,
+                )
             for item, definition in zip(
                     self.manifest.templates, definitions):
                 hypothesis = runtime.register(
@@ -597,9 +632,15 @@ class LanguageGenerationCourseLoader:
                         projection_timestamp_seq=(
                             recognition.projection_timestamp_seq),
                     )
-                if runtime.engine.active(hypothesis) is None:
+                projection = runtime.lifecycle_projection_if_available(
+                    definition.candidate)
+                snapshot = runtime.engine.ledger.snapshot(hypothesis)
+                if (projection is None
+                        and (snapshot.lifecycle != LIFECYCLE_ACTIVE
+                             or snapshot.epistemic_status != EPISTEMIC_UNKNOWN
+                             or runtime.engine.active(hypothesis) is not None)):
                     raise LanguageGenerationCourseError(
-                        "connector course 未使全部默认理论进入唯一 active 投影")
+                        "connector course 产生了非 forming 的无投影候选")
         finally:
             backend.close()
 
@@ -704,20 +745,18 @@ class LanguageGenerationCourseLoader:
                     projection_timestamp_seq=(
                         recognition.projection_timestamp_seq),
                 )
-        active = candidates.active_templates()
-        expected = tuple(sorted(
-            (item.template for item in manifest.templates),
-            key=lambda item: item.connector.stable_key(),
-        ))
-        if active != expected:
+        active = candidates.active_template_hypotheses()
+        trials = candidates.trial_template_hypotheses()
+        if not active and not trials:
             raise LanguageGenerationCourseError(
-                "connector course 未使全部默认理论进入唯一 active 投影")
+                "connector course 没有可调度的 active 或 forming 理论")
         report = candidates.learning.report()
-        factory = ActiveLanguageConnectorFactory(
+        factory = ScheduledLanguageConnectorFactory(
             candidates,
             manifest.runtime_policy,
             manifest.surface_protocol,
             manifest.stage4_policy.active_purpose,
+            manifest.stage4_policy.trial_purpose,
         )
         return LoadedLanguageGenerationCourse(
             factory,
