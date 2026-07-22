@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pure_integer_ai.cognition.shared.candidate_projection import (
+    CandidateGraphProjection,
+)
 from pure_integer_ai.cognition.shared.candidate_runtime import (
     CandidateLearningOutcome,
 )
@@ -74,6 +77,20 @@ def _strict_key(value: tuple[int, ...], *, label: str) -> tuple[int, ...]:
     if any(type(item) is not int for item in value):
         raise ValueError(f"{label} 必须使用严格整数")
     return value
+
+
+def _take(
+        values: tuple[int, ...], cursor: int, *, label: str,
+        ) -> tuple[tuple[int, ...], int]:
+    """从长度前缀整数流读取一个非空键段。"""
+    if cursor >= len(values):
+        raise ValueError(f"connector stage4 历史缺少 {label} 长度")
+    size = values[cursor]
+    cursor += 1
+    if (type(size) is not int or size <= 0
+            or cursor + size > len(values)):
+        raise ValueError(f"connector stage4 历史 {label} 长度非法")
+    return values[cursor:cursor + size], cursor + size
 
 
 def _outcomes(
@@ -315,8 +332,9 @@ class LanguageConnectorStage4Runtime:
         self.candidates = candidates
         self.policy = policy
         self._processed: dict[tuple[int, ...], LanguageConnectorStage4Outcome] = {}
-        self._processed_episodes: dict[
-            tuple[int, ...], tuple[TypedLanguageEpisode, ...]] = {}
+        self._processed_traces: dict[
+            tuple[int, ...], tuple[tuple[int, ...], ...]] = {}
+        self._restore_processed()
 
     def apply(
             self,
@@ -358,10 +376,10 @@ class LanguageConnectorStage4Runtime:
                 tuple(item.episode_key for item in items),
                 hypothesis,
             )
-            batch_episodes = tuple(item.episode for item in items)
             existing = self._processed.get(batch_key)
             if existing is not None:
-                if (self._processed_episodes[batch_key] != batch_episodes
+                if (self._processed_traces[batch_key]
+                        != tuple(item.trace for item in items)
                         or existing.connector != template
                         or existing.stance != stance):
                     raise RuntimeError("已处理 stage4 episode 的理论或 stance 漂移")
@@ -370,7 +388,7 @@ class LanguageConnectorStage4Runtime:
             timestamp_seq, resolve_seq, projection_seq = (
                 self.candidates.learning.next_timestamps(3))
             event_key = (
-                *self.policy.event_namespace,
+                *_packed(self.policy.event_namespace),
                 *_packed(batch_key),
                 *_packed(template.connector.stable_key()),
             )
@@ -419,9 +437,195 @@ class LanguageConnectorStage4Runtime:
                 learning,
             )
             self._processed[batch_key] = outcome
-            self._processed_episodes[batch_key] = batch_episodes
+            self._processed_traces[batch_key] = tuple(
+                item.trace for item in items)
             outcomes.append(outcome)
         return LanguageConnectorStage4Report(tuple(outcomes))
+
+    def _restore_processed(self) -> None:
+        """从 H-00/H-04 与候选图重建 stage4 批次游标，不建立第二真源。"""
+        engine = self.candidates.learning.engine
+        for hypothesis in engine.ledger.hypotheses():
+            for recognition in engine.recognition_history(hypothesis):
+                parsed = self._stage4_event_key(
+                    recognition.prediction.event_key)
+                if parsed is None:
+                    continue
+                batch_key, connector = parsed
+                if (recognition.prediction.observation
+                        != self.policy.verifier_source
+                        or recognition.verification.source
+                        != self.policy.verifier_source
+                        or recognition.prediction.scope
+                        != document_scope(self.policy.verifier_source)
+                        or recognition.prediction.predicted != connector):
+                    raise RuntimeError(
+                        "恢复 stage4 prediction 的来源、scope 或目标漂移")
+                template = self.candidates.definition_graph.read(
+                    connector).definition
+                definition = engine.definition(hypothesis)
+                if (definition.candidate != connector
+                        or template.connector != connector):
+                    raise RuntimeError(
+                        "恢复 stage4 Evidence 未绑定同一 connector 理论")
+                traces, episode_keys = self._batch_traces(
+                    recognition.verification.trace)
+                if _batch_identity(episode_keys, hypothesis) != batch_key:
+                    raise RuntimeError(
+                        "恢复 stage4 批次身份与 Evidence trace 不一致")
+                decisions = tuple(
+                    item for item in engine.resolver.decision_history(
+                        hypothesis)
+                    if item.timestamp_seq
+                    == recognition.evidence.timestamp_seq + 1
+                )
+                if len(decisions) != 1:
+                    raise RuntimeError(
+                        "恢复 stage4 Evidence 缺少唯一相邻 H-04 决策")
+                decision = decisions[0]
+                trace = decision.candidate(hypothesis)
+                active_ids = {
+                    *trace.after.support_evidence_ids,
+                    *trace.after.refute_evidence_ids,
+                    *trace.after.unknown_evidence_ids,
+                }
+                if recognition.evidence.evidence_id not in active_ids:
+                    raise RuntimeError(
+                        "恢复 stage4 H-04 决策未消费对应 Evidence")
+                projection = self._projection_for_decision(
+                    connector,
+                    decision,
+                    recognition.evidence,
+                )
+                learning = CandidateLearningOutcome(
+                    recognition.prediction,
+                    recognition.verification,
+                    recognition.evidence,
+                    decision,
+                    projection,
+                )
+                outcome = LanguageConnectorStage4Outcome(
+                    batch_key,
+                    template,
+                    recognition.verification.stance,
+                    learning,
+                )
+                existing = self._processed.get(batch_key)
+                if (existing is not None
+                        and (existing != outcome
+                             or self._processed_traces[batch_key] != traces)):
+                    raise RuntimeError("恢复 stage4 批次身份命中不同历史")
+                self._processed[batch_key] = outcome
+                self._processed_traces[batch_key] = traces
+
+    def _stage4_event_key(
+            self,
+            event_key: tuple[int, ...],
+            ) -> tuple[tuple[int, ...], ObjectIdentity] | None:
+        """识别本 policy 的 stage4 事件键，并恢复批次和 connector 身份。"""
+        if (not event_key
+                or event_key[0] != len(self.policy.event_namespace)):
+            return None
+        namespace, cursor = _take(event_key, 0, label="event namespace")
+        if namespace != self.policy.event_namespace:
+            return None
+        batch_key, cursor = _take(
+            event_key, cursor, label="batch key")
+        connector_key, cursor = _take(
+            event_key, cursor, label="connector")
+        if cursor != len(event_key):
+            raise RuntimeError("恢复 stage4 event key 含尾随字段")
+        return batch_key, ObjectIdentity.from_stable_key(connector_key)
+
+    def _batch_traces(
+            self,
+            trace: tuple[int, ...],
+            ) -> tuple[tuple[tuple[int, ...], ...], tuple[tuple[int, ...], ...]]:
+        """从 CandidateVerification trace 恢复逐 episode 消费键和 episode 身份。"""
+        policy_key, cursor = _take(trace, 0, label="policy")
+        if policy_key != self.policy.stable_key():
+            raise RuntimeError("恢复 stage4 trace 的 policy 漂移")
+        if cursor >= len(trace):
+            raise RuntimeError("恢复 stage4 trace 缺少 episode 数量")
+        count = trace[cursor]
+        cursor += 1
+        if type(count) is not int or count <= 0:
+            raise RuntimeError("恢复 stage4 trace 的 episode 数量非法")
+        traces = []
+        episode_keys = []
+        for _index in range(count):
+            item, cursor = _take(trace, cursor, label="episode trace")
+            episode_key = self._validate_episode_trace(item)
+            traces.append(item)
+            episode_keys.append(episode_key)
+        if cursor != len(trace):
+            raise RuntimeError("恢复 stage4 batch trace 含尾随字段")
+        return tuple(traces), tuple(episode_keys)
+
+    def _validate_episode_trace(
+            self,
+            trace: tuple[int, ...],
+            ) -> tuple[int, ...]:
+        """核验逐 episode trace 的 policy、purpose 和 routed signal 结构。"""
+        policy_key, cursor = _take(trace, 0, label="episode policy")
+        if policy_key != self.policy.stable_key():
+            raise RuntimeError("恢复 stage4 episode trace 的 policy 漂移")
+        episode_key, cursor = _take(
+            trace, cursor, label="episode identity")
+        purpose_key, cursor = _take(trace, cursor, label="surface purpose")
+        purpose = ObjectIdentity.from_stable_key(purpose_key)
+        if purpose not in {
+                self.policy.active_purpose,
+                self.policy.trial_purpose}:
+            raise RuntimeError("恢复 stage4 episode trace 的 purpose 未注册")
+        if cursor >= len(trace):
+            raise RuntimeError("恢复 stage4 episode trace 缺 signal 数量")
+        count = trace[cursor]
+        cursor += 1
+        if type(count) is not int or count != len(self.policy.routes):
+            raise RuntimeError("恢复 stage4 episode trace 的 signal 数量漂移")
+        for _index in range(count):
+            _signal, cursor = _take(trace, cursor, label="signal trace")
+        if cursor != len(trace):
+            raise RuntimeError("恢复 stage4 episode trace 含尾随字段")
+        return episode_key
+
+    def _projection_for_decision(
+            self,
+            connector: ObjectIdentity,
+            decision,
+            evidence,
+            ) -> CandidateGraphProjection | None:
+        """恢复本次 decision 对应的图投影前缀；unknown 可以没有投影。"""
+        candidate_ref = self.candidates.learning.graph.ontology.resolve(
+            connector)
+        if candidate_ref is None:
+            raise RuntimeError("恢复 stage4 projection 缺少 connector 图对象")
+        graph = self.candidates.learning.graph
+        history = graph.history(candidate_ref)
+        matches = tuple(
+            index for index, item in enumerate(history)
+            if item.definition.decision_key == decision.stable_key()
+        )
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise RuntimeError("恢复 stage4 decision 对应多个图 Event")
+        index = matches[0]
+        event = history[index].definition
+        if evidence.stable_key() not in event.evidence_keys:
+            raise RuntimeError("恢复 stage4 图 Event 未引用对应 Evidence")
+        replacement = None
+        for item in history[:index + 1]:
+            if item.definition.replacement is not None:
+                replacement = item.definition.replacement
+        materialized = graph.read_definition(event.hypothesis)
+        return CandidateGraphProjection(
+            materialized,
+            event.to_state,
+            history[:index + 1],
+            replacement,
+        )
 
     def _replayed_report(
             self,
@@ -453,12 +657,35 @@ class LanguageConnectorStage4Runtime:
             existing = self._processed.get(batch_key)
             if existing is None:
                 return None
-            if self._processed_episodes[batch_key] != items:
-                raise RuntimeError("已处理 stage4 episode 的完整内容漂移")
+            prepared = tuple(
+                self._prepare(item, restored=existing)
+                for item in items
+            )
+            traces = tuple(item.trace for item in prepared)
+            stances = tuple(item.stance for item in prepared)
+            stance = (
+                EVIDENCE_REFUTE
+                if EVIDENCE_REFUTE in stances
+                else EVIDENCE_SUPPORT
+                if stances and all(
+                    item == EVIDENCE_SUPPORT for item in stances)
+                else EVIDENCE_UNKNOWN
+            )
+            if (self._processed_traces[batch_key] != traces
+                    or existing.stance != stance
+                    or any(item.template != existing.connector
+                           or item.hypothesis != hypothesis
+                           for item in prepared)):
+                raise RuntimeError("已处理 stage4 episode 的消费内容漂移")
             outcomes.append(existing)
         return LanguageConnectorStage4Report(tuple(outcomes))
 
-    def _prepare(self, episode: TypedLanguageEpisode) -> _PreparedFeedback:
+    def _prepare(
+            self,
+            episode: TypedLanguageEpisode,
+            *,
+            restored: LanguageConnectorStage4Outcome | None = None,
+            ) -> _PreparedFeedback:
         """零写核验 episode、active connector、完整 route 和聚合三态。"""
         if episode.read_only:
             raise ValueError("read-only typed episode 不得写 connector Evidence")
@@ -475,7 +702,20 @@ class LanguageConnectorStage4Runtime:
         attribution = request.attribution
         if attribution is None:
             raise ValueError("connector stage4 surface 缺少显式理论归属")
-        if attribution.purpose == self.policy.active_purpose:
+        if restored is not None:
+            if (attribution.theory != restored.connector.connector
+                    or attribution.hypothesis
+                    != restored.learning.prediction.hypothesis):
+                raise RuntimeError("恢复 stage4 理论归属与重放 episode 漂移")
+            if attribution.purpose not in {
+                    self.policy.active_purpose,
+                    self.policy.trial_purpose}:
+                raise ValueError("恢复 stage4 surface purpose 未被 policy 注册")
+            registry = LanguageGenerationConnectorRegistry(
+                self.candidates.definition_graph.value_protocol,
+                (restored.connector,),
+            )
+        elif attribution.purpose == self.policy.active_purpose:
             registry = self.candidates.active_registry()
         elif attribution.purpose == self.policy.trial_purpose:
             trial = self.candidates.trial_template(attribution.hypothesis)
@@ -526,6 +766,7 @@ class LanguageConnectorStage4Runtime:
         trace = (
             *_packed(self.policy.stable_key()),
             *_packed(_episode_identity(episode)),
+            *_packed(attribution.purpose.stable_key()),
             len(routed),
             *(value for signal in routed
               for value in _packed(_signal_trace(signal))),

@@ -33,7 +33,7 @@ from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 
 
 class CandidateHistoryUnavailableError(RuntimeError):
-    """图中已有候选生命周期，但 M-03 前缺少可继续追加的 H-00 历史。"""
+    """图中已有候选生命周期，但缺少可继续追加的 H-00/H-04 持久历史。"""
 
 
 @dataclass(frozen=True)
@@ -140,7 +140,7 @@ class CandidateLearningRuntime:
             materialized = graph.read_definition(hypothesis)
             if materialized.definition != definition:
                 raise CandidateHistoryUnavailableError(
-                    "M-03 候选定义与图恢复定义不一致")
+                    "持久候选定义与图恢复定义不一致")
             prior = candidate_hypotheses.get(definition.candidate)
             if prior is not None and prior != hypothesis:
                 raise CandidateHistoryUnavailableError(
@@ -169,7 +169,7 @@ class CandidateLearningRuntime:
                     projected.decision_key)
                 if decision_by_id.get(decision.decision_id) != decision:
                     raise CandidateHistoryUnavailableError(
-                        "候选图引用的 H-04 decision 未从 M-03 完整恢复")
+                        "候选图引用的 H-04 decision 未从持久历史完整恢复")
                 trace = decision.candidate(hypothesis)
                 active_ids = frozenset((
                     *trace.after.support_evidence_ids,
@@ -191,7 +191,7 @@ class CandidateLearningRuntime:
                 if any(ledger_by_id.get(item.evidence_id) != item
                        for item in projected_evidence):
                     raise CandidateHistoryUnavailableError(
-                        "候选图 Evidence key 未在 M-03 ledger 无损恢复")
+                        "候选图 Evidence key 未在持久 ledger 无损恢复")
                 logical_clock = max(
                     logical_clock,
                     projected.timestamp_seq,
@@ -201,7 +201,7 @@ class CandidateLearningRuntime:
             if not history:
                 if active is not None:
                     raise CandidateHistoryUnavailableError(
-                        "M-03 当前 adopted 候选缺少 active 图投影")
+                        "持久历史中的 adopted 候选缺少 active 图投影")
                 continue
             projection = graph.project(candidate_ref)
             if active is not None:
@@ -210,17 +210,17 @@ class CandidateLearningRuntime:
                         or latest.decision_key
                         != active.decision.stable_key()):
                     raise CandidateHistoryUnavailableError(
-                        "M-03 当前 adopted 决策与 active 图投影不同步")
+                        "持久 adopted 决策与 active 图投影不同步")
             elif projection.state == graph.protocol.active_state:
                 raise CandidateHistoryUnavailableError(
-                    "候选图仍为 active，但 M-03 当前状态已不可采用")
+                    "候选图仍为 active，但持久当前状态已不可采用")
             snapshot = engine.ledger.snapshot(hypothesis)
             graph_superseded = (
                 projection.state == graph.protocol.superseded_state)
             if ((snapshot.lifecycle == LIFECYCLE_SUPERSEDED)
                     != graph_superseded):
                 raise CandidateHistoryUnavailableError(
-                    "M-03 supersede 状态与候选图当前投影不一致")
+                    "持久 supersede 状态与候选图当前投影不一致")
         runtime._hypotheses = set(hypotheses)
         runtime._candidate_hypotheses = candidate_hypotheses
         runtime._predictions = {
@@ -248,7 +248,7 @@ class CandidateLearningRuntime:
                 if restored.definition != definition:
                     raise RuntimeError("恢复候选图定义与 forming 输入不一致")
                 raise CandidateHistoryUnavailableError(
-                    "候选图已恢复但 H-00/H-04 历史尚未由 M-03 恢复，禁止伪续写")
+                    "候选图已恢复但 H-00/H-04 持久历史尚未恢复，禁止伪续写")
             if (candidate_ref is not None
                     and self.graph.history(candidate_ref)):
                 raise RuntimeError("候选已有 lifecycle，但对应 Hypothesis 图对象缺失")
@@ -465,7 +465,7 @@ class CandidateLearningRuntime:
             if (candidate_ref is not None
                     and self.graph.history(candidate_ref)):
                 raise CandidateHistoryUnavailableError(
-                    "候选只有图内恢复投影，M-03 前不得追加新 Evidence")
+                    "候选只有图内恢复投影，缺持久历史时不得追加新 Evidence")
             raise KeyError("候选对象未在当前 H-05 owner 中登记")
         return hypothesis
 

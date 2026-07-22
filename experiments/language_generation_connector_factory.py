@@ -37,6 +37,7 @@ from pure_integer_ai.experiments.language_generation_connector import (
     LanguageGenerationConnectorRuntimePolicy,
 )
 from pure_integer_ai.experiments.language_generation_connector_candidate import (
+    CANDIDATE_PERSISTENCE_TRAINING,
     LanguageConnectorCandidateRuntime,
 )
 from pure_integer_ai.experiments.language_generation_connector_graph import (
@@ -117,6 +118,18 @@ def _rebuild_candidate_owner(
             definition_graph,
             candidate_graph,
             event_log,
+        ), order_graph
+    if candidates.persistence_kind == CANDIDATE_PERSISTENCE_TRAINING:
+        history = ctx.training_candidate_history
+        if history is None:
+            raise RuntimeError("connector 恢复缺少目标 Core 训练历史")
+        if (ontology is candidates.definition_graph.ontology
+                and candidates.training_history is history):
+            return candidates, candidates.definition_graph.order_graph
+        return candidates.restore_for_training_graphs(
+            definition_graph,
+            candidate_graph,
+            history,
         ), order_graph
     if ontology is candidates.definition_graph.ontology:
         return candidates, candidates.definition_graph.order_graph
