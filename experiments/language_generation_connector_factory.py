@@ -494,12 +494,12 @@ class LanguageConnectorProductionRuntimeBuilder(Protocol):
 
 @dataclass(frozen=True)
 class LanguageConnectorProductionComponents:
-    """保存一次 context 独占的 G-01、R-01、renderer 和 G-04 组件。"""
+    """保存一次 context 独占的 G-01、可选 R-01、renderer 和 G-04 组件。"""
 
     selector: AnswerContentSelector
     plan_protocol: GenerationPlanProtocol
     structure_protocol: GenerationStructureLayerProtocol
-    alias: AliasRelationRuntime
+    alias: AliasRelationRuntime | None
     renderer: object
     postcheck_mapper: object
     postchecker: GenerationPostcheckRuntime
@@ -513,7 +513,8 @@ class LanguageConnectorProductionComponents:
         if not isinstance(
                 self.structure_protocol, GenerationStructureLayerProtocol):
             raise TypeError("connector production structure protocol 类型错误")
-        if not isinstance(self.alias, AliasRelationRuntime):
+        if self.alias is not None and not isinstance(
+                self.alias, AliasRelationRuntime):
             raise TypeError("connector production alias 类型错误")
         if not hasattr(self.renderer, "render"):
             raise TypeError("connector production renderer 必须实现 render")
@@ -550,12 +551,18 @@ class DefaultLanguageConnectorProductionRuntimeBuilder:
     def __init__(
             self,
             component_factory: LanguageConnectorProductionComponentFactory,
+            relation_factory=None,
             ) -> None:
-        """绑定可为宿主和评测 context 分别重建组件的注入 factory。"""
+        """绑定辅助组件 factory，并可由版本化课程独立提供 R-01 owner。"""
         if any(not hasattr(component_factory, method) for method in (
                 "build", "clone_for_evaluation", "state_key")):
             raise TypeError("connector production component factory 协议不完整")
+        if (relation_factory is not None
+                and any(not hasattr(relation_factory, method) for method in (
+                    "build", "clone_for_evaluation", "state_key"))):
+            raise TypeError("connector production relation factory 协议不完整")
         self._component_factory = component_factory
+        self._relation_factory = relation_factory
 
     def build(
             self,
@@ -598,7 +605,14 @@ class DefaultLanguageConnectorProductionRuntimeBuilder:
         components = self._component_factory.build(ctx)
         if not isinstance(components, LanguageConnectorProductionComponents):
             raise TypeError("connector production component factory 返回类型错误")
-        closure = components.alias.closure
+        alias = components.alias
+        if self._relation_factory is not None:
+            if alias is not None:
+                raise ValueError("课程 R-01 factory 与组件 alias owner 不得同时配置")
+            alias = self._relation_factory.build(ctx)
+        if not isinstance(alias, AliasRelationRuntime):
+            raise RuntimeError("connector production 缺少 R-01 owner")
+        closure = alias.closure
         if (closure.semantic_graph.ontology is not ctx.graph_ontology
                 or closure.candidate_runtime.graph.ontology
                 is not ctx.graph_ontology):
@@ -613,7 +627,7 @@ class DefaultLanguageConnectorProductionRuntimeBuilder:
             lifecycle,
             consumer,
         )
-        surface_runtime = GenerationSurfaceRuntime(components.alias)
+        surface_runtime = GenerationSurfaceRuntime(alias)
         surface_builder = connector.surface_request_builder(
             execution_planner)
         protocol = components.plan_protocol
@@ -682,7 +696,7 @@ class DefaultLanguageConnectorProductionRuntimeBuilder:
             runtime,
             connector,
             lifecycle,
-            components.alias,
+            alias,
         )
 
     def clone_for_evaluation(
@@ -690,11 +704,18 @@ class DefaultLanguageConnectorProductionRuntimeBuilder:
             ) -> "DefaultLanguageConnectorProductionRuntimeBuilder":
         """为 V-06 复制组件 factory，禁止共享 Use、parser 或 verifier 状态。"""
         return DefaultLanguageConnectorProductionRuntimeBuilder(
-            self._component_factory.clone_for_evaluation())
+            self._component_factory.clone_for_evaluation(),
+            None if self._relation_factory is None else (
+                self._relation_factory.clone_for_evaluation()),
+        )
 
     def state_key(self) -> tuple:
         """返回组件 factory 的完整配置键。"""
-        return self._component_factory.state_key()
+        return (
+            self._component_factory.state_key(),
+            () if self._relation_factory is None else (
+                self._relation_factory.state_key()),
+        )
 
 
 class LanguageConnectorProductionFactory:

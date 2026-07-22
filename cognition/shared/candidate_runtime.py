@@ -29,6 +29,11 @@ from pure_integer_ai.cognition.shared.hypothesis_resolution import (
 )
 from pure_integer_ai.cognition.shared.identity import ObjectIdentity, SourceRef
 from pure_integer_ai.cognition.shared.scope_identity import ScopeIdentity
+from pure_integer_ai.cognition.shared.training_hypothesis import (
+    TrainingCandidateHistoryLog,
+    TrainingHypothesisEventSink,
+    TrainingHypothesisHistoryProtocol,
+)
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 
 
@@ -83,6 +88,61 @@ class CandidateLearningOutcome:
     evidence: EvidenceRecord
     decision: ResolverDecision
     projection: CandidateGraphProjection | None
+
+
+@dataclass(frozen=True)
+class CandidateRecognitionRequest:
+    """一次可整批预检的 prediction、独立 reveal、H-04 和投影请求。"""
+
+    hypothesis: HypothesisKey
+    observation: SourceRef
+    scope: ScopeIdentity
+    event_key: tuple[int, ...]
+    visible_inputs: tuple[ObjectIdentity, ...]
+    predicted: ObjectIdentity
+    revealed: RevealedObjectObservation
+    timestamp_seq: int
+    resolve_timestamp_seq: int
+    projection_timestamp_seq: int
+    scorers: tuple = ()
+    archive_refuted: bool = False
+    replacement: HypothesisKey | None = None
+
+    def __post_init__(self) -> None:
+        """核验批量 recognition 的领域对象、容器和三段严格逻辑序。"""
+        if not isinstance(self.hypothesis, HypothesisKey):
+            raise TypeError("recognition hypothesis 类型错误")
+        if not isinstance(self.observation, SourceRef):
+            raise TypeError("recognition observation 类型错误")
+        if not isinstance(self.scope, ScopeIdentity):
+            raise TypeError("recognition scope 类型错误")
+        if not isinstance(self.visible_inputs, tuple):
+            raise TypeError("recognition visible_inputs 必须是 tuple")
+        if not isinstance(self.predicted, ObjectIdentity):
+            raise TypeError("recognition predicted 类型错误")
+        if not isinstance(self.revealed, RevealedObjectObservation):
+            raise TypeError("recognition revealed 类型错误")
+        if not isinstance(self.scorers, tuple):
+            raise TypeError("recognition scorers 必须是 tuple")
+        if type(self.archive_refuted) is not bool:
+            raise TypeError("recognition archive_refuted 必须是 bool")
+        if self.replacement is not None and not isinstance(
+                self.replacement, HypothesisKey):
+            raise TypeError("recognition replacement 类型错误")
+        assert_int(
+            self.timestamp_seq,
+            self.resolve_timestamp_seq,
+            self.projection_timestamp_seq,
+            _where="CandidateRecognitionRequest",
+        )
+        if (type(self.timestamp_seq) is not int
+                or type(self.resolve_timestamp_seq) is not int
+                or type(self.projection_timestamp_seq) is not int
+                or self.timestamp_seq < 0
+                or self.resolve_timestamp_seq <= self.timestamp_seq
+                or self.projection_timestamp_seq
+                <= self.resolve_timestamp_seq):
+            raise ValueError("recognition 三段逻辑序必须严格递增且非负")
 
 
 @dataclass(frozen=True)
@@ -229,6 +289,55 @@ class CandidateLearningRuntime:
         runtime._logical_clock = logical_clock
         return runtime
 
+    @classmethod
+    def restore_for_training_graph(
+            cls,
+            protocol,
+            graph: CandidateProjectionGraph,
+            verifier: IndependentObjectVerifier,
+            metadata: CandidateProjectionMetadata,
+            history: TrainingCandidateHistoryLog,
+            history_protocol: TrainingHypothesisHistoryProtocol,
+            ) -> "CandidateLearningRuntime":
+        """从 Core 训练历史和候选图恢复可继续追加的 H-00/H-04 owner。"""
+        if not isinstance(graph, CandidateProjectionGraph):
+            raise TypeError("training restore graph 类型错误")
+        if not isinstance(verifier, IndependentObjectVerifier):
+            raise TypeError("training restore verifier 类型错误")
+        if not isinstance(metadata, CandidateProjectionMetadata):
+            raise TypeError("training restore metadata 类型错误")
+        if not isinstance(history, TrainingCandidateHistoryLog):
+            raise TypeError("training restore history 类型错误")
+        if not isinstance(
+                history_protocol, TrainingHypothesisHistoryProtocol):
+            raise TypeError("training restore history_protocol 类型错误")
+        sink = TrainingHypothesisEventSink(history, history_protocol)
+        hypotheses = sink.hypotheses()
+        definitions: list[EvidenceCandidateDefinition] = []
+        for hypothesis in hypotheses:
+            try:
+                definition = EvidenceCandidateDefinition.from_stable_key(
+                    hypothesis.candidate_key)
+            except (TypeError, ValueError) as exc:
+                raise CandidateHistoryUnavailableError(
+                    "Core 训练历史无法恢复候选定义") from exc
+            if definition.hypothesis(protocol) != hypothesis:
+                raise CandidateHistoryUnavailableError(
+                    "Core 训练 Hypothesis 与候选协议不一致")
+            materialized = graph.read_definition(hypothesis)
+            if materialized.definition != definition:
+                raise CandidateHistoryUnavailableError(
+                    "Core 训练候选定义与候选图不一致")
+            definitions.append(definition)
+        ledger = sink.load_ledger(attach_sink=True)
+        engine = EvidenceCandidateEngine.from_history(
+            protocol,
+            definitions=tuple(definitions),
+            ledger=ledger,
+            decisions=sink.load_decisions(),
+        )
+        return cls.from_history(engine, graph, verifier, metadata)
+
     def preflight_register(
             self, definition: EvidenceCandidateDefinition, *,
             timestamp_base: int = 0) -> HypothesisKey:
@@ -259,6 +368,42 @@ class CandidateLearningRuntime:
         )
         return hypothesis
 
+    def preflight_register_many(
+            self,
+            requests: tuple[tuple[EvidenceCandidateDefinition, int], ...],
+            ) -> tuple[HypothesisKey, ...]:
+        """整批零写核验 H-00 forming、运行 owner 和候选图定义。"""
+        if not isinstance(requests, tuple) or not requests:
+            raise ValueError("preflight_register_many requests 必须是非空 tuple")
+        probe = self.engine.clone()
+        hypotheses = probe.register_many(requests)
+        candidate_hypotheses = dict(self._candidate_hypotheses)
+        for (definition, _timestamp_base), hypothesis in zip(
+                requests, hypotheses, strict=True):
+            prior = candidate_hypotheses.get(definition.candidate)
+            if prior is not None and prior != hypothesis:
+                raise RuntimeError("同一候选对象绑定了不同 Hypothesis")
+            candidate_hypotheses[definition.candidate] = hypothesis
+            candidate_ref = self.graph.ontology.resolve(definition.candidate)
+            if prior is None:
+                hypothesis_ref = self.graph.ontology.resolve(
+                    hypothesis.object_identity())
+                if hypothesis_ref is not None:
+                    restored = self.graph.read_definition(hypothesis)
+                    if restored.definition != definition:
+                        raise RuntimeError("恢复候选图定义与 forming 输入不一致")
+                    raise CandidateHistoryUnavailableError(
+                        "候选图已恢复但 H-00/H-04 持久历史尚未恢复，禁止伪续写")
+                if (candidate_ref is not None
+                        and self.graph.history(candidate_ref)):
+                    raise RuntimeError("候选已有 lifecycle，但对应 Hypothesis 图对象缺失")
+            self.graph.preflight_definition(
+                definition,
+                hypothesis,
+                **self.metadata.kwargs(),
+            )
+        return hypotheses
+
     def register(
             self, definition: EvidenceCandidateDefinition, *,
             timestamp_base: int = 0) -> HypothesisKey:
@@ -285,6 +430,35 @@ class CandidateLearningRuntime:
         )
         return hypothesis
 
+    def register_many(
+            self,
+            requests: tuple[tuple[EvidenceCandidateDefinition, int], ...],
+            ) -> tuple[HypothesisKey, ...]:
+        """整批预检后写候选图和 forming 历史，避免逐候选复制完整 owner。"""
+        hypotheses = self.preflight_register_many(requests)
+        for (definition, _timestamp_base), hypothesis in zip(
+                requests, hypotheses, strict=True):
+            self.graph.define(
+                definition,
+                hypothesis,
+                **self.metadata.kwargs(),
+            )
+        committed = self.engine.register_many(requests)
+        if committed != hypotheses:
+            raise RuntimeError("候选批量预检与正式登记身份不一致")
+        for (definition, timestamp_base), hypothesis in zip(
+                requests, hypotheses, strict=True):
+            self._hypotheses.add(hypothesis)
+            prior = self._candidate_hypotheses.get(definition.candidate)
+            if prior is not None and prior != hypothesis:
+                raise RuntimeError("候选登记后 owner 身份发生漂移")
+            self._candidate_hypotheses[definition.candidate] = hypothesis
+            self._logical_clock = max(
+                self._logical_clock,
+                timestamp_base + max(len(definition.forming_sources) - 1, 0),
+            )
+        return hypotheses
+
     def recognize(
             self, hypothesis: HypothesisKey, *, observation: SourceRef,
             scope: ScopeIdentity, event_key: tuple[int, ...],
@@ -297,73 +471,112 @@ class CandidateLearningRuntime:
             replacement: HypothesisKey | None = None,
             ) -> CandidateLearningOutcome:
         """完整执行 prediction 先行、独立 reveal、H-04 和 typed 图同步。"""
-        prediction = self.engine.predict(
+        return self.recognize_many((CandidateRecognitionRequest(
             hypothesis,
-            observation=observation,
-            scope=scope,
-            event_key=event_key,
-            visible_inputs=visible_inputs,
-            predicted=predicted,
-        )
-        verification = self.verifier.verify(prediction, revealed)
-        probe = self.engine.clone()
-        probe_prediction = probe.predict(
-            hypothesis,
-            observation=observation,
-            scope=scope,
-            event_key=event_key,
-            visible_inputs=visible_inputs,
-            predicted=predicted,
-        )
-        probe.reveal(
-            probe_prediction,
-            verification,
-            timestamp_seq=timestamp_seq,
-        )
-        probe.resolve(
-            hypothesis,
-            timestamp_seq=resolve_timestamp_seq,
-            scorers=scorers,
-            archive_refuted=archive_refuted,
-            replacement=replacement,
-        )
-        evidence = self.engine.reveal(
-            prediction,
-            verification,
-            timestamp_seq=timestamp_seq,
-        )
-        decision = self.engine.resolve(
-            hypothesis,
-            timestamp_seq=resolve_timestamp_seq,
-            scorers=scorers,
-            archive_refuted=archive_refuted,
-            replacement=replacement,
-        )
-        projections = self.sync_competition(
-            hypothesis,
-            timestamp_seq=projection_timestamp_seq,
-        )
-        projection = next((
-            item for candidate, item in projections
-            if candidate == hypothesis
-        ), None)
-        self._hypotheses.add(hypothesis)
-        self._predictions.add(prediction.stable_key())
-        projection_written = any(
-            item is not None for _candidate, item in projections)
-        self._logical_clock = max(
-            self._logical_clock,
+            observation,
+            scope,
+            event_key,
+            visible_inputs,
+            predicted,
+            revealed,
             timestamp_seq,
             resolve_timestamp_seq,
-            projection_timestamp_seq if projection_written else 0,
-        )
-        return CandidateLearningOutcome(
-            prediction,
-            verification,
-            evidence,
-            decision,
-            projection,
-        )
+            projection_timestamp_seq,
+            tuple(scorers),
+            archive_refuted,
+            replacement,
+        ),))[0]
+
+    def recognize_many(
+            self,
+            requests: tuple[CandidateRecognitionRequest, ...],
+            ) -> tuple[CandidateLearningOutcome, ...]:
+        """一次复制 owner 预演整批 recognition，再按同序提交 Evidence、决策和投影。"""
+        if (not isinstance(requests, tuple) or not requests
+                or any(not isinstance(item, CandidateRecognitionRequest)
+                       for item in requests)):
+            raise TypeError("recognize_many requests 必须是非空请求 tuple")
+        routes = tuple(
+            (item.hypothesis, item.observation, item.event_key)
+            for item in requests)
+        if len(set(routes)) != len(routes):
+            raise ValueError("同批 recognition 路由不得重复")
+
+        probe = self.engine.clone()
+        for request in requests:
+            prediction = probe.predict(
+                request.hypothesis,
+                observation=request.observation,
+                scope=request.scope,
+                event_key=request.event_key,
+                visible_inputs=request.visible_inputs,
+                predicted=request.predicted,
+            )
+            verification = self.verifier.verify(
+                prediction, request.revealed)
+            probe.reveal(
+                prediction,
+                verification,
+                timestamp_seq=request.timestamp_seq,
+            )
+            probe.resolve(
+                request.hypothesis,
+                timestamp_seq=request.resolve_timestamp_seq,
+                scorers=request.scorers,
+                archive_refuted=request.archive_refuted,
+                replacement=request.replacement,
+            )
+
+        outcomes = []
+        for request in requests:
+            prediction = self.engine.predict(
+                request.hypothesis,
+                observation=request.observation,
+                scope=request.scope,
+                event_key=request.event_key,
+                visible_inputs=request.visible_inputs,
+                predicted=request.predicted,
+            )
+            verification = self.verifier.verify(
+                prediction, request.revealed)
+            evidence = self.engine.reveal(
+                prediction,
+                verification,
+                timestamp_seq=request.timestamp_seq,
+            )
+            decision = self.engine.resolve(
+                request.hypothesis,
+                timestamp_seq=request.resolve_timestamp_seq,
+                scorers=request.scorers,
+                archive_refuted=request.archive_refuted,
+                replacement=request.replacement,
+            )
+            projections = self.sync_competition(
+                request.hypothesis,
+                timestamp_seq=request.projection_timestamp_seq,
+            )
+            projection = next((
+                item for candidate, item in projections
+                if candidate == request.hypothesis
+            ), None)
+            self._hypotheses.add(request.hypothesis)
+            self._predictions.add(prediction.stable_key())
+            projection_written = any(
+                item is not None for _candidate, item in projections)
+            self._logical_clock = max(
+                self._logical_clock,
+                request.timestamp_seq,
+                request.resolve_timestamp_seq,
+                request.projection_timestamp_seq if projection_written else 0,
+            )
+            outcomes.append(CandidateLearningOutcome(
+                prediction,
+                verification,
+                evidence,
+                decision,
+                projection,
+            ))
+        return tuple(outcomes)
 
     def sync_competition(
             self, hypothesis: HypothesisKey, *, timestamp_seq: int,
@@ -561,4 +774,5 @@ __all__ = [
     "CandidateLearningReport",
     "CandidateLearningRuntime",
     "CandidateProjectionMetadata",
+    "CandidateRecognitionRequest",
 ]
