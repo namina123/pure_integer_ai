@@ -51,6 +51,9 @@ def bootstrap(backend: StorageBackend) -> None:
     from pure_integer_ai.storage.occurrence import register_occurrence_tables
     from pure_integer_ai.storage.source_record import register_source_record_table
     from pure_integer_ai.storage.span import register_span_tables
+    from pure_integer_ai.storage.training_candidate_event import (
+        register_training_candidate_event_tables,
+    )
 
     register_space_table(backend)
     register_node_tables(backend)
@@ -68,6 +71,7 @@ def bootstrap(backend: StorageBackend) -> None:
     register_source_record_table(backend)
     register_occurrence_tables(backend)
     register_span_tables(backend)
+    register_training_candidate_event_tables(backend)
 
 
 __all__ = ["bootstrap"]

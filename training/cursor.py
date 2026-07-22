@@ -65,6 +65,10 @@ from pure_integer_ai.storage.occurrence import (
 from pure_integer_ai.storage.source_record import SOURCE_RECORD_TABLE
 from pure_integer_ai.storage.span import SPAN_MEMBER_TABLE, SPAN_TABLE
 from pure_integer_ai.storage.spaces.companion import TEXT_ASSOC_TABLE
+from pure_integer_ai.storage.training_candidate_event import (
+    TRAINING_CANDIDATE_EVENT_PART_TABLE,
+    TRAINING_CANDIDATE_EVENT_TABLE,
+)
 
 # 续训 replay 覆盖率阈值（E4·未达标禁续训·防 miss→None 静默降级破可复现）
 # B7 放宽（2026-07-03）：首版 1/1（100%）致 --resume 实际不可用（真实语料任一 teacher miss 即 raise）。
@@ -84,6 +88,8 @@ DUMP_TABLES: tuple[str, ...] = (
     MEMORY_OVERLAY_TABLE,
     MEMORY_EVENT_TABLE,
     MEMORY_EVENT_PART_TABLE,
+    TRAINING_CANDIDATE_EVENT_TABLE,
+    TRAINING_CANDIDATE_EVENT_PART_TABLE,
     OCCURRENCE_TABLE, OCCURRENCE_CANDIDATE_TABLE, SOURCE_RECORD_TABLE,
     SPAN_TABLE, SPAN_MEMBER_TABLE,
     TEXT_ASSOC_TABLE,

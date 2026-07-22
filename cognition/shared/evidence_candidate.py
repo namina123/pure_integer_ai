@@ -445,6 +445,15 @@ class ActiveEvidenceCandidate:
     decision: ResolverDecision
 
 
+@dataclass(frozen=True)
+class CandidateRecognitionRecord:
+    """一条可从持久 Evidence 无损恢复的 prediction 与 verifier 结果。"""
+
+    prediction: CandidatePrediction
+    verification: CandidateVerification
+    evidence: EvidenceRecord
+
+
 class EvidenceCandidateEngine:
     """统一管理 forming、prediction、Evidence、H-04 和只读采用投影。"""
 
@@ -478,7 +487,7 @@ class EvidenceCandidateEngine:
             ledger: HypothesisLedger,
             decisions: tuple[ResolverDecision, ...],
             ) -> "EvidenceCandidateEngine":
-        """从 M-03 ledger/decision 和调用方已核验定义恢复候选 engine。"""
+        """从持久 ledger/decision 和调用方已核验定义恢复候选 engine。"""
         if not isinstance(protocol, EvidenceCandidateProtocol):
             raise TypeError("from_history.protocol 类型错误")
         if (not isinstance(definitions, tuple)
@@ -493,7 +502,7 @@ class EvidenceCandidateEngine:
         if len(by_hypothesis) != len(definitions):
             raise ValueError("恢复定义重复同一 Hypothesis")
         if frozenset(by_hypothesis) != frozenset(ledger.hypotheses()):
-            raise ValueError("恢复定义与 M-03 ledger Hypothesis 集合不一致")
+            raise ValueError("恢复定义与持久 ledger Hypothesis 集合不一致")
         decision_sink = ledger.event_sink
         if decision_sink is not None and not callable(
                 getattr(decision_sink, "append_decision", None)):
@@ -532,6 +541,33 @@ class EvidenceCandidateEngine:
             self._predictions.values(),
             key=lambda item: item.stable_key(),
         ))
+
+    def recognition_history(
+            self,
+            hypothesis: HypothesisKey,
+            ) -> tuple[CandidateRecognitionRecord, ...]:
+        """恢复指定候选全部非 forming recognition，供领域 runtime 重建幂等游标。"""
+        self.definition(hypothesis)
+        formation_sources = self._definitions[hypothesis].forming_sources
+        formation_payloads = {
+            (ordinal, len(formation_sources))
+            for ordinal in range(len(formation_sources))
+        }
+        result = []
+        for evidence in self.ledger.evidence_history(hypothesis):
+            if (evidence.source in formation_sources
+                    and evidence.reason_key
+                    == self.protocol.formation_reason_key
+                    and evidence.payload in formation_payloads):
+                continue
+            prediction, verification = self._recognition_from_evidence(
+                evidence)
+            result.append(CandidateRecognitionRecord(
+                prediction,
+                verification,
+                evidence,
+            ))
+        return tuple(result)
 
     def definitions(self) -> tuple[EvidenceCandidateDefinition, ...]:
         """返回当前 owner 已核验的全部候选完整定义。"""
@@ -777,6 +813,13 @@ class EvidenceCandidateEngine:
             evidence: EvidenceRecord,
             ) -> CandidatePrediction:
         """从 recognition Evidence 恢复 prediction 并核验剩余 verifier 载荷。"""
+        return EvidenceCandidateEngine._recognition_from_evidence(evidence)[0]
+
+    @staticmethod
+    def _recognition_from_evidence(
+            evidence: EvidenceRecord,
+            ) -> tuple[CandidatePrediction, CandidateVerification]:
+        """从 Evidence payload 恢复完整 prediction 和独立 verifier 结果。"""
         try:
             prediction_key, cursor = _take(
                 evidence.payload, 0, label="Evidence.prediction")
@@ -793,7 +836,7 @@ class EvidenceCandidateEngine:
             if cursor != len(evidence.payload):
                 raise ValueError("recognition Evidence payload 含尾随数据")
             prediction = CandidatePrediction.from_stable_key(prediction_key)
-            ObjectIdentity.from_stable_key(authority_key)
+            authority = ObjectIdentity.from_stable_key(authority_key)
             _strict_key(
                 authority_version,
                 where="Evidence.authority_version",
@@ -810,7 +853,20 @@ class EvidenceCandidateEngine:
         if prediction.hypothesis != evidence.hypothesis:
             raise EvidenceCandidateError(
                 "恢复 prediction 与 Evidence 候选身份不一致")
-        return prediction
+        if evidence.source is None:
+            raise EvidenceCandidateError("recognition Evidence 缺少 verifier 来源")
+        verification = CandidateVerification(
+            evidence.stance,
+            evidence.reason_key,
+            evidence.source,
+            authority,
+            authority_version,
+            trace,
+        )
+        if verification.payload_for(prediction) != evidence.payload:
+            raise EvidenceCandidateError(
+                "恢复 verifier 与 Evidence payload 不一致")
+        return prediction, verification
 
 
 def binding_from_ref(
@@ -829,6 +885,7 @@ def binding_from_ref(
 
 
 __all__ = [
+    "CandidateRecognitionRecord",
     "ActiveEvidenceCandidate",
     "CANDIDATE_AS_OBJECT",
     "CANDIDATE_AS_SUBJECT",

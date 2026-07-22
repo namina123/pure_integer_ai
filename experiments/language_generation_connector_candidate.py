@@ -33,6 +33,11 @@ from pure_integer_ai.cognition.shared.memory_event_log import MemoryEventLog
 from pure_integer_ai.cognition.shared.memory_hypothesis import (
     MemoryHypothesisEventSink,
 )
+from pure_integer_ai.cognition.shared.training_hypothesis import (
+    TrainingCandidateHistoryLog,
+    TrainingHypothesisEventSink,
+    TrainingHypothesisHistoryProtocol,
+)
 from pure_integer_ai.cognition.shared.memory_overlay import MemoryAccessContext
 from pure_integer_ai.cognition.shared.scope_identity import ScopeIdentity
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
@@ -47,6 +52,16 @@ from pure_integer_ai.experiments.language_generation_connector_graph import (
 
 class LanguageConnectorCandidateError(RuntimeError):
     """connector 理论、H-00 候选定义和图 lifecycle 投影不一致。"""
+
+
+CANDIDATE_PERSISTENCE_VOLATILE = 0
+CANDIDATE_PERSISTENCE_TRAINING = 1
+CANDIDATE_PERSISTENCE_MEMORY = 2
+_CANDIDATE_PERSISTENCE_KINDS = frozenset({
+    CANDIDATE_PERSISTENCE_VOLATILE,
+    CANDIDATE_PERSISTENCE_TRAINING,
+    CANDIDATE_PERSISTENCE_MEMORY,
+})
 
 
 def _strict_key(value: tuple[int, ...], *, label: str) -> tuple[int, ...]:
@@ -208,7 +223,7 @@ class LanguageConnectorCandidateRuntime:
             definition_graph: LanguageGenerationConnectorGraph,
             learning: CandidateLearningRuntime,
             protocol: LanguageConnectorCandidateProtocol,
-            *, memory_enabled: bool | None = None,
+            *, persistence_kind: int | None = None,
             ) -> None:
         if not isinstance(
                 definition_graph, LanguageGenerationConnectorGraph):
@@ -220,18 +235,31 @@ class LanguageConnectorCandidateRuntime:
         if not isinstance(protocol, LanguageConnectorCandidateProtocol):
             raise TypeError("connector candidate protocol 类型错误")
         sink = learning.engine.ledger.event_sink
-        inferred_memory = isinstance(sink, MemoryHypothesisEventSink)
-        if memory_enabled is None:
-            memory_enabled = inferred_memory
-        if type(memory_enabled) is not bool:
-            raise TypeError("connector memory_enabled 必须是 bool 或 None")
-        if sink is not None and not inferred_memory:
-            raise TypeError("connector 候选只接受 M-03 Memory event sink")
+        if isinstance(sink, MemoryHypothesisEventSink):
+            inferred_kind = CANDIDATE_PERSISTENCE_MEMORY
+        elif isinstance(sink, TrainingHypothesisEventSink):
+            inferred_kind = CANDIDATE_PERSISTENCE_TRAINING
+        elif sink is None:
+            inferred_kind = CANDIDATE_PERSISTENCE_VOLATILE
+        else:
+            raise TypeError("connector 候选 event sink 类型未注册")
+        if persistence_kind is None:
+            persistence_kind = inferred_kind
+        if (type(persistence_kind) is not int
+                or persistence_kind not in _CANDIDATE_PERSISTENCE_KINDS):
+            raise ValueError("connector persistence kind 未注册")
+        if sink is not None and persistence_kind != inferred_kind:
+            raise ValueError("connector persistence kind 与 event sink 不一致")
+        training_protocol = self._history_protocol(protocol, learning)
+        if (isinstance(sink, TrainingHypothesisEventSink)
+                and sink.protocol != training_protocol):
+            raise ValueError("connector Core 训练历史协议与候选 owner 不一致")
         self.definition_graph = definition_graph
         self.learning = learning
         self.protocol = protocol
         self.mapper = LanguageConnectorCandidateMapper(protocol)
-        self._memory_enabled = memory_enabled
+        self._persistence_kind = persistence_kind
+        self._training_history_protocol = training_protocol
 
     def register(
             self,
@@ -384,13 +412,30 @@ class LanguageConnectorCandidateRuntime:
             definition_graph,
             self.learning.clone_for_graph(candidate_graph),
             self.protocol,
-            memory_enabled=self._memory_enabled,
+            persistence_kind=self._persistence_kind,
         )
 
     @property
+    def persistence_kind(self) -> int:
+        """返回进程内、Core 训练历史或断奶后 Memory 三种持久化来源。"""
+        return self._persistence_kind
+
+    @property
     def memory_enabled(self) -> bool:
-        """返回该 owner 是否要求从 M-03 恢复并继续持久化。"""
-        return self._memory_enabled
+        """兼容返回该 owner 是否明确绑定断奶后 M-03 Memory。"""
+        return self._persistence_kind == CANDIDATE_PERSISTENCE_MEMORY
+
+    @property
+    def training_history_protocol(self) -> TrainingHypothesisHistoryProtocol:
+        """返回与候选 aggregate 精确绑定的 Core 训练历史协议。"""
+        return self._training_history_protocol
+
+    @property
+    def training_history(self) -> TrainingCandidateHistoryLog | None:
+        """返回当前绑定的 Core 训练历史；待重绑定 clone 返回空。"""
+        sink = self.learning.engine.ledger.event_sink
+        return sink.history if isinstance(
+            sink, TrainingHypothesisEventSink) else None
 
     @property
     def memory_event_log(self) -> MemoryEventLog | None:
@@ -469,7 +514,67 @@ class LanguageConnectorCandidateRuntime:
             definition_graph,
             learning,
             self.protocol,
-            memory_enabled=True,
+            persistence_kind=CANDIDATE_PERSISTENCE_MEMORY,
+        )
+        for definition in definitions:
+            restored._validate_definition_projection(definition)
+        return restored
+
+    def restore_for_training_graphs(
+            self,
+            definition_graph: LanguageGenerationConnectorGraph,
+            candidate_graph: CandidateProjectionGraph,
+            history: TrainingCandidateHistoryLog,
+            ) -> "LanguageConnectorCandidateRuntime":
+        """从 Core 训练历史和候选图恢复 H-00/H-04，并绑定后续追加。"""
+        if not isinstance(definition_graph, LanguageGenerationConnectorGraph):
+            raise TypeError("training restore definition_graph 类型错误")
+        if not isinstance(candidate_graph, CandidateProjectionGraph):
+            raise TypeError("training restore candidate_graph 类型错误")
+        if definition_graph.ontology is not candidate_graph.ontology:
+            raise ValueError("Core 训练恢复的定义图和候选图必须共享 ontology")
+        if not isinstance(history, TrainingCandidateHistoryLog):
+            raise TypeError("training restore history 类型错误")
+        sink = TrainingHypothesisEventSink(
+            history,
+            self._training_history_protocol,
+        )
+        hypotheses = sink.hypotheses()
+        definitions: list[EvidenceCandidateDefinition] = []
+        for hypothesis in hypotheses:
+            try:
+                definition = EvidenceCandidateDefinition.from_stable_key(
+                    hypothesis.candidate_key)
+            except (TypeError, ValueError) as exc:
+                raise LanguageConnectorCandidateError(
+                    "Core 训练历史无法恢复 connector 候选定义") from exc
+            if (definition.hypothesis(self.learning.engine.protocol)
+                    != hypothesis):
+                raise LanguageConnectorCandidateError(
+                    "Core 训练 Hypothesis 与候选协议不一致")
+            materialized = candidate_graph.read_definition(hypothesis)
+            if materialized.definition != definition:
+                raise LanguageConnectorCandidateError(
+                    "Core 训练候选定义与候选图不一致")
+            definitions.append(definition)
+        ledger = sink.load_ledger(attach_sink=True)
+        engine = EvidenceCandidateEngine.from_history(
+            self.learning.engine.protocol,
+            definitions=tuple(definitions),
+            ledger=ledger,
+            decisions=sink.load_decisions(),
+        )
+        learning = CandidateLearningRuntime.from_history(
+            engine,
+            candidate_graph,
+            self.learning.verifier,
+            self.learning.metadata,
+        )
+        restored = LanguageConnectorCandidateRuntime(
+            definition_graph,
+            learning,
+            self.protocol,
+            persistence_kind=CANDIDATE_PERSISTENCE_TRAINING,
         )
         for definition in definitions:
             restored._validate_definition_projection(definition)
@@ -479,9 +584,25 @@ class LanguageConnectorCandidateRuntime:
         """返回协议、H-00/H-04 owner 和当前 active 理论的完整状态。"""
         return (
             self.protocol.stable_key(),
+            self._persistence_kind,
+            self._training_history_protocol.stable_key(),
             self.definition_graph.value_protocol.stable_key(),
             self.learning.state_key(),
             tuple(item.stable_key() for item in self.active_templates()),
+        )
+
+    @staticmethod
+    def _history_protocol(
+            protocol: LanguageConnectorCandidateProtocol,
+            learning: CandidateLearningRuntime,
+            ) -> TrainingHypothesisHistoryProtocol:
+        """由 connector 和 aggregate 协议派生不含物理 backend 的历史边界。"""
+        aggregate = learning.engine.protocol
+        return TrainingHypothesisHistoryProtocol(
+            protocol.stable_key(),
+            aggregate.hypothesis_kind_key,
+            aggregate.aggregate_source,
+            aggregate.aggregate_scope,
         )
 
     def _validate_definition_projection(
@@ -553,6 +674,9 @@ class LanguageConnectorCandidateRuntime:
 
 
 __all__ = [
+    "CANDIDATE_PERSISTENCE_MEMORY",
+    "CANDIDATE_PERSISTENCE_TRAINING",
+    "CANDIDATE_PERSISTENCE_VOLATILE",
     "LanguageConnectorCandidateError",
     "LanguageConnectorCandidateMapper",
     "LanguageConnectorCandidateProtocol",

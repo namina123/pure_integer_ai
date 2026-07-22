@@ -51,6 +51,7 @@ CORE_TABLES: frozenset[str] = frozenset({
     "graph_hypothesis_group", "graph_hypothesis_group_component",
     "memory_overlay_relation",
     "memory_event", "memory_event_part",
+    "training_candidate_event", "training_candidate_event_part",
     "span", "span_member",
 })
 

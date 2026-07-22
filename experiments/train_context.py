@@ -25,6 +25,9 @@ from pure_integer_ai.cognition.shared.scope_identity import (
 from pure_integer_ai.cognition.shared.scoped_persistence import ScopedIdentityStore
 from pure_integer_ai.cognition.shared.types import JudgeWeights, WEANING_PRE
 from pure_integer_ai.cognition.shared.work_memory import WorkMemory
+from pure_integer_ai.cognition.shared.training_hypothesis import (
+    TrainingCandidateHistoryLog,
+)
 from pure_integer_ai.crosscut.determinism.hasher import Hasher
 from pure_integer_ai.storage import bootstrap
 from pure_integer_ai.storage.backend import StorageBackend
@@ -60,6 +63,7 @@ class TrainContext:
     concept_graph: ConceptGraph
     scoped_identity_store: ScopedIdentityStore
     graph_ontology: GraphOntology
+    training_candidate_history: TrainingCandidateHistoryLog | None = None
     core_identity_catalog: CoreIdentityCatalog | None = None
     memory_read_overlay: MemoryOverlay | None = None
     memory_interact_overlay: MemoryOverlay | None = None
@@ -250,6 +254,8 @@ def make_train_context(
         concept_graph=ConceptGraph(backend),
         scoped_identity_store=scoped_identities,
         graph_ontology=ontology,
+        training_candidate_history=TrainingCandidateHistoryLog(
+            backend, core.space_id),
         core_identity_catalog=core_identity_catalog,
         memory_read_overlay=memory_read_overlay,
         memory_interact_overlay=memory_interact_overlay,
