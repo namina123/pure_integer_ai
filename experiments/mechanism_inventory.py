@@ -1200,7 +1200,36 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
             "assertion_record", "assertion_qualifier",
         ),
         readiness_eligible=False,
-        limitation="R-01 已分型 strict alias、方向 refers 和 branch-scoped realizes，并按 RoleBinding/filler 局部索引及调用方 prefix 策略完整发现可达 active route；预算不足整体失败，唯一选择原子提交全部 R-00 use，多 Representation 保留歧义。G-03 已有 test-only consumer，但正式课程 mapper、formal round caller和 M-03 H-00/use 跨 run 恢复尚未完成。",
+        limitation="R-01 已分型 strict alias、方向 refers 和 branch-scoped realizes，并按 RoleBinding/filler 局部索引及调用方 prefix 策略完整发现可达 active route；预算不足整体失败，唯一选择原子提交全部 R-00 use，多 Representation 保留歧义。G-03 已能把 query goal 与理论 attribution 作为完整 Use context 传入；真实 relation 课程来源仍未完成，故不能宣称已学会 alias/同指/词形。",
+    ),
+    MechanismRecord(
+        mechanism_id="relation.core_use_event",
+        scope=SCOPE_PRE_WEANING,
+        status=STATUS_OPT_IN,
+        owner="cognition.shared.relation_use",
+        writers=(
+            "cognition.shared.relation_use:RelationUseGraph.materialize_many",
+            "cognition.shared.relation_use:RelationUseOwner.append_many",
+            "experiments.relation_closure_runtime:RelationClosureRuntime.consume_many",
+            "experiments.alias_relation_runtime:AliasRelationRuntime.commit_many",
+        ),
+        readers=(
+            "cognition.shared.relation_use:RelationUseGraph.read",
+            "cognition.shared.relation_use:RelationUseGraph.history",
+            "cognition.shared.relation_use:RelationUseOwner.__init__",
+            "experiments.generation_surface_runtime:GenerationSurfaceRuntime.commit",
+        ),
+        gates=(),
+        sources=(
+            "RelationUseContext", "Proposition", "HypothesisKey",
+            "active_Evidence", "H04Decision", "consumer", "purpose",
+        ),
+        recovery=(
+            "graph_object", "graph_object_component", "graph_statement",
+            "assertion_record", "assertion_qualifier",
+        ),
+        readiness_eligible=False,
+        limitation="仅保存 PH2 正式训练中的来源化 relation Use Event；局部 use_key 只在完整 query context 内幂等，V-06 从 clone Core 图重建独立 owner。PH1 可继续使用进程内兼容账，PH3 仍使用 Memory UsePayload；当前不保存延迟 outcome，也不替代 M-08 的完整记忆结果归因。",
     ),
     MechanismRecord(
         mechanism_id="relation.subset_eq_universal",

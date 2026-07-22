@@ -34,6 +34,7 @@ from pure_integer_ai.cognition.shared.generation_surface import (
     SurfaceSlotPreview,
 )
 from pure_integer_ai.cognition.shared.identity import ObjectIdentity
+from pure_integer_ai.cognition.shared.relation_use import RelationUseContext
 from pure_integer_ai.experiments.alias_relation_runtime import (
     AliasRelationRuntime,
     AliasResolutionUse,
@@ -317,6 +318,16 @@ class GenerationSurfaceRuntime:
             raise TypeError("surface commit preview 类型错误")
         if not preview.complete:
             raise ValueError("失败 surface preview 不得提交部分采用账")
+        use_context = None
+        attribution = preview.request.attribution
+        if attribution is not None:
+            goal = preview.request.structure.selection.request.goal
+            use_context = RelationUseContext(
+                goal.source,
+                goal.scope,
+                attribution.theory,
+                attribution.purpose,
+            )
         commit_requests = []
         metadata = []
         for slot in preview.slots:
@@ -340,7 +351,8 @@ class GenerationSurfaceRuntime:
                 ))
         uses: tuple[AliasResolutionUse, ...] = ()
         if commit_requests:
-            uses = self._alias.commit_many(tuple(commit_requests))
+            uses = self._alias.commit_many(
+                tuple(commit_requests), context=use_context)
         if len(uses) != len(metadata):
             raise RuntimeError("R-01 批量采用数量与 surface proposal 不一致")
         adoptions = tuple(

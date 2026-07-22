@@ -34,6 +34,11 @@ from pure_integer_ai.cognition.shared.relation_closure import (
     RelationClosureCandidateSpec,
     RelationClosureProtocol,
 )
+from pure_integer_ai.cognition.shared.relation_use import (
+    RelationUseContext,
+    RelationUseDefinition,
+    RelationUseOwner,
+)
 from pure_integer_ai.cognition.shared.scope_identity import ScopeIdentity
 from pure_integer_ai.cognition.shared.semantic_graph import SemanticGraph
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
@@ -208,6 +213,28 @@ class RelationClosureUse:
     evidence_keys: tuple[tuple[int, ...], ...]
     decision_key: tuple[int, ...]
     read_only_recovered: bool
+    context: RelationUseContext | None = None
+    event: ObjectIdentity | None = None
+
+    def route_key(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """返回完整 context 加局部 use_key；PH1 无 context 时保留兼容路由。"""
+        context_key = () if self.context is None else self.context.stable_key()
+        return context_key, self.use_key
+
+    def to_definition(self) -> RelationUseDefinition:
+        """把已采用事实转换为可写入 PH2 Core 图的完整 Use 定义。"""
+        if self.context is None:
+            raise RelationClosureIncompleteError(
+                "配置 Core Use owner 后必须提供完整 RelationUseContext")
+        return RelationUseDefinition(
+            self.use_key,
+            self.context,
+            self.proposition,
+            self.hypothesis,
+            self.evidence_keys,
+            self.decision_key,
+            self.read_only_recovered,
+        )
 
 
 @dataclass(frozen=True)
@@ -339,7 +366,9 @@ class RelationClosureRuntime:
             self, candidate_runtime: CandidateLearningRuntime,
             semantic_graph: SemanticGraph,
             consumer: ActiveRelationClosureConsumer,
-            protocol: RelationClosureProtocol) -> None:
+            protocol: RelationClosureProtocol,
+            use_owner: RelationUseOwner | None = None) -> None:
+        """绑定同一候选、语义图和消费者，并可从 PH2 Core 图恢复 Use owner。"""
         if not isinstance(candidate_runtime, CandidateLearningRuntime):
             raise TypeError("candidate_runtime 必须是 CandidateLearningRuntime")
         if not isinstance(semantic_graph, SemanticGraph):
@@ -356,15 +385,42 @@ class RelationClosureRuntime:
             raise ValueError("live consumer 必须绑定同一 H-05 owner")
         if consumer.protocol != protocol:
             raise ValueError("runtime 与 consumer 的关系字段协议不一致")
+        if use_owner is not None:
+            if not isinstance(use_owner, RelationUseOwner):
+                raise TypeError("use_owner 必须是 RelationUseOwner 或 None")
+            if use_owner.graph.ontology is not semantic_graph.ontology:
+                raise ValueError("Core Use owner 必须绑定 relation SemanticGraph")
         self.candidate_runtime = candidate_runtime
         self.semantic_graph = semantic_graph
         self.consumer = consumer
         self.protocol = protocol
+        self.use_owner = use_owner
         self._formations: dict[
             ObjectIdentity, RelationClosureFormationTrace] = {}
         self._recognitions: dict[
             tuple, RelationClosureRecognitionTrace] = {}
-        self._uses: dict[tuple[int, ...], RelationClosureUse] = {}
+        self._uses: dict[
+            tuple[tuple[int, ...], tuple[int, ...]], RelationClosureUse
+        ] = {}
+        if use_owner is not None:
+            for materialized in use_owner.history():
+                definition = materialized.definition
+                use = RelationClosureUse(
+                    definition.use_key,
+                    definition.proposition,
+                    definition.hypothesis,
+                    definition.evidence_keys,
+                    definition.decision_key,
+                    definition.read_only_recovered,
+                    definition.context,
+                    materialized.event,
+                )
+                route = use.route_key()
+                existing = self._uses.get(route)
+                if existing is not None and existing != use:
+                    raise RelationClosureIncompleteError(
+                        "恢复的 Core Use 路由发生竞争")
+                self._uses[route] = use
 
     def form(
             self, spec: RelationClosureCandidateSpec,
@@ -442,17 +498,26 @@ class RelationClosureRuntime:
 
     def consume(
             self, proposition: ObjectIdentity, *,
-            use_key: tuple[int, ...]) -> RelationClosureUse:
+            use_key: tuple[int, ...],
+            context: RelationUseContext | None = None) -> RelationClosureUse:
         """通过正式 typed consumer 采用事实，并记录 Evidence/H-04 使用归因。"""
-        return self.consume_many(((proposition, use_key),))[0]
+        return self.consume_many(
+            ((proposition, use_key),), context=context)[0]
 
     def consume_many(
             self,
             requests: tuple[tuple[ObjectIdentity, tuple[int, ...]], ...],
+            *,
+            context: RelationUseContext | None = None,
             ) -> tuple[RelationClosureUse, ...]:
         """全量预检多事实采用，任一冲突时不留下部分 use ledger。"""
         if not isinstance(requests, tuple) or not requests:
             raise ValueError("consume_many requests 必须是非空 tuple")
+        if context is not None and not isinstance(context, RelationUseContext):
+            raise TypeError("consume_many context 类型错误")
+        if self.use_owner is not None and context is None:
+            raise RelationClosureIncompleteError(
+                "配置 Core Use owner 后必须提供完整 RelationUseContext")
         prepared: list[RelationClosureUse] = []
         for request in requests:
             if not isinstance(request, tuple) or len(request) != 2:
@@ -470,19 +535,37 @@ class RelationClosureRuntime:
                 fact.evidence_keys,
                 fact.decision_key,
                 fact.read_only_recovered,
+                context,
             ))
-        keys = tuple(item.use_key for item in prepared)
-        if len(set(keys)) != len(keys):
+        routes = tuple(item.route_key() for item in prepared)
+        if len(set(routes)) != len(routes):
             raise RelationClosureIncompleteError(
-                "同批 relation use_key 不得重复")
+                "同批 relation Use 路由不得重复")
         for use in prepared:
-            existing = self._uses.get(use.use_key)
-            if existing is not None and existing != use:
+            existing = self._uses.get(use.route_key())
+            if existing is not None and not self._same_use(existing, use):
                 raise RelationClosureIncompleteError(
-                    "同一 use_key 已绑定不同关系事实")
-        for use in prepared:
-            self._uses[use.use_key] = use
-        return tuple(prepared)
+                    "同一 relation Use 路由已绑定不同关系事实")
+        committed = tuple(prepared)
+        if self.use_owner is not None:
+            materialized = self.use_owner.append_many(tuple(
+                item.to_definition() for item in prepared))
+            committed = tuple(
+                RelationClosureUse(
+                    item.definition.use_key,
+                    item.definition.proposition,
+                    item.definition.hypothesis,
+                    item.definition.evidence_keys,
+                    item.definition.decision_key,
+                    item.definition.read_only_recovered,
+                    item.definition.context,
+                    item.event,
+                )
+                for item in materialized
+            )
+        for use in committed:
+            self._uses[use.route_key()] = use
+        return committed
 
     def audit(
             self, spec: RelationClosureCandidateSpec,
@@ -567,15 +650,21 @@ class RelationClosureRuntime:
             candidate_graph,
             engine=cloned_candidate.engine,
         )
+        cloned_use_owner = None
+        if self.use_owner is not None:
+            cloned_use_owner = self.use_owner.clone_for_ontology(
+                semantic_graph.ontology)
         cloned = RelationClosureRuntime(
             cloned_candidate,
             semantic_graph,
             cloned_consumer,
             self.protocol,
+            cloned_use_owner,
         )
         cloned._formations = dict(self._formations)
         cloned._recognitions = dict(self._recognitions)
-        cloned._uses = dict(self._uses)
+        if self.use_owner is None:
+            cloned._uses = dict(self._uses)
         return cloned
 
     def state_key(self) -> tuple:
@@ -600,6 +689,8 @@ class RelationClosureRuntime:
                 use.evidence_keys,
                 use.decision_key,
                 use.read_only_recovered,
+                None if use.context is None else use.context.stable_key(),
+                None if use.event is None else use.event.stable_key(),
             )
             for use in self._uses.values()
         ))
@@ -608,6 +699,20 @@ class RelationClosureRuntime:
             formations,
             recognitions,
             uses,
+            None if self.use_owner is None else self.use_owner.state_key(),
+        )
+
+    @staticmethod
+    def _same_use(left: RelationClosureUse, right: RelationClosureUse) -> bool:
+        """比较 Use 领域内容并忽略仅由 Core 图恢复得到的 Event 引用。"""
+        return (
+            left.use_key == right.use_key
+            and left.proposition == right.proposition
+            and left.hypothesis == right.hypothesis
+            and left.evidence_keys == right.evidence_keys
+            and left.decision_key == right.decision_key
+            and left.read_only_recovered == right.read_only_recovered
+            and left.context == right.context
         )
 
 
