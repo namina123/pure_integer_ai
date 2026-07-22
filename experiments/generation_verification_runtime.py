@@ -17,6 +17,7 @@ from pure_integer_ai.cognition.shared.generation_verification import (
     GenerationPostcheckRequest,
     GenerationSourceRequirement,
     GenerationSurfaceObservation,
+    GenerationSurfaceParseRequest,
     GenerationSurfaceParseResult,
     GenerationSurfaceParser,
     GenerationTaskRequirement,
@@ -154,6 +155,17 @@ class GenerationPostcheckProtocol:
             self.task_unknown,
         )
 
+    def stable_key(self) -> tuple[int, ...]:
+        """返回六维绑定和全部分型 reason 的完整协议键。"""
+        result = [len(self.bindings())]
+        for dimension, verifier in self.bindings():
+            result.extend(_packed(dimension.stable_key()))
+            result.extend(_packed(verifier.stable_key()))
+        result.append(len(self.reasons()))
+        for reason in self.reasons():
+            result.extend(_packed(reason.stable_key()))
+        return tuple(result)
+
 
 @dataclass(frozen=True)
 class GenerationStructureCheckRequest:
@@ -217,6 +229,7 @@ class _GenerationPostcheckContext:
     """一次 parser 结果和 postcheck request 的内部只读组合。"""
 
     request: GenerationPostcheckRequest
+    parse_request: GenerationSurfaceParseRequest
     parsed: GenerationSurfaceParseResult
 
 
@@ -350,10 +363,12 @@ class GenerationPostcheckRuntime:
         """反解析同一次 typed execution，并生成六维只读报告。"""
         if not isinstance(request, GenerationPostcheckRequest):
             raise TypeError("postcheck runtime 只接受 GenerationPostcheckRequest")
-        parsed = self.parser.parse(request.execution)
+        parse_request = GenerationSurfaceParseRequest.from_execution(
+            request.execution)
+        parsed = self.parser.parse(parse_request)
         if not isinstance(parsed, GenerationSurfaceParseResult):
             raise TypeError("surface parser 必须返回 GenerationSurfaceParseResult")
-        context = _GenerationPostcheckContext(request, parsed)
+        context = _GenerationPostcheckContext(request, parse_request, parsed)
         report = self.orchestrator.run(
             context, self._registrations(), read_only=True)
         return GenerationPostcheckRun(self.protocol, request, parsed, report)
@@ -414,14 +429,13 @@ class GenerationPostcheckRuntime:
     def _observation_binding_matches(
             context: _GenerationPostcheckContext,
             ) -> bool:
-        """核验 parser 观察精确绑定实际 execution、renderer 和 Representation。"""
+        """核验 parser 观察绑定受限请求，且恢复了实际 Representation。"""
         observation = context.parsed.observation
         if observation is None:
             return False
         execution = context.request.execution
         return (
-            observation.execution_key == execution.stable_key()
-            and observation.rendered_key == execution.rendered.stable_key()
+            observation.parse_request_key == context.parse_request.stable_key()
             and observation.representations == execution.representations
         )
 
