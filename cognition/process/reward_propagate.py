@@ -51,7 +51,12 @@ from pure_integer_ai.storage.edge_types import EDGE_CAUSES
 from pure_integer_ai.storage.edge_store import EdgeStore
 from pure_integer_ai.storage.experience_count import record_experience_outcome, pack_ctx_code
 from pure_integer_ai.storage.spaces.memory_space import SEG_EPISODIC, SEG_NEGATIVE
-from pure_integer_ai.cognition.shared.types import PathResult, EdgeRef, REWARD_LEGITIMATE_DOMAINS
+from pure_integer_ai.cognition.shared.types import (
+    EdgeRef,
+    MODALITY_LANGUAGE,
+    PathResult,
+    REWARD_LEGITIMATE_DOMAINS,
+)
 from pure_integer_ai.cognition.process.effective_weight import edge_rate, is_unobserved, RATE_SCALE
 from pure_integer_ai.cognition.process.abstraction import nearest_isa_ancestor
 
@@ -72,14 +77,14 @@ def _nearest_isa_ancestor_reward(amap: dict, ref: tuple[int, int]) -> tuple[int,
     return nearest_isa_ancestor(amap, ref)
 
 
-def _fetch_edge_row(backend: Any, edge_ref: EdgeRef) -> dict[str, Any] | None:
-    """按 EdgeRef 5-tuple 取边行（含 sn/tn/strength/base_strength）。"""
-    rows = backend.select("edge", where={
-        "space_id_from": edge_ref[0], "local_id_from": edge_ref[1],
-        "space_id_to": edge_ref[2], "local_id_to": edge_ref[3],
-        "edge_type": edge_ref[4],
-    }, limit=1)
-    return rows[0] if rows else None
+def _fetch_edge_row(edge_store: EdgeStore,
+                    edge_ref: EdgeRef) -> dict[str, Any] | None:
+    """经 EdgeStore 读取 EdgeRef 对应唯一旧边，禁止奖励路径静默选择首行。"""
+    return edge_store.get(
+        space_id_from=edge_ref[0], local_id_from=edge_ref[1],
+        space_id_to=edge_ref[2], local_id_to=edge_ref[3],
+        edge_type=edge_ref[4],
+    )
 
 
 def _distribute_by_rate(items: list[tuple[EdgeRef, int]], reward: int
@@ -127,6 +132,8 @@ def propagate_reward(path_result: PathResult, output_words: list[str],
     """
     assert_int(reward, intent_type, _where="propagate_reward.reward")
     assert_no_float(reward, _where="propagate_reward.reward_float")
+    if ctx_tag[1] == MODALITY_LANGUAGE:
+        return
     backend = backend or edge_store._b
 
     # —— 只走 CAUSES 头（PRECEDES 永不接 reward·M2 读 path.edges 选定 CAUSES 边） ——
@@ -137,7 +144,7 @@ def propagate_reward(path_result: PathResult, output_words: list[str],
     items: list[tuple[EdgeRef, int]] = []
     rows: dict[EdgeRef, dict[str, Any]] = {}
     for ref in causes_edges:
-        row = _fetch_edge_row(backend, ref)
+        row = _fetch_edge_row(edge_store, ref)
         if row is None:
             continue   # 边已不在（冷区脱离）·跳过
         rows[ref] = row
@@ -154,10 +161,7 @@ def propagate_reward(path_result: PathResult, output_words: list[str],
     # （default OFF 守 CI bit-identical·OFF → _skip 恒 False → 落点① 逐字现状）。
     # **仅剔 edge 写（sn/tn/strength）**：概念维对偶 experience_count（落点① 对偶段 :168-186）/ memory（落点②）/
     # selection_pref 台账（落点⑥）不受影响——皆概念维 / 独立台账·非 edge reward 多头（docstring :9-11 明示）。
-    # **memory 落点② 写为何保留**（§五「reward 从语言完全退场」窄读边界·审2 LOW-2）：memory_item 是 episodic
-    # 记录非 CAUSES edge strength 信号（reward<0→SEG_NEGATIVE·读侧 G5-C consolidate gate dormant·consumption 中环
-    # 4/5 defer）·写活但不反馈学习信号→不触 §五『edge 写退场』scope（仅剔会污染 CAUSES strength 的 edge 写）。
-    # CAUSES 掌握改走刀 constructive-check 通道（不接 strength·§五降级决断）。
+    # 语言模态已在函数入口拒绝 scalar reward 的全部持久写；本域过滤继续保护其他无自证锚的旧域。
     _skip_causes_edge_write = (
         getattr(gates, "CAUSES_REWARD_DOMAIN_FILTER_MODE", False)
         and ctx_tag[0] not in REWARD_LEGITIMATE_DOMAINS

@@ -75,6 +75,7 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import NamedTuple
 
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
@@ -124,6 +125,64 @@ _MAX_PROBE_ARITY = len(_PROBE_VALUES)   # 探针覆盖最大 arity（超→opera
 
 # §8.7-洗 洗净循环反馈半闭环：算子置信率 ×1000 缩放（sn/tn→rate·recognize 择优排序用·同 COVERAGE_SCALE 既有约定）
 _OP_CONF_RATE_SCALE = 1000
+
+
+@dataclass
+class DiscoveryRouteStats:
+    """结构发现路由的生产诊断计数。"""
+
+    calls: int = 0
+    input_roots: int = 0
+    shape_groups: int = 0
+    cue_clusters: int = 0
+    lca_clusters: int = 0
+    existing_key_clusters: int = 0
+    new_discovery_clusters: int = 0
+    fallback_clusters: int = 0
+    discover_samples: int = 0
+    recognize_samples: int = 0
+    dropped_samples: int = 0
+
+    def to_json(self) -> dict[str, int]:
+        return {
+            "calls": self.calls,
+            "input_roots": self.input_roots,
+            "shape_groups": self.shape_groups,
+            "cue_clusters": self.cue_clusters,
+            "lca_clusters": self.lca_clusters,
+            "existing_key_clusters": self.existing_key_clusters,
+            "new_discovery_clusters": self.new_discovery_clusters,
+            "fallback_clusters": self.fallback_clusters,
+            "discover_samples": self.discover_samples,
+            "recognize_samples": self.recognize_samples,
+            "dropped_samples": self.dropped_samples,
+        }
+
+
+@dataclass
+class StructureTallyStats:
+    """结构到关系 tally 的生产诊断计数。"""
+
+    calls: int = 0
+    input_roots: int = 0
+    realizes_skeletons: int = 0
+    shape_matched_roots: int = 0
+    aligned_roots: int = 0
+    candidate_alignments: int = 0
+    distinct_matches_added: int = 0
+    shadow_edges_added: int = 0
+
+    def to_json(self) -> dict[str, int]:
+        return {
+            "calls": self.calls,
+            "input_roots": self.input_roots,
+            "realizes_skeletons": self.realizes_skeletons,
+            "shape_matched_roots": self.shape_matched_roots,
+            "aligned_roots": self.aligned_roots,
+            "candidate_alignments": self.candidate_alignments,
+            "distinct_matches_added": self.distinct_matches_added,
+            "shadow_edges_added": self.shadow_edges_added,
+        }
 
 
 class SkeletonResult(NamedTuple):
@@ -1213,6 +1272,7 @@ def route_samples_for_discovery(
         existing_keys: set[tuple[tuple[int, ...], int, tuple, tuple]],
         existing_sigs: set[tuple[int, ...]],
         space_id: int,
+        stats: DiscoveryRouteStats | None = None,
         ) -> tuple[list[ConceptRef], list[ConceptRef]]:
     """同 shape 程序根 → 按 (sig,hint) 分组 → 每组 LCA 聚类 → 按簇 abstract_sig 路由 discover/recognize。
 
@@ -1260,6 +1320,9 @@ def route_samples_for_discovery(
     assert_int(space_id, _where="route_samples_for_discovery.space_id")
     for r in roots:
         assert_int(r[0], r[1], _where="route_samples_for_discovery.root")
+    if stats is not None:
+        stats.calls += 1
+        stats.input_roots += len(roots)
     # 1. 按 (shape_signature, operand_arity_hint) 分组（同 auto_discover:829·序列2 另半·同类样本分组）。
     groups: dict[tuple[tuple[int, ...], int], list[ConceptRef]] = {}
     for root in roots:
@@ -1268,6 +1331,8 @@ def route_samples_for_discovery(
             continue   # 无 COMPOSES 树（非程序根·如语言 struct_ref）→ 不路由
         hint = _operand_arity_hint(graph, root)
         groups.setdefault((sig, hint), []).append(root)
+    if stats is not None:
+        stats.shape_groups += len(groups)
     # 2. 建 ancestor_map 一次（同 auto_discover:843·run-scoped·空则 has_isa=False 跳过聚类守 bit-identical）。
     ancestor_map = build_isa_ancestor_map(backend, space_id=space_id)
     has_isa = bool(ancestor_map)
@@ -1282,7 +1347,10 @@ def route_samples_for_discovery(
         # 修法 B（doc/重来_语料聚簇规模 §15·2 审 APPROVE）：cue-first——外层 _cluster_by_cue 直接拆 sig 组·内层再 LCA。
         # 先结构（功能词脚手架分桶）后语义（内容词 LCA 参数化）·解 LCA-then-cue 让内容词 LCA 打散句法脚手架之病。
         # gate OFF → _cluster_by_cue 返 [(grp_sorted,())]·内层 LCA 照原跑 → 退化逐字 bit-identical（审1 Q4）。
-        for cue_roots, cue_sig in _cluster_by_cue(backend, graph, grp_sorted):
+        cue_groups = _cluster_by_cue(backend, graph, grp_sorted)
+        if stats is not None:
+            stats.cue_clusters += len(cue_groups)
+        for cue_roots, cue_sig in cue_groups:
             cue_sorted = sorted(cue_roots)
             cue_key = _normalize_abstract_sig(cue_sig)
             # 内层 LCA 聚类（在 cue 子簇内·同 auto_discover 两层镜像·幂等一致）·has_isa 且 ≥K 才聚类·否则单簇 None
@@ -1294,6 +1362,8 @@ def route_samples_for_discovery(
             # 跨 cue 子簇混回 sig 组单簇·直接销毁 cue 拆分（silent bug·不报错）。
             if not any(len(c_roots) >= MIN_DISCOVER_SAMPLES for c_roots, _c_sig in clusters):
                 clusters = [(list(cue_sorted), None)]
+            if stats is not None:
+                stats.lca_clusters += len(clusters)
             for c_roots, slot_lcas in clusters:
                 abstract_sig = _normalize_abstract_sig(
                     tuple(slot_lcas) if slot_lcas is not None else ())
@@ -1302,15 +1372,25 @@ def route_samples_for_discovery(
                 if arity is not None and (sig, arity, abstract_sig, cue_key) in existing_keys:
                     # (sig,arity,abstract_sig,cue_sig) 已载 → 全 held-out 识别（跨 run 泛化·守幂等不 re-discover）
                     recognize_roots.extend(sub_sorted)
+                    if stats is not None:
+                        stats.existing_key_clusters += 1
                 elif arity is not None and len(sub_sorted) >= MIN_DISCOVER_SAMPLES:
                     # 新 cue 子簇 → 发现首 K·识别余（held-out·§八.3·识别须新输入非发现集→真泛化）
                     discover_roots.extend(sub_sorted[:MIN_DISCOVER_SAMPLES])
                     recognize_roots.extend(sub_sorted[MIN_DISCOVER_SAMPLES:])
+                    if stats is not None:
+                        stats.new_discovery_clusters += 1
                 else:
                     # arity None（probe 不符/<K）或 子簇 <K 未载 → sig fallback（同原 _run_arith/_run_lang 路径）
                     if sig in existing_sigs:
                         recognize_roots.extend(sub_sorted)
+                    if stats is not None:
+                        stats.fallback_clusters += 1
                     # else 弃（<K 无载入·不发现不识别·诚实）
+    if stats is not None:
+        stats.discover_samples += len(discover_roots)
+        stats.recognize_samples += len(recognize_roots)
+        stats.dropped_samples += max(len(roots) - len(discover_roots) - len(recognize_roots), 0)
     return discover_roots, recognize_roots
 
 
@@ -1608,11 +1688,12 @@ def _collect_cue_slot_candidates(skeleton_ref: ConceptRef, input_ref: ConceptRef
 def tally_cue_slot_matches(input_roots: list[ConceptRef], *,
                            discovered_operators: list[DiscoveredOperator],
                            graph: ConceptGraph, edge_store, backend, space_id: int,
-                           rel_primitives: dict[int, ConceptRef]) -> int:
+                           rel_primitives: dict[int, ConceptRef],
+                           stats: StructureTallyStats | None = None) -> int:
     """结构反推 tally 编排（对应泛化 v2·审1C3/审2条件1+2·三路分离 + SHADOW 创建）。
 
     对每个 **REALIZES-R-skeleton**（EDGE_REALIZES skeleton→rel_ref 存在）+ cue-blind 对齐 input → 捕 cue slot W →
-    record_structure_match(W,R,input_root)（distinct forming-sample tally·append-only 幂等去重）→ 首次 new（该 input_root
+    record_structure_match(W,R,input_root)（distinct tally sample；生产为 recognition-routed input_root·append-only 幂等去重）→ 首次 new（该 input_root
     for (W,R)）→ record_emergent_relation_signal_shadow 建 D:11 SHADOW 行（generator 关后唯一创建者·审2 条件2·
     record_emergent_relation_signal_shadow 自身 query_from 幂等防同 (W,R) 多 sample 重复建边）。
 
@@ -1627,6 +1708,8 @@ def tally_cue_slot_matches(input_roots: list[ConceptRef], *,
     返新建 SHADOW 数（0=gate OFF caller 不调 / 无 REALIZES-skeleton / 无 cue slot 命中）。
     """
     assert_int(space_id, _where="tally_cue_slot_matches.space_id")
+    if stats is not None:
+        stats.calls += 1
     # rel_ref → rel_kind 反查（promote _structure_match_ok 用 rel_kind·REALIZES 边存 rel_ref）
     rel_ref_to_kind: dict[ConceptRef, int] = {ref: kind for kind, ref in rel_primitives.items()}
     ancestor_map = build_isa_ancestor_map(backend, space_id=space_id)
@@ -1646,6 +1729,8 @@ def tally_cue_slot_matches(input_roots: list[ConceptRef], *,
         if not sig:
             continue   # 空签名（非程序骨架）→ 跳过
         by_shape.setdefault(sig, []).append((op.skeleton_ref, op.arity, rels))
+    if stats is not None:
+        stats.realizes_skeletons += sum(len(v) for v in by_shape.values())
     if not by_shape:
         return 0   # 无 REALIZES-skeleton → 无 tally（REALIZES_MODE OFF 或无 oracle 命中）
     n_new_shadow = 0
@@ -1654,23 +1739,38 @@ def tally_cue_slot_matches(input_roots: list[ConceptRef], *,
         if root in seen:
             continue   # 去重（同 input_root 一次·保序确定·镜像 recognize_operators seen_inputs）
         seen.add(root)
+        if stats is not None:
+            stats.input_roots += 1
         sig = tuple(shape_signature(graph, root))
         candidates = by_shape.get(sig)
         if not candidates:
             continue   # 无同形 REALIZES-skeleton → 跳过
+        if stats is not None:
+            stats.shape_matched_roots += 1
+        root_aligned = False
         for skeleton_ref, arity, rels in candidates:
             ws = _collect_cue_slot_candidates(skeleton_ref, root, backend, arity, ancestor_map)
             if not ws:
                 continue   # 不对齐 / 无 cue slot → 不 tally
+            if stats is not None:
+                stats.candidate_alignments += 1
+                if not root_aligned:
+                    stats.aligned_roots += 1
+                    root_aligned = True
             for w in ws:
                 for rel_kind, rel_ref in rels:
                     new = record_structure_match(backend, space_id=space_id,
                                                  word_ref=w, rel_kind=rel_kind, sample_root=root)
                     if new:
+                        if stats is not None:
+                            stats.distinct_matches_added += 1
                         # 首次该 (W,R,input_root) → 建 D:11 SHADOW 行（generator 关后唯一创建者·
                         # record_emergent_relation_signal_shadow query_from 幂等·同 (W,R) 多 sample 不重复建边）
-                        n_new_shadow += record_emergent_relation_signal_shadow(
+                        added = record_emergent_relation_signal_shadow(
                             edge_store, w, rel_ref, space_id=space_id)
+                        n_new_shadow += added
+                        if stats is not None:
+                            stats.shadow_edges_added += added
     return n_new_shadow
 
 

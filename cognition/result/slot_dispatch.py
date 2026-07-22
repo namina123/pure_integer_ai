@@ -170,20 +170,36 @@ def dispatch_slot(slot: RoleSlot, dag_path: PathResult, graph: ConceptGraph,
         # 序列空→退化填槽（防御·不应发生·caller 标 filler 时保证序列在）
 
     # —— 单概念 → 词形路径（填槽主） ——
-    # 命门③ 候选 B：cue 位早 return（doc/重来_命门③·结构活化·功能词直出·绕 collide·在单概念填槽路径前）。
-    # cue 位（workmem.current_slot_is_cue=True·generate CORRESPONDENCE_SLOT_MODE 块 stash）读 cue_sig[slot_idx]
-    # -> surface_of(cue token) 直出功能词·返 CUE_SLOT_FILL=3·绕 collide/selection_pref/correspondence 全下游。
-    # 方法论契合：功能词由 cue 聚簇涌现（闭类 vs 开类·无须词表）·非硬编码语法角色。
-    # workmem.current_slot_idx 走 workmem（dispatch_slot 无 slot_idx 参数·审2 HIGH-1 修）。
-    # cue_sig 缺/越界/None/surface None -> fall-through 走 collide（防御·bit-identical 守）。gate OFF 不进->逐字现状。
-    if getattr(workmem, "current_slot_is_cue", False) and getattr(gates, "CUE_SLOT_FILL_MODE", False):
+    # cue 位有两级行为：无已学习 relation cue 时保持骨架原 cue 直出；有候选时把原 cue 作为 fallback
+    # 与 PRIMARY+BARE_TEXT D:11 cue 同池竞争。这样保留结构活化，同时让学习结果真正参与 winner。
+    _is_cue = getattr(workmem, "current_slot_is_cue", False)
+    _corr_gate = getattr(gates, "CORRESPONDENCE_SLOT_MODE", False)
+    _unit_rk = getattr(workmem, "current_rel_kind", 0)
+    _cue_fill_gate = getattr(gates, "CUE_SLOT_FILL_MODE", False)
+    _learned_cues = (graph.relation_cue_candidates(_unit_rk, space_id=slot.ref[0])
+                     if _is_cue and _corr_gate and _unit_rk != 0 else [])
+    _cue_ref: ConceptRef | None = None
+    if _is_cue and _cue_fill_gate:
         _cue_sig = getattr(workmem, "current_cue_sig", ())
-        _slot_idx = getattr(workmem, "current_slot_idx", 0)   # HIGH-1 修·走 workmem 非签名参数
+        _slot_idx = getattr(workmem, "current_slot_idx", 0)
         if _slot_idx < len(_cue_sig) and _cue_sig[_slot_idx] is not None:
-            _word = graph.surface_of(_cue_sig[_slot_idx])
-            if _word is not None:
-                return _word, CUE_SLOT_FILL   # cue token 直出绕 collide
+            _cue_ref = _cue_sig[_slot_idx]
+            _word = graph.surface_of(_cue_ref)
+            if _word is not None and not _learned_cues:
+                return _word, CUE_SLOT_FILL
     candidates = graph.activate_candidates(slot.ref)
+    _seen = set(candidates)
+    if _cue_ref is not None and _cue_ref not in _seen:
+        candidates.append(_cue_ref)
+        _seen.add(_cue_ref)
+    for _learned in _learned_cues:
+        if _learned not in _seen:
+            candidates.append(_learned)
+            _seen.add(_learned)
+    _cue_lineage_candidates = (
+        ({_cue_ref} if _cue_ref is not None else set()) | set(_learned_cues)
+        if _cue_fill_gate and _is_cue else set()
+    )
     # 维度桥 reader 移至 generate.py（读 unit=struct_ref·非 slot.ref·DISPATCH_TOKEN_CHAIN_MODE ON 时 slot.ref=token
     # 无 binding·审1 MEDIUM-1 修·slot_dispatch 只收 slot.ref 无 unit）。workmem.last_dim_skeleton 由 generate 每 unit 设。
     # P2 断桥 consumer 将在此读 workmem.last_dim_skeleton 做值填充（VALUE_TRANSIT_MODE defer·P1 无消费者·本函数不读）。
@@ -204,7 +220,7 @@ def dispatch_slot(slot: RoleSlot, dag_path: PathResult, graph: ConceptGraph,
     # candidates 过滤（hub 不进 scored 池）+ ctx_refs 过滤（hub 作上下文是非判别性噪声·移除增判别力）。
     # 空 fallback 守：全 candidates 是 hub（如 slot.ref 自身 hub 且 activate 返 [self]）时保原 candidates
     # （避 _stable_tiebreak([]) crash·degenerate 槽退原 unfiltered·stable≠correct·gate OFF 零行为变）。
-    if getattr(gates, "EXCLUDE_FUNCTION_MODE", False):
+    if getattr(gates, "EXCLUDE_FUNCTION_MODE", False) and not _cue_lineage_candidates:
         # perf round5（2026-07-13）：per-ref is_hub（K+M 次 × 2 query）-> 一次 compute_hub_set
         # + membership O(1)（解生产 EXCLUDE_FUNCTION_MODE ON 36 万调 fan-out·cProfile 15.4s）。
         # bit-identical：hub_set 与 is_hub 同 theta + 同 strength 累加 -> `c in hub_set` == is_hub(c)。
@@ -215,9 +231,9 @@ def dispatch_slot(slot: RoleSlot, dag_path: PathResult, graph: ConceptGraph,
         ctx_refs = [r for r in ctx_refs if r not in _hub_set]
     # 命门③ 候选 C（slot_lca 抽象约束·doc/重来_命门③_句子组装_结构抽象活化_设计_2026-07-18）：内容词位按 slot IS_A LCA 类过滤候选。
     # mirror hub filter :207-215 范式（filter + 空集 fallback 走 collide·非 bonus·design 决策·"抽象约束"语义纯·无须 cap）。
-    # cue 位不受影响（B cue 早 return :179-185 已返·不到此·仅当 CUE_SLOT_FILL_MODE ON·混合 case 见设计档诚实边界）。
+    # 生产 cue 候选竞争绕过内容词 LCA；CUE_SLOT_FILL_MODE OFF 的实验组合仍保留旧过滤行为。
     # current_slot_lca=() 跳过（无约束位/gate OFF/getattr 默认守·bit-identical）。
-    if getattr(gates, "SLOT_LCA_CONSTRAINT_MODE", False):
+    if getattr(gates, "SLOT_LCA_CONSTRAINT_MODE", False) and not _cue_lineage_candidates:
         _slot_lca = getattr(workmem, "current_slot_lca", ())   # getattr 默认守（mirror B 审1 LOW-1·current_slot_lca default ()）
         if _slot_lca != ():    # ()=无约束位->跳过
             cand_f = [c for c in candidates if graph.is_a_descendant_of(c, _slot_lca)]
@@ -238,12 +254,9 @@ def dispatch_slot(slot: RoleSlot, dag_path: PathResult, graph: ConceptGraph,
     _pr_gate = getattr(gates, "PRONOUN_SLOT_MODE", False)
     _mod_gate = getattr(gates, "MODIFIER_DIRECTION_MODE", False)   # G2 修饰方向A·head 偏好第 6 路
     _so_gate = getattr(gates, "SIMILAR_SECOND_ORDER_MODE", False)   # Phase C 二阶相似·第 7 路 tiebreak（read-side Jaccard）
-    _corr_gate = getattr(gates, "CORRESPONDENCE_SLOT_MODE", False)   # 对应桥第 8 路·(β) 独立轴·cue-slot-aware
     if _sp_gate or _pr_gate or _mod_gate or _so_gate or _corr_gate:
         # 对应桥 per-unit/per-slot stash（generate CORRESPONDENCE_SLOT_MODE 块设·getattr default 守 gate OFF）：
         # _unit_rk=skeleton REALIZES R（两跳 reader）·_is_cue=该 slot 是否 cue 位（cue-slot-aware 反 theater）。
-        _unit_rk = getattr(workmem, "current_rel_kind", 0)
-        _is_cue = getattr(workmem, "current_slot_is_cue", False)
         scored = [(c, s * SCORE_SCALE
                    + _cap_sp(
                        (graph.selection_pref_score(c, ctx_refs) if _sp_gate else 0)
@@ -264,4 +277,5 @@ def dispatch_slot(slot: RoleSlot, dag_path: PathResult, graph: ConceptGraph,
 
     best = _stable_tiebreak(pool)
     word = modality_serialize(best, slot.role, target_lang, graph)
-    return word, LINEAGE_CONCEPT_FILL
+    source = CUE_SLOT_FILL if best in _cue_lineage_candidates else LINEAGE_CONCEPT_FILL
+    return word, source

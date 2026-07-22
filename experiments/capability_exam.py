@@ -49,7 +49,8 @@ from pure_integer_ai.storage.edge_store import SOURCE_BARE_TEXT, SOURCE_MATH
 from pure_integer_ai.cognition.result.graph_view import ConceptGraph
 from pure_integer_ai.cognition.result.layer0_anchor import count_layer0
 from pure_integer_ai.cognition.shared.types import (
-    CodeSpec, MODALITY_ARITH, MODALITY_CODE, MODALITY_LANGUAGE, DOMAIN_MATH, LANG_NONE,
+    CodeSpec, Episode, MODALITY_ARITH, MODALITY_CODE, MODALITY_LANGUAGE,
+    DOMAIN_MATH, LANG_NONE,
 )
 from pure_integer_ai.experiments.collection import CollectedItem, COLLECT_PRECEDES, COLLECT_CAUSES
 from pure_integer_ai.experiments.formal_train import (
@@ -664,7 +665,7 @@ def project_dimensions(result: FormalTrainResult,
     # 加 reward_pos 腿（delta>0 AND reward_pos>0 才 MECHANISM_LIVE）·reward_pos=0 -> FAIL（CI 默认路径诚实）。
     # training_mode opt-in（生产 True / CI 默认 False）·reward_pos 从 result.episodes 算（不在 final_metrics）。
 
-    _eps = getattr(result, "episodes", None) or []
+    _eps = _legacy_result_episodes(result)
     _ec = len(_eps)
     _rp = sum(1 for e in _eps if getattr(e, "reward", 0) > 0)
     # reward_pos 腿深修（I-新·2026-07-14 落地旧 defer）：⑦ MECHANISM_LIVE 须 delta>0 AND reward_pos>0。
@@ -743,6 +744,8 @@ def _classify_episode(ep: Any) -> tuple[str, str] | None:
     **诚实边界**：分类按 episode 真实字段（modality + pr_vector + input）·非死写维度。
     pr_vector 空判 verify 路径（_run_verify_round:518 / _run_task_driven_generate:1965 都置空）。
     """
+    if not isinstance(ep, Episode):
+        return None
     inp = ep.input
     if inp is None:
         return (DIM_LONG_CODE, "mode_a")   # Mode A task-driven（input=None·formal_train.py:1961）
@@ -755,6 +758,14 @@ def _classify_episode(ep: Any) -> tuple[str, str] | None:
     if mod == MODALITY_CODE and not has_pr:
         return (DIM_LONG_CODE, "verify")
     return None
+
+
+def _legacy_result_episodes(result: FormalTrainResult) -> list[Episode]:
+    """返回旧能力考核可消费的标量 reward episode，隔离 typed 协议。"""
+    return [
+        item for item in (getattr(result, "episodes", None) or [])
+        if isinstance(item, Episode)
+    ]
 
 
 def _door_vetoed(ep: Any, path: str, door: str) -> bool:
@@ -854,8 +865,7 @@ def project_layer0(result: FormalTrainResult) -> dict[str, int]:
     诚实边界：本投影只标+汇总·不提供 R6（R6 加固属刀G ConceptNet Causes loader / 时序升验证 defer）。
     stable≠correct（外部锚门满足≠语义正确·#479 墙）。
     """
-    episodes = getattr(result, "episodes", None) or []
-    return count_layer0(episodes)
+    return count_layer0(_legacy_result_episodes(result))
 
 
 def project_lang_measures(result: FormalTrainResult) -> dict[str, int]:
@@ -966,15 +976,15 @@ def _g_dead_footnotes(table: dict[str, dict[str, dict[str, Any]]]) -> list[str]:
 
 # ---- harness 主入口 ----
 
-def run_capability_exam(config: FormalTrainConfig,
-                        corpus: list, *,
-                        backend: Any,
-                        teacher: Any = None,
-                        runner: Any = None,
-                        anti_theater: bool = False,
-                        backend_factory: Callable[[], Any] | None = None,
-                        training_mode: bool = False,
-                        flat_floors: bool = False) -> CapabilityReport:
+def _run_capability_exam_impl(config: FormalTrainConfig,
+                              corpus: list, *,
+                              backend: Any,
+                              teacher: Any = None,
+                              runner: Any = None,
+                              anti_theater: bool = False,
+                              backend_factory: Callable[[], Any] | None = None,
+                              training_mode: bool = False,
+                              flat_floors: bool = False) -> CapabilityReport:
     """跑一轮 formal_train + 训练前后 strength snapshot + 投影 8 维度 → CapabilityReport。
 
     步骤：
@@ -1010,23 +1020,21 @@ def run_capability_exam(config: FormalTrainConfig,
     # training_mode opt-in（默认 False 守既有测 bit-identical·镜像 run_weaning_arith:151-171）
     # 生产 caller 传 True：翻 TRAINING_MODE → reward 环路触发（gap1 修复·eff_stage=STAGE3·5 verify 通道可达）
     # flat_floors 绕 stage 门控（cap_exam 职责=8 维考核非门控标定·门控 defer D5·既有 e2e 同范式）
-    saved_tm = gates.TRAINING_MODE
-    saved_floors = (stages.FLOOR_GRAPH_SIZE_S1, stages.FLOOR_CAUSES_COV_S2,
-                    stages.FLOOR_CONDUCTION_S3, stages.FLOOR_PROMOTE_S4)
+    gate_token = gates.push_gate_overrides({
+        "TRAINING_MODE": True if training_mode else gates.TRAINING_MODE,
+    })
+    floor_token = stages.push_stage_floor_overrides({
+        "FLOOR_GRAPH_SIZE_S1": 0,
+        "FLOOR_CAUSES_COV_S2": 0,
+        "FLOOR_CONDUCTION_S3": 0,
+        "FLOOR_PROMOTE_S4": 0,
+    } if flat_floors else {})
     try:
-        if flat_floors:
-            stages.FLOOR_GRAPH_SIZE_S1 = 0
-            stages.FLOOR_CAUSES_COV_S2 = 0
-            stages.FLOOR_CONDUCTION_S3 = 0
-            stages.FLOOR_PROMOTE_S4 = 0
-        if training_mode:
-            gates.TRAINING_MODE = True   # opt-in 翻 ON（默认 False 不动 TM→尊重 CI 默认 OFF/外部 monkeypatch·守既有测 bit-identical）
         result: FormalTrainResult = formal_train(
             _exam_config, corpus, backend=backend, teacher=teacher, runner=runner)
     finally:
-        gates.TRAINING_MODE = saved_tm
-        (stages.FLOOR_GRAPH_SIZE_S1, stages.FLOOR_CAUSES_COV_S2,
-         stages.FLOOR_CONDUCTION_S3, stages.FLOOR_PROMOTE_S4) = saved_floors
+        stages.reset_stage_floor_overrides(floor_token)
+        gates.reset_gate_overrides(gate_token)
 
     # 3. 训练后 snapshot（重建 ConceptGraph·observe 增边后图新鲜）
     post_graph = ConceptGraph(backend)
@@ -1140,7 +1148,7 @@ def run_capability_exam(config: FormalTrainConfig,
     # total = result.episodes 数（collect_episodes=True 已强制·#723）·含 language judge + Mode A verify（PRE·
     # #727 决断3 纠偏·非 Mode B POST·后者 gate OFF + WEANING_PRE + 无 source_b 不激活·defer 独立 session）+
     # Mode A task-driven 三路 episode。空 corpus（lang 玩具 1 item）total 可能 < 10 → 诚实标噪声。
-    total_episodes = len(result.episodes) if getattr(result, "episodes", None) else 0
+    total_episodes = len(_legacy_result_episodes(result))
     assert_int(total_episodes, _where="run_capability_exam.total_episodes")
     if total_episodes < FIXTURE_SIZE_MIN:
         fixture_size_note = FIXTURE_NOTE_NOISE
@@ -1166,6 +1174,37 @@ def run_capability_exam(config: FormalTrainConfig,
         footnotes=footnotes,
         fixture_size_note=fixture_size_note,
     )
+
+
+def run_capability_exam(config: FormalTrainConfig,
+                        corpus: list, *,
+                        backend: Any,
+                        teacher: Any = None,
+                        runner: Any = None,
+                        anti_theater: bool = False,
+                        backend_factory: Callable[[], Any] | None = None,
+                        training_mode: bool = False,
+                        flat_floors: bool = False) -> CapabilityReport:
+    """在独立 backend 中运行统一能力考核，只返回多维报告而不提交训练副作用。"""
+    from dataclasses import replace as _dc_replace
+    from pure_integer_ai.experiments.evaluation_isolation import (
+        isolated_backend_evaluation,
+    )
+
+    eval_config = _dc_replace(config, persist_graph_dump=False)
+    with isolated_backend_evaluation(backend, teacher=teacher) as isolated:
+        eval_backend, eval_teacher = isolated
+        return _run_capability_exam_impl(
+            eval_config,
+            corpus,
+            backend=eval_backend,
+            teacher=eval_teacher,
+            runner=runner,
+            anti_theater=anti_theater,
+            backend_factory=backend_factory,
+            training_mode=training_mode,
+            flat_floors=flat_floors,
+        )
 
 
 # ---- 反 theater 锚点 → 期望维度映射（P0-4·ABORT 只升失败锚点对应维度） ----

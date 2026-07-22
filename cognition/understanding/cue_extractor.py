@@ -17,7 +17,7 @@
   - 边界 cue（句首/句末无左/右）跳·不凑配（守反统计）。
   - gate CUE_EXTRACTOR_MODE 默认 OFF（守回归 bit-identical·ON 启裸文本自产）。
 
-落点：formal_train._split_item_to_segments 每句段调·填 Segment.cue_based_causal_pairs /
+落点：language_observation._split_item_to_segments 每句段调·填 Segment.cue_based_causal_pairs /
   Segment.is_a_pairs（段内 token index·切片后已重映射）。
 
 **刀 B 数值等式声明**（extract_numeric_claims / extract_numeric_claims_gated·独立函数·不改 extract_cues
@@ -70,7 +70,7 @@ def extract_cues(tokens: list[str], *, lang: int,
     **刀5 件8 透传**（close 刀4 生产 gap）：4 可选参透传给 cue_type_of 第二源
     （D:11 readback·gate EMERGENT_RELATION_CUE_READBACK_MODE·冷启动退化纯 frozenset）。
     默认全 None → cue_type_of:99 退化纯 frozenset → 现状零行为变（bit-identical）。
-    生产 caller（formal_train._split_item_to_segments）透传 ctx.backend/edge_store/space_id/concept_index。
+    生产 caller（language_observation._split_item_to_segments）透传 ctx.backend/edge_store/space_id/concept_index。
     """
     cue_pairs: list[tuple[int, int]] = []
     is_a_pairs: list[tuple[int, int]] = []
@@ -202,7 +202,7 @@ def extract_numeric_claims_gated(tokens: list[str], *, lang: int,
                                  ) -> list[tuple[int, int, int, int]]:
     """gate 守门版（CUE_EXTRACTOR_MODE OFF → 返空·bit-identical 守回归·同 extract_cues_gated 范式）。
 
-    formal_train._split_item_to_segments 调此版（gate OFF 时返空·现状零行为变）。
+    language_observation._split_item_to_segments 调此版（gate OFF 时返空·现状零行为变）。
     **独立于 extract_cues_gated**（刀 B·不改 3-tuple 签名·隔离改动）·同 CUE_EXTRACTOR_MODE gate 守门
     （数值提取是 cue 提取一部分·同 gate 合理·非新 gate）。
     """
@@ -228,10 +228,8 @@ def extract_universal_claims(tokens: list[str], *, lang: int,
     反统计契约）。返 token index 对（child_idx, parent_idx）·resolve 在验序器（token→ConceptRef·
     concept_index.lookup·非构造器·隔离改动降风险·同刀 A precedes_pairs 范式）。
 
-    **构造性验证 ≠ 构造性检查**（刀 C 升验证·刀 A/B 是检查）：child/parent 概念须在**外部 ConceptNet 祖先图**
-    （build_isa_ancestor_map_external·source=SOURCE_CONCEPTNET·非 cue 自产）才 verified/falsified·
-    否则 can't-verify（None·诚实弃权·守属性全称 G5b #479 墙·详 doc/重来_刀C量化cue设计_2026-07-08.md §六b）。
-    本函数只提 token index 对·外部源验在 universal_proof_fn_factory + _run_universal_verify_round。
+    本函数只提取 token index 对，不判断集合关系真值。外部 SUBSET_EQ 路径可支持声明；缺路径保持未知，
+    只有后续注入的独立显式反证才能证伪。证据判断位于 universal_proof_fn_factory 和运行接线层。
 
     **首版诚实 scope**：紧邻单 token child/parent（多 token "会飞 的 鸟" defer·tokenize 质量依赖·同刀 A/B）·
     不要求限定词"所有/每个"前置（"都是"自含全称 force·非分类声明由三值 None 过滤·非机制判别）。
@@ -265,7 +263,7 @@ def extract_universal_claims_gated(tokens: list[str], *, lang: int,
                                    ) -> list[tuple[int, int]]:
     """gate 守门版（CUE_EXTRACTOR_MODE OFF → 返空·bit-identical 守回归·同 extract_numeric_claims_gated 范式）。
 
-    formal_train._split_item_to_segments 调此版（gate OFF 时返空·现状零行为变）。
+    language_observation._split_item_to_segments 调此版（gate OFF 时返空·现状零行为变）。
     **独立于 extract_cues_gated**（刀 C·不改 3-tuple 签名·隔离改动）·同 CUE_EXTRACTOR_MODE gate 守门
     （全称量化是 cue 提取一部分·同 gate 合理·非新 gate）。
     """
@@ -275,7 +273,7 @@ def extract_universal_claims_gated(tokens: list[str], *, lang: int,
                                     space_id=space_id, concept_index=concept_index)
 
 
-# ============ A1·STEP6：存在量化声明提取（有的 X 是 Y·镜像刀 C·双向祖先·独立函数） ============
+# ============ A1·STEP6：存在量化声明提取（有的 X 是 Y·独立函数） ============
 
 def extract_existential_claims(tokens: list[str], *, lang: int,
                                backend=None, edge_store=None,
@@ -292,15 +290,9 @@ def extract_existential_claims(tokens: list[str], *, lang: int,
     （守反统计·不凑配·同 extract_universal_claims 反统计契约）。返 token index 对（child_idx, parent_idx）·
     resolve 在验序器（token→ConceptRef·concept_index.lookup·非构造器·隔离改动降风险·同 ∀ 范式）。
 
-    **构造性验证 ≠ 构造性检查**（同 ∀·A1 镜像）：child/parent 概念须在**外部 ConceptNet 祖先图**
-    （build_isa_ancestor_map_external·source=SOURCE_CONCEPTNET·非 cue 自产）才 verified/falsified·
-    否则 can't-verify（None·诚实弃权·守属性 ∃ #479 墙）。本函数只提 token index 对·外部源验在
-    existential_proof_fn_factory + _run_existential_verify_round。
-
-    **★双向祖先（关键·非单纯 reversed）**：∃ "有的 X 是 Y"=∃x:X(x)∧Y(x)=X∩Y≠∅·类层真 iff X⊆Y OR Y⊆X
-    （其一为子集→小类实例即 X∩Y 样本）。"有的鸟是企鹅"（企鹅⊆鸟→reversed 命中）/ "有的鸟是动物"
-    （鸟⊆动物→forward 命中·同 ∀）。**单向 reversed 会误证伪"有的鸟是动物"**（鸟∉ancestors(动物)）→
-    须双向 OR：`parent ∈ ancestors(child) OR child ∈ ancestors(parent)`·双向皆不命中+两分类→falsified。
+    本函数只识别 ``A∩B != 空`` 声明，不验证交集。正证需要共同 MEMBER 见证、显式 overlap，或已知
+    非空子类同时包含于 A/B；反证需要显式 DISJOINT。单纯 A⊆B 或 B⊆A 缺少较小类非空前提，双向
+    都无路径也不能推出空交集。证据判断位于 existential_proof_fn_factory 和运行接线层。
 
     **首版诚实 scope**：紧邻单 token child/parent（多 token defer·同 ∀）·要求 是 锚定（ZH·EN defer·
     同 property cue ZH-first）·"有的"自含 ∃ force（非分类声明由三值 None 过滤·非机制判别）。
@@ -337,7 +329,7 @@ def extract_existential_claims_gated(tokens: list[str], *, lang: int,
                                      ) -> list[tuple[int, int]]:
     """gate 守门版（CUE_EXTRACTOR_MODE OFF → 返空·bit-identical 守回归·同 extract_universal_claims_gated 范式）。
 
-    formal_train._split_item_to_segments 调此版（gate OFF 时返空·现状零行为变）。
+    language_observation._split_item_to_segments 调此版（gate OFF 时返空·现状零行为变）。
     同 CUE_EXTRACTOR_MODE gate 守门（存在量化是 cue 提取一部分·同 gate 合理·非新 gate·同刀 B/C/D）。
     """
     if not getattr(gates, "CUE_EXTRACTOR_MODE", False):
@@ -482,7 +474,7 @@ def extract_property_claims_gated(tokens: list[str], *, lang: int,
                                   ) -> list[tuple[int, int, int, int, int, int, int, int]]:
     """gate 守门版（PROPOSITION_MODE OFF → 返空·bit-identical 守回归）。
 
-    formal_train._split_item_to_segments 调此版（gate OFF 时返空·现状零行为变）。
+    language_observation._split_item_to_segments 调此版（gate OFF 时返空·现状零行为变）。
     **gate = PROPOSITION_MODE**（异刀B/刀C 用 CUE_EXTRACTOR_MODE·属性命题是独立 G1+#774 特性·单 gate
     守 extraction→build→intent→G3b 全链·cleaner bit-identical·设计 §四）。STEP5 PR3：加 4 可选参
     （is_property_possess_cue D:11 readback 第二源·'拥有'类词经 D:11→REL_PROPERTY→True·gate
@@ -563,7 +555,7 @@ def extract_comparison_claims_gated(tokens: list[str], *, lang: int,
                                     ) -> list[tuple[int, int, int]]:
     """gate 守门版（CUE_EXTRACTOR_MODE OFF → 返空·bit-identical 守回归·同 extract_numeric/universal_claims_gated 范式）。
 
-    formal_train._split_item_to_segments 调此版（gate OFF 时返空·现状零行为变）。
+    language_observation._split_item_to_segments 调此版（gate OFF 时返空·现状零行为变）。
     **独立于 extract_cues_gated**（刀 D·不改 3-tuple 签名·隔离改动）·同 CUE_EXTRACTOR_MODE gate 守门
     （比较提取是 cue 提取一部分·同 gate 合理·非新 gate·同刀 B/刀C）。
     """
@@ -621,7 +613,7 @@ def extract_similar_claims_gated(tokens: list[str], *, lang: int,
                                  ) -> list[tuple[int, int]]:
     """gate 守门版（CUE_EXTRACTOR_MODE OFF → 返空·bit-identical 守回归·同 extract_numeric/comparison_claims_gated 范式）。
 
-    formal_train._split_item_to_segments 调此版（gate OFF 时返空·现状零行为变）。
+    language_observation._split_item_to_segments 调此版（gate OFF 时返空·现状零行为变）。
     同 CUE_EXTRACTOR_MODE gate 守门（相似提取是 cue 提取一部分·同 gate 合理·非新 gate·同刀 B/C/D）。
     """
     if not getattr(gates, "CUE_EXTRACTOR_MODE", False):

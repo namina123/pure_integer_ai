@@ -30,6 +30,10 @@ from pure_integer_ai.cognition.shared.types import (
     InputPayload, IntentType, Episode, PathResult, GMeta, ConceptRef,
     TERMINAL_REACHED_SINK, TERMINAL_DEAD_END, REWARD_DEAD_END, G_META_DEAD_END,
 )
+from pure_integer_ai.cognition.shared.scope_identity import (
+    generation_scope,
+    query_scope,
+)
 from pure_integer_ai.cognition.process.dag_path import dag_path_step
 from pure_integer_ai.cognition.process.reward_propagate import propagate_reward
 
@@ -70,6 +74,45 @@ def episode_loop(input_payload: InputPayload,
                  memory_active: bool = False,
                  coverage_threshold: int = 0,
                  memory_read: Any = None) -> tuple[Any, Episode]:
+    """在活动 episode 内建立 query/generation 子生命周期并运行主循环。"""
+    scoped = getattr(workmem, "episode_active", False)
+    if not scoped:
+        return _episode_loop_impl(
+            input_payload, subgraph_edges, seeds, workmem, intent,
+            generate_fn=generate_fn, judge_fn=judge_fn,
+            edge_store=edge_store, backend=backend, current_seq=current_seq,
+            memory_active=memory_active, coverage_threshold=coverage_threshold,
+            memory_read=memory_read)
+    query_parent = getattr(workmem, "active_episode_scope", None)
+    if query_parent is None or input_payload.scope_identity != query_parent:
+        raise ValueError("episode_loop 输入 scope 与当前 episode 不一致")
+    query = query_scope(1, parent=query_parent)
+    workmem.begin_query(query)
+    try:
+        result = _episode_loop_impl(
+            input_payload, subgraph_edges, seeds, workmem, intent,
+            generate_fn=generate_fn, judge_fn=judge_fn,
+            edge_store=edge_store, backend=backend, current_seq=current_seq,
+            memory_active=memory_active, coverage_threshold=coverage_threshold,
+            memory_read=memory_read)
+    except BaseException:
+        workmem.end_generation()
+        workmem.end_query()
+        raise
+    workmem.end_query()
+    return result
+
+
+def _episode_loop_impl(input_payload: InputPayload,
+                 subgraph_edges: list[dict[str, Any]],
+                 seeds: list[ConceptRef], workmem: Any, intent: IntentType, *,
+                 generate_fn: GenerateFn | None = None,
+                 judge_fn: JudgeFn | None = None,
+                 edge_store: EdgeStore, backend: Any,
+                 current_seq: int = 0,
+                 memory_active: bool = False,
+                 coverage_threshold: int = 0,
+                 memory_read: Any = None) -> tuple[Any, Episode]:
     """episode 主循环（wiring 单点化·M5）。
 
     返 (output, Episode)·Episode 聚合层供防塌/收敛验收消费（F5）。
@@ -89,8 +132,17 @@ def episode_loop(input_payload: InputPayload,
         coverage_threshold=coverage_threshold)
 
     # —— 结果建模（卷三模块1 生成输出·target_lang 偏好·C1 防跨语言·F2） ——
-    output = generate_fn(path_result, workmem, input_payload) \
-        if generate_fn is not None else None
+    if generate_fn is None:
+        output = None
+    elif getattr(workmem, "active_query_scope", None) is None:
+        output = generate_fn(path_result, workmem, input_payload)
+    else:
+        generation = generation_scope(1, parent=workmem.active_query_scope)
+        workmem.begin_generation(generation)
+        try:
+            output = generate_fn(path_result, workmem, input_payload)
+        finally:
+            workmem.end_generation()
 
     # —— reward 生产（两生产者·M5 单点 wiring） ——
     if path_result.terminal == TERMINAL_DEAD_END:
@@ -120,7 +172,7 @@ def episode_loop(input_payload: InputPayload,
         reward=reward,
         ref=path_result.sink,
         terminal=path_result.terminal,
-        pr_vector=getattr(workmem, "pr_vector", {}),
+        pr_vector=dict(getattr(workmem, "pr_vector", {}) or {}),
         judge_G4_active=g_meta.G4_vetoed,
         judge_G2p_active=g_meta.G2p_vetoed,
         judge_G3a_active=g_meta.G3a_vetoed,
@@ -131,10 +183,7 @@ def episode_loop(input_payload: InputPayload,
         vetoed=g_meta.vetoed,
         exploration_injected=getattr(path_result, "exploration_injected", False),
     )
-    # #728 A 半：tri_space caller 接线（episode 末尾·propagate_reward 后·为下 episode 准备 workmem.replay/exclude）。
-    # gate MEMORY_REPLAY_MODE OFF → tri_space early-return（workmem.replay 永空·dag_path local_seeds == seeds·bit-identical）。
-    # gate ON + memory_read 传入 → tri_space query memory → 写 workmem.replay（info_ref concept ref·每 episode 清 fresh）。
-    # lazy import 照 dag_path EXPLORATION_MODE lazy import anti_collapse 范式避 cognition.process ↔ cognition.result 顶层循环。
+    # 兼容入口只清除旧 reward replay 状态，不为下一 episode 生成召回指令。
     from pure_integer_ai.cognition.result.tri_space import tri_space_coordination
     tri_space_coordination(episode, workmem=workmem, memory_space=memory_read)
     return output, episode

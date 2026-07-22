@@ -23,7 +23,10 @@ from typing import Any
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.storage import discipline as disc
 from pure_integer_ai.storage.backend import StorageBackend, TYPE_INT
-from pure_integer_ai.storage.spaces.registry import SPACE_TYPE_MEMORY, SpaceRegistry
+from pure_integer_ai.storage.spaces.registry import (
+    SPACE_TYPE_MEMORY,
+    SpaceRegistry,
+)
 
 # memory_item status（MUTABLE_MONOTONE 单向 flip·§十三决断4）
 STATUS_EXPERIENCE = 1     # 带衰减经验
@@ -78,9 +81,16 @@ class MemorySpace:
 
     def __init__(self, registry: SpaceRegistry, backend: StorageBackend,
                  space_id: int) -> None:
+        """绑定唯一 Memory 空间注册行，禁止跨 backend 或错误空间类型拼接。"""
+        if registry.backend is not backend:
+            raise ValueError("MemorySpace registry 与 backend 不一致")
+        identity = registry.identity(space_id)
+        if identity.space_type != SPACE_TYPE_MEMORY:
+            raise ValueError("MemorySpace 必须绑定 Memory 空间")
         self.registry = registry
         self.backend = backend
         self.space_id = space_id
+        self.identity = identity
 
     @classmethod
     def create(cls, registry: SpaceRegistry, name: str) -> "MemorySpace":
@@ -104,6 +114,10 @@ class MemorySpace:
         """
         assert_int(local_id, content_hash, seg_type, info_ref_space, info_ref_id,
                    context_tag, round_id, _where="MemorySpace.put")
+        if session_id is not None:
+            assert_int(session_id, _where="MemorySpace.put.session_id")
+            if type(session_id) is not int or session_id <= 0:
+                raise ValueError("MemorySpace session_id 必须为严格正整数或 None")
         self.backend.insert("memory_item", {
             "space_id": self.space_id, "local_id": local_id,
             "content_hash": content_hash, "status": STATUS_EXPERIENCE,
@@ -152,7 +166,11 @@ class MemorySpace:
 
     def query_by_session(self, session_id: int | None) -> list[dict[str, Any]]:
         """按 session_id 检索（跨会话隔离·A4 执行点）。None 查阅读层。"""
-        where: dict[str, Any] = {"space_id": self.space_id}
         if session_id is not None:
-            where["session_id"] = session_id
-        return self.backend.select("memory_item", where=where)
+            assert_int(session_id, _where="MemorySpace.query_by_session")
+            if type(session_id) is not int or session_id <= 0:
+                raise ValueError("session_id 必须为严格正整数或 None")
+        return self.backend.select("memory_item", where={
+            "space_id": self.space_id,
+            "session_id": session_id,
+        })

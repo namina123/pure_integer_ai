@@ -32,6 +32,13 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, runtime_checkable
 
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
+from pure_integer_ai.crosscut.determinism.hasher import Hasher
+from pure_integer_ai.cognition.shared.identity import (
+    GLOBAL_OWNER_SCOPE,
+    ObjectIdentity,
+    SourceRef,
+    VersionBundle,
+)
 from pure_integer_ai.storage.edge_types import (
     EDGE_CAUSES, EDGE_PRECEDES, EDGE_IS_A, EDGE_PROPERTY, EDGE_COOCCURS,
 )
@@ -94,6 +101,11 @@ class CollectedItem:
     """
 
     tokens: list[str] = field(default_factory=list)
+    raw_text: str | None = None   # L-01 正式词形 provider 输入；None 保留已分词/结构化来源，非 None 时 formal_train 在所有消费者前统一分词
+    word_form_parse: Any = field(default=None, compare=False, repr=False)   # L-02 多边界 Hypothesis/Evidence 结果；tokens 只保存当前兼容 winner
+    boundary_profile: Any = field(default=None, compare=False, repr=False)   # U-03 上游显式句界 Evidence；不得由 CollectedItem 自行按字符作用生成
+    boundary_parse: Any = field(default=None, compare=False, repr=False)   # U-03 来源化候选全集；probe 预览与 training ledger 提交分离
+    boundary_decision: Any = field(default=None, compare=False, repr=False)   # U-03 当前 active 图选择或纯预览决定；分段器只消费其 token cut 投影
     role_seq: list[int] = field(default_factory=list)
     causal_pairs: list[tuple[int, int]] = field(default_factory=list)
     is_a_pairs: list[tuple[int, int]] = field(default_factory=list)
@@ -119,11 +131,22 @@ class CollectedItem:
                    # task-driven 代码模态 unparse 读（候选 A·observe 建树一次·task-driven 纯读·幂等守 bit-identical·
                    # 确定性：code struct_ref=__prog_{stage}_{h63(code_source)}·跨 round 稳定·observe guard 防重 build）。
                    # 非 code 模态 / observe 未建树 → None（task-driven 跳过·诚实）。向后兼容默认 None（既有 item 零改）。
+    source_ref: SourceRef | None = field(default=None, compare=False)   # 稳定来源记录；生产 source 应显式填，旧 fixture 可由 corpus_identity 补匿名来源
+    document_scope_hash: int = field(default=0, compare=False, repr=False)   # identity registry 索引缓存；完整身份仍在 SourceRef/ScopeIdentity
+    speaker_identity: ObjectIdentity | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         assert_int(self.collect_type, self.source, self.strength,
                    self.domain, self.lang, self.modality,
+                   self.document_scope_hash,
                    _where="CollectedItem.__post_init__")
+        if self.raw_text is not None and not isinstance(self.raw_text, str):
+            raise TypeError("CollectedItem.raw_text 必须是字符串或 None")
+        if self.source_ref is not None and self.source_ref.source_kind != self.source:
+            raise ValueError("CollectedItem.source 与 SourceRef.source_kind 不一致")
+        if (self.speaker_identity is not None
+                and not isinstance(self.speaker_identity, ObjectIdentity)):
+            raise TypeError("CollectedItem.speaker_identity 必须是 ObjectIdentity 或 None")
 
 
 @runtime_checkable
@@ -173,10 +196,10 @@ def _split_paragraphs(text: str) -> list[str]:
 
 
 def _tokenize(text: str) -> list[str]:
-    """最小 tokenize（空白分词·首版·emergent_role caller-fill defer）。
+    """生成未启用课程 provider 时使用的空白分词兼容结果。
 
-    中文未分词→整段作单 token 序按字符/标点切是 caller 职责·首版按空白切（英文/已分词语料）。
-    纯本地读确定性·非语义判定。
+    LocalDirSource 同时保留 raw_text；L-01 正式入口会在所有训练消费者前用课程 FMM
+    覆盖本结果。未配置 provider 时继续按空白切，保持既有语料行为。
     """
     return [t for t in text.split() if t]
 
@@ -214,17 +237,29 @@ class LocalDirSource:
                 continue
             with open(path, "r", encoding="utf-8") as f:
                 text = f.read()
-            for para in _split_paragraphs(text):
+            file_source_id = Hasher("local_dir.source_file.v1").h63(
+                (os.path.normcase(os.path.abspath(self._dir)), fn))
+            if file_source_id == 0:
+                file_source_id = 1
+            for paragraph_index, para in enumerate(_split_paragraphs(text)):
                 tokens = _tokenize(para)
                 if not tokens:
                     continue
                 items.append(CollectedItem(
                     tokens=tokens,
+                    raw_text=para,
                     collect_type=COLLECT_PRECEDES,
                     source=SOURCE_BARE_TEXT,
                     strength=1,
                     lang=self._lang,
                     domain=self._domain,
+                    source_ref=SourceRef(
+                        SOURCE_BARE_TEXT,
+                        file_source_id,
+                        paragraph_index,
+                        GLOBAL_OWNER_SCOPE,
+                        VersionBundle(),
+                    ),
                 ))
         return items
 
@@ -1139,6 +1174,10 @@ def collect_corpus(sources: list[CollectionSource]) -> CollectionReport:
                 report.failed_sources.append(f"{src.name()}:unavailable")
                 continue
             items = src.collect()
+            from pure_integer_ai.experiments.corpus_identity import (
+                assign_corpus_source_refs,
+            )
+            assign_corpus_source_refs(items, source_namespace=src.name())
             for it in items:
                 report.items.append(it)
                 report.counts_per_type[it.collect_type] = \

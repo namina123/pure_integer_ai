@@ -26,38 +26,75 @@ def _encode_int(n: int) -> bytes:
     return b"\x02" + n.to_bytes(nbytes, "big", signed=True)
 
 
-def _encode(value: Any) -> bytes:
+def _append_encoded(out: bytearray, value: Any) -> None:
+    """把一个值的 canonical 编码追加到缓冲区，避免递归 bytes 拼接复制。"""
+    if type(value) is int:
+        out.extend(_encode_int(value))
+        return
     if isinstance(value, bool):
-        return b"\x01" + (b"\x01" if value else b"\x00")
+        out.extend(b"\x01\x01" if value else b"\x01\x00")
+        return
     if isinstance(value, int):
-        return _encode_int(value)
+        out.extend(_encode_int(value))
+        return
     if isinstance(value, bytes):
-        return b"\x03" + len(value).to_bytes(8, "big") + value
+        out.extend(b"\x03")
+        out.extend(len(value).to_bytes(8, "big"))
+        out.extend(value)
+        return
     if isinstance(value, str):
-        b = value.encode("utf-8")
-        return b"\x04" + len(b).to_bytes(8, "big") + b
+        encoded = value.encode("utf-8")
+        out.extend(b"\x04")
+        out.extend(len(encoded).to_bytes(8, "big"))
+        out.extend(encoded)
+        return
     if value is None:
-        return b"\x06"
+        out.extend(b"\x06")
+        return
     if isinstance(value, Rational):
-        return b"\x07" + _encode_int(value.num) + _encode_int(value.den)
+        out.extend(b"\x07")
+        out.extend(_encode_int(value.num))
+        out.extend(_encode_int(value.den))
+        return
     if isinstance(value, FixedQuotient):
-        return (b"\x08" + _encode_int(value.M) + _encode_int(value.r)
-                + _encode_int(value.k) + _encode_int(value.b))
+        out.extend(b"\x08")
+        out.extend(_encode_int(value.M))
+        out.extend(_encode_int(value.r))
+        out.extend(_encode_int(value.k))
+        out.extend(_encode_int(value.b))
+        return
     if isinstance(value, (tuple, list)):
-        out = b"\x05" + len(value).to_bytes(8, "big")
+        out.extend(b"\x05")
+        out.extend(len(value).to_bytes(8, "big"))
         for item in value:
-            out += _encode(item)
-        return out
+            _append_encoded(out, item)
+        return
     if isinstance(value, dict):
         # canonical：按键排序（dict 插入序跨宿主不保证一致·排序保 bit 一致）
-        out = b"\x0A" + len(value).to_bytes(8, "big")
-        for k in sorted(value.keys(), key=lambda x: _encode(x)):
-            out += _encode(k) + _encode(value[k])
-        return out
+        encoded_keys = sorted(
+            ((_encode(key), key) for key in value),
+            key=lambda item: item[0],
+        )
+        out.extend(b"\x0A")
+        out.extend(len(value).to_bytes(8, "big"))
+        for encoded_key, key in encoded_keys:
+            out.extend(encoded_key)
+            _append_encoded(out, value[key])
+        return
     if dataclasses.is_dataclass(value):
-        return b"\x09" + _encode(tuple(getattr(value, f.name)
-                                        for f in dataclasses.fields(value)))
+        out.extend(b"\x09")
+        _append_encoded(out, tuple(
+            getattr(value, field.name) for field in dataclasses.fields(value)
+        ))
+        return
     raise TypeError(f"Hasher 不支持编码类型: {type(value)!r}")
+
+
+def _encode(value: Any) -> bytes:
+    """返回与历史格式逐字节相同的 canonical 编码。"""
+    out = bytearray()
+    _append_encoded(out, value)
+    return bytes(out)
 
 
 def _fnv1a(data: bytes, h: int) -> int:
@@ -65,6 +102,44 @@ def _fnv1a(data: bytes, h: int) -> int:
         h ^= byte
         h = (h * _FNV_PRIME) & _MASK64
     return h
+
+
+def _fnv1a_int(value: int, state: int) -> int:
+    """把严格整数按既有 canonical 编码直接续入 FNV 状态。"""
+    state ^= 0x02
+    state = (state * _FNV_PRIME) & _MASK64
+    size = max(1, (value.bit_length() + 8) // 8)
+    return _fnv1a(value.to_bytes(size, "big", signed=True), state)
+
+
+def _fnv1a_tuple_header(size: int, state: int) -> int:
+    """把 tuple 类型标记和八字节长度按既有格式续入 FNV 状态。"""
+    state ^= 0x05
+    state = (state * _FNV_PRIME) & _MASK64
+    return _fnv1a(size.to_bytes(8, "big"), state)
+
+
+@dataclass(frozen=True)
+class TupleHashPrefix:
+    """保存 tuple 公共前缀的 FNV 状态，并对剩余项续算同一稳定哈希。"""
+
+    _state: int
+    _remaining_items: int
+
+    def h(self, suffix: tuple[Any, ...]) -> int:
+        """续算完整 64-bit 哈希；suffix 数量必须补足预声明 tuple。"""
+        if not isinstance(suffix, tuple):
+            raise TypeError("tuple 哈希 suffix 必须是 tuple")
+        if len(suffix) != self._remaining_items:
+            raise ValueError("tuple 哈希 suffix 数量与预声明长度不一致")
+        state = self._state
+        for item in suffix:
+            state = _fnv1a(_encode(item), state)
+        return state
+
+    def h63(self, suffix: tuple[Any, ...]) -> int:
+        """续算并返回可存 SQLite INTEGER 的 63-bit 稳定哈希。"""
+        return self.h(suffix) & ((1 << 63) - 1)
 
 
 class Hasher:
@@ -79,3 +154,38 @@ class Hasher:
     def h63(self, value: Any) -> int:
         """掩 63-bit（存 SQLite INTEGER 用，跨宿主一致）。"""
         return _fnv1a(_encode(value), self._iv) & ((1 << 63) - 1)
+
+    def h63_tagged_int_tuple(
+            self, tag: int, values: tuple[int, ...]) -> int:
+        """流式计算 ``(tag, values)``，结果与通用 canonical 编码逐位相同。"""
+        if type(tag) is not int:
+            raise TypeError("tag 必须是严格整数")
+        if not isinstance(values, tuple):
+            raise TypeError("values 必须是严格整数元组")
+        for index, value in enumerate(values):
+            if type(value) is not int:
+                raise TypeError(f"values[{index}] 必须是严格整数")
+        state = _fnv1a_tuple_header(2, self._iv)
+        state = _fnv1a_int(tag, state)
+        state = _fnv1a_tuple_header(len(values), state)
+        for value in values:
+            state = _fnv1a_int(value, state)
+        return state & ((1 << 63) - 1)
+
+    def prepare_tuple_prefix(
+            self, total_items: int,
+            prefix: tuple[Any, ...]) -> TupleHashPrefix:
+        """预哈希 tuple 公共前缀，后续不同 suffix 仍得到原 canonical 哈希。"""
+        if type(total_items) is not int or total_items < 0:
+            raise ValueError("tuple 总项数必须为非负严格整数")
+        if not isinstance(prefix, tuple):
+            raise TypeError("tuple 哈希 prefix 必须是 tuple")
+        if len(prefix) > total_items:
+            raise ValueError("tuple 哈希 prefix 不得长于总项数")
+        state = _fnv1a(
+            b"\x05" + total_items.to_bytes(8, "big"),
+            self._iv,
+        )
+        for item in prefix:
+            state = _fnv1a(_encode(item), state)
+        return TupleHashPrefix(state, total_items - len(prefix))

@@ -23,7 +23,7 @@ KNOWLEDGE_DEFINITION = 2  # 知识定义（具体诠释·sign=0 检疫）
 
 
 def target_space_id(stage: int, ctx: SpaceContext) -> int:
-    """按 stage 决定概念点落点 space_id（M4·非硬编码 CORE）。
+    """按 stage 决定概念点落点，缺少该阶段设施时拒绝写入。
 
     训练期 → 核心；训练后阅读 → 记忆一层；交互 → 记忆二层；外部 define → 伴随检疫。
     """
@@ -31,23 +31,24 @@ def target_space_id(stage: int, ctx: SpaceContext) -> int:
         return ctx.core.space_id
     if stage == STAGE_POST_WEANING_READ:
         if ctx.memory_read is None:
-            return ctx.core.space_id
+            raise RuntimeError("训练后阅读缺少 MemoryRead，拒绝降级写入 Core")
+        if ctx.companion is None:
+            raise RuntimeError("训练后阅读缺少 Companion 检疫空间")
         return ctx.memory_read.space_id
     if stage == STAGE_USER_INTERACTION:
         if ctx.memory_interact is None:
-            return ctx.memory_read.space_id if ctx.memory_read else ctx.core.space_id
+            raise RuntimeError("用户交互缺少 MemoryInteract，拒绝降级写入其他空间")
         return ctx.memory_interact.space_id
     if stage == STAGE_EXTERNAL_DEFINE:
-        # 伴随检疫（概念点先入伴随 sign=0·过闸晋升）——返回伴随 space_id
         if ctx.companion is None:
-            return ctx.core.space_id
+            raise RuntimeError("外部定义缺少 Companion，拒绝降级写入 Core")
         return ctx.companion.space_id
-    return ctx.core.space_id
+    raise ValueError(f"未知训练 stage: {stage}")
 
 
 def route_to_space(stage: int, ctx: SpaceContext,
                    *, teacher_content_type: int | None = None) -> str:
-    """路由判定（返回落点描述·供 observe/审计用）。
+    """返回经设施核验的路由描述，未知阶段和缺失空间均失败。
 
     EXTERNAL_DEFINE 教师分流：元定义 PRIMARY 直落核心（仅断奶前·H3）/ 知识定义 sign=0 检疫。
     G2：内容类型须系统侧机械核查非教师自标（白名单 = 模态标记码点/IS_A 骨架/高频概念频次阈值）。
@@ -55,21 +56,26 @@ def route_to_space(stage: int, ctx: SpaceContext,
     if stage == STAGE_TRAINING:
         return "CORE"   # 训练期核心养洁净
     if stage == STAGE_POST_WEANING_READ:
+        if ctx.memory_read is None:
+            raise RuntimeError("训练后阅读缺少 MemoryRead，拒绝降级写入 Core")
+        if ctx.companion is None:
+            raise RuntimeError("训练后阅读缺少 Companion 检疫空间")
         return "COMPANION_QUARANTINE→MEMORY_READ"   # 伴随 staging → 过闸晋升记忆一层
     if stage == STAGE_USER_INTERACTION:
+        if ctx.memory_interact is None:
+            raise RuntimeError("用户交互缺少 MemoryInteract，拒绝降级写入其他空间")
         return "MEMORY_INTERACT"   # 记忆二层全量（不经检疫·H4 stage 纪律）
     if stage == STAGE_EXTERNAL_DEFINE:
+        if ctx.companion is None:
+            raise RuntimeError("外部定义缺少 Companion，拒绝降级写入 Core")
         if (teacher_content_type == META_DEFINITION
                 and ctx.weaning_phase == WEANING_PRE):
             return "CORE_PRIMARY"   # 元定义直落核心（仅断奶前·冷启动硬依赖·H3）
         return "COMPANION_QUARANTINE"   # 知识定义 sign=0 检疫
-    return "CORE"
+    raise ValueError(f"未知训练 stage: {stage}")
 
 
 def gate_check_memory_steady(ctx: SpaceContext) -> bool:
-    """M10 门控：开记忆前重测防塌三柱（衔接四条件记忆主导守恒·§十三M10）。
-
-    首版占位：返回 True（ Stage 5 防塌三柱/收敛判据落地后接真实度量）。
-    训练后开记忆须重新验收防塌三柱（防误判"训练期验收通过=稳态安全"）。
-    """
-    return True   # defer：Stage 5 防塌三柱度量接线后填实
+    """在真实 Memory 稳态探针接线前保持硬阻断。"""
+    _ = ctx
+    return False

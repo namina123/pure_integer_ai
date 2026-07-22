@@ -23,6 +23,7 @@ from pure_integer_ai.crosscut.guards.float_guard import assert_no_float, FloatVi
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.storage import discipline as disc
 from pure_integer_ai.storage.edge_types import EDGE_IS_A   # leaf 模块（无 backend import·无环）·perf #1144 IS_A gen counter
+from pure_integer_ai.storage.telemetry import active_backend_telemetry
 
 # 列类型 → SQLite affinity（DictBackend 不用·仅 SQLiteBackend）。
 TYPE_INT = "INT"
@@ -110,6 +111,7 @@ class _BaseBackend:
             "col_types": {c[0]: c[1] for c in columns},
             "discipline": discipline,
             "core": is_core,
+            "indexes": [tuple(index) for index in indexes],
         }
         self._do_create_table(table, columns)
         for idx in indexes:
@@ -120,6 +122,10 @@ class _BaseBackend:
         if table not in self._tables:
             raise KeyError(f"ensure_index: 未注册表 {table!r}")
         self._do_ensure_index(table, columns, defer_indexes=defer_indexes)
+        normalized = tuple(columns)
+        indexes = self._tables[table].setdefault("indexes", [])
+        if normalized not in indexes:
+            indexes.append(normalized)
 
     def _meta(self, table: str) -> dict[str, Any]:
         m = self._tables.get(table)
@@ -129,11 +135,19 @@ class _BaseBackend:
 
     # -- 写操作（经纪律闸门） --
     def insert(self, table: str, row: dict[str, Any]) -> None:
+        telemetry = active_backend_telemetry()
         m = self._meta(table)
         allow_text = any(t == TYPE_TEXT for t in m["col_types"].values())
         _validate_row(row, allow_text=allow_text)
         disc.check_write(table, "insert", m["discipline"], m["core"])
-        self._do_insert(table, row)
+        try:
+            self._do_insert(table, row)
+        except BaseException:
+            if telemetry is not None:
+                telemetry.record("insert", table, failed=True)
+            raise
+        if telemetry is not None:
+            telemetry.record("insert", table, rows=1)
         # perf #1144：IS_A 拓扑版本 bump（ancestor_map cache O(1) 命中信号）。IS_A 拓扑仅经 insert 变
         # （update 只动 tier/strength/sn/tn 非拓扑·edge_store:320/361/373/379/419·IS_A reward-inert 无 reward update·
         # 无 delete）→ 任一 IS_A insert = 拓扑变。gen-match ⟺ ancestor_map 不变（bit-identical·abstraction.build_isa_ancestor_map 读）。
@@ -144,6 +158,7 @@ class _BaseBackend:
 
     def update(self, table: str, where: dict[str, Any],
                set_: dict[str, Any]) -> int:
+        telemetry = active_backend_telemetry()
         m = self._meta(table)
         allow_text = any(t == TYPE_TEXT for t in m["col_types"].values())
         # 增量元组 ("+=", n) 的 n 须纯整数；其余值经 _validate_row 拒 float/str
@@ -153,19 +168,46 @@ class _BaseBackend:
             else:
                 _validate_row({k: v}, allow_text=allow_text)
         disc.check_write(table, "update", m["discipline"], m["core"])
-        return self._do_update(table, where, set_)
+        try:
+            affected = self._do_update(table, where, set_)
+        except BaseException:
+            if telemetry is not None:
+                telemetry.record("update", table, failed=True)
+            raise
+        if telemetry is not None:
+            telemetry.record("update", table, rows=affected)
+        return affected
 
     def delete(self, table: str, where: dict[str, Any]) -> int:
+        telemetry = active_backend_telemetry()
         m = self._meta(table)
         disc.check_write(table, "delete", m["discipline"], m["core"])
-        return self._do_delete(table, where)
+        try:
+            affected = self._do_delete(table, where)
+        except BaseException:
+            if telemetry is not None:
+                telemetry.record("delete", table, failed=True)
+            raise
+        if telemetry is not None:
+            telemetry.record("delete", table, rows=affected)
+        return affected
 
     def select(self, table: str, where: dict[str, Any] | None = None,
                where_gt: dict[str, int] | None = None,
                order_by: str | None = None, *, descending: bool = False,
                limit: int | None = None) -> list[dict[str, Any]]:
+        telemetry = active_backend_telemetry()
         self._meta(table)  # 存在性检查
-        return self._do_select(table, where, where_gt, order_by, descending, limit)
+        try:
+            rows = self._do_select(
+                table, where, where_gt, order_by, descending, limit)
+        except BaseException:
+            if telemetry is not None:
+                telemetry.record("select", table, failed=True)
+            raise
+        if telemetry is not None:
+            telemetry.record("select", table, rows=len(rows))
+        return rows
 
     def count(self, table: str, where: dict[str, Any] | None = None) -> int:
         """计数匹配行（**零 copy**·dedup 存在性检查 / size 函数用·替代 select+len）。
@@ -175,8 +217,17 @@ class _BaseBackend:
         每潜在边一次存在性 select）+ size 函数（_graph_size/_edge_count select 全表只为 len）省海量 copy。
         不支持 where_gt/order_by/limit（dedup/size 不需·需者用 select）。纯读无 discipline 闸门（同 select）。
         """
+        telemetry = active_backend_telemetry()
         self._meta(table)  # 存在性检查
-        return self._do_count(table, where)
+        try:
+            rows = self._do_count(table, where)
+        except BaseException:
+            if telemetry is not None:
+                telemetry.record("count", table, failed=True)
+            raise
+        if telemetry is not None:
+            telemetry.record("count", table, rows=rows)
+        return rows
 
     def isa_edge_generation(self, space_id: int) -> int:
         """IS_A 拓扑版本号（perf cache signal·bump on EDGE_IS_A insert·#1144）。
@@ -412,6 +463,19 @@ class SQLiteBackend(_BaseBackend):
     def _q(self, name: str) -> str:
         return '"' + name.replace('"', '""') + '"'
 
+    def _equality_clauses(self, where: dict[str, Any] | None
+                          ) -> tuple[list[str], list[Any]]:
+        """把结构化等值条件转换为 SQL；None 必须使用 IS NULL。"""
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in (where or {}).items():
+            if value is None:
+                clauses.append(f"{self._q(column)} IS NULL")
+            else:
+                clauses.append(f"{self._q(column)}=?")
+                params.append(value)
+        return clauses, params
+
     def _do_create_table(self, table, columns):
         cols = ", ".join(
             f"{self._q(c)} {_SQLITE_AFFINITY.get(t, 'INTEGER')}" for c, t in columns
@@ -446,19 +510,16 @@ class SQLiteBackend(_BaseBackend):
                 set_parts.append(f"{self._q(c)}=?")
                 set_params.append(v)
         set_clause = ", ".join(set_parts)
-        where_clause = " AND ".join(f"{self._q(c)}=?" for c in where) or "1=1"
+        where_parts, where_params = self._equality_clauses(where)
+        where_clause = " AND ".join(where_parts) or "1=1"
         cur = self._conn.execute(
             f"UPDATE {self._q(table)} SET {set_clause} WHERE {where_clause}",
-            tuple(set_params) + tuple(where.values()),
+            tuple(set_params) + tuple(where_params),
         )
         return cur.rowcount
 
     def _do_select(self, table, where, where_gt, order_by, descending, limit):
-        clauses, params = [], []
-        if where:
-            for k, v in where.items():
-                clauses.append(f"{self._q(k)}=?")
-                params.append(v)
+        clauses, params = self._equality_clauses(where)
         if where_gt:
             for k, v in where_gt.items():
                 clauses.append(f"{self._q(k)}>?")
@@ -479,21 +540,18 @@ class SQLiteBackend(_BaseBackend):
 
     def _do_count(self, table, where):
         # SELECT COUNT(*)（零行 fetch·镜像 DictBackend._do_count 语义·dedup/size 用）。
-        clauses, params = [], []
-        if where:
-            for k, v in where.items():
-                clauses.append(f"{self._q(k)}=?")
-                params.append(v)
+        clauses, params = self._equality_clauses(where)
         where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         cur = self._conn.execute(
             f"SELECT COUNT(*) FROM {self._q(table)}{where_sql}", tuple(params))
         return cur.fetchone()[0]
 
     def _do_delete(self, table, where):
-        where_clause = " AND ".join(f"{self._q(c)}=?" for c in where) or "1=1"
+        where_parts, where_params = self._equality_clauses(where)
+        where_clause = " AND ".join(where_parts) or "1=1"
         cur = self._conn.execute(
             f"DELETE FROM {self._q(table)} WHERE {where_clause}",
-            tuple(where.values()),
+            tuple(where_params),
         )
         return cur.rowcount
 

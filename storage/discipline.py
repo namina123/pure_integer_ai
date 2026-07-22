@@ -45,6 +45,13 @@ CORE_TABLES: frozenset[str] = frozenset({
     "concept_node", "def_array", "assoc_table", "outward_index",
     "edge", "memory_item",
     "audit_event", "archived",
+    "identity_header", "identity_part", "assertion_supersede",
+    "assertion_record", "assertion_qualifier",
+    "graph_object", "graph_object_component", "graph_statement",
+    "graph_hypothesis_group", "graph_hypothesis_group_component",
+    "memory_overlay_relation",
+    "memory_event", "memory_event_part",
+    "span", "span_member",
 })
 
 # 可变纪律核心表：允许 UPDATE（其单调/前移纪律由 store 层 monotone 守卫守）。

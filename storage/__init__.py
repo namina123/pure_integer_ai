@@ -31,6 +31,26 @@ def bootstrap(backend: StorageBackend) -> None:
     from pure_integer_ai.storage.spaces.memory_space import register_memory_table
     from pure_integer_ai.storage.spaces.companion import register_companion_table
     from pure_integer_ai.storage.audit import register_audit_table
+    from pure_integer_ai.storage.assertion_identity import (
+        register_assertion_identity_tables,
+    )
+    from pure_integer_ai.storage.assertion_record import (
+        register_assertion_record_tables,
+    )
+    from pure_integer_ai.storage.graph_object import register_graph_object_table
+    from pure_integer_ai.storage.graph_statement import (
+        register_graph_statement_table,
+    )
+    from pure_integer_ai.storage.memory_overlay import (
+        register_memory_overlay_table,
+    )
+    from pure_integer_ai.storage.memory_event import register_memory_event_table
+    from pure_integer_ai.storage.memory_aggregate import (
+        register_memory_aggregate_tables,
+    )
+    from pure_integer_ai.storage.occurrence import register_occurrence_tables
+    from pure_integer_ai.storage.source_record import register_source_record_table
+    from pure_integer_ai.storage.span import register_span_tables
 
     register_space_table(backend)
     register_node_tables(backend)
@@ -38,7 +58,16 @@ def bootstrap(backend: StorageBackend) -> None:
     register_memory_table(backend)
     register_companion_table(backend)
     register_audit_table(backend)
+    register_assertion_identity_tables(backend)
+    register_assertion_record_tables(backend)
+    register_graph_object_table(backend)
+    register_graph_statement_table(backend)
+    register_memory_overlay_table(backend)
+    register_memory_event_table(backend)
+    register_memory_aggregate_tables(backend)
+    register_source_record_table(backend)
+    register_occurrence_tables(backend)
+    register_span_tables(backend)
 
 
 __all__ = ["bootstrap"]
-

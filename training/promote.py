@@ -53,7 +53,7 @@ PROMOTE_EXP_FREQ_MIN = 3      # D:11 experience 闸：e_sn+e_tn ≥ 3（镜像 G
 PROMOTE_EXP_SUCCESS_NUM = 1   # D:11 experience 闸：e_sn/(e_sn+e_tn) ≥ 1/2（镜像 G5·成功率）
 
 # ---- 对应泛化 v2 D:11 结构反推 promote（审2条件1+2·三路分离 + SHADOW 创建·ORACLE_PROMOTE_MODE ON 时唯一轨）----
-# 结构反推 tally 闸：W 落 REALIZES-R-skeleton cue slot 的 distinct forming-sample ≥ K（镜像 PROMOTE_EXP_FREQ_MIN）。
+# 结构反推 tally 闸：W 落 REALIZES-R-skeleton cue slot 的 distinct tally sample ≥ K（生产为 recognition-routed input）。
 # 非循环（R 来自 REALIZES oracle·非 cue）·学全（W 可新词·非 oracle/frozenset）·详见 doc/重来_对应泛化_结构反推_学全。
 PROMOTE_STRUCTURE_MATCH_MIN = 3
 
@@ -178,14 +178,14 @@ def _definition_ok_d11(edge_store: EdgeStore, ref: tuple,
 def _structure_match_ok(backend, word_sid: int, word_lid: int, rel_kind: int) -> bool:
     """对应泛化 v2 结构反推 tally 闸（D:11 promote 唯一证据轨·ORACLE_PROMOTE_MODE ON 时）。
 
-    读 structure_match_count(W,R) distinct forming-sample ≥ PROMOTE_STRUCTURE_MATCH_MIN
+    读 structure_match_count(W,R) distinct tally sample ≥ PROMOTE_STRUCTURE_MATCH_MIN
     + **specificity gate**（审1 CONDITION 1·学得非写死·W' count(R) 须 > Σ count(other R)·特异主 R·
       非通用连接词·过滤"和/的"误晋）+ **显式守 CUE_CLUSTER_MODE**（审1 C3·OFF→ATTR_CUE_SIG 不写→
       cue slot 无→确定 soft-fail 非静默失效）。
 
     **非循环**（心脏·§四）：R 来自 REALIZES oracle（内容对命中 ConceptNet·source==CONCEPTNET·非 cue）·
     W 是观察（cue slot 落位）·提升反馈在 REALIZES source filter 断 → 非自证。
-    **学全**：W 可新词（不在 oracle/frozenset）·distinct forming-sample 达阈即 promote·真泛化。
+    **学全**：W 可新词（不在 oracle/frozenset）·distinct recognition-routed sample 达阈即 promote·真泛化。
     无行/全 0/不特异 → False。gate OFF（caller promote_edge ORACLE_PROMOTE_MODE 分支不调此函数）。
 
     **specificity 诚实边界**（审1 CONDITION 1）：结构锚降噪非消噪·specificity 在 abstract_sig 异（使/是 skeleton
@@ -230,7 +230,7 @@ def promote_edge(edge_store: EdgeStore, node_store: NodeStore,
     if et == EDGE_RELATION_SIGNAL:
         if getattr(gates, "ORACLE_PROMOTE_MODE", False):
             # 对应泛化 v2：结构匹配轨（审2条件3·两 gate 共存）。generator 关·D:11 SHADOW→PRIMARY **只认
-            # _structure_match_ok**（distinct forming-sample ≥K + specificity + 守 CUE_CLUSTER_MODE）。
+            # _structure_match_ok**（distinct tally sample ≥K + specificity + 守 CUE_CLUSTER_MODE）。
             # experience/teacher 轨退场（word 级 reward-feed 染·跨域污染 = 审2 BLOCKER 1 病源）。
             if backend is None:
                 return False
@@ -303,7 +303,7 @@ def promote_report(edge_store: EdgeStore, ref: tuple,
 
     D:11 EDGE_RELATION_SIGNAL 边：
       - ORACLE_PROMOTE_MODE ON（对应泛化 v2·审1 B1）：eligible = structure_match_ok
-        （distinct forming-sample ≥K + specificity + 守CUE_CLUSTER + rel_kind 桥·镜像 promote_edge:231-244）。
+        （distinct tally sample ≥K + specificity + 守CUE_CLUSTER + rel_kind 桥·镜像 promote_edge:231-244）。
       - OFF（刀4 双轨）：eligible = experience_ok ∨ definition_d11（experience 主导·加 "experience" 键）。
     D:11 不接 reward·freq/reward 恒 False。非 D:11 边（既有三重）：eligible = freq ∧ reward ∧ definition（bit-identical 不动）。
     """

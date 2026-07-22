@@ -51,12 +51,17 @@ from pure_integer_ai.storage.chapter_seq import CHAPTER_SEQ_TABLE
 from pure_integer_ai.storage.selection_pref_count import read_selection_pref_count
 from pure_integer_ai.storage.pronoun_resolution_count import read_pronoun_resolution_count
 from pure_integer_ai.storage.abstract_mark import get_mark, MARK_LANG
+from pure_integer_ai.storage.telemetry import record_diagnostic_event
 from pure_integer_ai.storage.concept_correspondence import (
     load_correspondence as _load_correspondence, CORR_ORDINAL,
 )
 from pure_integer_ai.crosscut.integer.unicode_codec import decode as _decode_codepoints
 from pure_integer_ai.cognition.process.abstraction import build_isa_ancestor_map, nearest_isa_ancestor
-from pure_integer_ai.cognition.shared.hub_detect import is_hub as _shared_is_hub, compute_hub_set as _shared_compute_hub_set
+from pure_integer_ai.cognition.shared.hub_detect import (
+    HubDegreeState,
+    compute_hub_set as _shared_compute_hub_set,
+    is_hub as _shared_is_hub,
+)
 from pure_integer_ai.cognition.understanding.modification_direction import head_preference, HEAD_PREF_CAP
 from pure_integer_ai.cognition.shared.types import ConceptRef
 
@@ -96,6 +101,7 @@ class ConceptGraph:
                  lang_of: LangResolver | None = None) -> None:
         self._b = backend
         self._edge_store = EdgeStore(backend)   # hub_detect 读 COOCCURS 用（归一化半 A·thin wrapper）
+        self._hub_degree_state = HubDegreeState(self._edge_store)
         self._surface_of = surface_of
         self._lang_of = lang_of   # C1 跨语言偏好用·概念 lang 注入式（observe lang 标注·首版 defer）
         # selection_pref_score 的 ancestor_map lazy cache（per space_id·S4 决断 2 生成侧精查）。
@@ -177,6 +183,9 @@ class ConceptGraph:
         # CORRESPONDENCE_SLOT_MODE OFF → cue_rel_of 不被调（slot_dispatch _corr_gate=False）→ CI 不 cache·bit-identical。
         # 0 亦缓存（_COUNT_MISS 区分"未算"与"算得 0"·冷启动 v2-learned D:11 多为 0）。cache 值 == fresh query（D:11 一代内稳定）。
         self._cue_rel_cache: dict[ConceptRef, int] = {}
+        # 生成 cue 候选反向索引：同 space 的 PRIMARY + BARE_TEXT D:11 按 rel_kind 分组。
+        # D:11 只在训练/tally/promote 写，和 cue_rel_of 共用 per-item invalidate 生命周期。
+        self._relation_cue_cache: dict[tuple[int, int], tuple[ConceptRef, ...]] = {}
 
     # ---- role_seq（卷一模块2 attach_role_seq def_array） ----
 
@@ -390,6 +399,37 @@ class ConceptGraph:
         self._cue_rel_cache[word_ref] = rel_kind
         return rel_kind
 
+    def relation_cue_candidates(self, rel_kind: int, *,
+                                space_id: int) -> list[ConceptRef]:
+        """读取关系类型对应的已学习 cue 词候选。
+
+        只返回同一 space 内 `PRIMARY + SOURCE_BARE_TEXT` 的 D:11 word->REL_* 边。
+        教师 boot 词和未晋升 SHADOW 不进入生成候选池；目标节点必须带匹配的
+        ATTR_RELATION_PRIMITIVE，避免 D:11 共享边类型的 operator/modal/action 污染。
+        """
+        assert_int(rel_kind, space_id,
+                   _where="ConceptGraph.relation_cue_candidates")
+        if rel_kind == 0:
+            return []
+        key = (space_id, rel_kind)
+        cached = self._relation_cue_cache.get(key)
+        if cached is None:
+            candidates: set[ConceptRef] = set()
+            rows = self._b.select("edge", where={
+                "space_id_from": space_id,
+                "edge_type": EDGE_RELATION_SIGNAL,
+                "tier": TIER_PRIMARY,
+                "source": SOURCE_BARE_TEXT,
+            })
+            for row in rows:
+                target = (row["space_id_to"], row["local_id_to"])
+                attrs = read_composes_attrs(self._b, target)
+                if attrs.get(ATTR_RELATION_PRIMITIVE, (0, 0))[0] == rel_kind:
+                    candidates.add((row["space_id_from"], row["local_id_from"]))
+            cached = tuple(sorted(candidates))
+            self._relation_cue_cache[key] = cached
+        return list(cached)
+
     def _ref_node_type(self, ref: ConceptRef) -> int | None:
         """读 ref 的 node_type（concept_node.type·PURE_ALIAS 自包含 node_type 判据用）。
 
@@ -581,15 +621,19 @@ class ConceptGraph:
         return _shared_is_hub(ref, self._edge_store)
 
     def hub_set(self) -> set[ConceptRef]:
-        """hub ref 集（单遍 + dirty-flag 缓存·替 per-ref is_hub 批量调用）。
+        """hub ref 集（上下文派生状态·替 per-ref is_hub 批量调用）。
 
-        委托 cognition/shared/hub_detect.compute_hub_set（单遍扫 COOCCURS 建 degree map·
-        WeakKeyDictionary dirty-flag 缓存·COOCCURS version 不变 O(1) 命中）。slot_dispatch 批量
+        委托 cognition/shared/hub_detect.compute_hub_set；首次单遍扫 COOCCURS，后续同一生成轮复用。
+        ``invalidate_ancestor_map`` 在 observe 后显式失效，避免本对象独立 EdgeStore 的版本号看不到外部 writer。
+        slot_dispatch 批量
         排除用（candidates + ctx_refs 一次 membership 查·替 K+M 次 per-ref is_hub·解 36 万调 fan-out）。
         与 is_hub 同 theta（THETA_HUB_DEGREE）-> `ref in hub_set()` == `is_hub(ref)` bit-identical。
         生成期 COOCCURS 不变（generation 不 observe）-> 缓存跨 slot 稳定·一代一次 fresh 重算。
         """
-        return _shared_compute_hub_set(self._edge_store)
+        return _shared_compute_hub_set(
+            self._edge_store,
+            state=self._hub_degree_state,
+        )
 
     # ---- selection_pref_score（CLASS 级共现·S4 决断 2 生成侧精查·两层正交第二腿） ----
 
@@ -681,6 +725,7 @@ class ConceptGraph:
         self._mem_seq_cache.clear()
         self._token_seq_cache.clear()   # P0 #1040：read_token_seq def_array 读 cache（observe attach_token_seq 增 token 行后清·保 fresh）
         self._cooccur_nbr_cache.clear()   # perf round6：collide_score 邻接 cache（observe 增 COOCCURS 后清·保 fresh）
+        self._hub_degree_state.invalidate()   # 其他 EdgeStore 写 COOCCURS 后重建 hub 度数
         self._lang_cache.clear()   # perf round7：lang_of cache（observe set_mark 后清·保 fresh）
         self._surface_cache.clear()   # P0a：surface_of cache（observe ensure 增概念后清·保 fresh）
         self._similar_cache.clear()   # perf round7：similar_candidates cache（observe 增 EDGE_SIMILAR 后清·保 fresh）
@@ -689,6 +734,7 @@ class ConceptGraph:
         self._head_pref_cache.clear()   # perf round10：G2 head_pref read cache（modification_direction observe-only 写·per-item 清够·镜像 pronoun）
         self._second_order_cache.clear()   # Phase C：second_order_similarity per-pair cache（COOCCURS observe-only 写·per-item 清够·镜像 _cooccur_nbr_cache·保 fresh）
         self._cue_rel_cache.clear()   # 对应桥 cue_rel_of cache（D:11 tally/promote observe-only 写·per-item 清够·保 fresh）
+        self._relation_cue_cache.clear()   # relation-driven cue 候选（同 D:11 生命周期）
 
     def invalidate_generate_read_cache(self) -> None:
         """perf round9：清 selection_pref per-pair read cache（generate_output 入口调）。
@@ -804,6 +850,7 @@ class ConceptGraph:
         诚实边界：pr_tn 是决策频次非语义正确（stable≠correct·"它们→最近 token 可能功能词"接地墙外·
         代词消解结构非墙 vs sense 消歧 #479 真墙·§九.7.6 W2 拆分）。
         """
+        record_diagnostic_event("hotspot.pronoun")
         if not getattr(gates, "PRONOUN_SLOT_MODE", False):
             return 0
         # perf round9：per-pair read cache（key=(c, antecedent_ref)·memo read_pronoun_resolution_count）。
@@ -868,6 +915,7 @@ class ConceptGraph:
         其余 4 dict 从 composes_attr 表读（read_composes_attrs）。
         vm_proof_fn 经此重建 compile_graph 所需 5 dict（A3·致命#1）。
         """
+        record_diagnostic_event("hotspot.skeleton_read")
         from collections import deque
         children_of: dict[ConceptRef, list[ConceptRef]] = {}
         operator_of: dict[ConceptRef, int] = {}

@@ -51,6 +51,7 @@ from __future__ import annotations
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.storage import discipline as disc
 from pure_integer_ai.storage.backend import StorageBackend, TYPE_INT, register_extension_table
+from pure_integer_ai.storage.telemetry import record_diagnostic_event
 
 ABSTRACT_MARK_TABLE = "abstract_mark"
 
@@ -111,6 +112,7 @@ def set_mark(backend: StorageBackend, *, ref: tuple[int, int],
     表未注册（bare fixture / 未 register_abstract_mark）→ KeyError 静默 skip（向后兼容·
     同 record_base_freq / attach_chapter_seq 范式·observe 在 bare fixture 跑不崩）。
     """
+    record_diagnostic_event("hotspot.abstract_mark")
     sid, lid = ref
     assert_int(sid, lid, mark_kind, mark_value, status, _where="set_mark.args")
     try:
@@ -143,6 +145,7 @@ def get_marks(backend: StorageBackend, *, ref: tuple[int, int],
     输出按 (mark_kind, mark_value) 确定序（bit-identical·同插入序+值排序）。
     表未注册→[]（向后兼容·同 read_op_confidence 范式）。
     """
+    record_diagnostic_event("hotspot.abstract_mark")
     sid, lid = ref
     assert_int(sid, lid, _where="get_marks.ref")
     where: dict[str, int] = {"space_id": sid, "local_id": lid}
@@ -182,6 +185,7 @@ def query_nodes_by_mark(backend: StorageBackend, *, mark_kind: int,
 
     输出按 (space_id, local_id) 确定序（bit-identical）。表未注册→[]。
     """
+    record_diagnostic_event("hotspot.abstract_mark")
     assert_int(mark_kind, mark_value, status, _where="query_nodes_by_mark.args")
     try:
         rows = backend.select(ABSTRACT_MARK_TABLE, where={
@@ -205,6 +209,7 @@ def query_intersection(backend: StorageBackend,
     输出 sorted (space_id, local_id) 确定序（set.intersection 无序·sorted 守 bit-identical）。
     表未注册→[]。
     """
+    record_diagnostic_event("hotspot.abstract_mark")
     if not marks:
         return []
     for mk, mv in marks:

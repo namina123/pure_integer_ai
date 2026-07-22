@@ -13,6 +13,7 @@ from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.storage.edge_store import EdgeStore
 from pure_integer_ai.storage.node_store import TIER_SHADOW
 from pure_integer_ai.cognition.shared.edge_types import EDGE_COOCCURS
+from pure_integer_ai.cognition.shared.hub_detect import HubDegreeState
 from pure_integer_ai.config import gates
 
 DEFAULT_COOCCURS_PAIR_CAP = 256   # 段内配对上限（O(n²) 节流·§训练性能）
@@ -47,7 +48,8 @@ def segment_cooccurrence_pairs(n: int, *, cap: int = DEFAULT_COOCCURS_PAIR_CAP) 
 
 def build_cooccurs(edge_store: EdgeStore, refs: list[tuple[int, int]],
                    *, lang: int, domain: int, source: int, space_id: int,
-                   cap: int = DEFAULT_COOCCURS_PAIR_CAP) -> int:
+                   cap: int = DEFAULT_COOCCURS_PAIR_CAP,
+                   hub_degree_state: HubDegreeState | None = None) -> int:
     """共现 COOCCURS 建边（同桶内配对·SHADOW·频次计数）。
 
     C1 同桶内配对·不跨桶：refs 由 caller（observe）按单 lang/domain 段传入·同段同桶·
@@ -66,11 +68,14 @@ def build_cooccurs(edge_store: EdgeStore, refs: list[tuple[int, int]],
         if dedup:
             # 总收口 0.1：跨段去重（同 pair 合并 strength=频次·解 append-only 堆叠·LIVE 病灶①）。
             # 仅新建边计 n（返 True）·UPDATE 不增边·built_edges=真实边数（dedup 后大降=解阻塞可观测）。
-            if edge_store.add_cooccurs_dedup(
+            created = edge_store.add_cooccurs_dedup(
                 space_id_from=a[0], local_id_from=a[1],
                 space_id_to=b[0], local_id_to=b[1],
                 edge_type=EDGE_COOCCURS, source=source, tier=TIER_SHADOW,
-            ):
+            )
+            if hub_degree_state is not None:
+                hub_degree_state.observe_cooccurs(a, b, 1)
+            if created:
                 n += 1
         else:
             edge_store.add(
@@ -80,5 +85,7 @@ def build_cooccurs(edge_store: EdgeStore, refs: list[tuple[int, int]],
                 source=source, epistemic_origin=None,
                 tier=TIER_SHADOW,   # §十一缺口#4: 裸文本共现 SHADOW 脏持有
             )
+            if hub_degree_state is not None:
+                hub_degree_state.observe_cooccurs(a, b, 1)
             n += 1
     return n
