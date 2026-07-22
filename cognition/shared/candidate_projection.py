@@ -98,6 +98,7 @@ class CandidateProjectionProtocol:
     event_namespace_key: tuple[int, ...]
 
     def __post_init__(self) -> None:
+        """核验候选投影的 predicate、状态、事件 kind 和命名空间互异完整。"""
         predicates = self.predicate_identities()
         states_and_kinds = self.state_identities() + self.kind_identities()
         if any(not isinstance(item, ObjectIdentity)
@@ -174,6 +175,7 @@ class CandidateProjectionEvent:
     replacement: ObjectIdentity | None = None
 
     def __post_init__(self) -> None:
+        """核验生命周期 Event 与候选定义、Hypothesis 和逻辑序一致。"""
         if not isinstance(self.event, ObjectIdentity):
             raise TypeError("event 必须是 ObjectIdentity")
         if self.event.object_kind != OBJECT_EVENT:
@@ -249,6 +251,7 @@ class CandidateProjectionGraph:
     def __init__(
             self, ontology: GraphOntology,
             protocol: CandidateProjectionProtocol) -> None:
+        """绑定当前图并物化调用方注入的候选生命周期协议身份。"""
         if not isinstance(ontology, GraphOntology):
             raise TypeError("ontology 必须是 GraphOntology")
         if not isinstance(protocol, CandidateProjectionProtocol):
@@ -350,12 +353,20 @@ class CandidateProjectionGraph:
         if candidate_ref is None or hypothesis_ref is None:
             raise CandidateProjectionError("候选或 Hypothesis 尚未物化")
         statements: list[GraphStatement] = []
+        row_cache: dict[
+            tuple[int, tuple[int, int]], tuple[GraphStatement, ...]
+        ] = {}
         for binding in definition.bindings:
             predicate = self.ontology.resolve(binding.predicate)
             value = self.ontology.resolve(binding.value)
             if predicate is None or value is None:
                 raise CandidateProjectionError("候选 binding 端点尚未物化")
-            rows = self._binding_rows(candidate_ref, binding, predicate)
+            rows = self._cached_binding_rows(
+                row_cache,
+                candidate_ref,
+                binding,
+                predicate,
+            )
             matching: list[GraphStatement] = []
             conflicting: list[GraphStatement] = []
             for row in rows:
@@ -795,12 +806,20 @@ class CandidateProjectionGraph:
         if candidate is None:
             return None
         matches = 0
+        row_cache: dict[
+            tuple[int, tuple[int, int]], tuple[GraphStatement, ...]
+        ] = {}
         for binding in definition.bindings:
             predicate = self.ontology.resolve(binding.predicate)
             value = self.ontology.resolve(binding.value)
             if predicate is None:
                 continue
-            rows = self._binding_rows(candidate, binding, predicate)
+            rows = self._cached_binding_rows(
+                row_cache,
+                candidate,
+                binding,
+                predicate,
+            )
             slot_rows = tuple(
                 row for row in rows
                 if row.assertion.qualifiers
@@ -853,6 +872,23 @@ class CandidateProjectionGraph:
             predicate=predicate,
             object_ref=candidate,
         )
+
+    def _cached_binding_rows(
+            self,
+            cache: dict[
+                tuple[int, tuple[int, int]], tuple[GraphStatement, ...]
+            ],
+            candidate: TypedRef,
+            binding: CandidateBinding,
+            predicate: TypedRef,
+            ) -> tuple[GraphStatement, ...]:
+        """在单次定义核验内复用同 predicate 和候选方向的完整 statement 集。"""
+        key = binding.candidate_endpoint, predicate.node_ref()
+        rows = cache.get(key)
+        if rows is None:
+            rows = self._binding_rows(candidate, binding, predicate)
+            cache[key] = rows
+        return rows
 
     @staticmethod
     def _binding_row_matches(
@@ -1023,6 +1059,7 @@ class EvidenceCandidateProjector:
     def __init__(
             self, engine: EvidenceCandidateEngine,
             graph: CandidateProjectionGraph) -> None:
+        """绑定同一候选 engine 与图 facade，驱动生命周期投影。"""
         if not isinstance(engine, EvidenceCandidateEngine):
             raise TypeError("engine 必须是 EvidenceCandidateEngine")
         if not isinstance(graph, CandidateProjectionGraph):

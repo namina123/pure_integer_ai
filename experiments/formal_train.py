@@ -436,6 +436,10 @@ class FormalTrainConfig:
     # L-05B2A typed formal generation owner factory；None 保留版本化 legacy 兼容链。
     # factory 必须从当前 TrainContext 的真实 S-02/S-07/R-01 owner 装配请求 mapper、planner 和 renderer。
     language_generation_runtime_factory: Any = None
+    # L-05B2B 默认课程入口：loader 与 component factory 必须成对提供，且与直接 factory 互斥。
+    # loader 只加载版本化理论和 Core Evidence；component factory 重建当前图的 R-01/G-04 运行组件。
+    language_generation_course_loader: Any = None
+    language_generation_component_factory: Any = None
     # typed 阶段4 owner 必须由同一 generation factory installation 提供。
     # L-05B2B typed H2 只使用 V-00 development split 的注入式分维期望；不得读取 held-out 调参。
     language_generation_h2_protocol: Any = None
@@ -484,6 +488,7 @@ class FormalTrainResult:
     probe_set: ProbeSet | None = None   # W4 D4 留出探针集（config.probe_holdout>0 时 formal_train 主入口建·版本化·W6/caller/test 可查·默认 None）
     holdout_retention: int = 0   # W6 E2 模拟退场 eval 采的探针保持率真值（默认 0 bit-identical·cross_verify 通过率×1000·D1 曲线②度量·真泛化 defer W8）
     word_form_course_report: Any = None   # L-01 课程 manifest、可见 split 和去重计数；未配置 provider 时为 None
+    language_generation_course_report: Any = None
     typed_language_h2_report: Any = None
     typed_language_floor_report: Any = None
     typed_language_stage4_report: Any = None
@@ -623,20 +628,41 @@ def _formal_train_impl(config: FormalTrainConfig,
     if (config.language_generation_h2_protocol is not None
             and config.evaluation_plan is None):
         raise ValueError("typed language H2 必须配套 V-00 evaluation_plan")
+    default_generation_configured = (
+        config.language_generation_course_loader is not None,
+        config.language_generation_component_factory is not None,
+    )
+    if any(default_generation_configured) and not all(
+            default_generation_configured):
+        raise ValueError(
+            "默认 connector course loader 与 component factory 必须成对配置")
+    if (config.language_generation_runtime_factory is not None
+            and any(default_generation_configured)):
+        raise ValueError("直接 generation factory 与默认 connector 课程入口互斥")
+    generation_owner_configured = (
+        config.language_generation_runtime_factory is not None
+        or all(default_generation_configured)
+    )
+    if (all(default_generation_configured)
+            and config.language_semantic_course_protocol is None):
+        raise ValueError("默认 connector 课程需要正式 semantic course runtime")
+    if (all(default_generation_configured)
+            and config.language_precedence_protocol is None):
+        raise ValueError("默认 connector 课程需要正式 R-06/S-07 runtime")
     if (config.language_generation_h2_protocol is not None
-            and config.language_generation_runtime_factory is None):
+            and not generation_owner_configured):
         raise ValueError("typed language H2 必须配套 typed generation owner")
     if (config.language_generation_floor_protocol is not None
-            and config.language_generation_runtime_factory is None):
+            and not generation_owner_configured):
         raise ValueError("typed language floor 必须配套 typed generation owner")
     if (config.language_generation_floor_protocol is not None
             and config.evaluation_plan is None):
         raise ValueError("typed language floor 必须配套 V-00 evaluation_plan")
-    if (config.language_generation_runtime_factory is not None
+    if (generation_owner_configured
             and STAGE3_REWARD in requested_stages
             and config.language_generation_h2_protocol is None):
         raise ValueError("正式 typed language 阶段3 必须配置分维 H2")
-    if (config.language_generation_runtime_factory is not None
+    if (generation_owner_configured
             and STAGE3_REWARD in requested_stages
             and config.language_generation_floor_protocol is None):
         raise ValueError("正式 typed language 阶段3 必须配置 held-out 分维 floor")
@@ -723,13 +749,27 @@ def _formal_train_impl(config: FormalTrainConfig,
             config.language_causal_protocol,
             config.language_causal_course,
         )
-    if config.language_generation_runtime_factory is not None:
+    generation_factory = config.language_generation_runtime_factory
+    if all(default_generation_configured):
+        from pure_integer_ai.experiments.language_generation_connector_factory import (
+            DefaultLanguageConnectorProductionRuntimeBuilder,
+            LanguageConnectorProductionFactory,
+        )
+        loaded_course = config.language_generation_course_loader.load(ctx)
+        ctx.language_generation_course_report = loaded_course.report
+        generation_factory = LanguageConnectorProductionFactory(
+            loaded_course.connector_factory,
+            DefaultLanguageConnectorProductionRuntimeBuilder(
+                config.language_generation_component_factory),
+            loaded_course.stage4_policy,
+        )
+    if generation_factory is not None:
         from pure_integer_ai.experiments.generation_production_runtime import (
             install_production_generation_runtime,
         )
         install_production_generation_runtime(
             ctx,
-            config.language_generation_runtime_factory,
+            generation_factory,
         )
         if (STAGE4_PROMOTE_WEAN in requested_stages
                 and ctx.language_generation_stage4_runtime is None):
@@ -851,6 +891,8 @@ def _formal_train_impl(config: FormalTrainConfig,
         result.evaluation_plan_sha256 = ctx.evaluation_plan.sha256()
     result.probe_set = ctx.probe_set   # W4 D4 探针集 expose（config.probe_holdout>0 时主入口建·版本化·W6/caller/test 可查）
     result.word_form_course_report = ctx.word_form_course_report
+    result.language_generation_course_report = (
+        ctx.language_generation_course_report)
     result.execution = FormalTrainExecutionStats(
         input_items=_input_item_count,
         training_items=len(corpus),
