@@ -192,8 +192,7 @@ class GenerationTaskObservation:
 class GenerationSurfaceObservation:
     """分支注入 parser 对实际 surface 产生的完整 typed 观察。"""
 
-    execution_key: tuple[int, ...]
-    rendered_key: tuple[int, ...]
+    parse_request_key: tuple[int, ...]
     representations: tuple[ObjectIdentity, ...]
     branch: ObjectIdentity
     stance: ObjectIdentity
@@ -207,8 +206,10 @@ class GenerationSurfaceObservation:
     trace: tuple[int, ...]
 
     def __post_init__(self) -> None:
-        _strict_key(self.execution_key, label="surface observation execution key")
-        _strict_key(self.rendered_key, label="surface observation rendered key")
+        _strict_key(
+            self.parse_request_key,
+            label="surface observation parse request key",
+        )
         if not isinstance(self.representations, tuple) or not self.representations:
             raise ValueError("surface observation representations 必须非空")
         if any(not isinstance(item, ObjectIdentity)
@@ -264,8 +265,7 @@ class GenerationSurfaceObservation:
     def stable_key(self) -> tuple[int, ...]:
         """返回执行绑定、恢复语义、来源、结构和任务观察完整键。"""
         result = [
-            *_packed(self.execution_key),
-            *_packed(self.rendered_key),
+            *_packed(self.parse_request_key),
             len(self.representations),
         ]
         for representation in self.representations:
@@ -325,13 +325,67 @@ class GenerationSurfaceParseResult:
         return tuple(result)
 
 
+@dataclass(frozen=True)
+class GenerationSurfaceParseRequest:
+    """只向独立 parser 暴露实际输出和运行归属，不暴露生成计划答案。"""
+
+    renderer: ObjectIdentity
+    units: tuple[int, ...]
+    branch: ObjectIdentity
+    source: SourceRef
+    scope: ScopeIdentity
+
+    def __post_init__(self) -> None:
+        """核验 parser 输入只含不可反推计划的输出边界与分支上下文。"""
+        _require_instruction(self.renderer, label="parse request renderer")
+        _strict_key(self.units, label="parse request units")
+        if (not isinstance(self.branch, ObjectIdentity)
+                or self.branch.object_kind != OBJECT_LANGUAGE_BRANCH):
+            raise ValueError("parse request branch 必须是 LanguageBranch")
+        if not isinstance(self.source, SourceRef):
+            raise TypeError("parse request source 类型错误")
+        if not isinstance(self.scope, ScopeIdentity):
+            raise TypeError("parse request scope 类型错误")
+
+    @classmethod
+    def from_execution(
+            cls,
+            execution: TypedGenerationExecution,
+            ) -> "GenerationSurfaceParseRequest":
+        """从成功 execution 提取不含计划、命题和原始表示序列的 parser 输入。"""
+        if not isinstance(execution, TypedGenerationExecution):
+            raise TypeError("parse request execution 类型错误")
+        if not execution.complete or execution.rendered is None:
+            raise ValueError("parse request 只接受已完成并渲染的 execution")
+        goal = execution.plan.request.goal
+        if goal.target_branch is None:
+            raise ValueError("G-04 parser 需要显式目标 LanguageBranch")
+        return cls(
+            execution.rendered.renderer,
+            execution.rendered.units,
+            goal.target_branch,
+            goal.source,
+            goal.scope,
+        )
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回输出绑定、renderer、整数单元、分支和运行归属完整键。"""
+        return (
+            *_packed(self.renderer.stable_key()),
+            *_packed(self.units),
+            *_packed(self.branch.stable_key()),
+            *_packed(self.source.stable_key()),
+            *_packed(self.scope.stable_key()),
+        )
+
+
 class GenerationSurfaceParser(Protocol):
     """按目标 LanguageBranch 反解析实际 Representation 和 renderer 输出。"""
 
     def parse(
-            self, execution: TypedGenerationExecution,
+            self, request: GenerationSurfaceParseRequest,
             ) -> GenerationSurfaceParseResult:
-        """返回 typed 观察或分型失败，不从码点名称猜语义。"""
+        """仅从受限输出请求返回 typed 观察，不读取原 generation plan。"""
         ...
 
 
@@ -417,6 +471,7 @@ __all__ = [
     "GenerationPostcheckRequest",
     "GenerationSourceRequirement",
     "GenerationSurfaceObservation",
+    "GenerationSurfaceParseRequest",
     "GenerationSurfaceParseResult",
     "GenerationSurfaceParser",
     "GenerationTaskObservation",

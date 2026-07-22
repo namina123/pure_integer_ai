@@ -87,6 +87,7 @@ class TrainContext:
     language_semantic_course_reports: list[Any] = field(default_factory=list)
     alias_relation_course_report: Any = None
     language_generation_course_report: Any = None
+    language_generation_postcheck_course_report: Any = None
     language_generation_runtime_factory: Any = None
     language_generation_runtime: Any = None
     language_generation_stage4_runtime: Any = None

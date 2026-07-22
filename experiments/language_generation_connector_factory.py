@@ -501,8 +501,8 @@ class LanguageConnectorProductionComponents:
     structure_protocol: GenerationStructureLayerProtocol
     alias: AliasRelationRuntime | None
     renderer: object
-    postcheck_mapper: object
-    postchecker: GenerationPostcheckRuntime
+    postcheck_mapper: object | None
+    postchecker: GenerationPostcheckRuntime | None
 
     def __post_init__(self) -> None:
         """核验一次 context 独占组件具备完整的六层与复核协议。"""
@@ -518,9 +518,13 @@ class LanguageConnectorProductionComponents:
             raise TypeError("connector production alias 类型错误")
         if not hasattr(self.renderer, "render"):
             raise TypeError("connector production renderer 必须实现 render")
-        if not hasattr(self.postcheck_mapper, "build"):
+        if (self.postcheck_mapper is None) != (self.postchecker is None):
+            raise ValueError("connector production G-04 mapper/runtime 必须成对配置")
+        if (self.postcheck_mapper is not None
+                and not hasattr(self.postcheck_mapper, "build")):
             raise TypeError("connector production G-04 mapper 必须实现 build")
-        if not isinstance(self.postchecker, GenerationPostcheckRuntime):
+        if (self.postchecker is not None
+                and not isinstance(self.postchecker, GenerationPostcheckRuntime)):
             raise TypeError("connector production G-04 runtime 类型错误")
 
 
@@ -552,8 +556,9 @@ class DefaultLanguageConnectorProductionRuntimeBuilder:
             self,
             component_factory: LanguageConnectorProductionComponentFactory,
             relation_factory=None,
+            postcheck_factory=None,
             ) -> None:
-        """绑定辅助组件 factory，并可由版本化课程独立提供 R-01 owner。"""
+        """绑定辅助组件，并可由独立版本化课程提供 R-01 和 G-04 owner。"""
         if any(not hasattr(component_factory, method) for method in (
                 "build", "clone_for_evaluation", "state_key")):
             raise TypeError("connector production component factory 协议不完整")
@@ -561,8 +566,13 @@ class DefaultLanguageConnectorProductionRuntimeBuilder:
                 and any(not hasattr(relation_factory, method) for method in (
                     "build", "clone_for_evaluation", "state_key"))):
             raise TypeError("connector production relation factory 协议不完整")
+        if (postcheck_factory is not None
+                and any(not hasattr(postcheck_factory, method) for method in (
+                    "build", "branches", "clone_for_evaluation", "state_key"))):
+            raise TypeError("connector production G-04 factory 协议不完整")
         self._component_factory = component_factory
         self._relation_factory = relation_factory
+        self._postcheck_factory = postcheck_factory
 
     def build(
             self,
@@ -620,6 +630,28 @@ class DefaultLanguageConnectorProductionRuntimeBuilder:
         if closure.use_owner is None:
             raise RuntimeError(
                 "connector production R-01 必须配置 PH2 Core Use owner")
+
+        postcheck_mapper = components.postcheck_mapper
+        postchecker = components.postchecker
+        if self._postcheck_factory is not None:
+            if postcheck_mapper is not None or postchecker is not None:
+                raise ValueError("课程 G-04 factory 与组件 G-04 owner 不得同时配置")
+            connector_branches = frozenset(
+                template.language_branch
+                for template in assembly.connector.registry.templates
+            )
+            postcheck_branches = frozenset(self._postcheck_factory.branches())
+            if not connector_branches.issubset(postcheck_branches):
+                raise ValueError("G-04 课程未覆盖 connector 的全部 LanguageBranch")
+            postcheck_binding = self._postcheck_factory.build(ctx)
+            postcheck_mapper = getattr(postcheck_binding, "mapper", None)
+            postchecker = getattr(postcheck_binding, "runtime", None)
+        if postcheck_mapper is None or postchecker is None:
+            raise RuntimeError("connector production 缺少 G-04 owner")
+        if not hasattr(postcheck_mapper, "build"):
+            raise TypeError("connector production G-04 mapper 必须实现 build")
+        if not isinstance(postchecker, GenerationPostcheckRuntime):
+            raise TypeError("connector production G-04 runtime 类型错误")
 
         connector = assembly.connector
         structure_planner = connector.structure_planner()
@@ -689,8 +721,8 @@ class DefaultLanguageConnectorProductionRuntimeBuilder:
         runtime = ProductionGenerationRuntime(
             SemanticCourseGenerationRequestMapper(),
             executor,
-            postcheck_mapper=components.postcheck_mapper,
-            postchecker=components.postchecker,
+            postcheck_mapper=postcheck_mapper,
+            postchecker=postchecker,
         )
         return LanguageConnectorProductionRuntimeBinding(
             runtime,
@@ -707,6 +739,8 @@ class DefaultLanguageConnectorProductionRuntimeBuilder:
             self._component_factory.clone_for_evaluation(),
             None if self._relation_factory is None else (
                 self._relation_factory.clone_for_evaluation()),
+            None if self._postcheck_factory is None else (
+                self._postcheck_factory.clone_for_evaluation()),
         )
 
     def state_key(self) -> tuple:
@@ -715,6 +749,8 @@ class DefaultLanguageConnectorProductionRuntimeBuilder:
             self._component_factory.state_key(),
             () if self._relation_factory is None else (
                 self._relation_factory.state_key()),
+            () if self._postcheck_factory is None else (
+                self._postcheck_factory.state_key()),
         )
 
 

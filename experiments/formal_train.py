@@ -437,10 +437,11 @@ class FormalTrainConfig:
     # factory 必须从当前 TrainContext 的真实 S-02/S-07/R-01 owner 装配请求 mapper、planner 和 renderer。
     language_generation_runtime_factory: Any = None
     # L-05B2B 默认课程入口：loader 与 component factory 必须成对提供，且与直接 factory 互斥。
-    # generation loader 加载 connector 理论；可选 relation loader 加载版本化 R-01 Core 课程。
+    # generation loader 加载 connector 理论；可选 relation/postcheck loader 分别加载 R-01/G-04 课程。
     # component factory 只需提供辅助组件；未配置 relation loader 时保留旧 alias 注入兼容路径。
     language_generation_course_loader: Any = None
     language_alias_relation_course_loader: Any = None
+    language_generation_postcheck_course_loader: Any = None
     language_generation_component_factory: Any = None
     # typed 阶段4 owner 必须由同一 generation factory installation 提供。
     # L-05B2B typed H2 只使用 V-00 development split 的注入式分维期望；不得读取 held-out 调参。
@@ -492,6 +493,7 @@ class FormalTrainResult:
     word_form_course_report: Any = None   # L-01 课程 manifest、可见 split 和去重计数；未配置 provider 时为 None
     alias_relation_course_report: Any = None
     language_generation_course_report: Any = None
+    language_generation_postcheck_course_report: Any = None
     typed_language_h2_report: Any = None
     typed_language_floor_report: Any = None
     typed_language_stage4_report: Any = None
@@ -645,6 +647,9 @@ def _formal_train_impl(config: FormalTrainConfig,
     if (config.language_alias_relation_course_loader is not None
             and not all(default_generation_configured)):
         raise ValueError("R-01 课程 loader 必须配套默认 connector 课程入口")
+    if (config.language_generation_postcheck_course_loader is not None
+            and not all(default_generation_configured)):
+        raise ValueError("G-04 课程 loader 必须配套默认 connector 课程入口")
     generation_owner_configured = (
         config.language_generation_runtime_factory is not None
         or all(default_generation_configured)
@@ -766,6 +771,13 @@ def _formal_train_impl(config: FormalTrainConfig,
             loaded_relation = config.language_alias_relation_course_loader.load(ctx)
             ctx.alias_relation_course_report = loaded_relation.report
             relation_factory = loaded_relation.factory
+        postcheck_factory = None
+        if config.language_generation_postcheck_course_loader is not None:
+            loaded_postcheck = (
+                config.language_generation_postcheck_course_loader.load(ctx))
+            ctx.language_generation_postcheck_course_report = (
+                loaded_postcheck.report)
+            postcheck_factory = loaded_postcheck.factory
         loaded_course = config.language_generation_course_loader.load(ctx)
         ctx.language_generation_course_report = loaded_course.report
         generation_factory = LanguageConnectorProductionFactory(
@@ -773,6 +785,7 @@ def _formal_train_impl(config: FormalTrainConfig,
             DefaultLanguageConnectorProductionRuntimeBuilder(
                 config.language_generation_component_factory,
                 relation_factory,
+                postcheck_factory,
             ),
             loaded_course.stage4_policy,
         )
@@ -907,6 +920,8 @@ def _formal_train_impl(config: FormalTrainConfig,
     result.alias_relation_course_report = ctx.alias_relation_course_report
     result.language_generation_course_report = (
         ctx.language_generation_course_report)
+    result.language_generation_postcheck_course_report = (
+        ctx.language_generation_postcheck_course_report)
     result.execution = FormalTrainExecutionStats(
         input_items=_input_item_count,
         training_items=len(corpus),
