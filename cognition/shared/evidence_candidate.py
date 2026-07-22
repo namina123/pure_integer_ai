@@ -583,31 +583,73 @@ class EvidenceCandidateEngine:
             self, definition: EvidenceCandidateDefinition, *,
             timestamp_base: int = 0) -> HypothesisKey:
         """形成候选并只追加 unknown Evidence，不把样本数当支持或掌握。"""
-        if not isinstance(definition, EvidenceCandidateDefinition):
-            raise TypeError("definition 必须是 EvidenceCandidateDefinition")
-        assert_int(timestamp_base, _where="EvidenceCandidateEngine.register")
-        if type(timestamp_base) is not int or timestamp_base < 0:
-            raise ValueError("timestamp_base 必须为非负严格整数")
-        if len(definition.forming_sources) < (
-                self.protocol.minimum_forming_sources):
-            raise EvidenceCandidateError(
-                "形成（forming）独立来源数未达到注入条件")
-        if self.protocol.aggregate_source in definition.forming_sources:
-            raise EvidenceCandidateError("aggregate manifest 不得冒充 forming observation")
-        hypothesis = definition.hypothesis(self.protocol)
-        existing = self._definitions.get(hypothesis)
-        if existing is not None:
-            if existing != definition:
-                raise EvidenceCandidateError("同一 Hypothesis 绑定了不同候选定义")
-            return hypothesis
+        return self.register_many(((definition, timestamp_base),))[0]
 
+    def register_many(
+            self,
+            requests: tuple[tuple[EvidenceCandidateDefinition, int], ...],
+            ) -> tuple[HypothesisKey, ...]:
+        """整批预检并登记 forming，使 owner 复制次数不随候选数线性增长。"""
+        if not isinstance(requests, tuple) or not requests:
+            raise ValueError("register_many requests 必须是非空 tuple")
+        normalized: list[
+            tuple[EvidenceCandidateDefinition, int, HypothesisKey]
+        ] = []
+        for request in requests:
+            if not isinstance(request, tuple) or len(request) != 2:
+                raise TypeError("register_many request 必须是 definition/timestamp 对")
+            definition, timestamp_base = request
+            if not isinstance(definition, EvidenceCandidateDefinition):
+                raise TypeError("definition 必须是 EvidenceCandidateDefinition")
+            assert_int(timestamp_base, _where="EvidenceCandidateEngine.register")
+            if type(timestamp_base) is not int or timestamp_base < 0:
+                raise ValueError("timestamp_base 必须为非负严格整数")
+            if len(definition.forming_sources) < (
+                    self.protocol.minimum_forming_sources):
+                raise EvidenceCandidateError(
+                    "形成（forming）独立来源数未达到注入条件")
+            if self.protocol.aggregate_source in definition.forming_sources:
+                raise EvidenceCandidateError(
+                    "aggregate manifest 不得冒充 forming observation")
+            normalized.append((
+                definition,
+                timestamp_base,
+                definition.hypothesis(self.protocol),
+            ))
+        hypotheses = tuple(item[2] for item in normalized)
+        if len(set(hypotheses)) != len(hypotheses):
+            raise EvidenceCandidateError("同批 forming 不得重复 Hypothesis")
+
+        pending = []
         probe = self.ledger.clone()
-        self._register_into(
-            probe, definition, hypothesis, timestamp_base=timestamp_base)
-        self._register_into(
-            self.ledger, definition, hypothesis, timestamp_base=timestamp_base)
-        self._definitions[hypothesis] = definition
-        return hypothesis
+        for definition, timestamp_base, hypothesis in normalized:
+            existing = self._definitions.get(hypothesis)
+            if existing is not None:
+                if existing != definition:
+                    raise EvidenceCandidateError(
+                        "同一 Hypothesis 绑定了不同候选定义")
+                self._validate_existing_formation(
+                    definition,
+                    hypothesis,
+                    timestamp_base=timestamp_base,
+                )
+                continue
+            self._register_into(
+                probe,
+                definition,
+                hypothesis,
+                timestamp_base=timestamp_base,
+            )
+            pending.append((definition, timestamp_base, hypothesis))
+        for definition, timestamp_base, hypothesis in pending:
+            self._register_into(
+                self.ledger,
+                definition,
+                hypothesis,
+                timestamp_base=timestamp_base,
+            )
+            self._definitions[hypothesis] = definition
+        return hypotheses
 
     def predict(
             self, hypothesis: HypothesisKey, *, observation: SourceRef,
@@ -793,20 +835,62 @@ class EvidenceCandidateEngine:
         """向指定 ledger 登记候选及形成 unknown，供 clone 预检和正式提交复用。"""
         ledger.register(hypothesis)
         for ordinal, source in enumerate(definition.forming_sources):
-            evidence_id = _EVIDENCE_HASHER.h63((
-                hypothesis.stable_key(),
-                self.protocol.formation_reason_key,
-                source.stable_key(),
-            )) or 1
-            ledger.append_evidence(EvidenceRecord(
-                evidence_id,
+            ledger.append_evidence(self._formation_evidence(
+                definition,
                 hypothesis,
-                EVIDENCE_UNKNOWN,
-                self.protocol.formation_reason_key,
-                source,
-                timestamp_base + ordinal,
-                payload=(ordinal, len(definition.forming_sources)),
+                source=source,
+                ordinal=ordinal,
+                timestamp_base=timestamp_base,
             ))
+
+    def _validate_existing_formation(
+            self,
+            definition: EvidenceCandidateDefinition,
+            hypothesis: HypothesisKey,
+            *,
+            timestamp_base: int,
+            ) -> None:
+        """核验既有 forming Evidence 的来源、ordinal 和逻辑序与课程完全一致。"""
+        existing = {
+            item.evidence_id: item
+            for item in self.ledger.evidence_history(hypothesis)
+        }
+        for ordinal, source in enumerate(definition.forming_sources):
+            expected = self._formation_evidence(
+                definition,
+                hypothesis,
+                source=source,
+                ordinal=ordinal,
+                timestamp_base=timestamp_base,
+            )
+            if existing.get(expected.evidence_id) != expected:
+                raise EvidenceCandidateError(
+                    "既有 forming Evidence 与课程逻辑序或来源不一致")
+
+    def _formation_evidence(
+            self,
+            definition: EvidenceCandidateDefinition,
+            hypothesis: HypothesisKey,
+            *,
+            source: SourceRef,
+            ordinal: int,
+            timestamp_base: int,
+            ) -> EvidenceRecord:
+        """构造一条来源化 forming unknown Evidence，供预检和提交共用。"""
+        evidence_id = _EVIDENCE_HASHER.h63((
+            hypothesis.stable_key(),
+            self.protocol.formation_reason_key,
+            source.stable_key(),
+        )) or 1
+        return EvidenceRecord(
+            evidence_id,
+            hypothesis,
+            EVIDENCE_UNKNOWN,
+            self.protocol.formation_reason_key,
+            source,
+            timestamp_base + ordinal,
+            payload=(ordinal, len(definition.forming_sources)),
+        )
 
     @staticmethod
     def _prediction_from_evidence(

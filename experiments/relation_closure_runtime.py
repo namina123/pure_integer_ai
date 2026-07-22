@@ -10,6 +10,7 @@ from pure_integer_ai.cognition.shared.candidate_runtime import (
     CandidateLearningOutcome,
     CandidateLearningReport,
     CandidateLearningRuntime,
+    CandidateRecognitionRequest,
 )
 from pure_integer_ai.cognition.shared.candidate_verifier import (
     RevealedObjectObservation,
@@ -423,78 +424,162 @@ class RelationClosureRuntime:
                 self._uses[route] = use
 
     def form(
-            self, spec: RelationClosureCandidateSpec,
+            self, spec: RelationClosureCandidateSpec, *,
+            timestamp_base: int = 0,
             ) -> RelationClosureFormationTrace:
-        """核验 S-00 原子定义后登记 H-05 forming unknown，不重写命题真值。"""
-        if not isinstance(spec, RelationClosureCandidateSpec):
-            raise TypeError("spec 必须是 RelationClosureCandidateSpec")
-        proposition_ref = self.semantic_graph.ontology.resolve(
-            spec.proposition.proposition)
-        if proposition_ref is None:
-            raise RelationClosureIncompleteError(
-                "relation forming 前必须已有 S-00 原子命题定义")
-        restored = self.semantic_graph.read_atomic(proposition_ref)
-        if restored.definition != spec.proposition:
-            raise RelationClosureIncompleteError(
-                "relation forming 输入与 SemanticGraph 定义不一致")
-        definition = spec.candidate_definition(self.protocol)
-        existing = self._formations.get(spec.proposition.proposition)
-        if existing is not None:
-            if existing.spec != spec:
+        """核验 S-00 定义后按显式逻辑序登记 forming unknown，不重写真值。"""
+        return self.form_many(((spec, timestamp_base),))[0]
+
+    def form_many(
+            self,
+            requests: tuple[tuple[RelationClosureCandidateSpec, int], ...],
+            ) -> tuple[RelationClosureFormationTrace, ...]:
+        """整批核验 S-00 后登记 relation forming，避免逐候选复制完整 H-00 owner。"""
+        if not isinstance(requests, tuple) or not requests:
+            raise ValueError("relation form_many requests 必须是非空 tuple")
+        normalized = []
+        pending = []
+        for request in requests:
+            if not isinstance(request, tuple) or len(request) != 2:
+                raise TypeError("relation form_many request 必须是 spec/timestamp 对")
+            spec, timestamp_base = request
+            if not isinstance(spec, RelationClosureCandidateSpec):
+                raise TypeError("spec 必须是 RelationClosureCandidateSpec")
+            assert_int(timestamp_base, _where="relation forming timestamp_base")
+            if type(timestamp_base) is not int or timestamp_base < 0:
+                raise ValueError(
+                    "relation forming timestamp_base 必须为非负严格整数")
+            proposition_ref = self.semantic_graph.ontology.resolve(
+                spec.proposition.proposition)
+            if proposition_ref is None:
                 raise RelationClosureIncompleteError(
-                    "同一 Proposition 已绑定不同 relation closure spec")
-            return existing
-        hypothesis = self.candidate_runtime.register(definition)
-        trace = RelationClosureFormationTrace(spec, hypothesis)
-        self._formations[spec.proposition.proposition] = trace
-        return trace
+                    "relation forming 前必须已有 S-00 原子命题定义")
+            restored = self.semantic_graph.read_atomic(proposition_ref)
+            if restored.definition != spec.proposition:
+                raise RelationClosureIncompleteError(
+                    "relation forming 输入与 SemanticGraph 定义不一致")
+            existing = self._formations.get(spec.proposition.proposition)
+            if existing is not None:
+                if existing.spec != spec:
+                    raise RelationClosureIncompleteError(
+                        "同一 Proposition 已绑定不同 relation closure spec")
+                normalized.append(existing)
+                continue
+            definition = spec.candidate_definition(self.protocol)
+            pending.append((len(normalized), spec, definition, timestamp_base))
+            normalized.append(None)
+        propositions = tuple(item[1].proposition.proposition for item in pending)
+        if len(set(propositions)) != len(propositions):
+            raise RelationClosureIncompleteError(
+                "同批 relation forming 不得重复 Proposition")
+        if pending:
+            hypotheses = self.candidate_runtime.register_many(tuple(
+                (definition, timestamp_base)
+                for _index, _spec, definition, timestamp_base in pending
+            ))
+            for (index, spec, _definition, _timestamp), hypothesis in zip(
+                    pending, hypotheses, strict=True):
+                trace = RelationClosureFormationTrace(spec, hypothesis)
+                self._formations[spec.proposition.proposition] = trace
+                normalized[index] = trace
+        return tuple(normalized)
 
     def recognize(
             self, input_value: RelationClosureRecognitionInput,
             ) -> RelationClosureRecognitionTrace:
-        """冻结 Proposition prediction，再执行独立 reveal、H-04 和 active 投影。"""
-        if not isinstance(input_value, RelationClosureRecognitionInput):
-            raise TypeError("input_value 必须是 RelationClosureRecognitionInput")
-        formation = self._formations.get(input_value.proposition)
-        if formation is None:
-            raise RelationClosureIncompleteError(
-                "recognition 前必须完成 relation forming writer")
-        route = input_value.route_key()
-        existing = self._recognitions.get(route)
-        if existing is not None:
-            if existing.input != input_value:
-                raise RelationClosureIncompleteError(
-                    "同一 recognition 路由绑定了不同输入")
-            return existing
-        replacement = None
-        if input_value.replacement is not None:
-            replacement = self.candidate_runtime.hypothesis_for_candidate(
-                input_value.replacement)
-        evidence_seq, decision_seq, projection_seq = (
-            self.candidate_runtime.next_timestamps(3))
-        outcome = self.candidate_runtime.recognize(
-            formation.hypothesis,
-            observation=input_value.observation,
-            scope=input_value.scope,
-            event_key=input_value.event_key,
-            visible_inputs=input_value.visible_inputs,
-            predicted=input_value.proposition,
-            revealed=input_value.revealed,
-            timestamp_seq=evidence_seq,
-            resolve_timestamp_seq=decision_seq,
-            projection_timestamp_seq=projection_seq,
-            archive_refuted=input_value.archive_refuted,
-            replacement=replacement,
-        )
-        facts = self.consumer.lookup_proposition(input_value.proposition)
-        active_fact = facts[0] if len(facts) == 1 else None
-        trace = RelationClosureRecognitionTrace(
+        """自动分配下一段逻辑序，再执行独立 reveal、H-04 和 active 投影。"""
+        timestamps = self.candidate_runtime.next_timestamps(3)
+        return self.recognize_at(
             input_value,
-            outcome,
-            active_fact,
+            timestamp_seq=timestamps[0],
+            resolve_timestamp_seq=timestamps[1],
+            projection_timestamp_seq=timestamps[2],
         )
-        self._recognitions[route] = trace
-        return trace
+
+    def recognize_at(
+            self,
+            input_value: RelationClosureRecognitionInput,
+            *,
+            timestamp_seq: int,
+            resolve_timestamp_seq: int,
+            projection_timestamp_seq: int,
+            ) -> RelationClosureRecognitionTrace:
+        """按课程注入的三段逻辑序执行可重放 relation prediction/reveal。"""
+        return self.recognize_many_at(((
+            input_value,
+            timestamp_seq,
+            resolve_timestamp_seq,
+            projection_timestamp_seq,
+        ),))[0]
+
+    def recognize_many_at(
+            self,
+            requests: tuple[
+                tuple[RelationClosureRecognitionInput, int, int, int], ...],
+            ) -> tuple[RelationClosureRecognitionTrace, ...]:
+        """整批预演并提交 relation recognition，保持 manifest 顺序和幂等路由。"""
+        if not isinstance(requests, tuple) or not requests:
+            raise ValueError("relation recognize_many_at requests 必须是非空 tuple")
+        normalized = []
+        pending = []
+        for request in requests:
+            if not isinstance(request, tuple) or len(request) != 4:
+                raise TypeError("relation recognition request 必须含输入和三段逻辑序")
+            input_value, timestamp_seq, resolve_seq, projection_seq = request
+            if not isinstance(input_value, RelationClosureRecognitionInput):
+                raise TypeError("input_value 必须是 RelationClosureRecognitionInput")
+            formation = self._formations.get(input_value.proposition)
+            if formation is None:
+                raise RelationClosureIncompleteError(
+                    "recognition 前必须完成 relation forming writer")
+            route = input_value.route_key()
+            existing = self._recognitions.get(route)
+            if existing is not None:
+                if existing.input != input_value:
+                    raise RelationClosureIncompleteError(
+                        "同一 recognition 路由绑定了不同输入")
+                normalized.append(existing)
+                continue
+            replacement = None
+            if input_value.replacement is not None:
+                replacement = self.candidate_runtime.hypothesis_for_candidate(
+                    input_value.replacement)
+            candidate_request = CandidateRecognitionRequest(
+                formation.hypothesis,
+                input_value.observation,
+                input_value.scope,
+                input_value.event_key,
+                input_value.visible_inputs,
+                input_value.proposition,
+                input_value.revealed,
+                timestamp_seq,
+                resolve_seq,
+                projection_seq,
+                archive_refuted=input_value.archive_refuted,
+                replacement=replacement,
+            )
+            pending.append((len(normalized), input_value, candidate_request))
+            normalized.append(None)
+        routes = tuple(item[1].route_key() for item in pending)
+        if len(set(routes)) != len(routes):
+            raise RelationClosureIncompleteError(
+                "同批 relation recognition 路由不得重复")
+        if pending:
+            outcomes = self.candidate_runtime.recognize_many(tuple(
+                item[2] for item in pending))
+            for (index, input_value, _request), outcome in zip(
+                    pending, outcomes, strict=True):
+                facts = self.consumer.lookup_proposition(
+                    input_value.proposition)
+                active_fact = facts[0] if len(facts) == 1 else None
+                trace = RelationClosureRecognitionTrace(
+                    input_value,
+                    outcome,
+                    active_fact,
+                )
+                self._recognitions[input_value.route_key()] = trace
+                normalized[index] = trace
+        return tuple(normalized)
 
     def consume(
             self, proposition: ObjectIdentity, *,

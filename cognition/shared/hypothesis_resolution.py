@@ -994,6 +994,8 @@ class HypothesisResolver:
                 timestamp_seq,
                 replacement,
             ))
+        if not planned:
+            return {}
         validation_ledger = self.ledger.clone()
         for transition in planned:
             validation_ledger.append_transition(transition)
