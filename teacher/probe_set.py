@@ -1,14 +1,14 @@
 """teacher.probe_set — D4 留出探针集隔离 + 版本化（§十一 #4-bis line711·#358 完整实现）。
 
-探针集与训练集**隔离**（训练教师评过的探针=泄漏·保持率失真）·断奶验收须 probe_set∩训练集=∅
-（纯整集合不相交判定）。保持率由独立探针评估（D1 曲线② 数据源）·探针集版本化（每轮同版本·
-纯整数序列+版本号·bit-identical 可复现·新 run_id 新版本）。
+本模块只提供旧签名集合的精确内容不相交诊断和版本化。该判据不能识别同源改写，不能
+单独作为断奶 D4；正式隔离由 experiments.evaluation_protocol 的完整内容、dedup cluster、
+provenance cluster 和 EXTERNAL 分账共同判定。
 
 与 D3 互补：D3 防判官偏袒 / D4 防数据泄漏·两道同时过才允许断奶评估。
 
 铁律：纯整数（ConceptRef 元组·集合运算）/ 确定性 bit-identical（版本化·frozenset 确定性）/
   不写死（探针采样质量是 oracle 责任非本模块）/ 几百G不重训（新 run_id 新探针版本）。
-诚实边界：探针隔离防泄漏·不保探针本身有代表性（探针采样质量是 oracle 责任）。
+诚实边界：本模块只防精确签名重复，不证明来源独立或探针代表性。
 """
 from __future__ import annotations
 
@@ -37,10 +37,9 @@ class ProbeSet:
 
 
 def is_disjoint(probe_set: ProbeSet, training_refs: Iterable[ConceptRef]) -> bool:
-    """D4·探针集∩训练集=∅（纯整集合不相交判定）。
+    """判断旧合成 ref 是否精确不相交，不据此宣称 V-00 来源隔离。
 
-    ≠∅→泄漏→保持率失真→can_wean=False（硬条件·D1 曲线② 数据源合法性前置）。
-    training_refs 训练教师评过/喂过的概念 ref 集。
+    非空交集一定是泄漏；空交集仍可能包含同源改写或哈希身份不足。
     """
     return probe_set.probe_refs.isdisjoint(set(training_refs))
 

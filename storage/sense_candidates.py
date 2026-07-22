@@ -51,6 +51,7 @@ from pure_integer_ai.storage import discipline as disc
 from pure_integer_ai.storage.backend import StorageBackend, TYPE_INT, register_extension_table
 
 SENSE_CANDIDATES_TABLE = "sense_candidates"
+SENSE_LEGACY_BRIDGE_TABLE = "sense_legacy_bridge"
 
 # surface_hash 固定种子（跨 run 确定·bit-identical·caller 经 sense_surface_hash 算·不私自复算）
 _SENSE_SURFACE_HASHER = Hasher("sense_candidates.surface")
@@ -78,12 +79,35 @@ _SENSE_CANDIDATES_INDEXES = [
     ("space_id", "surface_hash"),   # 主查询 key（一 token 多 sense·各 sense 一行）
 ]
 
+_SENSE_LEGACY_BRIDGE_COLUMNS = [
+    ("space_id", TYPE_INT),
+    ("legacy_local_id", TYPE_INT),
+    ("object_kind", TYPE_INT),
+    ("object_space_id", TYPE_INT),
+    ("object_local_id", TYPE_INT),
+]
+_SENSE_LEGACY_BRIDGE_INDEXES = [
+    ("space_id", "legacy_local_id", "object_kind"),
+    ("object_kind", "object_space_id", "object_local_id"),
+]
+
+
+class SenseLegacyBridgeConflict(ValueError):
+    """旧 sense 候选到分型对象的迁移不完整或互相冲突。"""
+
 
 def register_sense_candidates(backend: StorageBackend) -> None:
-    """注册 sense_candidates 扩展表（core=False·MUTABLE_MONOTONE·启动/用前调·幂等）。"""
+    """注册旧 sense 候选台账和到权威对象的只增迁移桥。"""
     register_extension_table(backend, SENSE_CANDIDATES_TABLE,
                              _SENSE_CANDIDATES_COLUMNS,
                              disc.DISC_MUTABLE_MONOTONE, _SENSE_CANDIDATES_INDEXES)
+    register_extension_table(
+        backend,
+        SENSE_LEGACY_BRIDGE_TABLE,
+        _SENSE_LEGACY_BRIDGE_COLUMNS,
+        disc.DISC_APPEND_ONLY,
+        _SENSE_LEGACY_BRIDGE_INDEXES,
+    )
 
 
 def read_sense_candidates(backend: StorageBackend, space_id: int,
@@ -138,6 +162,71 @@ def record_sense_token_seen(backend: StorageBackend, space_id: int,
         "space_id": space_id, "surface_hash": surface_hash,
         "sense_sid": sid, "sense_lid": lid,
     }, set_={"sc_tn": ("+=", 1)})
+
+
+def record_legacy_sense_bridge(
+        backend: StorageBackend, *, legacy_ref: tuple[int, int],
+        object_ref: tuple[int, int, int]) -> None:
+    """按对象类型幂等记录旧候选 ConceptRef 到权威 Sense/Concept 的桥。"""
+    legacy_space_id, legacy_local_id = legacy_ref
+    object_kind, object_space_id, object_local_id = object_ref
+    assert_int(
+        legacy_space_id,
+        legacy_local_id,
+        object_kind,
+        object_space_id,
+        object_local_id,
+        _where="record_legacy_sense_bridge",
+    )
+    try:
+        existing = backend.select(SENSE_LEGACY_BRIDGE_TABLE, where={
+            "space_id": legacy_space_id,
+            "legacy_local_id": legacy_local_id,
+            "object_kind": object_kind,
+        })
+    except KeyError:
+        return
+    expected = {
+        "space_id": legacy_space_id,
+        "legacy_local_id": legacy_local_id,
+        "object_kind": object_kind,
+        "object_space_id": object_space_id,
+        "object_local_id": object_local_id,
+    }
+    if existing:
+        if len(existing) != 1 or existing[0] != expected:
+            raise SenseLegacyBridgeConflict(
+                "同一旧候选和对象类型存在不同或重复迁移桥")
+        return
+    backend.insert(SENSE_LEGACY_BRIDGE_TABLE, expected)
+
+
+def load_legacy_sense_bridges(
+        backend: StorageBackend, *, legacy_ref: tuple[int, int]
+        ) -> tuple[tuple[int, int, int], ...]:
+    """读取旧候选关联的 ``(object_kind, space_id, local_id)`` 集合。"""
+    legacy_space_id, legacy_local_id = legacy_ref
+    assert_int(
+        legacy_space_id, legacy_local_id,
+        _where="load_legacy_sense_bridges")
+    try:
+        rows = backend.select(SENSE_LEGACY_BRIDGE_TABLE, where={
+            "space_id": legacy_space_id,
+            "legacy_local_id": legacy_local_id,
+        })
+    except KeyError:
+        return ()
+    values = {
+        (
+            row["object_kind"],
+            row["object_space_id"],
+            row["object_local_id"],
+        )
+        for row in rows
+    }
+    if len(values) != len(rows):
+        raise SenseLegacyBridgeConflict("旧 sense 迁移桥存在重复行")
+    return tuple(sorted(values))
 
 
 def bootstrap_sense_candidates(backend: StorageBackend, concept_index,

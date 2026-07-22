@@ -32,7 +32,10 @@ from pure_integer_ai.storage.node_store import TIER_SHADOW
 from pure_integer_ai.cognition.shared.edge_types import (
     EDGE_RELATION_SIGNAL, EDGE_PRECEDES, EDGE_COOCCURS, EDGE_CAUSES,
 )
-from pure_integer_ai.cognition.shared.hub_detect import compute_hub_set
+from pure_integer_ai.cognition.shared.hub_detect import (
+    HubDegreeState,
+    compute_hub_set,
+)
 from pure_integer_ai.cognition.shared.relation_primitives import REL_CAUSES, ensure_relation_primitives
 
 # ---- 涌现假设签名阈值（oracle 标占位·§十一#4 能力达标∧依赖度低二维调） ----
@@ -91,6 +94,7 @@ def generate_emergent_hypotheses(backend: StorageBackend, edge_store: EdgeStore,
                                  concept_index, *, space_id: int,
                                  excluded_word_refs: set[tuple[int, int]],
                                  rel_kind: int = REL_CAUSES,
+                                 hub_degree_state: HubDegreeState | None = None,
                                  ) -> list[tuple[tuple[int, int], int, tuple[int, int]]]:
     """子环1：涌现假设生成器（PRECEDES 链 connector 定位·用户 2026-07-05 选·运行时重建·无新表）。
 
@@ -141,7 +145,10 @@ def generate_emergent_hypotheses(backend: StorageBackend, edge_store: EdgeStore,
     # n=10 从 385s（per-ref）根治。循环内 O(1) 查表跳过 hub 对·_cooccurs_count 复原纯计数。
     # **语义同**（hub 对不计 hits 不达 EMERGENT_COOCCURS_MIN）。
     exclude_func = getattr(gates, "EXCLUDE_FUNCTION_MODE", False)
-    hub_set = compute_hub_set(edge_store) if exclude_func else set()
+    hub_set = (
+        compute_hub_set(edge_store, state=hub_degree_state)
+        if exclude_func else set()
+    )
 
     # 3. 对每候选 w 查 connector 签名（确定性 sorted 迭代）
     out: list[tuple[tuple[int, int], int, tuple[int, int]]] = []

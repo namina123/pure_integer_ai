@@ -11,7 +11,7 @@ reward 不调·断奶前后不变**（§九铁律承认 enum 例外·同 space_r
   PRECEDES_CUE_FORWARD 时序（刀 A）：A → [cue] → B·A 先于 B：然后/之后/接着 ...
   ARITH_EQUALS_CUE     数值等式声明（刀 B）：EXPR 等于 NUM·左式二目算术：等于/equals ...
   UNIVERSAL_CUE        全称量化（刀 C）：child → [cue] → parent·X 都是 Y（内涵分类子集 X⊆Y）：都是/全是 ...
-  EXISTENTIAL_CUE      存在量化（A1·STEP6·镜像刀 C）：有的 X 是 Y·∃x∈X∧x∈Y（双向祖先 X⊆Y OR Y⊆X）：有的/有些 ...
+  EXISTENTIAL_CUE      存在量化：有的 X 是 Y·只标记 A∩B 非空声明，不携带证明：有的/有些 ...
   MEREOLOGY_CUE        部分-整体（T-L1d·客观序 gap）：X 的一部分 Y·part → whole·boot loader 主路径（同 is_a/causes）·
                        解 REL_MEREOLOGY 误路由入 IS_A_CUE·observe-time 提取 defer
 （刀 A 时序 + 刀 B 数值 = 构造性检查 SELF_PRODUCED·刀 C 量化 = 构造性验证 EXTERNAL·ConceptNet 外部源对齐·
@@ -43,8 +43,7 @@ PRECEDES_CUE_FORWARD = 4  # 时序（刀 A）：A → [cue] → B·A 先于 B（
 ARITH_EQUALS_CUE = 5      # 数值等式声明（刀 B）：EXPR 等于 NUM ·左式二目算术 NUM OP NUM·右式 NUM·闭包传检查·不入图
 UNIVERSAL_CUE = 6         # 全称量化（刀 C）：child → [cue] → parent ·X 都是 Y·内涵分类子集 X⊆Y·
                          # ConceptNet 外部源验·构造性验证 EXTERNAL（刀 A/B SELF_PRODUCED 是检查·刀 C 升验证）·三值逻辑
-EXISTENTIAL_CUE = 7       # 存在量化（A1·STEP6·镜像刀 C）：有的 X 是 Y ·∃x∈X: x∈Y·ConceptNet 外部源验·
-                         # 构造性验证 EXTERNAL·三值逻辑（双向祖先 X⊆Y OR Y⊆X·守属性 ∃ #479 墙）
+EXISTENTIAL_CUE = 7       # 存在量化：有的 X 是 Y；cue 只标记声明，真值需要独立 typed Evidence。
 MEREOLOGY_CUE = 8         # 部分-整体（T-L1d·客观序 gap 补）：X 的一部分 Y ·part(左) → whole(右)·
                          # 解 REL_MEREOLOGY 误路由入 IS_A_CUE（gate ON 时 部分-整体 被建成 IsA 边=语义错）·
                          # 独立 EDGE_MEREOLOGY=25 typed 边·boot loader mereology_facts 主路径（同 is_a/causes）·
@@ -90,7 +89,7 @@ _CUE_WORDS: dict[int, dict[int, frozenset[str]]] = {
             "都是", "全是",  # X 都是 Y ·全称量化内涵分类子集 X⊆Y（刀 C·ConceptNet 外部源验·构造性验证 EXTERNAL·三值逻辑 None 守属性全称墙）
         }),
         EXISTENTIAL_CUE: frozenset({
-            "有的", "有些",  # 有的 X 是 Y ·存在量化 ∃x∈X∧x∈Y（A1·STEP6·镜像刀 C·ConceptNet 外部源验·构造性验证 EXTERNAL·双向祖先 X⊆Y OR Y⊆X·三值 None 守属性 ∃ 墙·closed-class 量化词·开放变体 某些/部分 defer·无 REL_EXISTENTIAL 故无 D:11 readback·frozenset-only）
+            "有的", "有些",  # closed-class 存在量化词；开放变体由后续学习机制处理。
         }),
     },
     LANG_EN: {
@@ -334,7 +333,7 @@ def _similar_from_d11_primary(token: str, space_id: int,
 # 不挂 abstract_mark·激活 ensure_symbol_types）·开放变体走 D:11 教师晋升有路径。
 _NEGATION_CUES: dict[int, frozenset[str]] = {
     LANG_ZH: frozenset({"不", "没", "非", "无"}),   # X 的 Y 不 是 Z（不）/ 没（罕·没是）/ 非文言 / 无文言
-    LANG_EN: frozenset({"not", "no", "never"}),     # X's Y is not Z / no Y is Z / never
+    LANG_EN: frozenset({"not", "no", "never"}),     # 英文例：X's Y is not Z / no Y is Z / never
 }
 
 
@@ -787,31 +786,42 @@ def cue_type_of(token: str, lang: int, *,
         return None
     if backend is None or edge_store is None or space_id is None or concept_index is None:
         return None   # 参数不全→退化（不读 D:11）
-    return _cue_type_from_d11_primary(token, space_id, backend, edge_store, concept_index)
+    return _cue_type_from_d11_primary(token, lang, space_id, backend,
+                                       edge_store, concept_index)
 
 
-def _cue_type_from_d11_primary(token: str, space_id: int,
+def _cue_type_from_d11_primary(token: str, lang: int, space_id: int,
                                backend, edge_store, concept_index) -> int | None:
     """刀4 决断5：D:11 PRIMARY 边 readback → cue_type（反 theater 关键·冷启动返 None）。
 
-    flow：concept_index.lookup(token, space_id) → word_ref | None（词未概念化→None）
+    flow：旧概念索引或词形索引 lookup(token, lang, space_id) → word_ref | None（词未概念化→None）
       → lookup_word_concept(backend, edge_store, word_ref, space_id, tier_filter=TIER_PRIMARY)
       → [(rel_ref, rel_kind), ...] → _REL_KIND_TO_CUE_TYPE.get(rel_kind) → 首命中 cue_type | None。
 
     只读 TIER_PRIMARY D:11 边（已验证晋升·未验证 SHADOW 不注入·反 theater）。
     词未概念化（concept_index.lookup 返 None）/ 无 D:11 PRIMARY 边 / rel_kind 无映射 → None。
     """
-    word_ref = concept_index.lookup(token, space_id)
-    if word_ref is None:
+    # 先查旧的 surface→概念身份，再查词形域的类型化身份；两者可并存。
+    word_refs = []
+    concept_ref = concept_index.lookup(token, space_id)
+    if concept_ref is not None:
+        word_refs.append(concept_ref)
+    from pure_integer_ai.cognition.understanding.word_form_index import WordFormIndex
+    word_ref = WordFormIndex(backend, concept_index).lookup(
+        token, language=lang, space_id=space_id)
+    if word_ref is not None and word_ref not in word_refs:
+        word_refs.append(word_ref)
+    if not word_refs:
         return None   # 词未概念化（冷启动·未 observe）·退化
     from pure_integer_ai.cognition.understanding.word_concept_signal import lookup_word_concept
     from pure_integer_ai.storage.node_store import TIER_PRIMARY
-    rels = lookup_word_concept(backend, edge_store, word_ref,
-                               space_id=space_id, tier_filter=TIER_PRIMARY)
-    for _rel_ref, rel_kind in rels:
-        cue_type = _REL_KIND_TO_CUE_TYPE.get(rel_kind)
-        if cue_type is not None:
-            return cue_type
+    for word_ref in word_refs:
+        rels = lookup_word_concept(backend, edge_store, word_ref,
+                                   space_id=space_id, tier_filter=TIER_PRIMARY)
+        for _rel_ref, rel_kind in rels:
+            cue_type = _REL_KIND_TO_CUE_TYPE.get(rel_kind)
+            if cue_type is not None:
+                return cue_type
     return None
 
 

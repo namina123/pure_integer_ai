@@ -275,14 +275,14 @@ def _build_topo_layers_oi(subgraph_edges: list[dict[str, Any]],
             continue
         oi = e.get("order_index")
         if oi is None:
-            continue   # PRECEDES should always have oi; defensive
+            continue   # PRECEDES 正常必须带 oi；这里保留防御性退化。
         f = (e["space_id_from"], e["local_id_from"])
         t = (e["space_id_to"], e["local_id_to"])
         out_ois.setdefault(f, []).append(oi)
         in_ois.setdefault(t, []).append(oi)
         nodes.add(f)
         nodes.add(t)
-    # Also include CAUSES-only nodes (no PRECEDES edge; rare in language; appended last).
+    # 追加只有 CAUSES、没有 PRECEDES 的节点；语言中罕见，统一放在末尾。
     for e in subgraph_edges:
         if e["edge_type"] in head_types:
             nodes.add((e["space_id_from"], e["local_id_from"]))
@@ -329,11 +329,11 @@ def _build_topo_layers_oi(subgraph_edges: list[dict[str, Any]],
 
 def a2_layer_oi(subgraph_edges: list[dict[str, Any]], active: set[NodeRef],
                 head_types: set[int]) -> tuple[list[list[NodeRef]], dict, HeadStepper]:
-    """F2 A2 oi-first-occurrence layering + convergence + stepper (drop Kahn; gate ON).
+    """F2 A2 按 oi 首次出现分层、收敛并步进；gate ON 时不再使用 Kahn。
 
-    Mirrors a2_layer signature; replaces Kahn layering with _build_topo_layers_oi
-    (includes cyclic nodes). convergence + HeadStepper reuse a2_layer's (subgraph-based,
-    independent of Kahn). Called by dag_path when PRECEDES_OI_MODE ON.
+    签名与 a2_layer 一致，以包含环节点的 _build_topo_layers_oi 替代 Kahn 分层。
+    convergence 和 HeadStepper 继续复用 a2_layer 的子图实现；PRECEDES_OI_MODE ON 时
+    由 dag_path 调用。
     """
     for e in subgraph_edges:
         assert_no_float(e["edge_type"], e.get("order_index") or 0,

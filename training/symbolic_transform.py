@@ -125,7 +125,7 @@ def _eval_rhs(backend, builder, *, rhs_root: ConceptRef,
                                subtree_binding=subtree_binding, value_binding=value_binding)
                      for k in kids]
 
-        # Pow → lower if exp concrete
+        # exp 为具体值时，把 Pow 降为可执行结构。
         if op == OPCODE_POW_PATTERN:
             base_ref, exp_ref = eval_kids[0], eval_kids[1]
             exp_attrs = read_composes_attrs(backend, exp_ref)

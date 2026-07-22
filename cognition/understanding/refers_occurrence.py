@@ -21,12 +21,16 @@ from pure_integer_ai.config import gates
 from pure_integer_ai.storage.edge_store import EdgeStore, SUBTYPE_OCCURRENCE
 from pure_integer_ai.storage.node_store import TIER_SHADOW, TIER_PRIMARY
 from pure_integer_ai.storage.backend import StorageBackend
+from pure_integer_ai.storage.telemetry import record_diagnostic_event
 from pure_integer_ai.storage.pronoun_resolution_count import (
     record_pronoun_resolution_decision, record_pronoun_resolution_dangling,
     read_pronoun_resolution_count,
 )
 from pure_integer_ai.cognition.shared.edge_types import EDGE_REFERS_TO, EDGE_PROPERTY
-from pure_integer_ai.cognition.shared.hub_detect import compute_hub_set
+from pure_integer_ai.cognition.shared.hub_detect import (
+    HubDegreeState,
+    compute_hub_set,
+)
 from pure_integer_ai.cognition.shared.concept_index import ConceptIndex
 from pure_integer_ai.cognition.shared.work_memory import WorkMemory, DEFAULT_PRONOUN_WINDOW
 from pure_integer_ai.cognition.process.effective_weight import effective_weight   # #733 layer 3·OCCURRENCE 衰减复用（同层 cognition L5·import_direction 允许·无循环）
@@ -59,7 +63,9 @@ def resolve_pronoun_occurrence(edge_store: EdgeStore, concept_index: ConceptInde
                                pronoun_features: int | None = None,
                                theta_num: int = THETA_PRONOUN_NUM,
                                theta_den: int = THETA_PRONOUN_DEN,
-                               backend: StorageBackend | None = None) -> tuple[int, int] | None:
+                               backend: StorageBackend | None = None,
+                               hub_degree_state: HubDegreeState | None = None,
+                               ) -> tuple[int, int] | None:
     """性质B pronoun 解析·落记忆 occurrence token。
 
     返回先行词 ConceptRef·悬空返 None（J4=0 真碎句）。
@@ -71,6 +77,7 @@ def resolve_pronoun_occurrence(edge_store: EdgeStore, concept_index: ConceptInde
       悬空时写 pr_fn（record_pronoun_resolution_dangling·self-loop (pronoun,pronoun)·零教师·per-occurrence）。
       consumer 自消费（gate ON·读历史 pr_tn 加候选分·B0 dim consumer=refers_occurrence·reward>0 鲁棒·J4 bool veto 只查 dangling）。
     """
+    record_diagnostic_event("hotspot.pronoun")
     # 代词概念点（性质B 落记忆·occurrence token）·layer 3 候选扩源需 pronoun_ref 先建
     pronoun_ref = concept_index.ensure(pronoun_surface, space_id=memory_space_id,
                                        tier=TIER_SHADOW)
@@ -82,7 +89,7 @@ def resolve_pronoun_occurrence(edge_store: EdgeStore, concept_index: ConceptInde
     # 跨 round append-only 累积 → layer3 循环膨胀 × 每候选 2 全表扫 = 7194×2 = 276M 行 = 218s（n=5 占 65%）。
     # 改 compute_hub_set **单遍** O(#COOCCURS) 建 degree map·每 resolve 调用 1 次·set 查表 O(1)·根治。
     # gate OFF → hub_set 空 set → `in` 永假 → 不过滤 → bit-identical 现状。
-    hub_set = (compute_hub_set(edge_store)
+    hub_set = (compute_hub_set(edge_store, state=hub_degree_state)
                if getattr(gates, "EXCLUDE_FUNCTION_MODE", False) else set())
     # 层1（factor E·2026-07-09·doc/重来_factorE_层1指代_intra_seg_设计）：同段前序 token（同段前指·"动物...它们"
     # 同段）。judge.py:58 注释声称"层1 单句指代已解析"是 theater——#733 只实施层3+② fix·层1 候选生成从未实现。

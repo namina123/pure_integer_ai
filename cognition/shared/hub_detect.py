@@ -27,10 +27,9 @@ emergent_relation_signal(understanding)+refers_occurrence(understanding) 三调 
 """
 from __future__ import annotations
 
-import weakref
-
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.storage.edge_store import EdgeStore
+from pure_integer_ai.storage.telemetry import record_diagnostic_event
 from pure_integer_ai.cognition.shared.edge_types import EDGE_COOCCURS
 
 # θ oracle 标定起点（§十五 B 组初值·hub_degree = COOCCURS 关联边总数·≥ θ → hub）。
@@ -40,11 +39,82 @@ from pure_integer_ai.cognition.shared.edge_types import EDGE_COOCCURS
 # 说/做 类高频实词 hub 跨 N 段 → ≥θ）·content word 单段 ~2-4 边 < θ 不挡。oracle 验后调。
 THETA_HUB_DEGREE = 8
 
-# perf round3 dirty-flag 缓存（审2 建议 WeakKeyDictionary·2026-07-13）：compute_hub_set 结果集缓存留
-# cognition 层·不污染 EdgeStore 实例（解跨层状态泄漏 + 未来 __slots__ 静默 AttributeError 脆性）·
-# WeakKeyDictionary 与实例属性同等 GC 安全（EdgeStore GC -> 条目自动清·无 id 重用串值）。
-# key=edge_store · value=(cooccurs_version, theta, hub_set)·失效即 fresh 重算·bit-identical。
-_HUB_SET_CACHE = weakref.WeakKeyDictionary()
+class HubDegreeState:
+    """在一个训练上下文内增量维护 COOCCURS 度数及 hub 集。
+
+    首次读取时从权威图完整构建，之后只接受同一上下文 COOCCURS writer 提交的强度增量。
+    若调用方绕过该 writer 或切换 backend，必须显式失效后重新构建，禁止用模块级缓存跨上下文共享。
+    """
+
+    def __init__(self, edge_store: EdgeStore, *,
+                 theta: int = THETA_HUB_DEGREE) -> None:
+        """绑定用于首次权威读取的边存储和固定判定阈值。"""
+        assert_int(theta, _where="HubDegreeState.theta")
+        if theta <= 0:
+            raise ValueError("hub 阈值必须为正整数")
+        self._edge_store = edge_store
+        self._theta = theta
+        self._degrees: dict[tuple[int, int], int] | None = None
+        self._hubs: set[tuple[int, int]] = set()
+
+    @property
+    def theta(self) -> int:
+        """返回本状态固定使用的 hub 度数阈值。"""
+        return self._theta
+
+    def invalidate(self) -> None:
+        """清除全部派生度数；下次读取重新扫描权威 COOCCURS 边。"""
+        self._degrees = None
+        self._hubs.clear()
+
+    def _load(self) -> None:
+        """从当前权威边集重建度数和 hub 集；表缺失时按冷启动空图处理。"""
+        if self._degrees is not None:
+            return
+        try:
+            rows = self._edge_store.query_type(EDGE_COOCCURS)
+        except KeyError:
+            rows = []
+        degrees: dict[tuple[int, int], int] = {}
+        for row in rows:
+            strength = row["strength"]
+            assert_int(strength, _where="HubDegreeState._load.strength")
+            source = (row["space_id_from"], row["local_id_from"])
+            target = (row["space_id_to"], row["local_id_to"])
+            degrees[source] = degrees.get(source, 0) + strength
+            degrees[target] = degrees.get(target, 0) + strength
+        self._degrees = degrees
+        self._hubs = {
+            ref for ref, degree in degrees.items() if degree >= self._theta
+        }
+
+    def observe_cooccurs(self, source: tuple[int, int],
+                         target: tuple[int, int],
+                         strength_delta: int) -> None:
+        """在权威写入成功后提交一次 COOCCURS 强度增量。
+
+        尚未首次读取时无需预建派生状态；后续完整读取会包含已经写入的边。
+        """
+        source_sid, source_lid = source
+        target_sid, target_lid = target
+        assert_int(
+            source_sid, source_lid, target_sid, target_lid, strength_delta,
+            _where="HubDegreeState.observe_cooccurs",
+        )
+        if strength_delta < 0:
+            raise ValueError("COOCCURS 强度增量不得为负")
+        if self._degrees is None or strength_delta == 0:
+            return
+        for ref in (source, target):
+            degree = self._degrees.get(ref, 0) + strength_delta
+            self._degrees[ref] = degree
+            if degree >= self._theta:
+                self._hubs.add(ref)
+
+    def hub_set(self) -> set[tuple[int, int]]:
+        """返回当前 hub 集；返回值只读使用，调用方不得原地修改。"""
+        self._load()
+        return self._hubs
 
 
 def hub_degree(word_ref: tuple[int, int], edge_store: EdgeStore) -> int:
@@ -58,6 +128,7 @@ def hub_degree(word_ref: tuple[int, int], edge_store: EdgeStore) -> int:
 
     表未注册（bare fixture）→ KeyError 容错返 0（冷启动退化·bit-identical OFF·无 crash·审1 Q7）。
     """
+    record_diagnostic_event("hotspot.hub")
     sid, lid = word_ref
     assert_int(sid, lid, _where="hub_degree.word_ref")
     try:
@@ -82,45 +153,29 @@ def is_hub(word_ref: tuple[int, int], edge_store: EdgeStore) -> bool:
     return hub_degree(word_ref, edge_store) >= THETA_HUB_DEGREE
 
 
-def compute_hub_set(edge_store: EdgeStore, *, theta: int = THETA_HUB_DEGREE) -> set[tuple[int, int]]:
+def compute_hub_set(edge_store: EdgeStore, *, theta: int = THETA_HUB_DEGREE,
+                    state: HubDegreeState | None = None) -> set[tuple[int, int]]:
     """单遍扫 COOCCURS 边建 degree map → 返 hub_degree ≥ θ 的 ref 集。
 
     **perf**（2026-07-08 训练测试 cProfile 实测）：per-ref is_hub 每 ref 2 全表扫·refers_occurrence 候选过滤
     7194 调 × 2 = 276M 行扫描 = 218s（n=5 占 65%）。改单遍 edge_store.query_type 建 degree map。**复杂度注**
-    （审 P2-2/7）：query_type 调 backend.select("edge", where={"edge_type": COOCCURS})·DictBackend **无索引**
-    （_do_ensure_index no-op）→ 实际 O(#all_edges) 全表扫返 #COOCCURS 行·SQLite 用 ix_edge_type 近 O(#COOCCURS)。
-    win 不在"O(#COOCCURS)"而在"**1 遍** vs per-ref N×2 遍"（n=5: 1 vs 14388 遍）。**大批量场景必需**
+    （审 P2-2/7）：query_type 调 backend.select("edge", where={"edge_type": COOCCURS})，Dict/SQLite
+    都使用 edge_type 索引返回完整 COOCCURS 桶。win 在"**1 遍** vs per-ref N×2 遍"（n=5: 1 vs 14388 遍）。
+    **大批量场景必需**
     （emergence preds/succs + refers_occurrence 候选池）·小 N 场景（collide_score candidates≤少·ctx_refs≤64）仍用 is_hub。
 
-    **perf round3 dirty-flag 缓存**（2026-07-13·解 O(n²) 残留）：单遍改后仍每代词 occurrence（refers_occurrence:85）/
-    每 emergence 信号（emergent_relation_signal:144）调 1 次 = O(#calls × #COOCCURS) = O(n²)。加 dirty-flag 缓存：
-    COOCCURS 未变（edge_store.cooccurs_version 不变）→ 返缓存集 O(1)；失效（COOCCURS 插入/strength 更新 bump）→
-    fresh 重算。observe token loop（代词解析）在 build_cooccurs 之前（observe.py:115 < :265）·段内多代词共享版本→缓存命中。
-    **bit-identical**：缓存仅加速·失效即 fresh 重算·永不 stale（尊重原 fresh-compute 设计 :68-69·COOCCURS append-only 单调增·
-    version 精确追踪）。**只 COOCCURS bump**（代词解析自己 add REFERS_TO/PROPERTY·通用 version 误失效零收益）。
-    缓存挂 cognition 层模块级 WeakKeyDictionary（审2 建议·不污染 EdgeStore 实例·GC 安全·无 id 重用风险）。key=(version, theta)。
+    **上下文增量状态**（2026-07-20·解 O(n²) 残留）：单遍改后仍每代词 occurrence 调一次，若每次
+    COOCCURS 改动都重扫完整桶，累计仍是 O(#calls × #COOCCURS)。生产调用方传入 ``HubDegreeState``，
+    首次扫图后由同一 ``build_cooccurs`` writer 提交 strength 增量，只更新两个端点的 degree/hub 状态；
+    无 state 的独立调用保持 fresh 单遍读取。状态按训练/评测上下文隔离，外部 writer 必须显式失效。
 
     degree[from] += strength ∧ degree[to] += strength（COOCCURS 无向·与 hub_degree 读 strength 同语义·总收口 0.1）。
     表未注册 → KeyError 容错返空集（冷启动退化·bit-identical OFF·无 crash）。
     """
-    # dirty-flag 缓存：COOCCURS 未变 → O(1) 返缓存；失效 → fresh 重算（bit-identical）。
-    cache = _HUB_SET_CACHE.get(edge_store)
-    if cache is not None and cache[0] == edge_store.cooccurs_version and cache[1] == theta:
-        return cache[2]
-    try:
-        rows = edge_store.query_type(EDGE_COOCCURS)
-    except KeyError:
-        result: set[tuple[int, int]] = set()   # edge 表未注册（bare fixture）·向后兼容
-        _HUB_SET_CACHE[edge_store] = (edge_store.cooccurs_version, theta, result)
-        return result
-    deg: dict[tuple[int, int], int] = {}
-    for r in rows:
-        s = r["strength"]   # 总收口 0.1：读 strength（gate OFF 恒 1·等价数行；gate ON 频次）
-        assert_int(s, _where="compute_hub_set.strength")   # 守纯整数（与 hub_degree 一致·对抗审 P2-1）
-        a = (r["space_id_from"], r["local_id_from"])
-        b = (r["space_id_to"], r["local_id_to"])
-        deg[a] = deg.get(a, 0) + s
-        deg[b] = deg.get(b, 0) + s
-    result = {ref for ref, d in deg.items() if d >= theta}
-    _HUB_SET_CACHE[edge_store] = (edge_store.cooccurs_version, theta, result)
-    return result
+    record_diagnostic_event("hotspot.hub")
+    if state is not None:
+        if state.theta != theta:
+            raise ValueError(
+                f"HubDegreeState 阈值 {state.theta} 与请求阈值 {theta} 不一致")
+        return state.hub_set()
+    return HubDegreeState(edge_store, theta=theta).hub_set()

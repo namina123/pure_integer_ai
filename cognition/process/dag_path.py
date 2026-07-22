@@ -285,7 +285,7 @@ def dag_path_step(subgraph_edges: list[dict[str, Any]],
     path = PathData()
     budget = _step_budget(topo_layers, safety_factor)
     attractor_on = bool(getattr(gates, "ATTRACTOR_MODE", False))
-    # F2 acyclic fix（对抗审 REFUTED·MEMORY_REPLAY_MODE 生产 ON）：stepper 初始 active = seeds + replay
+    # F2 acyclic fix：显式 query-local 附加 seed 可能带入有入边节点，初始 active 必须保持无环处理。
     # candidate（struct_ref[i]·i>0·**有 inter-seg in-edge**）。replay seed 进 active 致其 in-edge（last_token[i-1]
     # ->struct_ref[i]）与 out-edge（struct_ref[i]->token_0[i]·后继访时收）组合成环 -> generate.py:109 _path_acyclic
     # crash。OI_MODE ON -> seed 节点跳过 advance（不收 pred 边）·seed 已 active（初始）无须 add_active·其 out-edge

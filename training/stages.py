@@ -29,8 +29,10 @@
 """
 from __future__ import annotations
 
+import contextvars
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from pure_integer_ai.config import gates
 from pure_integer_ai.cognition.shared.types import (
@@ -63,6 +65,54 @@ FLOOR_CONDUCTION_S3 = 500      # 阶段3→4：reward 导通率 ≥ 50%
 FLOOR_PROMOTE_S4 = 100         # 阶段4→5：promote 率 ≥ 10%
 
 _SCALE = 1000
+_FLOOR_NAMES = frozenset({
+    "FLOOR_GRAPH_SIZE_S1",
+    "FLOOR_CAUSES_COV_S2",
+    "FLOOR_CONDUCTION_S3",
+    "FLOOR_PROMOTE_S4",
+})
+_FLOOR_OVERRIDES: contextvars.ContextVar[dict[str, int] | None] = (
+    contextvars.ContextVar("zero_ai_stage_floor_overrides", default=None)
+)
+
+
+def push_stage_floor_overrides(
+        overrides: dict[str, int],
+        ) -> contextvars.Token[dict[str, int] | None]:
+    """叠加当前执行上下文的阶段阈值覆盖，并返回可精确复位的 token。"""
+    current = _FLOOR_OVERRIDES.get()
+    merged = {} if current is None else dict(current)
+    for name, value in overrides.items():
+        if name not in _FLOOR_NAMES:
+            raise AttributeError(f"未知阶段阈值: {name}")
+        if type(value) is not int or value < 0:
+            raise TypeError(f"阶段阈值必须是非负 int: {name}")
+        merged[name] = value
+    return _FLOOR_OVERRIDES.set(merged)
+
+
+def reset_stage_floor_overrides(
+        token: contextvars.Token[dict[str, int] | None]) -> None:
+    """使用 push 返回的 token 恢复调用前阶段阈值上下文。"""
+    _FLOOR_OVERRIDES.reset(token)
+
+
+@contextmanager
+def stage_floor_overrides(overrides: dict[str, int]) -> Iterator[None]:
+    """在当前嵌套或并发上下文内临时覆盖阶段阈值。"""
+    token = push_stage_floor_overrides(overrides)
+    try:
+        yield
+    finally:
+        reset_stage_floor_overrides(token)
+
+
+def _stage_floor(name: str) -> int:
+    """读取当前上下文覆盖；未覆盖时回退到可由测试设置的进程基线。"""
+    current = _FLOOR_OVERRIDES.get()
+    if current is not None and name in current:
+        return current[name]
+    return globals()[name]
 
 
 @dataclass
@@ -117,13 +167,13 @@ def stage_metric_gate(stage: int, metrics: StageMetrics) -> bool:
     返 True = 该阶段已达标可收口进下一阶段。
     """
     if stage == STAGE1_SKELETON:
-        return metrics.graph_size >= FLOOR_GRAPH_SIZE_S1
+        return metrics.graph_size >= _stage_floor("FLOOR_GRAPH_SIZE_S1")
     if stage == STAGE2_CAUSES_ABS:
-        return metrics.causes_coverage >= FLOOR_CAUSES_COV_S2
+        return metrics.causes_coverage >= _stage_floor("FLOOR_CAUSES_COV_S2")
     if stage == STAGE3_REWARD:
-        return metrics.conduction_rate >= FLOOR_CONDUCTION_S3
+        return metrics.conduction_rate >= _stage_floor("FLOOR_CONDUCTION_S3")
     if stage == STAGE4_PROMOTE_WEAN:
-        return metrics.promote_rate >= FLOOR_PROMOTE_S4
+        return metrics.promote_rate >= _stage_floor("FLOOR_PROMOTE_S4")
     # STAGE5：defer·无门控
     return True
 

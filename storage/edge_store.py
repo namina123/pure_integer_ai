@@ -27,11 +27,16 @@ from typing import Any
 
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.storage import discipline as disc
+from pure_integer_ai.storage.assertion_identity import LegacyAssertionAmbiguity
 from pure_integer_ai.storage.backend import StorageBackend, TYPE_INT
 from pure_integer_ai.storage.edge_types import is_registered_edge_type, EDGE_COOCCURS, EDGE_PRECEDES, EDGE_CAUSES
 from pure_integer_ai.storage.node_store import TIER_PRIMARY, TIER_SHADOW
 
 DEFAULT_STRENGTH = 1  # base_strength 初始值（先验·reward 不调）
+
+
+class EdgeMutationConflict(RuntimeError):
+    """旧宽边在唯一性预检后未能精确更新一行。"""
 
 # ---- source 枚举（数据源类型·非null·§十五决策2/B8） ----
 SOURCE_CONCEPTNET = 1
@@ -123,6 +128,52 @@ class EdgeStore:
         """COOCCURS 边变更 → bump 版本号（compute_hub_set dirty-flag cache 失效）。非 COOCCURS 边无操作。"""
         if edge_type == EDGE_COOCCURS:
             self._cooccurs_version += 1
+
+    @staticmethod
+    def _wide_key(*, space_id_from: int, local_id_from: int,
+                  space_id_to: int, local_id_to: int,
+                  edge_type: int) -> dict[str, int]:
+        """构造旧 edge 表的五元宽键；该键只用于兼容读取，不能充当断言身份。"""
+        return {
+            "space_id_from": space_id_from,
+            "local_id_from": local_id_from,
+            "space_id_to": space_id_to,
+            "local_id_to": local_id_to,
+            "edge_type": edge_type,
+        }
+
+    def _select_unique(self, *, space_id_from: int, local_id_from: int,
+                       space_id_to: int, local_id_to: int,
+                       edge_type: int) -> dict[str, Any] | None:
+        """按旧五元宽键读取唯一行，多行时拒绝猜测来源或 scope。"""
+        where = self._wide_key(
+            space_id_from=space_id_from,
+            local_id_from=local_id_from,
+            space_id_to=space_id_to,
+            local_id_to=local_id_to,
+            edge_type=edge_type,
+        )
+        rows = self._b.select("edge", where=where)
+        if len(rows) > 1:
+            signatures = tuple(
+                (row.get("source"), row.get("epistemic_origin"),
+                 row.get("subtype"), row.get("order_index"),
+                 row.get("memory_time_attach"), row.get("content_version"))
+                for row in rows
+            )
+            raise LegacyAssertionAmbiguity(
+                "旧宽边命中多行；五元键缺少 source/parser/scope，禁止选择首行；"
+                f"兼容元数据={signatures!r}")
+        return rows[0] if rows else None
+
+    def _update_selected(self, row: dict[str, Any],
+                         set_: dict[str, Any], *, operation: str) -> None:
+        """用预检所得完整旧行做比较更新，并要求后端恰好命中一行。"""
+        where = {column: row.get(column) for column, _ in EDGE_COLUMNS}
+        matched = self._b.update("edge", where=where, set_=set_)
+        if matched != 1:
+            raise EdgeMutationConflict(
+                f"{operation}: 唯一性预检后应更新 1 行，实际更新 {matched} 行")
 
     def add(self, *, space_id_from: int, local_id_from: int,
             space_id_to: int, local_id_to: int, edge_type: int,
@@ -289,13 +340,12 @@ class EdgeStore:
 
     def get(self, *, space_id_from: int, local_id_from: int,
             space_id_to: int, local_id_to: int, edge_type: int) -> dict[str, Any] | None:
-        """取单边（复合键·limit 1）。"""
-        rows = self._b.select("edge", where={
-            "space_id_from": space_id_from, "local_id_from": local_id_from,
-            "space_id_to": space_id_to, "local_id_to": local_id_to,
-            "edge_type": edge_type,
-        }, limit=1)
-        return rows[0] if rows else None
+        """读取旧宽键下的唯一边；多行歧义必须由 scoped assertion 调用方消解。"""
+        return self._select_unique(
+            space_id_from=space_id_from, local_id_from=local_id_from,
+            space_id_to=space_id_to, local_id_to=local_id_to,
+            edge_type=edge_type,
+        )
 
     def set_tier(self, *, space_id_from: int, local_id_from: int,
                  space_id_to: int, local_id_to: int, edge_type: int,
@@ -317,11 +367,7 @@ class EdgeStore:
             )
         if new_tier == old:
             return   # 幂等
-        self._b.update("edge", where={
-            "space_id_from": space_id_from, "local_id_from": local_id_from,
-            "space_id_to": space_id_to, "local_id_to": local_id_to,
-            "edge_type": edge_type,
-        }, set_={"tier": new_tier})
+        self._update_selected(cur, {"tier": new_tier}, operation="set_tier")
 
     def query_from(self, space_id: int, local_id: int,
                    edge_type: int | None = None) -> list[dict[str, Any]]:
@@ -358,29 +404,35 @@ class EdgeStore:
             raise disc.MonotoneViolation(
                 f"strength 须单调不降·delta 须 ≥ 0: delta={delta}"
             )
-        self._b.update("edge", where={
-            "space_id_from": space_id_from, "local_id_from": local_id_from,
-            "space_id_to": space_id_to, "local_id_to": local_id_to,
-            "edge_type": edge_type,
-        }, set_={"strength": ("+=", delta)})
+        cur = self.get(
+            space_id_from=space_id_from, local_id_from=local_id_from,
+            space_id_to=space_id_to, local_id_to=local_id_to,
+            edge_type=edge_type,
+        )
+        if cur is None:
+            raise KeyError(
+                f"add_strength: 边不存在 ({space_id_from},{local_id_from})->"
+                f"({space_id_to},{local_id_to}) et={edge_type}")
+        self._update_selected(
+            cur, {"strength": ("+=", delta)}, operation="add_strength")
         self._bump_if_cooccurs(edge_type)   # perf round3：COOCCURS strength 更新 bump（hub_degree 读 strength）
 
     def record_success(self, *, space_id_from: int, local_id_from: int,
                        space_id_to: int, local_id_to: int, edge_type: int,
                        success: bool) -> None:
         """sn++（成功）/ tn++（失败）。sn 单调不降；tn 可升（失败计数·revisability）。"""
-        if success:
-            self._b.update("edge", where={
-                "space_id_from": space_id_from, "local_id_from": local_id_from,
-                "space_id_to": space_id_to, "local_id_to": local_id_to,
-                "edge_type": edge_type,
-            }, set_={"sn": ("+=", 1)})
-        else:
-            self._b.update("edge", where={
-                "space_id_from": space_id_from, "local_id_from": local_id_from,
-                "space_id_to": space_id_to, "local_id_to": local_id_to,
-                "edge_type": edge_type,
-            }, set_={"tn": ("+=", 1)})
+        cur = self.get(
+            space_id_from=space_id_from, local_id_from=local_id_from,
+            space_id_to=space_id_to, local_id_to=local_id_to,
+            edge_type=edge_type,
+        )
+        if cur is None:
+            raise KeyError(
+                f"record_success: 边不存在 ({space_id_from},{local_id_from})->"
+                f"({space_id_to},{local_id_to}) et={edge_type}")
+        field = "sn" if success else "tn"
+        self._update_selected(
+            cur, {field: ("+=", 1)}, operation="record_success")
 
     def record_episode_result(self, *, space_id_from: int, local_id_from: int,
                               space_id_to: int, local_id_to: int, edge_type: int,
@@ -416,10 +468,15 @@ class EdgeStore:
             set_["strength"] = ("+=", strength_delta)
         if not set_:
             return
-        self._b.update("edge", where={
-            "space_id_from": space_id_from, "local_id_from": local_id_from,
-            "space_id_to": space_id_to, "local_id_to": local_id_to,
-            "edge_type": edge_type,
-        }, set_=set_)
+        cur = self.get(
+            space_id_from=space_id_from, local_id_from=local_id_from,
+            space_id_to=space_id_to, local_id_to=local_id_to,
+            edge_type=edge_type,
+        )
+        if cur is None:
+            raise KeyError(
+                f"record_episode_result: 边不存在 ({space_id_from},{local_id_from})->"
+                f"({space_id_to},{local_id_to}) et={edge_type}")
+        self._update_selected(cur, set_, operation="record_episode_result")
         self._bump_if_cooccurs(edge_type)   # perf round3 防御性：COOCCURS strength 更新 bump（当前 reward 仅 feed
         #   CAUSES·reward_propagate.py:152 assert CAUSES-only·此 COOCCURS 分支生产不可达·纵深防御）

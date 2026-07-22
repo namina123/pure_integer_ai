@@ -29,17 +29,19 @@ from pure_integer_ai.storage.edge_types import EDGE_COMPOSES
 from pure_integer_ai.storage.node_store import TIER_PRIMARY, NODE_CONCEPT
 from pure_integer_ai.cognition.shared.types import (
     InputPayload, Segment, ObserveResult, SpaceContext, ConceptRef, MultiRef,
-    STAGE_EXTERNAL_DEFINE, MODALITY_LANGUAGE, MODALITY_AUDIO, MODALITY_ANIMATION,
+    STAGE_EXTERNAL_DEFINE, STAGE_TRAINING,
+    MODALITY_LANGUAGE, MODALITY_AUDIO, MODALITY_ANIMATION,
     MODALITY_2D, MODALITY_3D, MODALITY_CODE, MODALITY_ARITH,
 )
 from pure_integer_ai.cognition.shared.concept_index import ConceptIndex
+from pure_integer_ai.cognition.shared.hub_detect import HubDegreeState
 from pure_integer_ai.cognition.shared.work_memory import WorkMemory
 from pure_integer_ai.cognition.understanding.role_precedes import (
     build_precedes_edges, build_inter_segment_precedes, build_struct_anchor,
     attach_role_seq, attach_token_seq,
 )
 from pure_integer_ai.cognition.understanding.emergent_role import (
-    observe_position, role_seq_for_tokens, register_position_hist,
+    PositionHistogramState, register_position_hist,
 )
 from pure_integer_ai.cognition.understanding.causes import build_causes_edges
 from pure_integer_ai.cognition.understanding.is_a import build_is_a_edges, has_reverse_isa_edge
@@ -64,6 +66,15 @@ from pure_integer_ai.cognition.understanding.cue_words import is_property_attr_m
 from pure_integer_ai.cognition.understanding.modification_direction import (
     observe_modification, register_modification_hist,
 )
+from pure_integer_ai.cognition.shared.scope_identity import (
+    CLOCK_OBSERVATION,
+    SCOPE_DOCUMENT,
+    LogicalClock,
+    LogicalClockIdentity,
+    LogicalTimestamp,
+)
+from pure_integer_ai.cognition.shared.scoped_persistence import ScopedIdentityStore
+from pure_integer_ai.cognition.shared.work_memory import WorkMemoryScopeError
 
 
 class ObservePipeline:
@@ -77,26 +88,61 @@ class ObservePipeline:
                  concept_index: ConceptIndex | None = None,
                  work_memory: WorkMemory | None = None,
                  lemmatizer=None, sense_lookup=None,
-                 pronoun_feature_lookup=None) -> None:
+                 record_legacy_sense_counts: bool = True,
+                 pronoun_feature_lookup=None,
+                 word_form_providers=None,
+                 occurrence_index=None,
+                 source_intake=None,
+                 occurrence_order_writer=None,
+                 position_histogram_state=None,
+                 hub_degree_state=None,
+                 write_legacy_language_sequences: bool = True) -> None:
         self.ctx = ctx
         self.backend = ctx.core.backend
         # 缺口#1：position_hist 表用前注册（幂等·cognition 扩展表·守依赖单向向下）
         register_position_hist(self.backend)
+        self.position_histogram_state = (
+            position_histogram_state or PositionHistogramState(self.backend)
+        )
         # B6 指代维：pronoun_resolution_count 表用前注册（幂等·方案3 tn+fn 路·gate 守写读·守依赖单向向下）
         register_pronoun_resolution_count(self.backend)
         # G2 修饰方向A：modification_hist 表用前注册（幂等· 的-cue head/modifier 统计·source write gate-independent·守依赖单向向下）
         register_modification_hist(self.backend)
         self.edge_store = EdgeStore(self.backend)
+        self.hub_degree_state = (
+            hub_degree_state or HubDegreeState(self.edge_store)
+        )
         self.concept_index = concept_index or ConceptIndex(self.backend, ctx.companion)
         self.work_memory = work_memory or WorkMemory()
         self.lemmatizer = lemmatizer
         self.sense_lookup = sense_lookup
+        if type(record_legacy_sense_counts) is not bool:
+            raise TypeError("record_legacy_sense_counts 必须是 bool")
+        self.record_legacy_sense_counts = record_legacy_sense_counts
         self.pronoun_feature_lookup = pronoun_feature_lookup
-        self._timestamp_seq = 0   # audit_event 自增序（无墙钟·性质B time_attach）
+        self.word_form_providers = word_form_providers
+        self.occurrence_index = occurrence_index
+        if source_intake is None and occurrence_index is not None and ctx.companion is not None:
+            from pure_integer_ai.cognition.understanding.source_intake import SourceIntake
+            source_intake = SourceIntake(
+                occurrence_index.source_repository, ctx.companion)
+        self.source_intake = source_intake
+        self.occurrence_order_writer = occurrence_order_writer
+        if occurrence_order_writer is not None and occurrence_index is None:
+            raise ValueError("occurrence 顺序 writer 必须与 OccurrenceIndex 同时装配")
+        if type(write_legacy_language_sequences) is not bool:
+            raise TypeError("write_legacy_language_sequences 必须是 bool")
+        self.write_legacy_language_sequences = write_legacy_language_sequences
+        self.scoped_identity_store = ScopedIdentityStore(self.backend)
 
-    def _next_timestamp(self) -> int:
-        self._timestamp_seq += 1
-        return self._timestamp_seq
+    def _next_timestamp(self, clock: LogicalClock | None) -> int:
+        """推进 scoped 时钟；无 scope 的旧调用只走运行期兼容序号。"""
+        if clock is not None:
+            timestamp = clock.advance()
+            return timestamp.seq
+        legacy_seq = getattr(self.backend, "_legacy_observe_timestamp_seq", 0) + 1
+        self.backend._legacy_observe_timestamp_seq = legacy_seq
+        return legacy_seq
 
     def _get_isa_ancestor_hoist(self, space_id: int):
         """#1115：IS_A ancestor_map 增量 hoist（per space·per-run·lazy 首建·挂 backend）。
@@ -126,7 +172,23 @@ class ObservePipeline:
         return (amap, didx)
 
     def observe(self, raw: InputPayload) -> ObserveResult:
-        """observe 总控：段级循环建图 + 落点分流。"""
+        """在当前 episode 生命周期内执行 observe，异常时丢弃未完成边界。"""
+        scoped = self.work_memory.episode_active
+        if (not scoped and raw.scope_identity is not None
+                and raw.scope_identity.scope_kind != SCOPE_DOCUMENT):
+            raise WorkMemoryScopeError(
+                "带 episode/query/generation scope 的 observe 必须先打开 WorkMemory 生命周期")
+        if scoped:
+            self.work_memory.assert_episode_scope(raw.scope_identity)
+        try:
+            return self._observe_impl(raw)
+        except BaseException:
+            if scoped:
+                self.work_memory.abort_episode()
+            raise
+
+    def _observe_impl(self, raw: InputPayload) -> ObserveResult:
+        """执行段级建图；生命周期边界由外层 observe 入口统一管理。"""
         assert_no_float(self.ctx.stage, raw.source, raw.stage, _where="observe")
         # observer-source 不变量（审1 C1 / 审2 F-2·v2 非循环心脏）：observe 永不接 source=SOURCE_CONCEPTNET——
         # ConceptNet oracle 须 bypass observe（boot 直注 / labeler 直建 edge）。observe 建 CONCEPTNET-source 边
@@ -135,29 +197,70 @@ class ObservePipeline:
             "observer-source invariant (审1 C1 / 审2 F-2): ConceptNet oracle must bypass observe "
             "(boot direct-inject / labeler direct-build edge). An observe-built CONCEPTNET-source edge "
             "would pass REALIZES _has_external_* filter and break v2 non-circular heart.")
+        # 路由依赖必须先于 Companion、来源表和图写入核验，失败的 Observation 不得留下半摄入来源。
+        observation_space_id = target_space_id(raw.stage, self.ctx)
         result = ObserveResult()
+        observation_clock = None
+        observation_clock_start = 0
+        if raw.scope_identity is not None:
+            observation_clock = self.scoped_identity_store.resume_clock(
+                LogicalClockIdentity(raw.scope_identity, CLOCK_OBSERVATION))
+            observation_clock_start = observation_clock.current_seq
         struct_refs: list[ConceptRef] = []
         language_struct_refs: list[ConceptRef] = []   # 语言段 struct_ref（inter-seg PRECEDES 串链·代码域不参与）
         last_tokens: list[ConceptRef] = []   # item3 缺漏5：每段末 token（inter-seg PRECEDES 边 from）
         order_base = 0   # 全局 token 序（C4·跨段递增）
         seg_idx = 0
+        previous_occurrence = None
+        previous_document_index = None
         # ② fix（#733·J4 指代层3）：per-round reset 悬空段集·observe 段末标 struct_ref 进 dangling_units·judge ② 查
-        self.work_memory.dangling_units.clear()
-        self.work_memory._segment_dangling = 0
+        scoped = self.work_memory.episode_active
+        if scoped:
+            self.work_memory.begin_observation_state()
+        else:
+            # 旧直接 observe fixture 没有生命周期身份，保留兼容路径但不把它当作生产契约。
+            self.work_memory.dangling_units.clear()
+            self.work_memory._segment_dangling = 0
+        occurrence_enabled = (
+            self.occurrence_index is not None
+            and raw.source_ref is not None
+            and raw.raw_text is not None
+        )
+        if raw.stage != STAGE_TRAINING:
+            if raw.source_ref is None or raw.raw_text is None:
+                raise ValueError("断奶后 Observation 必须携带 SourceRef 和原文")
+            if self.source_intake is None:
+                raise RuntimeError("断奶后 Observation 缺少 Companion 来源入口")
+            if raw.source_license_id is None or raw.source_batch_id is None:
+                raise ValueError("断奶后 Observation 缺少许可或 batch")
+            self.source_intake.ensure(
+                raw.source_ref,
+                raw.raw_text,
+                license_id=raw.source_license_id,
+                batch_id=raw.source_batch_id,
+            )
+        if occurrence_enabled:
+            if raw.occurrence_scope_identity is None:
+                raise ValueError("L-03 occurrence 写入必须携带稳定来源 scope")
+            self.occurrence_index.ensure_source(raw.source_ref, raw.raw_text)
 
         for seg in raw.segments:
+            if scoped:
+                self.work_memory.begin_segment(seg_idx)
             # parse_segment 按 modality 分发（I1·语言首版实·非语言骨架 defer）
             parsed = self._parse_segment(seg)
             # 落点 space（M4·按 stage·非硬编码 CORE）
-            space_id = target_space_id(raw.stage, self.ctx)
+            space_id = observation_space_id
             memory_space_id = (self.ctx.memory_read.space_id
                                if self.ctx.memory_read is not None else space_id)
 
             # ② fix（#733）：段内悬空计数 reset·resolve_pronoun_occurrence 悬空时 _segment_dangling++·段末归 dangling_units
-            self.work_memory._segment_dangling = 0
+            if not scoped:
+                self.work_memory._segment_dangling = 0
             # 层1 同段指代（factor E·2026-07-09）：段首清当前段前序 token ref 列表·token loop 内 append·
             # resolve_pronoun_occurrence gate PRONOUN_INTRASEG_MODE ON 时读此作同段前指候选源。
-            self.work_memory._current_segment_refs.clear()
+            if not scoped:
+                self.work_memory._current_segment_refs.clear()
             # G2 修饰方向A（2-token lookback·source write gate-independent·镜像 factor E）：
             # 当 prev1 token 是 的（is_property_attr_marker）→ 当前 token=head·prev2=modifier → observe_modification。
             _md_prev1_tok: str | None = None
@@ -165,27 +268,93 @@ class ObservePipeline:
             _md_prev2_ref: ConceptRef | None = None
             # ② normalize 每 token 归一（模块3）
             resolved: list[ConceptRef] = []
+            segment_occurrences = []
+            if occurrence_enabled:
+                lengths = (
+                    len(seg.token_spans),
+                    len(seg.document_token_indices),
+                    len(seg.occurrence_ordinals),
+                )
+                if any(length != len(parsed.tokens) for length in lengths):
+                    raise ValueError("L-03 occurrence 元数据未与 segment tokens 对齐")
             for ti, tok in enumerate(parsed.tokens):
+                if scoped:
+                    self.work_memory.next_occurrence_ordinal()
                 ref = normalize_to_concept(
                     tok, concept_index=self.concept_index, edge_store=self.edge_store,
                     space_id=space_id, source=raw.source,
                     work_memory=self.work_memory, memory_space_id=memory_space_id,
-                    timestamp_seq=self._next_timestamp(),
+                    timestamp_seq=self._next_timestamp(observation_clock),
                     lemmatizer=self.lemmatizer, sense_lookup=self.sense_lookup,
                     pronoun_feature_lookup=self.pronoun_feature_lookup,
                     backend=self.backend, lang=raw.lang,
+                    hub_degree_state=self.hub_degree_state,
                 )
+                representation_candidate = None
+                if self.word_form_providers is not None:
+                    representation_candidate = self.word_form_providers.observe_surface(
+                        tok,
+                        runtime_language=raw.lang,
+                        space_id=space_id,
+                    )
                 if isinstance(ref, MultiRef):
-                    # PRECEDES 取首（结构序）·observe 塌缩·消歧在理解侧 recognize（非生成侧·刀6 修正 docstring）。
-                    # 刀6 片3：MultiRef 各 sense 写 sense_candidates sc_tn（摄入侧写真·非死列表·gate 守）。
+                    # 单值 caller 才可进入此兼容投影；typed caller 在上游已严格拒绝多 Sense。
+                    # legacy MultiRef 各 sense 写 sense_candidates sc_tn；typed 路径不得回写旧目录。
                     # gate SENSE_LOOKUP_MODE OFF → sense_lookup=None → MultiRef 不产 → 此分支不进·退化 bit-identical。
                     resolved.append(ref.refs[0])
-                    if getattr(gates, "SENSE_LOOKUP_MODE", False):
+                    if (self.record_legacy_sense_counts
+                            and getattr(gates, "SENSE_LOOKUP_MODE", False)):
                         _sh = sense_surface_hash(tok)
                         for _sense_ref in ref.refs:
                             record_sense_token_seen(self.backend, space_id, _sh, _sense_ref)
                 else:
                     resolved.append(ref)
+                if occurrence_enabled:
+                    normalized_refs = (
+                        tuple(ref.refs) if isinstance(ref, MultiRef) else (ref,))
+                    typed_candidates = []
+                    legacy_candidates = []
+                    for normalized_ref in normalized_refs:
+                        typed = self.occurrence_index.typed_candidate_for_node(
+                            normalized_ref)
+                        if typed is None:
+                            legacy_candidates.append(normalized_ref)
+                        else:
+                            typed_candidates.append(typed)
+                    if representation_candidate is not None:
+                        typed_candidates.append(representation_candidate)
+                    start, end = seg.token_spans[ti]
+                    occurrence = self.occurrence_index.record(
+                        source=raw.source_ref,
+                        raw_text=raw.raw_text,
+                        scope=raw.occurrence_scope_identity,
+                        start=start,
+                        end=end,
+                        ordinal=seg.occurrence_ordinals[ti],
+                        segment_index=seg.seg_id,
+                        local_index=ti,
+                        document_index=seg.document_token_indices[ti],
+                        speaker=raw.speaker_identity,
+                        typed_candidates=tuple(typed_candidates),
+                        legacy_candidates=tuple(legacy_candidates),
+                    )
+                    result.occurrence_refs.append(occurrence.occurrence)
+                    segment_occurrences.append(occurrence.occurrence)
+                    if (self.occurrence_order_writer is not None
+                            and previous_occurrence is not None
+                            and previous_document_index is not None):
+                        order_fact = self.occurrence_order_writer.record_adjacent(
+                            previous_occurrence,
+                            occurrence.occurrence,
+                            source=raw.source_ref,
+                            scope=raw.occurrence_scope_identity,
+                            previous_position=previous_document_index,
+                            current_position=seg.document_token_indices[ti],
+                        )
+                        result.order_fact_assertion_hashes.append(
+                            order_fact.assertion_hash)
+                    previous_occurrence = occurrence.occurrence
+                    previous_document_index = seg.document_token_indices[ti]
                 # 层1 同段指代（factor E）：append 本段已 normalize 的 token ref（取 resolved[-1]·两分支统一·
                 # MultiRef 取 refs[0] 同 resolved）。pronoun normalize 时此列表含前序不含自身（append 在 normalize 返回后）。
                 # 对抗审 Bug#1：代词永不作先行词（它→他 pronoun→pronoun 污染 OCCURRENCE 边·未解析代词 SHADOW ref
@@ -202,6 +371,8 @@ class ObservePipeline:
                 _md_prev1_ref = resolved[-1]
                 _md_prev1_tok = tok
                 result.built_concepts += 1
+
+            result.segment_occurrence_refs.append(segment_occurrences)
 
             # 段结构概念点（一句/一步一概念·承载 role_seq 属性）。
             # code/arith 用**内容哈希** struct_ref（多程序去重·Task #477·__seg_{stage}_{seg_idx} 原 seg_idx
@@ -267,6 +438,8 @@ class ObservePipeline:
                             space_id=space_id, source=raw.source, root_ref=struct_ref)
                         result.built_concepts += 1
                 struct_refs.append(struct_ref)   # episode seed/sink=COMPOSES 根（致命#3）
+                if scoped:
+                    self.work_memory.end_segment(resolved)
                 seg_idx += 1
                 continue   # 跳过 build_precedes/causes/is_a/cooccurs/attach_role_seq（代码域无句间序）
             # 算术域 modality gate（A3 兄弟件·doc/重来_算术域observe设计补充.md §九）：
@@ -284,43 +457,44 @@ class ObservePipeline:
                             space_id=space_id, source=raw.source, root_ref=struct_ref)
                         result.built_concepts += 1
                 struct_refs.append(struct_ref)   # episode seed/sink=COMPOSES 根（致命#3）
+                if scoped:
+                    self.work_memory.end_segment(resolved)
                 seg_idx += 1
                 continue   # 跳过语言建边（算术域无句间序·同代码域）
-            # ③ PRECEDES（模块2）+ role_seq 属性
-            result.built_edges += build_precedes_edges(
-                self.edge_store, resolved, source=raw.source,
-                space_id=space_id, order_base=order_base)
-            # struct_ref → 段首 token 锚边（item3 缺漏1·active 从 struct_ref 传到 token）
-            if resolved:
-                result.built_edges += build_struct_anchor(
-                    self.edge_store, struct_ref, resolved[0],
-                    source=raw.source, space_id=space_id,
-                    order_base=order_base)
-            if parsed.role_seq:
-                attach_role_seq(self.backend, struct_ref, parsed.role_seq,
-                                order_base=order_base)
-            elif resolved:
-                # 缺口#1·致命6 修复：parsed.role_seq 空（emergent_role 未预填）时
-                # 用 emergent_role 兜底填 role_seq（冷启动全 SUBJECT·解 generate 产空→reward 腿空转）。
-                # 同时 observe_position 累加位置直方图（喂主导度闸·位置桶涌现·doc line580①）。
-                rseq = role_seq_for_tokens(self.backend, resolved)
-                attach_role_seq(self.backend, struct_ref, rseq,
-                                order_base=order_base)
-                for ti, tok_ref in enumerate(resolved):
-                    observe_position(self.backend, tok_ref, ti)
-            # P0 #1040：段 token concept 序落 struct_ref def_array（gate ON·生成侧 dispatch 沿此派发 token concept
-            # → activate_candidates 取别名/surface_of 产真字·解主缺口 generate 永不产真词）。repeat-safe（每 position
-            # 一行·非 PRECEDES walk dedup）。gate OFF（CI）不调零行 bit-identical·生产 flip defer 到 #1041（reward 校准）。
-            if getattr(gates, "DISPATCH_TOKEN_CHAIN_MODE", False) and resolved:
-                attach_token_seq(self.backend, struct_ref, resolved,
-                                 order_base=order_base)
+            # L-05B2A typed formal generation 逐调用关闭旧宽序；未安装 typed owner 的兼容路径保持原行为。
+            if self.write_legacy_language_sequences:
+                result.built_edges += build_precedes_edges(
+                    self.edge_store, resolved, source=raw.source,
+                    space_id=space_id, order_base=order_base)
+                if resolved:
+                    result.built_edges += build_struct_anchor(
+                        self.edge_store, struct_ref, resolved[0],
+                        source=raw.source, space_id=space_id,
+                        order_base=order_base)
+                if parsed.role_seq:
+                    attach_role_seq(self.backend, struct_ref, parsed.role_seq,
+                                    order_base=order_base)
+                elif resolved:
+                    rseq = self.position_histogram_state.roles_for_tokens(resolved)
+                    attach_role_seq(self.backend, struct_ref, rseq,
+                                    order_base=order_base)
+                    for ti, tok_ref in enumerate(resolved):
+                        self.position_histogram_state.observe(tok_ref, ti)
+                if (getattr(gates, "DISPATCH_TOKEN_CHAIN_MODE", False)
+                        and resolved):
+                    attach_token_seq(self.backend, struct_ref, resolved,
+                                     order_base=order_base)
             # ④ CAUSES（模块2-bis·§8.1c 硬边界·reward 反传唯一落点）
             result.built_edges += build_causes_edges(
                 self.edge_store, resolved,
                 structured_pairs=parsed.structured_causal_pairs,
                 cue_pairs=parsed.cue_based_causal_pairs,
                 source=raw.source, space_id=space_id,
-                weaning_phase=self.ctx.weaning_phase)
+                weaning_phase=self.ctx.weaning_phase,
+                assertion_scope=raw.scope_identity,
+                assertion_store=(self.scoped_identity_store
+                                 if raw.scope_identity is not None else None),
+                qualifier_prefix=(seg_idx,))
             # ④-bis IS_A（§8.1b proper subset·致命3 来源② 系词提取·Segment.is_a_pairs）
             result.built_edges += build_is_a_edges(
                 self.edge_store, resolved,
@@ -375,7 +549,8 @@ class ObservePipeline:
             # ⑤ COOCCURS（模块6·分桶 SHADOW）
             result.built_edges += build_cooccurs(
                 self.edge_store, resolved, lang=raw.lang, domain=raw.domain,
-                source=raw.source, space_id=space_id)
+                source=raw.source, space_id=space_id,
+                hub_degree_state=self.hub_degree_state)
             # ⑤-bis 选择倾向共现统计（刀5 件5 地基·§十 边约束·selection_pref_count 表 sp_tn 写）
             # 段内 token 类聚合共现·双向记录 (a, class_of(b))/(b, class_of(a))·predicate 写时识别 defer S4。
             # gate SELECTION_PREF_MODE·self-gate·OFF 返 0·守回归 bit-identical（self.backend 同 observe 既有）。
@@ -401,7 +576,10 @@ class ObservePipeline:
                     epistemic=EPI_CUE, space_id=space_id)
 
             # 段入 WorkMemory FIFO（供后续段 pronoun 回溯·性质B 跨句 partial）
-            self.work_memory.push_segment(seg_idx, resolved)
+            if scoped:
+                self.work_memory.end_segment(resolved)
+            else:
+                self.work_memory.push_segment(seg_idx, resolved)
             struct_refs.append(struct_ref)
             language_struct_refs.append(struct_ref)   # 语言段才串 inter-seg PRECEDES（代码域 continue 不入）
             last_tokens.append(resolved[-1] if resolved else struct_ref)   # item3 缺漏5：段末 token（inter-seg 边 from）
@@ -410,16 +588,23 @@ class ObservePipeline:
 
         # 句间序 PRECEDES（替旧 TYPE_SENTENCE_TRANSITION·§十五E·item3 缺漏5 d-1：段末token→下段struct_ref）
         # 仅语言段串序链（代码域无句间序·language_struct_refs 不含代码段·A3）
-        if len(language_struct_refs) > 1:
+        if (self.write_legacy_language_sequences
+                and len(language_struct_refs) > 1):
             result.built_edges += build_inter_segment_precedes(
                 self.edge_store, language_struct_refs, last_tokens, source=raw.source,
-                space_id=target_space_id(raw.stage, self.ctx),
+                space_id=observation_space_id,
                 seg_order_base=order_base)
 
         # ⑧ 落点分流（模块8·审计记录）
         route = route_to_space(raw.stage, self.ctx)
         result.deferred.append(f"route:{route}")
         result.struct_refs = struct_refs   # 段结构概念 ref 序（formal_train episode seed/sink/key_skeleton 用）
+        if (observation_clock is not None
+                and observation_clock.current_seq > observation_clock_start):
+            self.scoped_identity_store.register_timestamp(LogicalTimestamp(
+                observation_clock.identity,
+                observation_clock.current_seq,
+            ))
         return result
 
     def _parse_segment(self, seg: Segment) -> Segment:

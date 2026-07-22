@@ -33,6 +33,10 @@ from pure_integer_ai.storage.concept_correspondence import (
 _CONCEPT_HASHER = Hasher("pure_integer_ai.concept.v1")
 
 
+class ConceptIdentityConflict(ValueError):
+    """旧 surface 身份已绑定到不同节点类型时拒绝静默复用。"""
+
+
 def content_hash(surface: str | int) -> int:
     """surface → 整数 hash（str 走 h63·int 直接用·QID/synset 整数 id）。"""
     if isinstance(surface, int):
@@ -90,6 +94,10 @@ class ConceptIndex:
         space_map = self._index.setdefault(space_id, {})
         if ch in space_map:
             lid = space_map[ch]
+            row = self._nodes.get(space_id, lid)
+            if row is None:
+                raise ConceptIdentityConflict("surface 身份指向不存在的概念节点")
+            # 旧 API 历史上不把 node_type 纳入身份；新代码须走 ensure_typed 或分型图对象。
             # tier 单调升（§十二⑤·概念点 tier=max 其边 tier）
             self._bump_tier(space_id, lid, tier)
             return (space_id, lid)
@@ -113,12 +121,43 @@ class ConceptIndex:
             self._companion.put_text(surface)
         return (space_id, lid)
 
+    def ensure_typed(self, surface: str | int, *, space_id: int,
+                     tier: int = TIER_SHADOW,
+                     node_type: int = 1) -> tuple[int, int]:
+        """严格创建旧节点；同 surface 已绑定异型节点时拒绝复用。"""
+        existing = self.lookup(surface, space_id)
+        if existing is not None:
+            row = self._nodes.get(*existing)
+            if row is None:
+                raise ConceptIdentityConflict("surface 身份指向不存在的概念节点")
+            if row["type"] != node_type:
+                raise ConceptIdentityConflict(
+                    "同一旧 surface 身份不得同时充当不同节点类型；"
+                    "必须使用分型对象或显式迁移桥")
+        return self.ensure(
+            surface, space_id=space_id, tier=tier, node_type=node_type)
+
     def lookup(self, surface: str | int, space_id: int) -> tuple[int, int] | None:
         """查既有概念点（不建）。lazy 重建守跨 run identity（载入算子可 inline·§8.7-idx）。"""
         self._ensure_space_loaded(space_id)   # lazy 重建（post-load_run·载入算子 lookup 命中）
         ch = content_hash(surface)
         lid = self._index.get(space_id, {}).get(ch)
         return (space_id, lid) if lid is not None else None
+
+    def lookup_typed(self, surface: str | int, space_id: int, *,
+                     node_type: int) -> tuple[int, int] | None:
+        """按旧 surface 和节点类型查找；同键异型时 fail closed。"""
+        assert_int(space_id, node_type, _where="ConceptIndex.lookup_typed")
+        ref = self.lookup(surface, space_id)
+        if ref is None:
+            return None
+        row = self._nodes.get(*ref)
+        if row is None:
+            raise ConceptIdentityConflict("surface 身份指向不存在的概念节点")
+        if row["type"] != node_type:
+            raise ConceptIdentityConflict(
+                "旧 surface 已绑定其他节点类型，不能按请求类型静默读取")
+        return ref
 
     def _bump_tier(self, space_id: int, local_id: int, new_tier: int) -> None:
         """tier 单调升（MUTABLE_MONOTONE·只升不降·NodeStore.set_tier 守）。"""
@@ -129,3 +168,6 @@ class ConceptIndex:
         except Exception:
             # set_tier 内部已守单调（降级抛 MonotoneViolation）·此处忽略降级尝试
             pass
+
+
+__all__ = ["ConceptIdentityConflict", "ConceptIndex", "content_hash"]

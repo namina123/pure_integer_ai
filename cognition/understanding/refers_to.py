@@ -25,6 +25,8 @@ from pure_integer_ai.storage.node_store import TIER_PRIMARY, TIER_SHADOW
 from pure_integer_ai.storage.edge_store import EPI_STRUCTURED
 from pure_integer_ai.storage.abstract_mark import set_mark, MARK_LANG
 from pure_integer_ai.storage.backend import StorageBackend
+from pure_integer_ai.storage.telemetry import record_diagnostic_event
+from pure_integer_ai.cognition.shared.hub_detect import HubDegreeState
 from pure_integer_ai.cognition.shared.types import LANG_NONE
 from pure_integer_ai.cognition.shared.concept_index import ConceptIndex
 from pure_integer_ai.cognition.shared.types import MultiRef, ConceptRef
@@ -60,6 +62,7 @@ def normalize_to_concept(tok: str, *,
                          pronoun_feature_lookup: PronounFeatureLookup | None = None,
                          backend: StorageBackend | None = None,
                          lang: int = LANG_NONE,
+                         hub_degree_state: HubDegreeState | None = None,
                          ) -> ConceptRef | MultiRef:
     """归一链：tok → ConceptRef / MultiRef（性质分发）。
 
@@ -68,6 +71,7 @@ def normalize_to_concept(tok: str, *,
     backend + lang：词形 NODE_WORD 挂 abstract_mark MARK_LANG（§7.7.1 路径 B·解 target_lang 缺口·
       observe 透传 raw.lang·backend=None 时 skip·bare fixture 向后兼容）。
     """
+    record_diagnostic_event("hotspot.normalize")
     # —— 代词走性质B（occurrence-bound·落记忆） ——
     if is_pronoun(tok):
         if memory_space_id is None or work_memory is None:
@@ -82,6 +86,7 @@ def normalize_to_concept(tok: str, *,
             pronoun_features=(pronoun_feature_lookup(tok)
                               if pronoun_feature_lookup else None),
             backend=backend,   # B6 方案3 tn+fn 路 pronoun_resolution_count 读写（gate 守·None skip）
+            hub_degree_state=hub_degree_state,
         )
         if antecedent is None:
             # 悬空 → 代词概念点 SHADOW（J4=0 真碎句由卷三判）

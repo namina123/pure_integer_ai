@@ -23,6 +23,7 @@ from pure_integer_ai.crosscut.guards.float_guard import (
 from pure_integer_ai.crosscut.guards.lint import (
     no_float_check,
     import_direction_check,
+    chinese_explanation_check,
     run_lint,
 )
 
@@ -36,5 +37,6 @@ __all__ = [
     "scan_module",
     "no_float_check",
     "import_direction_check",
+    "chinese_explanation_check",
     "run_lint",
 ]

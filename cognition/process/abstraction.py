@@ -46,6 +46,7 @@ from pure_integer_ai.algorithm.graph_algebra import isa_ancestor_map
 from pure_integer_ai.algorithm.closure import transitive_closure, closure_pure_refers_to
 from pure_integer_ai.storage.edge_types import EDGE_IS_A, EDGE_MEREOLOGY, EDGE_REFERS_TO
 from pure_integer_ai.storage.edge_store import SOURCE_CONCEPTNET, EPI_STRUCTURED, SUBTYPE_PURE_ALIAS
+from pure_integer_ai.storage.telemetry import record_diagnostic_event
 from pure_integer_ai.cognition.shared.types import ConceptRef
 from pure_integer_ai.config import gates
 
@@ -63,6 +64,7 @@ def build_isa_ancestor_map(backend, *, space_id: int) -> dict[ConceptRef, set[Co
     铁律：纯整数 / 确定性（transitive_closure BFS 节点自然序·bit-identical）/ 单向依赖（L5→algorithm L2
     向下 + L5→storage L0 读边）/ 幂等（纯读·重复同果）。
     """
+    record_diagnostic_event("hotspot.ancestor")
     assert_int(space_id, _where="build_isa_ancestor_map.space_id")
     # #1115 perf 迭代2：observe hoist 增量优先（所有 caller 统一增量 map·免 gen-cache 频繁失效重建）。
     # cProfile n=50 证：structure_discover/graph_view/reward_propagate 走 gen-cache·observe 建 IS_A → gen bump →
@@ -269,6 +271,7 @@ def nearest_isa_ancestor(ancestor_map: dict[ConceptRef, set[ConceptRef]],
     （MED-2 perf #1147·原 O(|ancestors|²)·T-L1a 30k IS_A 深 closure → ancestors 大非链短·155k calls 176s self）。
     写读一致铁律：三处调用方须同 release 同改（写时 class_of(b)=X·读时 class_of(c)=X·row 命中）·否则 pair-rate 失配死信。
     """
+    record_diagnostic_event("hotspot.nearest")
     ancestors = ancestor_map.get(ref)
     if not ancestors:
         return ref   # 冷启动退化·无 IS_A 祖先→class = token 自身

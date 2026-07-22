@@ -86,11 +86,12 @@ def run_weaning_arith(*, rounds_per_stage: int = 2,
         **诚实**：mock POST 非真断奶（weaning_ready 仍 False·非 rep.ready 切换·E2 整体仍 False·
         teacher_offline defer W6 / probe_input_novel defer W4·W2 只验第三条件算术域就位）。
 
-    probe_holdout（W4 D4 探针留出·默认 0 不切·bit-identical）：
+    probe_holdout（W4 兼容探针尾切·默认 0 不切）：
       - >0：formal_train 主入口切 corpus 末尾 N 作 held-out probe（不喂 boot/discovery/H2/stage/generate/
-        base_freq 全部下游）→ ctx.probe_set_disjoint=True（D4 通用路径过·D4 域无关·算术域走通用 ctx track）。
+        base_freq 全部下游），可运行保持率诊断并证明精确签名不重复。
       - probe_version（默认 None→派生自 run_id）探针版本号·守几百 G 不重训·bit-identical 可复现。
-      **诚实**：D4 单闸门过非真断奶（weaning_ready 仍 False·D3/D5/E2 defer·holdout_retention 真度量 defer W6）。
+      **V-00 纠偏**：尾切没有 dedup/provenance cluster，不能识别同源改写，不再解锁断奶 D4；
+      严格 D4 必须通过 FormalTrainConfig.evaluation_plan 注入五类 split ledger。
       **probe_holdout 须 << len(corpus)=12**（切分影响 discovery held-out 池·probe_holdout=10→training 2→泛化池空）。
 
     calibrate_mode_b（W5 D5 Mode B 预验台账·默认 False 不跑·bit-identical）：
@@ -125,7 +126,7 @@ def run_weaning_arith(*, rounds_per_stage: int = 2,
         rounds_per_stage=rounds_per_stage,
         weaning_phase=weaning_phase,                       # W2 mock POST 注入（默认 PRE 守 bit-identical）
         collect_episodes=is_post,                          # W2 POST 测试查 episode.reward/judge_G5_active·PRE 默认 False
-        probe_holdout=probe_holdout,                       # W4 D4 探针留出（默认 0 不切·bit-identical）
+        probe_holdout=probe_holdout,                       # W4 兼容尾切（只作精确内容和保持率诊断）
         probe_version=probe_version if probe_version is not None
                        else _derive_probe_version(run_id),  # W4 D4 探针版本（派生自 run_id·守几百 G 不重训）
         calibrate_mode_b=calibrate_mode_b,                 # W5 D5 Mode B 预验（默认 False 不跑·bit-identical）
@@ -148,26 +149,22 @@ def run_weaning_arith(*, rounds_per_stage: int = 2,
                   for item in corpus]
     backend = DictBackend()
 
-    saved_tm = gates.TRAINING_MODE
-    saved_mode_b = gates.MODE_B_CROSS_VERIFY_MODE
-    saved_floors = (stages.FLOOR_GRAPH_SIZE_S1, stages.FLOOR_CAUSES_COV_S2,
-                    stages.FLOOR_CONDUCTION_S3, stages.FLOOR_PROMOTE_S4)
+    gate_token = gates.push_gate_overrides({
+        "TRAINING_MODE": training_mode,
+        "MODE_B_CROSS_VERIFY_MODE": is_post,
+    })
+    floor_token = stages.push_stage_floor_overrides({
+        "FLOOR_GRAPH_SIZE_S1": 0,
+        "FLOOR_CAUSES_COV_S2": 0,
+        "FLOOR_CONDUCTION_S3": 0,
+        "FLOOR_PROMOTE_S4": 0,
+    } if flat_floors else {})
     try:
-        if flat_floors:
-            # W0 诚实标注：绕 stage 门控验 reward 闭环激活·门控阈值标定 defer D5（W0 不 claim 断奶 PASS）
-            stages.FLOOR_GRAPH_SIZE_S1 = 0
-            stages.FLOOR_CAUSES_COV_S2 = 0
-            stages.FLOOR_CONDUCTION_S3 = 0
-            stages.FLOOR_PROMOTE_S4 = 0
-        gates.TRAINING_MODE = training_mode
-        if is_post:
-            gates.MODE_B_CROSS_VERIFY_MODE = True   # W2 POST cross-verify 激活（:597 双条件之一·try/finally 守 CI）
+        # W0 仅在当前上下文绕阶段门控，避免并发训练共享阈值串扰。
         result = formal_train(config, corpus, backend=backend)
     finally:
-        gates.TRAINING_MODE = saved_tm
-        gates.MODE_B_CROSS_VERIFY_MODE = saved_mode_b
-        (stages.FLOOR_GRAPH_SIZE_S1, stages.FLOOR_CAUSES_COV_S2,
-         stages.FLOOR_CONDUCTION_S3, stages.FLOOR_PROMOTE_S4) = saved_floors
+        stages.reset_stage_floor_overrides(floor_token)
+        gates.reset_gate_overrides(gate_token)
     return (result, backend) if return_backend else result
 
 

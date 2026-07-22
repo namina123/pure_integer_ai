@@ -20,6 +20,11 @@ from pure_integer_ai.storage.edge_store import (
 )
 from pure_integer_ai.storage.node_store import TIER_PRIMARY, NODE_CONCEPT
 from pure_integer_ai.cognition.shared.edge_types import EDGE_CAUSES
+from pure_integer_ai.cognition.shared.scope_identity import (
+    ScopeIdentity,
+    concept_assertion,
+)
+from pure_integer_ai.cognition.shared.scoped_persistence import ScopedIdentityStore
 
 
 def build_causes_edges(edge_store: EdgeStore,
@@ -29,7 +34,10 @@ def build_causes_edges(edge_store: EdgeStore,
                        cue_pairs: list[tuple[int, int]],
                        source: int, space_id: int,
                        teacher_confirmed: list[tuple[int, int]] | None = None,
-                       weaning_phase: int = 0) -> int:
+                       weaning_phase: int = 0,
+                       assertion_scope: ScopeIdentity | None = None,
+                       assertion_store: ScopedIdentityStore | None = None,
+                       qualifier_prefix: tuple[int, ...] = ()) -> int:
     """CAUSES 因果建边（来源①②③·④闭包按需派生非此）。
 
     structured_pairs / cue_pairs / teacher_confirmed：token index 对·经 refs 解析为概念 ref。
@@ -37,47 +45,75 @@ def build_causes_edges(edge_store: EdgeStore,
     返回建边数。
     """
     n = 0
+    if (assertion_scope is None) != (assertion_store is None):
+        raise ValueError("CAUSES assertion_scope 与 assertion_store 必须同时提供")
     # ① 结构化源（有向照搬不反转·M1·epistemic_origin=STRUCTURED）
     for ai, bi in structured_pairs:
         n += _insert_causes(edge_store, refs[ai], refs[bi],
-                            source=source, epistemic=EPI_STRUCTURED, space_id=space_id)
+                            source=source, epistemic=EPI_STRUCTURED, space_id=space_id,
+                            assertion_scope=assertion_scope,
+                            assertion_store=assertion_store,
+                            qualifiers=(*qualifier_prefix, ai, bi))
     # ② 指向词 + 句法（epistemic_origin=CUE）
     for ai, bi in cue_pairs:
         n += _insert_causes(edge_store, refs[ai], refs[bi],
-                            source=source, epistemic=EPI_CUE, space_id=space_id)
+                            source=source, epistemic=EPI_CUE, space_id=space_id,
+                            assertion_scope=assertion_scope,
+                            assertion_store=assertion_store,
+                            qualifiers=(*qualifier_prefix, ai, bi))
     # ③ 断奶前 LLM 教师确认（epistemic_origin=LLM_CONFIRM·断奶后退场）
     if teacher_confirmed and weaning_phase == 0:  # WEANING_PRE=0
         for ai, bi in teacher_confirmed:
             n += _insert_causes(edge_store, refs[ai], refs[bi],
                                 source=5,  # SOURCE_TEACHER
-                                epistemic=EPI_LLM_CONFIRM, space_id=space_id)
+                                epistemic=EPI_LLM_CONFIRM, space_id=space_id,
+                                assertion_scope=assertion_scope,
+                                assertion_store=assertion_store,
+                                qualifiers=(*qualifier_prefix, ai, bi))
     return n
 
 
 def _insert_causes(edge_store: EdgeStore, a: tuple[int, int], b: tuple[int, int],
-                   *, source: int, epistemic: int, space_id: int) -> int:
+                   *, source: int, epistemic: int, space_id: int,
+                   assertion_scope: ScopeIdentity | None = None,
+                   assertion_store: ScopedIdentityStore | None = None,
+                   qualifiers: tuple[int, ...] = ()) -> int:
     if a == b:
         return 0
     # space_id 来自参数（M4·按 stage）·端点 ref 已在目标 space 建
     # gate CAUSES_DEDUP_MODE（perf round5·mirror PRECEDES_DEDUP_MODE）：ON 走 add_causes_dedup 跨 round
     # 去重（解 observe 16× 重复边膨胀·silent skip·**reward 影响零**·终审 resolver 3 路径全证伪·纯 perf + 数据卫生）。
     # OFF 走旧 add（16×·CI bit-identical）·详见 add_causes_dedup docstring。
-    if getattr(gates, "CAUSES_DEDUP_MODE", False):
-        return 1 if edge_store.add_causes_dedup(
+    # 有 scoped assertion 时，旧 edge 只能保留关系聚合的一行；每次 episode 的
+    # 独立事实已经进入 assertion registry，不能再让兼容行重复膨胀并失去 EdgeRef 唯一性。
+    if assertion_scope is not None or getattr(gates, "CAUSES_DEDUP_MODE", False):
+        inserted = edge_store.add_causes_dedup(
             space_id_from=a[0], local_id_from=a[1],
             space_id_to=b[0], local_id_to=b[1],
             edge_type=EDGE_CAUSES, source=source,
             epistemic_origin=epistemic, tier=TIER_PRIMARY,
-        ) else 0
-    edge_store.add(
-        space_id_from=a[0], local_id_from=a[1],
-        space_id_to=b[0], local_id_to=b[1],
-        edge_type=EDGE_CAUSES, strength=DEFAULT_STRENGTH,
-        source=source, epistemic_origin=epistemic,
-        order_index=None, role=None,   # CAUSES 无 order_index 时序语义（§十三C·OR 语义）
-        tier=TIER_PRIMARY,
-    )
-    return 1
+        )
+    else:
+        edge_store.add(
+            space_id_from=a[0], local_id_from=a[1],
+            space_id_to=b[0], local_id_to=b[1],
+            edge_type=EDGE_CAUSES, strength=DEFAULT_STRENGTH,
+            source=source, epistemic_origin=epistemic,
+            order_index=None, role=None,   # CAUSES 无 order_index 时序语义（§十三C·OR 语义）
+            tier=TIER_PRIMARY,
+        )
+        inserted = True
+    if assertion_scope is not None and assertion_store is not None:
+        assertion_store.register_assertion(concept_assertion(
+            EDGE_CAUSES,
+            a,
+            b,
+            scope=assertion_scope,
+            provenance_kind=source,
+            epistemic_origin=epistemic,
+            qualifiers=qualifiers,
+        ))
+    return 1 if inserted else 0
 
 
 def bootstrap_causes_edges(concept_index, edge_store: EdgeStore,

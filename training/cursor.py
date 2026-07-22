@@ -20,6 +20,7 @@ CursorState / cursor_resume —— stage-skip 续训（E8·跳已完成 skippabl
 per-space dump 形态（复用 paths.py C5）：
   <run_dir>/<run_id>/space_<sid>.dump = JSON 行（该 space 的所有表行·filter_rows_for_space 过滤）
   跨 space 边在两端 space dump 各留一份（append-only 可回溯·非跨 space 移动·§十五决策1）。
+  <run_dir>/<run_id>/global_identity.dump = 不属于单一 space 的身份索引完整快照。
 
 铁律：纯整数（dump 行纯整·伴随 TEXT 合法·JSON 序列化无浮点）/ 确定性（per-space 文件+行序确定·bit-identical）/
   append-only（load 不改 dump 文件·续训写新 run_id）/ 几百G不重训（新 run_id·终 dump base）。
@@ -36,6 +37,34 @@ from typing import Any
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.storage.backend import StorageBackend
 from pure_integer_ai.storage import paths
+from pure_integer_ai.storage.assertion_identity import (
+    ASSERTION_SUPERSEDE_TABLE,
+    IDENTITY_HEADER_TABLE,
+    IDENTITY_PART_TABLE,
+)
+from pure_integer_ai.storage.assertion_record import (
+    ASSERTION_QUALIFIER_TABLE,
+    ASSERTION_RECORD_TABLE,
+)
+from pure_integer_ai.storage.graph_object import GRAPH_OBJECT_TABLE
+from pure_integer_ai.storage.graph_object_identity import (
+    GRAPH_HYPOTHESIS_GROUP_COMPONENT_TABLE,
+    GRAPH_HYPOTHESIS_GROUP_TABLE,
+    GRAPH_OBJECT_COMPONENT_TABLE,
+)
+from pure_integer_ai.storage.graph_statement import GRAPH_STATEMENT_TABLE
+from pure_integer_ai.storage.memory_overlay import MEMORY_OVERLAY_TABLE
+from pure_integer_ai.storage.memory_event import (
+    MEMORY_EVENT_PART_TABLE,
+    MEMORY_EVENT_TABLE,
+)
+from pure_integer_ai.storage.occurrence import (
+    OCCURRENCE_CANDIDATE_TABLE,
+    OCCURRENCE_TABLE,
+)
+from pure_integer_ai.storage.source_record import SOURCE_RECORD_TABLE
+from pure_integer_ai.storage.span import SPAN_MEMBER_TABLE, SPAN_TABLE
+from pure_integer_ai.storage.spaces.companion import TEXT_ASSOC_TABLE
 
 # 续训 replay 覆盖率阈值（E4·未达标禁续训·防 miss→None 静默降级破可复现）
 # B7 放宽（2026-07-03）：首版 1/1（100%）致 --resume 实际不可用（真实语料任一 teacher miss 即 raise）。
@@ -48,7 +77,31 @@ REPLAY_COVERAGE_MIN_DEN = 10
 # 终 dump 涉及的核心表（per-space filter·cognition 经 backend 抽象访问的表）
 DUMP_TABLES: tuple[str, ...] = (
     "concept_node", "edge", "def_array", "memory_item",
+    GRAPH_OBJECT_TABLE, GRAPH_OBJECT_COMPONENT_TABLE,
+    GRAPH_HYPOTHESIS_GROUP_TABLE,
+    GRAPH_HYPOTHESIS_GROUP_COMPONENT_TABLE,
+    GRAPH_STATEMENT_TABLE,
+    MEMORY_OVERLAY_TABLE,
+    MEMORY_EVENT_TABLE,
+    MEMORY_EVENT_PART_TABLE,
+    OCCURRENCE_TABLE, OCCURRENCE_CANDIDATE_TABLE, SOURCE_RECORD_TABLE,
+    SPAN_TABLE, SPAN_MEMBER_TABLE,
+    TEXT_ASSOC_TABLE,
+    IDENTITY_HEADER_TABLE, IDENTITY_PART_TABLE, ASSERTION_SUPERSEDE_TABLE,
+    ASSERTION_RECORD_TABLE, ASSERTION_QUALIFIER_TABLE,
 )
+
+GLOBAL_DUMP_TABLES: frozenset[str] = frozenset({
+    IDENTITY_HEADER_TABLE,
+    IDENTITY_PART_TABLE,
+    ASSERTION_SUPERSEDE_TABLE,
+    ASSERTION_RECORD_TABLE,
+    ASSERTION_QUALIFIER_TABLE,
+    SOURCE_RECORD_TABLE,
+    GRAPH_OBJECT_COMPONENT_TABLE,
+    GRAPH_HYPOTHESIS_GROUP_TABLE,
+    GRAPH_HYPOTHESIS_GROUP_COMPONENT_TABLE,
+})
 
 
 @dataclass
@@ -95,6 +148,8 @@ def dump_run(backend: StorageBackend, run_dir: str, run_id: str,
         path = paths.space_dump_path(run_dir, run_id, sid)
         with open(path, "w", encoding="utf-8") as f:
             for table in tables:
+                if table in GLOBAL_DUMP_TABLES:
+                    continue
                 rows = paths.filter_rows_for_space(_table_rows(backend, table), sid)
                 for r in rows:
                     record = {"_table": table,
@@ -102,6 +157,16 @@ def dump_run(backend: StorageBackend, run_dir: str, run_id: str,
                     f.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
                     f.write("\n")
         dumped.append(sid)
+    global_tables = tuple(table for table in tables if table in GLOBAL_DUMP_TABLES)
+    if global_tables:
+        global_path = paths.global_identity_dump_path(run_dir, run_id)
+        with open(global_path, "w", encoding="utf-8") as f:
+            for table in global_tables:
+                for row in _table_rows(backend, table):
+                    record = {"_table": table,
+                              **{k: _serialize_value(v) for k, v in row.items()}}
+                    f.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+                    f.write("\n")
     return dumped
 
 
@@ -122,10 +187,9 @@ def load_run(backend: StorageBackend, run_dir: str, run_id: str) -> list[int]:
     """
     sids = paths.list_space_dumps(run_dir, run_id)
     floor_by_space: dict[int, int] = {}   # id_pool rebaseline 跟踪（per-space max local_id·序列7 Gap2）
-    for sid in sids:
-        path = paths.space_dump_path(run_dir, run_id, sid)
-        if not os.path.isfile(path):
-            continue
+
+    def load_file(path: str) -> None:
+        """载入单个确定性 dump 文件，并同步 id_pool 恢复水位。"""
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -135,16 +199,22 @@ def load_run(backend: StorageBackend, run_dir: str, run_id: str) -> list[int]:
                 table = record.pop("_table", None)
                 if table is None:
                     continue
-                # 还原 None（JSON null→None·backend insert 接受 None→SQLite NULL）
                 row = {k: v for k, v in record.items()}
                 backend.insert(table, row)
-                # id_pool rebaseline 逐行跟踪：含 space_id+local_id 的行（concept_node/memory_item 自分配·
-                # composes_attr 等引用≤）取 per-space max·载完推高水位（序列7 Gap2·robust 不硬编码表名）。
                 lid_r = row.get("local_id")
                 if lid_r is not None and "space_id" in row:
                     sid_r = row["space_id"]
                     if lid_r > floor_by_space.get(sid_r, 0):
                         floor_by_space[sid_r] = lid_r
+
+    for sid in sids:
+        path = paths.space_dump_path(run_dir, run_id, sid)
+        if not os.path.isfile(path):
+            continue
+        load_file(path)
+    global_path = paths.global_identity_dump_path(run_dir, run_id)
+    if os.path.isfile(global_path):
+        load_file(global_path)
     for sid_r, floor in sorted(floor_by_space.items()):
         backend.advance_id_pool(sid_r, floor)
     return sids

@@ -4,7 +4,7 @@
   - 闭环核心 gate（§六默认 ON·新基线主线·重来无旧序可退 + OFF 则防塌柱①②失效）：
     JUDGE / ATTRACTOR / PR / CONVERGENCE_STEP / CAUSES_SINK / DISPATCH / A2
   - 可选 gate（§六默认 OFF·守回归 / 性能优化非承重）：
-    CUE_EXTRACTOR_MODE / COOCCURS_WINDOW_MODE / MEMORY_REPLAY_MODE（#728）/ 各 perf gate
+    CUE_EXTRACTOR_MODE / COOCCURS_WINDOW_MODE / 各 perf gate
     （原 PROCESS_REWARD_PROP / B3_LU / SPECTRAL 3 dead gate 已删 P3 #1054·见下删注）
 
 **每阶段纪律**：gate 默认 OFF（回归 bit-identical）→ 写机制 → 单测验证 → ON 验承重 → 下一阶段。
@@ -16,11 +16,17 @@ gate DISPATCH_MODE 装饰位零读取 OFF/ON 等价 bit-identical）。
 机制 production 无条件跑（dag_path 全程不翻 gate）·gate 名仅定形避免后改（同 JUDGE_MODE/GENERATE_MODE 承重件范式·
 无 OFF 态·关机制必塌故不可读 gate）。ATTRACTOR_MODE 例外（真实 opt-in·dag_path:232 getattr 读·reward 阶段翻 ON）。
 
-live-read：模块级 bool·读即当前值·测试可 `gates.X = True` 翻·env `ZERO_AI_<NAME>=1/0` 覆盖。
+live-read：模块属性保存环境和测试基线；正式 runner 通过 context-local overlay 临时覆盖，
+并发或嵌套运行互不串扰。旧测试仍可用 `gates.X = True` 修改进程基线。
 """
 from __future__ import annotations
 
+import contextvars
 import os
+import sys
+import types
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 
 
 def _flag(env_name: str, default: bool) -> bool:
@@ -29,6 +35,64 @@ def _flag(env_name: str, default: bool) -> bool:
     if v is None:
         return default
     return v.strip() in ("1", "true", "TRUE", "True", "yes", "YES")
+
+
+_GATE_OVERRIDES: contextvars.ContextVar[
+    tuple[dict[str, bool], ...]
+] = contextvars.ContextVar("zero_ai_gate_overrides", default=())
+
+
+def push_gate_overrides(
+        overrides: Mapping[str, bool],
+        ) -> contextvars.Token[tuple[dict[str, bool], ...]]:
+    """压入当前执行上下文的 gate 覆盖，并返回可精确复位的 token。
+
+    覆盖只影响当前线程或异步上下文；模块属性仍保存进程基线，供环境配置和旧测试
+    直接赋值。正式 runner 必须使用本接口，禁止临时改写模块全局值。
+    """
+    if not isinstance(overrides, Mapping):
+        raise TypeError("gate overrides 必须是映射")
+    module = sys.modules[__name__]
+    normalized: dict[str, bool] = {}
+    for name, value in overrides.items():
+        if not isinstance(name, str) or not name.isupper():
+            raise ValueError("gate 名必须是大写字符串")
+        baseline = types.ModuleType.__getattribute__(module, name)
+        if type(baseline) is not bool:
+            raise ValueError(f"{name} 不是可覆盖的 bool gate")
+        if type(value) is not bool:
+            raise TypeError(f"{name} 覆盖值必须是 bool")
+        normalized[name] = value
+    current = _GATE_OVERRIDES.get()
+    return _GATE_OVERRIDES.set((*current, normalized))
+
+
+def reset_gate_overrides(
+        token: contextvars.Token[tuple[dict[str, bool], ...]],
+        ) -> None:
+    """用配对 token 恢复 gate 覆盖栈，嵌套层不得越级复位。"""
+    _GATE_OVERRIDES.reset(token)
+
+
+@contextmanager
+def gate_overrides(overrides: Mapping[str, bool]) -> Iterator[None]:
+    """在一个词法作用域内应用 context-local gate 覆盖。"""
+    token = push_gate_overrides(overrides)
+    try:
+        yield
+    finally:
+        reset_gate_overrides(token)
+
+
+class _ContextLocalGateModule(types.ModuleType):
+    """让既有 ``gates.X`` reader 优先读取当前上下文覆盖。"""
+
+    def __getattribute__(self, name: str):
+        if name.isupper():
+            for layer in reversed(_GATE_OVERRIDES.get()):
+                if name in layer:
+                    return layer[name]
+        return types.ModuleType.__getattribute__(self, name)
 
 
 # ---- 闭环核心 gate（§六 end-state ON·接线前 OFF 守 stage 纪律） ----
@@ -509,9 +573,8 @@ ORACLE_PROMOTE_MODE = _flag("ZERO_AI_ORACLE_PROMOTE_MODE", False)
 # default OFF·bit-identical（gate OFF→generate 不读 stash·workmem 三字段 default 守·dispatch_slot _corr_gate=False 不进分支→逐字现状）。
 # 生产 try/finally 与 REALIZES_MODE + CUE_CLUSTER_MODE + ORACLE_PROMOTE_MODE 四 gate 共翻（学全机制+生成消费共构）。
 CORRESPONDENCE_SLOT_MODE = _flag("ZERO_AI_CORRESPONDENCE_SLOT_MODE", False)
-# 命门③ 候选 B（doc/重来_命门③_句子组装_结构抽象活化_设计_2026-07-18）：cue 位直出 cue token 功能词·结构活化。
-# dispatch_slot cue 位（workmem.current_slot_is_cue=True）早 return·读 workmem.current_cue_sig[slot_idx]（cue token ConceptRef）
-# -> surface_of(cue_token) 直出·返 CUE_SLOT_FILL=3·绕 collide/selection_pref/correspondence 全下游选词路径。内容词位走既有路径不变。
+# 命门③ 候选 B：cue 位结构活化。无 learned relation cue 时直出骨架 cue；有 PRIMARY+BARE_TEXT D:11
+# cue 时，骨架 cue 作为 fallback 与 learned cue 同池竞争，correspondence bonus 可真实改变 winner。
 # **方法论纠偏契合**（用户）：功能词由 cue 聚簇（_cluster_by_cue sustainable-split）涌现（闭类 是/使 重复≥K 可持续拆 vs
 # 开类内容词<K 不可持续拆·天然区分·无须词表·守 §十五 C5 禁硬编码功能词表）·主谓宾作 cue 位+内容词位涌现·非硬编码语法角色。
 # workmem.current_cue_sig（tuple·None 占位非 cue 位）+ current_slot_idx（dispatch_slot 无 slot_idx 参数·走 workmem·审2 HIGH-1）
@@ -519,10 +582,8 @@ CORRESPONDENCE_SLOT_MODE = _flag("ZERO_AI_CORRESPONDENCE_SLOT_MODE", False)
 # produced_refs（generate.py:203 src!=CUE_SLOT_FILL 守·审2 HIGH-2·它是结构活化非内容词·不入 collide ctx 保信号质量）。
 # **6 gate 同翻缺一链断**（审1 MED-4）：CUE_CLUSTER_MODE（写 cue_sig）+ COMPOSES_COMBINE_MODE（写 INSTANTIATES->read 非 None）
 # + REALIZES_MODE（skeleton->REL_*->rel_kind!=0）+ CORRESPONDENCE_SLOT_MODE（stash current_cue_slots/cue_sig/slot_idx）
-# + ORDINAL_SURFACE_MODE（surface_of 返 chr 非 None）+ CUE_SLOT_FILL_MODE（dispatch 早 return）。缺任一->current_cue_slots=∅->走 collide bit-identical。
-# **互斥优先级**（审2 MED-3）：ON 时 cue slot 走 cue_token 直出（早 return）·CORRESPONDENCE_SLOT_MODE 的 _correspondence_bonus 在 cue slot 上被取代
-# （非 cue slot 仍 bonus=0 走 collide）。CORRESPONDENCE_SLOT_MODE 仅提供 stash·其 bonus 逻辑仅本 gate OFF 时对 cue slot 生效。
-# default OFF·bit-identical（gate OFF->dispatch 不进 cue 早 return 分支->走 collide 返 LINEAGE_CONCEPT_FILL=1·lineage 值集 {1,2}·逐字现状）。
+# + ORDINAL_SURFACE_MODE（surface_of）+ CUE_SLOT_FILL_MODE（fallback/lineage）。缺关系候选时仍稳定直出骨架 cue。
+# default OFF·bit-identical（gate OFF->不注入骨架 cue fallback，不改 lineage，走既有候选链）。
 # 生产 try/finally 与上述 5 gate 共翻（同 cue-slot-aware 家族·学全机制+生成消费共构）。
 CUE_SLOT_FILL_MODE = _flag("ZERO_AI_CUE_SLOT_FILL_MODE", False)
 # 命门③ 候选 C（doc/重来_命门③_句子组装_结构抽象活化_设计_2026-07-18）：slot_lca 抽象约束·内容词活化。
@@ -537,8 +598,8 @@ CUE_SLOT_FILL_MODE = _flag("ZERO_AI_CUE_SLOT_FILL_MODE", False)
 # **独立 gate 链**（design·审2 核）：COMPOSES_COMBINE_MODE（写 INSTANTIATES 边->read 非 None）+ SLOT_LCA_CONSTRAINT_MODE（读+过滤）= 2 gate·
 # 不依赖 REALIZES/CUE_CLUSTER/CORRESPONDENCE_SLOT/CUE_SLOT_FILL/ORDINAL_SURFACE（ATTR_SLOT_ROLE 由 _cluster_by_lca 写非 CUE_CLUSTER 门）。
 # **空集 fallback**（mirror hub filter `if cand_f:`）：slot_lca 类约束下候选空（未见过该类 token）-> 退化走 collide 不阻断生成。
-# **混合 case 诚实边界**（审2 MED-1）：CUE_SLOT_FILL_MODE OFF + SLOT_LCA_CONSTRAINT_MODE ON 时 cue 位不早 return 走 LCA filter·cue slot ATTR_SLOT_ROLE 是 cue token LCA 非内容词抽象语义错位·
-# 但 sound 守（空集 fallback 走 collide bit-identical）·生产 B+C 共翻 7 gate 不触发（CUE_SLOT_FILL_MODE 必 ON cue 早 return）·仅实验场景。
+# **混合 case 诚实边界**：CUE_SLOT_FILL_MODE OFF + SLOT_LCA_CONSTRAINT_MODE ON 时 cue 位仍走旧 LCA filter；
+# 生产 B+C 共翻时 cue 候选竞争显式绕过内容词 LCA，避免功能词被错误排除。
 # default OFF·bit-identical（gate OFF->dispatch 不进过滤分支->candidates 不变->走 collide 返 LINEAGE_CONCEPT_FILL=1·逐字现状·getattr 默认守 minimal workmem 不崩）。
 # 生产 try/finally 与 B 6 gate 共翻（7 gate = B 6 + C 1·COMPOSES_COMBINE 共享不重计·C 独立 2 gate 也可活·生产 B+C 共翻最完整）。
 SLOT_LCA_CONSTRAINT_MODE = _flag("ZERO_AI_SLOT_LCA_CONSTRAINT_MODE", False)
@@ -591,19 +652,6 @@ SYMBOLIC_TRANSFORM_MODE = _flag("ZERO_AI_SYMBOLIC_TRANSFORM_MODE", False)
 # ACTION_BRIDGE_* 范式）·S8 课程续起时与 SYMBOLIC_TRANSFORM_MODE 同 flip。bit-identical（gate OFF + specs 空→不进）。
 # Phase 1 = INVERSE only（链式法则 COMPOSITION defer Phase 2·恒等 IDENTITY 折化简规则）。
 SYMBOLIC_RELATION_MODE = _flag("ZERO_AI_SYMBOLIC_RELATION_MODE", False)
-
-# #728 输出侧 memory_space 融通（A+B 同闭环·§十四 tri_space 中环 + dag_path 路径选择反哺）。
-# A 半：episode_loop 末尾调 tri_space_coordination（query memory → 写 workmem.{replay_candidates,exclude_refs}）。
-# B 半：dag_path 入口 local_seeds 扩张（replay_candidates 作额外种子·topo_layers + PR 偏向·路径层序变）。
-# **落地纠偏（3 Explore·task doc 片3 错）**：原片3 "slot_dispatch replay boost" 字面错——sink concept ref 不在
-# slot_dispatch candidates·单 slot boost 无效 theater。纠为 dag_path 入口 local_seeds 扩张（footnote4 "路径选择
-# 连贯 = dag_path 层" 对·片3 错）。tri_space 写 workmem.replay 存 info_ref concept ref（非 memory_ref 行 id）。
-# workmem.replay 每 episode 清（fresh per episode·memory_space 持久层累积学习·transient 重算 top-N）。
-# exclude_refs defer（sink 保护 + intent.sink 固定 + 粒度不匹配 三重阻断·无有效读法·诚实标半 defer）。
-# default OFF·守回归（OFF = tri_space early-return 不写 workmem.replay → dag_path local_seeds == seeds → bit-identical·
-# 既有测试零行为变）。ON = tri_space query memory → 写 workmem.replay（info_ref concept ref）→ dag_path 扩张种子 →
-# 路径层序变 → generate 输出倾向历史成功 sink 路径（弱有效·stable≠correct·#479 墙）。
-MEMORY_REPLAY_MODE = _flag("ZERO_AI_MEMORY_REPLAY_MODE", False)
 
 # M1片2 intent 分类（替换 formal_train.py:366,1448 两处 IntentType(INTENT_QUESTION) 硬编码·
 # doc/重来_M1片2_intent分类设计_2026-07-08.md）。cognition/understanding/intent_classify.classify_intent
@@ -676,7 +724,7 @@ CODE_UNPARSE_MODE = _flag("ZERO_AI_CODE_UNPARSE_MODE", False)
 
 # 刀 A 时序 cue verify-driven episode（语言域第一个 LIVE form_proof_fn·构造性检查层·形式 cue 扩展首刀）。
 # formal_train.run_round_full 语言域路由分支（_is_verify_modality 之后）：语言域 + 任段 precedes_pairs 非空 +
-# 本 gate ON → 走 _run_time_seq_verify_round（镜像 _run_verify_round·但验 PRECEDES DAG Kahn 无环·非 COMPOSES 执行）·
+# 本 gate ON → 走 occurrence-order adapter（验 cue 图 Kahn 无环·非事件时间、因果或 COMPOSES 执行）·
 # 直调 time_seq_proof_fn 绕 judge（语言域 G5=DEAD_DESIGN·_ARITH_DOMAINS 门挡·非挂 G5）·reward=1 iff DAG 无环·
 # 不落 strength（verify propagate no-op·镜像 :457）·**永不接 reward**（PRECEDES strength 恒 1·reward CAUSES-only）。
 # **诚实边界**：构造性检查层（Kahn 验 DAG 无环·确定性）·非构造性验证（cue 对 + token 序 PRECEDES 均 single-source·
@@ -689,7 +737,7 @@ TIME_SEQ_PROOF_MODE = _flag("ZERO_AI_TIME_SEQ_PROOF_MODE", False)
 
 # ---- 刀 B：语言域数值等式 cue verify-driven episode（self_proof_fn 独立通道·绕 judge·镜像刀 A 时序） ----
 # formal_train.run_round_full 语言域路由分支（_is_verify_modality + 时序分支之后·numeric priority over precedes）：
-# 语言域 + 任段 numeric_claims 非空 + 本 gate ON → 走 _run_numeric_verify_round（镜像 _run_time_seq_verify_round·
+# 语言域 + 任段 numeric_claims 非空 + 本 gate ON → 走 _run_numeric_verify_round（镜像 occurrence-order adapter·
 # 但验数值等式声明算术一致·直接整数算术·非 PRECEDES DAG·非 COMPOSES 执行）·直调 numeric_proof_fn 绕 judge·
 # reward=1 iff 全声明算术一致·不落 strength（verify propagate no-op）·**永不接 reward**（数值声明不入图）。
 # **诚实边界**：构造性检查层（整数算术 +,-,× 确定性）·非构造性验证（左式/右式数均 single-source·来自文本 cue 锚·
@@ -708,8 +756,7 @@ NUMERIC_PROOF_MODE = _flag("ZERO_AI_NUMERIC_PROOF_MODE", False)
 # **★构造性验证层·首个 EXTERNAL**（刀 A/B 是构造性检查 SELF_PRODUCED·刀 C 升验证·Layer0 external_verified
 # 首个语言域 episode 计入·可驱动停止决策）。IS_A 来源须 ConceptNet（build_isa_ancestor_map_external·
 # source=SOURCE_CONCEPTNET+epistemic=EPI_STRUCTURED 双 filter）·**非 cue 自产**（否则 single-source theater）。
-# **三值逻辑**（守属性全称 G5b #479 墙）：verified→reward=1 EXTERNAL / falsified→reward=0 EXTERNAL /
-# can't-verify→None→弃权无 episode（child/parent 非分类概念如"会飞"·诚实降级非证伪）。
+# **三值逻辑**：外部祖先路径支持→reward=1 EXTERNAL；缺路径→None。显式反证 adapter 未接线前不产生 reward=0。
 # **诚实边界**：构造性验证≠truth（ConceptNet 可错·外部源对齐非命题真·#479 墙·stable≠correct）·
 # 刀 C=G5b 窄子域（内涵分类子集）·属性全称子域 defer Mode B（详 doc/重来_刀C量化cue设计_2026-07-08.md §六b）。
 # external 依赖 ConceptNet 本地文件（CI/生产 default 无→ext_map 空→全 can't-verify→无 reward·非 theater）。
@@ -720,15 +767,10 @@ UNIVERSAL_PROOF_MODE = _flag("ZERO_AI_UNIVERSAL_PROOF_MODE", False)
 # ---- A1·STEP6：语言域存在量化 cue verify-driven episode（self_proof_fn 独立通道·绕 judge·镜像刀 C） ----
 # formal_train.run_round_full 语言域路由分支（universal 分支后·numeric>comparison>universal>existential>precedes 序）：
 # 语言域 + 任段 existential_claims 非空 + 本 gate ON → 走 _run_existential_verify_round（镜像
-# _run_universal_verify_round·但验存在量化 X∩Y≠∅·**双向祖先** X⊆Y OR Y⊆X·ConceptNet 外部祖先图）·直调
-# existential_proof_fn 绕 judge·reward=1 iff 全声明 verified（ConceptNet 外部断言 X∩Y≠∅）·不落 strength。
-# **构造性验证层 EXTERNAL**（同刀 C·Layer0 external_verified 计入·可驱动停止决策）。IS_A 来源须 ConceptNet
-# （build_isa_ancestor_map_external·source filter·非 cue 自产·反 single-source theater）·复用 ∀ 的 ext_map。
-# **三值逻辑**（守属性 ∃ #479 墙·同 ∀）：verified→reward=1 EXTERNAL / falsified→reward=0 EXTERNAL /
-# can't-verify→None→弃权无 episode（child/parent 非分类概念如"会飞"·诚实降级非证伪）。
-# **诚实边界**：构造性验证≠truth（ConceptNet 可错·#479 墙·stable≠correct）·严格实例存在 defer（双向祖先验
-# 类层 X∩Y≠∅·实例非空=世界态 #479 墙）·D6 closed-class frozenset {有的,有些}·无 REL_EXISTENTIAL 故无 D:11。
-# external 依赖 ConceptNet 本地文件（CI/生产 default 无→ext_map 空→全 can't-verify→无 reward·非 theater）。
+# _run_universal_verify_round·验证 A∩B 非空声明）并直调 existential_proof_fn 绕 judge。
+# 正证需要共同 MEMBER witness、显式 overlap 或已知非空共同子类；反证需要显式 DISJOINT。
+# 当前 caller 只提供 SUBSET_EQ 祖先图，尚无 typed Evidence adapter，因此必须返回 None 且不产 EXTERNAL episode。
+# D6 closed-class frozenset {有的,有些} 只负责 cue 识别，不携带真值或证明。
 # default OFF·守 CI 回归（OFF = 路由不走 → 既有路径不变 bit-identical）。
 # **★生产训练 try/finally 翻 ON**（镜像 UNIVERSAL 范式·formal_train try + finally 复位·否则孤儿 = theater）。
 EXISTENTIAL_PROOF_MODE = _flag("ZERO_AI_EXISTENTIAL_PROOF_MODE", False)
@@ -869,3 +911,8 @@ COMPARISON_PROOF_MODE = _flag("ZERO_AI_COMPARISON_PROOF_MODE", False)
 # blast radius 最小：h63 身份/local_id/dedup 全不动·只变 OutputPart.words（None/占位→真字·gate 控制）·
 # reward/dag_path 不读显示文本（reward 活信号不变）·详见 plan velvet-juggling-garden.md。
 ORDINAL_SURFACE_MODE = _flag("ZERO_AI_ORDINAL_SURFACE_MODE", False)
+
+
+_THIS_MODULE = sys.modules[__name__]
+if not isinstance(_THIS_MODULE, _ContextLocalGateModule):
+    _THIS_MODULE.__class__ = _ContextLocalGateModule

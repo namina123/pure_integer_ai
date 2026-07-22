@@ -33,6 +33,18 @@ from typing import Any, Iterable
 from pure_integer_ai.crosscut.guards.float_guard import assert_no_float
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.cognition.shared.types import Episode, TERMINAL_REACHED_SINK
+from pure_integer_ai.experiments.language_generation_episode import (
+    TypedLanguageEpisode,
+)
+from pure_integer_ai.experiments.verification_orchestration import (
+    APPLICABILITY_APPLICABLE,
+    APPLICABILITY_NOT_APPLICABLE,
+    APPLICABILITY_UNKNOWN,
+    VERDICT_CONFLICTED,
+    VERDICT_REFUTE,
+    VERDICT_SUPPORT,
+    VERDICT_UNKNOWN,
+)
 from pure_integer_ai.training.stages import StageMetrics
 from pure_integer_ai.teacher.weaning import WeaningMetrics
 
@@ -68,6 +80,15 @@ class RoundMetrics:
     # generate 行独有（stage 行恒 0）·generate_verified=外真验过 episode 数·generate_total=task-driven episode 总数。
     generate_verified: int = 0
     generate_total: int = 0
+    typed_episode_count: int = 0
+    typed_generation_complete: int = 0
+    typed_postcheck_complete: int = 0
+    typed_signal_support: int = 0
+    typed_signal_refute: int = 0
+    typed_signal_unknown: int = 0
+    typed_signal_conflicted: int = 0
+    typed_signal_not_applicable: int = 0
+    typed_signal_applicability_unknown: int = 0
 
     def to_json(self) -> dict[str, Any]:
         """jsonl 行（sort_keys 确定性·source_dist int 键转 str 因 JSON 键须 str）。"""
@@ -87,6 +108,16 @@ class RoundMetrics:
             "veto_count": self.veto_count,
             "generate_verified": self.generate_verified,
             "generate_total": self.generate_total,
+            "typed_episode_count": self.typed_episode_count,
+            "typed_generation_complete": self.typed_generation_complete,
+            "typed_postcheck_complete": self.typed_postcheck_complete,
+            "typed_signal_support": self.typed_signal_support,
+            "typed_signal_refute": self.typed_signal_refute,
+            "typed_signal_unknown": self.typed_signal_unknown,
+            "typed_signal_conflicted": self.typed_signal_conflicted,
+            "typed_signal_not_applicable": self.typed_signal_not_applicable,
+            "typed_signal_applicability_unknown": (
+                self.typed_signal_applicability_unknown),
             "source_dist": {str(k): v for k, v in sorted(self.source_dist.items())},
         }
 
@@ -108,7 +139,7 @@ class MetricsCollector:
     # ---- 主入口 ----
 
     def record_round(self, round_id: int, stage: int,
-                     episodes: Iterable[Episode], *,
+                     episodes: Iterable[Episode | TypedLanguageEpisode], *,
                      graph_size: int, causes_coverage: int,
                      promote_count: int, oov_promote_count: int,
                      source_counts: dict[int, int] | None = None,
@@ -128,7 +159,13 @@ class MetricsCollector:
                    intervention_rate, holdout_retention, dependency,
                    int(count_g5_self_assess),
                    _where="metrics.record_round")
-        ep_list = list(episodes)
+        all_episodes = list(episodes)
+        if any(not isinstance(item, (Episode, TypedLanguageEpisode))
+               for item in all_episodes):
+            raise TypeError("metrics 收到未注册 episode 协议")
+        ep_list = [item for item in all_episodes if isinstance(item, Episode)]
+        typed = [item for item in all_episodes
+                 if isinstance(item, TypedLanguageEpisode)]
         total = len(ep_list)
         reward_pos = sum(1 for e in ep_list if e.reward > 0)
         dead_end = sum(e.dead_end_count for e in ep_list)
@@ -144,6 +181,16 @@ class MetricsCollector:
         judge_self = sum(1 for e in ep_list
                          if e.terminal == TERMINAL_REACHED_SINK and e.reward > 0
                          and (count_g5_self_assess or not e.judge_G5_active))
+        typed_signals = tuple(
+            signal for episode in typed for signal in episode.signals)
+
+        def signal_count(applicability: int, verdict: int | None = None) -> int:
+            """按完整 applicability 和可选 verdict 计数，不跨维度归并。"""
+            return sum(
+                1 for signal in typed_signals
+                if signal.applicability == applicability
+                and (verdict is None or signal.verdict == verdict)
+            )
 
         m = RoundMetrics(
             round_id=round_id,
@@ -160,6 +207,23 @@ class MetricsCollector:
             dead_end_count=dead_end,
             veto_count=veto,
             source_dist=dict(source_counts or {}),
+            typed_episode_count=len(typed),
+            typed_generation_complete=sum(
+                int(item.generation_complete) for item in typed),
+            typed_postcheck_complete=sum(
+                int(item.postcheck_complete is True) for item in typed),
+            typed_signal_support=signal_count(
+                APPLICABILITY_APPLICABLE, VERDICT_SUPPORT),
+            typed_signal_refute=signal_count(
+                APPLICABILITY_APPLICABLE, VERDICT_REFUTE),
+            typed_signal_unknown=signal_count(
+                APPLICABILITY_APPLICABLE, VERDICT_UNKNOWN),
+            typed_signal_conflicted=signal_count(
+                APPLICABILITY_APPLICABLE, VERDICT_CONFLICTED),
+            typed_signal_not_applicable=signal_count(
+                APPLICABILITY_NOT_APPLICABLE),
+            typed_signal_applicability_unknown=signal_count(
+                APPLICABILITY_UNKNOWN),
         )
         for v in (m.conduction_rate, m.promote_rate, m.realizes_rate,
                   m.judge_self_rate, m.oov_promote_rate):

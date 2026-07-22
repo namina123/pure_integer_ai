@@ -1,15 +1,15 @@
 """storage.structure_match_count — 结构反推 tally 台账（对应泛化 v2·cue↔rel 学全）。
 
 结构反推（用户定义 2026-07-17）：新词 W 落在 oracle-确认结构（REALIZES-R-skeleton）的 cue 槽位 →
-推 W↔R。tally (W,R) distinct forming-sample ≥K → promote W→R D:11 PRIMARY（D:11 删 ∨·只认结构匹配轨·
+推 W↔R。tally (W,R) distinct input_root ≥K（生产为 recognition-routed sample）→ promote W→R D:11 PRIMARY（D:11 删 ∨·只认结构匹配轨·
 修审2 BLOCKER 1）。本表 = tally 计数落点（relation-specific + structure-grounded·修审2 BLOCKER 2）。
 
 **一行 per (W,R,input_root) append-only**（非 experience_count 的 update 计数器范式）：
   - 去重键 = (space_id, word_sid, word_lid, rel_kind, sample_sid, sample_lid)（审2 条件4b·distinct
-    forming-sample 去重·sample_root_ref 维）。
-  - distinct forming-sample count for (W,R) = 该 (W,R) 的行数（每行=1 distinct input_root）。
+    tally sample 去重·sample_root_ref 维）。
+  - distinct tally sample count for (W,R) = 该 (W,R) 的行数（每行=1 distinct input_root）。
   - append-only（DISC_APPEND_ONLY·insert only·重放同语料→同行集→同 count·天然幂等抗刷数·防 theater）。
-  - 无计数器列：distinct 语义=行数·非次数（同 input_root 重见=skip·不计权重·distinct forming-sample）。
+  - 无计数器列：distinct 语义=行数·非次数（同 input_root 重见=skip·不计权重·distinct tally sample）。
 
 **为何独立表非 experience_count 加列**（同 experience_count 范式）：experience_count 是 word 级
 **不区分关系**（= BLOCKER 1 病源·reward-feed 染·跨域污染）；本表 **relation-specific**（(W,R) 键）+
@@ -44,7 +44,7 @@ _STRUCTURE_MATCH_COUNT_COLUMNS = [
     ("word_sid", TYPE_INT),       # W ConceptRef space（cue slot 落位词）
     ("word_lid", TYPE_INT),       # W ConceptRef local
     ("rel_kind", TYPE_INT),       # REL_CAUSES / REL_SUBSET 等（int enum·relation-specific 键）
-    ("sample_sid", TYPE_INT),     # input_root ConceptRef space（distinct forming-sample 去重维）
+    ("sample_sid", TYPE_INT),     # input_root ConceptRef space（distinct tally sample 去重维）
     ("sample_lid", TYPE_INT),     # input_root ConceptRef local
 ]
 _STRUCTURE_MATCH_COUNT_INDEXES = [
@@ -69,7 +69,7 @@ def register_structure_match_count(backend: StorageBackend) -> None:
 def record_structure_match(backend: StorageBackend, *, space_id: int,
                            word_ref: tuple[int, int], rel_kind: int,
                            sample_root: tuple[int, int]) -> bool:
-    """记一次 W 落 REALIZES-R-skeleton cue slot（distinct forming-sample tally++）。
+    """记一次 W 落 REALIZES-R-skeleton cue slot（distinct tally sample++）。
 
     append-only check-then-insert：行 (W,R,input_root) 不存在→insert·返 True（new·首次该 sample for (W,R)）；
     已存在→skip·返 False（幂等·重放同语料/同 input_root 重见不重计）。
@@ -112,7 +112,7 @@ def record_structure_match(backend: StorageBackend, *, space_id: int,
 
 def read_structure_match_count(backend: StorageBackend, *, space_id: int,
                                word_ref: tuple[int, int], rel_kind: int) -> int:
-    """读 (W,R) distinct forming-sample count（= 该 (W,R) 行数·每行=1 distinct input_root）。
+    """读 (W,R) distinct tally sample count（= 该 (W,R) 行数·每行=1 distinct input_root）。
 
     无行/表未注册→0（冷启动·promote 闸 _structure_match_ok 判 <K→False）。promote 用此判 ≥K。
     """
@@ -131,7 +131,7 @@ def read_structure_match_count(backend: StorageBackend, *, space_id: int,
 
 def read_structure_match_per_rel(backend: StorageBackend, *, space_id: int,
                                  word_ref: tuple[int, int]) -> dict[int, int]:
-    """读 W 各 rel_kind 的 distinct forming-sample count（specificity gate 用·审1 CONDITION 1）。
+    """读 W 各 rel_kind 的 distinct tally sample count（specificity gate 用·审1 CONDITION 1）。
 
     返 {rel_kind: count}（W 落各 REALIZES-R-skeleton cue slot 的 distinct sample 分布）。
     specificity：W' promote R 须 count(W,R) 显著 > Σ count(W,other R)（W' 特异 R·非通用连接词·

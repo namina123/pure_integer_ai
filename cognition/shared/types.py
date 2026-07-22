@@ -12,9 +12,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from pure_integer_ai.cognition.shared.scope_identity import ScopeIdentity
 
 from pure_integer_ai.crosscut.guards.float_guard import assert_no_float
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
+from pure_integer_ai.cognition.shared.identity import (
+    CorpusVersion, CurriculumVersion, LogicalTime, ObjectIdentity, OwnerScope,
+    ParserVersion, PrimitiveVersion, SourceRef, TypedRef, VersionBundle,
+)
 
 # ---- 编址 ----
 NodeRef = tuple[int, int]          # (space_id, local_id)
@@ -183,8 +188,8 @@ class Segment:
     # 全称量化声明（刀 C·(child_idx, parent_idx) token index 对·X 都是 Y·resolve 在验序器·
     # ConceptNet 外部源验·构造性验证 EXTERNAL·三值逻辑·不入图·详 doc/重来_刀C量化cue设计_2026-07-08.md）
     universal_claims: list[tuple[int, int]] = field(default_factory=list)
-    # 存在量化声明（A1·STEP6·镜像刀 C·(child_idx, parent_idx) token index 对·有的 X 是 Y·resolve 在验序器·
-    # ConceptNet 外部源验·构造性验证 EXTERNAL·三值逻辑·双向祖先 X⊆Y OR Y⊆X·不入图·详 existential_proof.py）
+    # 存在量化声明（(child_idx, parent_idx) token index 对·有的 X 是 Y；本字段不携带真值，
+    # 后续验证需要 MEMBER/nonempty/overlap/DISJOINT typed Evidence）。
     existential_claims: list[tuple[int, int]] = field(default_factory=list)
     # 属性命题声明（G1+#774·(subject_idx, attr_type_idx, value_idx, _reserved, polarity, modality) 6-int tuple·
     # "X 的 Y 是 Z" 提取·observe build_property_edges 建命题节点+PROPERTY 出边·G3b 读判同(subject,attr_type)
@@ -220,6 +225,9 @@ class Segment:
     # 默认 0=无章节标记（无标记主流文本·退化同流水账·章节承载 defer 钥匙①）·向后兼容（既有 Segment 零改）
     chapter_seq: int = 0
     section_seq: int = 0
+    token_spans: list[tuple[int, int]] = field(default_factory=list)
+    document_token_indices: list[int] = field(default_factory=list)
+    occurrence_ordinals: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -240,7 +248,38 @@ class InputPayload:
     # 卷三 judge 自锚于输入（§十四自评命门破解）——intent + key_skeleton 由输入层填。
     intent: "IntentType" = field(default_factory=lambda: IntentType())
     key_skeleton: list[ConceptRef] = field(default_factory=list)   # J1 覆盖关键骨架子集
-    item_key: int = 0   # 维度桥 item-identity（P1 G-PR2·建 raw 时 id(collected_item)·observe 查 discovery item→skeleton map·解 raw per-round 重建 id 不稳·见 memory p1-dim-bridge-derisk）
+    item_key: int = 0   # 维度桥的 document scope registry 索引；哈希只作索引，完整身份见 scope_identity
+    scope_identity: ScopeIdentity | None = None   # document/episode/query/generation 完整运行 scope；新断言生产路径应显式提供
+    source_ref: SourceRef | None = None
+    occurrence_scope_identity: ScopeIdentity | None = None   # 来源 occurrence 的稳定 scope；不得使用随 stage/round 变化的观察 episode scope
+    raw_text: str | None = None
+    speaker_identity: ObjectIdentity | None = None
+    source_license_id: str | None = None
+    source_batch_id: int | None = None
+
+    def __post_init__(self) -> None:
+        """核验显式来源、原文和 speaker 身份不会与旧整数 source 静默冲突。"""
+        if self.source_ref is not None:
+            if self.source_ref.source_kind != self.source:
+                raise ValueError("InputPayload.source 与 SourceRef.source_kind 不一致")
+        if self.occurrence_scope_identity is not None:
+            if self.source_ref is None:
+                raise ValueError("occurrence_scope_identity 必须同时携带 SourceRef")
+            if self.occurrence_scope_identity.source != self.source_ref:
+                raise ValueError("occurrence scope 必须指向同一 SourceRef")
+        if self.raw_text is not None and not isinstance(self.raw_text, str):
+            raise TypeError("InputPayload.raw_text 必须是字符串或 None")
+        if (self.speaker_identity is not None
+                and not isinstance(self.speaker_identity, ObjectIdentity)):
+            raise TypeError("speaker_identity 必须是 ObjectIdentity 或 None")
+        if (self.source_license_id is None) != (self.source_batch_id is None):
+            raise ValueError("来源许可和 batch 必须同时声明或同时省略")
+        if self.source_license_id is not None:
+            if not isinstance(self.source_license_id, str) or not self.source_license_id:
+                raise ValueError("source_license_id 必须是非空字符串")
+            assert_int(self.source_batch_id, _where="InputPayload.source_batch_id")
+            if type(self.source_batch_id) is not int or self.source_batch_id < 0:
+                raise ValueError("source_batch_id 必须是非负严格整数")
 
 
 @dataclass
@@ -253,6 +292,14 @@ class ObserveResult:
     # 段结构概念 ref 序（每段一个 struct_ref·inter-segment PRECEDES 串链·
     # formal_train 取首/末做 episode seed/sink + 全量做 key_skeleton·2026-07-02 落）
     struct_refs: list[ConceptRef] = field(default_factory=list)
+    occurrence_refs: list[TypedRef] = field(default_factory=list)
+    segment_occurrence_refs: list[list[TypedRef]] = field(default_factory=list)
+    order_fact_assertion_hashes: list[int] = field(default_factory=list)
+    span_refs: list[TypedRef] = field(default_factory=list)
+    span_statement_assertion_hashes: list[int] = field(default_factory=list)
+    prediction_results: list[Any] = field(default_factory=list)
+    sense_candidate_traces: list[Any] = field(default_factory=list)
+    semantic_course_run: Any = None
 
 
 # ---- SpaceContext：observe 持有的三空间 + 阶段/开关 ----
