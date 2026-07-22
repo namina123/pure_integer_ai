@@ -291,6 +291,8 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
         memory_read_aggregates=memory_read_aggregates,
         memory_interact_aggregates=memory_interact_aggregates,
         word_form_course_report=ctx.word_form_course_report,
+        language_generation_course_report=(
+            ctx.language_generation_course_report),
         teacher=_clone_teacher(ctx.teacher, backend),
         weights=copy.deepcopy(ctx.weights),
         work_memory=WorkMemory(),

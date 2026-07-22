@@ -7,6 +7,28 @@ from typing import Protocol
 from pure_integer_ai.cognition.shared.candidate_projection import (
     CandidateProjectionGraph,
 )
+from pure_integer_ai.cognition.shared.generation_content import (
+    AnswerContentSelector,
+    GenerationContentLayerResolver,
+    GenerationStanceLayerResolver,
+)
+from pure_integer_ai.cognition.shared.generation_execution import (
+    TypedGenerationExecutor,
+)
+from pure_integer_ai.cognition.shared.generation_plan import (
+    GenerationLayerRegistration,
+    GenerationPlanProtocol,
+    GenerationPlanner,
+)
+from pure_integer_ai.cognition.shared.generation_structure_execution import (
+    GenerationStructureExecutionPlanner,
+)
+from pure_integer_ai.cognition.shared.generation_structure_plan import (
+    GenerationDiscourseLayerResolver,
+    GenerationPropositionLayerResolver,
+    GenerationStructureLayerProtocol,
+    GenerationSyntaxLayerResolver,
+)
 from pure_integer_ai.cognition.shared.generation_surface import (
     GenerationSurfaceAttribution,
     GenerationSurfaceProtocol,
@@ -21,6 +43,9 @@ from pure_integer_ai.cognition.shared.structure_order import (
     StructureOrderGraph,
     StructureOrderGraphPredicates,
 )
+from pure_integer_ai.cognition.shared.structure_order_consumer import (
+    StructureOrderConsumer,
+)
 from pure_integer_ai.cognition.shared.structure_order_lifecycle import (
     StructureOrderLifecycleGraph,
 )
@@ -30,6 +55,13 @@ from pure_integer_ai.experiments.alias_relation_runtime import (
 from pure_integer_ai.experiments.generation_production_runtime import (
     ProductionGenerationInstallation,
     ProductionGenerationRuntime,
+)
+from pure_integer_ai.experiments.generation_surface_runtime import (
+    GenerationSurfaceLayerResolver,
+    GenerationSurfaceRuntime,
+)
+from pure_integer_ai.experiments.generation_verification_runtime import (
+    GenerationPostcheckRuntime,
 )
 from pure_integer_ai.experiments.language_generation_connector import (
     LanguageGenerationConnector,
@@ -47,6 +79,9 @@ from pure_integer_ai.experiments.language_generation_connector_graph import (
 from pure_integer_ai.experiments.language_generation_connector_stage4 import (
     LanguageConnectorStage4Policy,
     LanguageConnectorStage4Runtime,
+)
+from pure_integer_ai.experiments.language_semantic_runtime import (
+    SemanticCourseGenerationRequestMapper,
 )
 from pure_integer_ai.experiments.train_context import TrainContext
 
@@ -148,6 +183,7 @@ class ActiveLanguageConnectorAssembly:
     order_graph: StructureOrderGraph
 
     def __post_init__(self) -> None:
+        """核验 active connector、候选 owner 与 S-07 facade 属于同次装配。"""
         if not isinstance(self.connector, LanguageGenerationConnector):
             raise TypeError("connector assembly connector 类型错误")
         if not isinstance(self.candidates, LanguageConnectorCandidateRuntime):
@@ -176,6 +212,7 @@ class ActiveLanguageConnectorFactory:
             surface_protocol: GenerationSurfaceProtocol,
             production_purpose: ObjectIdentity,
             ) -> None:
+        """保存可跨 context 恢复的候选协议、运行策略和 production purpose。"""
         if not isinstance(candidates, LanguageConnectorCandidateRuntime):
             raise TypeError("connector factory candidates 类型错误")
         if not isinstance(
@@ -266,6 +303,7 @@ class TrialLanguageConnectorAssembly:
     hypothesis: HypothesisKey
 
     def __post_init__(self) -> None:
+        """核验 trial connector 只绑定一个 exact Hypothesis 和同一 S-07 facade。"""
         if not isinstance(self.connector, LanguageGenerationConnector):
             raise TypeError("trial connector assembly connector 类型错误")
         if not isinstance(self.candidates, LanguageConnectorCandidateRuntime):
@@ -298,6 +336,7 @@ class TrialLanguageConnectorFactory:
             hypothesis: HypothesisKey,
             trial_purpose: ObjectIdentity,
             ) -> None:
+        """保存 forming 候选、exact Hypothesis 和隔离 trial purpose。"""
         if not isinstance(candidates, LanguageConnectorCandidateRuntime):
             raise TypeError("trial connector factory candidates 类型错误")
         if not isinstance(
@@ -419,6 +458,7 @@ class LanguageConnectorProductionRuntimeBinding:
     alias: AliasRelationRuntime
 
     def __post_init__(self) -> None:
+        """核验 production binding 显式携带四类正确运行 owner。"""
         if not isinstance(self.runtime, ProductionGenerationRuntime):
             raise TypeError("connector production runtime 类型错误")
         if not isinstance(self.connector, LanguageGenerationConnector):
@@ -452,6 +492,208 @@ class LanguageConnectorProductionRuntimeBuilder(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class LanguageConnectorProductionComponents:
+    """保存一次 context 独占的 G-01、R-01、renderer 和 G-04 组件。"""
+
+    selector: AnswerContentSelector
+    plan_protocol: GenerationPlanProtocol
+    structure_protocol: GenerationStructureLayerProtocol
+    alias: AliasRelationRuntime
+    renderer: object
+    postcheck_mapper: object
+    postchecker: GenerationPostcheckRuntime
+
+    def __post_init__(self) -> None:
+        """核验一次 context 独占组件具备完整的六层与复核协议。"""
+        if not isinstance(self.selector, AnswerContentSelector):
+            raise TypeError("connector production selector 类型错误")
+        if not isinstance(self.plan_protocol, GenerationPlanProtocol):
+            raise TypeError("connector production plan protocol 类型错误")
+        if not isinstance(
+                self.structure_protocol, GenerationStructureLayerProtocol):
+            raise TypeError("connector production structure protocol 类型错误")
+        if not isinstance(self.alias, AliasRelationRuntime):
+            raise TypeError("connector production alias 类型错误")
+        if not hasattr(self.renderer, "render"):
+            raise TypeError("connector production renderer 必须实现 render")
+        if not hasattr(self.postcheck_mapper, "build"):
+            raise TypeError("connector production G-04 mapper 必须实现 build")
+        if not isinstance(self.postchecker, GenerationPostcheckRuntime):
+            raise TypeError("connector production G-04 runtime 类型错误")
+
+
+class LanguageConnectorProductionComponentFactory(Protocol):
+    """为宿主或 V-06 context 重建不共享可变状态的运行组件。"""
+
+    def build(
+            self,
+            ctx: TrainContext,
+            ) -> LanguageConnectorProductionComponents:
+        """返回绑定当前图和当前评测 owner 的全部运行组件。"""
+        ...
+
+    def clone_for_evaluation(
+            self,
+            ) -> "LanguageConnectorProductionComponentFactory":
+        """复制策略配置并清空调用、Use、parser 和 verifier 状态。"""
+        ...
+
+    def state_key(self) -> tuple:
+        """返回组件协议、预算和版本的完整可比较键。"""
+        ...
+
+
+class DefaultLanguageConnectorProductionRuntimeBuilder:
+    """把当前 connector、S-07、R-01 和注入组件装成真实 G-00 至 G-04。"""
+
+    def __init__(
+            self,
+            component_factory: LanguageConnectorProductionComponentFactory,
+            ) -> None:
+        """绑定可为宿主和评测 context 分别重建组件的注入 factory。"""
+        if any(not hasattr(component_factory, method) for method in (
+                "build", "clone_for_evaluation", "state_key")):
+            raise TypeError("connector production component factory 协议不完整")
+        self._component_factory = component_factory
+
+    def build(
+            self,
+            ctx: TrainContext,
+            assembly: ActiveLanguageConnectorAssembly
+            | TrialLanguageConnectorAssembly,
+            ) -> LanguageConnectorProductionRuntimeBinding:
+        """按同一 owner 装配六层 planner、延迟提交 surface 和 G-04 复核。"""
+        if not isinstance(ctx, TrainContext):
+            raise TypeError("connector production builder ctx 类型错误")
+        if not isinstance(assembly, (
+                ActiveLanguageConnectorAssembly,
+                TrialLanguageConnectorAssembly)):
+            raise TypeError("connector production builder assembly 类型错误")
+        precedence = ctx.precedence_relation_runtime
+        if precedence is None:
+            raise RuntimeError("connector production 缺少 R-06/S-07 runtime")
+        lifecycle = getattr(precedence, "lifecycle", None)
+        consumer = getattr(precedence, "consumer", None)
+        if not isinstance(lifecycle, StructureOrderLifecycleGraph):
+            raise RuntimeError("connector production 缺少 S-07 lifecycle owner")
+        if not isinstance(consumer, StructureOrderConsumer):
+            raise RuntimeError("connector production 缺少 S-07 consumer owner")
+        source_order = lifecycle.order_graph
+        if (source_order.ontology is not ctx.graph_ontology
+                or assembly.order_graph.ontology is not ctx.graph_ontology
+                or source_order.predicates.refs()
+                != assembly.order_graph.predicates.refs()):
+            raise ValueError("connector production S-07 图身份与课程理论不一致")
+        if source_order is not assembly.order_graph:
+            lifecycle = StructureOrderLifecycleGraph(
+                assembly.order_graph,
+                lifecycle.protocol,
+            )
+            consumer = StructureOrderConsumer(
+                lifecycle,
+                consumer.resolver,
+                consumer.protocol,
+            )
+        components = self._component_factory.build(ctx)
+        if not isinstance(components, LanguageConnectorProductionComponents):
+            raise TypeError("connector production component factory 返回类型错误")
+        closure = components.alias.closure
+        if (closure.semantic_graph.ontology is not ctx.graph_ontology
+                or closure.candidate_runtime.graph.ontology
+                is not ctx.graph_ontology):
+            raise ValueError("connector production R-01 组件未绑定当前图")
+
+        connector = assembly.connector
+        structure_planner = connector.structure_planner()
+        execution_planner = GenerationStructureExecutionPlanner(
+            lifecycle,
+            consumer,
+        )
+        surface_runtime = GenerationSurfaceRuntime(components.alias)
+        surface_builder = connector.surface_request_builder(
+            execution_planner)
+        protocol = components.plan_protocol
+        structure_protocol = components.structure_protocol
+        selector = components.selector
+        registrations = (
+            GenerationLayerRegistration(
+                protocol.stance_layer,
+                GenerationStanceLayerResolver(protocol, selector),
+            ),
+            GenerationLayerRegistration(
+                protocol.content_layer,
+                GenerationContentLayerResolver(protocol, selector),
+            ),
+            GenerationLayerRegistration(
+                protocol.discourse_layer,
+                GenerationDiscourseLayerResolver(
+                    protocol,
+                    structure_protocol,
+                    selector,
+                    structure_planner,
+                ),
+            ),
+            GenerationLayerRegistration(
+                protocol.proposition_layer,
+                GenerationPropositionLayerResolver(
+                    protocol,
+                    structure_protocol,
+                    selector,
+                    structure_planner,
+                ),
+            ),
+            GenerationLayerRegistration(
+                protocol.syntax_layer,
+                GenerationSyntaxLayerResolver(
+                    protocol,
+                    structure_protocol,
+                    selector,
+                    structure_planner,
+                ),
+            ),
+            GenerationLayerRegistration(
+                protocol.surface_layer,
+                GenerationSurfaceLayerResolver(
+                    protocol,
+                    selector,
+                    structure_planner,
+                    surface_builder,
+                    surface_runtime,
+                    commit=False,
+                ),
+            ),
+        )
+        executor = TypedGenerationExecutor(
+            GenerationPlanner(protocol, registrations),
+            components.renderer,
+            surface_runtime,
+        )
+        runtime = ProductionGenerationRuntime(
+            SemanticCourseGenerationRequestMapper(),
+            executor,
+            postcheck_mapper=components.postcheck_mapper,
+            postchecker=components.postchecker,
+        )
+        return LanguageConnectorProductionRuntimeBinding(
+            runtime,
+            connector,
+            lifecycle,
+            components.alias,
+        )
+
+    def clone_for_evaluation(
+            self,
+            ) -> "DefaultLanguageConnectorProductionRuntimeBuilder":
+        """为 V-06 复制组件 factory，禁止共享 Use、parser 或 verifier 状态。"""
+        return DefaultLanguageConnectorProductionRuntimeBuilder(
+            self._component_factory.clone_for_evaluation())
+
+    def state_key(self) -> tuple:
+        """返回组件 factory 的完整配置键。"""
+        return self._component_factory.state_key()
+
+
 class LanguageConnectorProductionFactory:
     """原子装配 connector production runtime 与共享候选 owner 的 typed stage4。"""
 
@@ -461,6 +703,7 @@ class LanguageConnectorProductionFactory:
             runtime_builder: LanguageConnectorProductionRuntimeBuilder,
             stage4_policy: LanguageConnectorStage4Policy,
             ) -> None:
+        """绑定 connector、production builder 和同次 stage4 策略。"""
         for label, value, methods in (
                 ("connector factory", connector_factory,
                  ("build", "clone_for_evaluation", "state_key")),
@@ -546,7 +789,10 @@ class LanguageConnectorProductionFactory:
 __all__ = [
     "ActiveLanguageConnectorAssembly",
     "ActiveLanguageConnectorFactory",
+    "DefaultLanguageConnectorProductionRuntimeBuilder",
     "LanguageConnectorAssemblyFactory",
+    "LanguageConnectorProductionComponentFactory",
+    "LanguageConnectorProductionComponents",
     "LanguageConnectorProductionFactory",
     "LanguageConnectorProductionRuntimeBinding",
     "LanguageConnectorProductionRuntimeBuilder",

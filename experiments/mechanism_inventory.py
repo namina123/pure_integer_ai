@@ -1673,7 +1673,11 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
             "experiments.alias_relation_runtime:AliasRelationRuntime.preview_surface",
             "experiments.alias_relation_runtime:AliasRelationRuntime.commit_many",
         ),
-        gates=("FormalTrainConfig.language_generation_runtime_factory",),
+        gates=(
+            "FormalTrainConfig.language_generation_runtime_factory",
+            "FormalTrainConfig.language_generation_course_loader",
+            "FormalTrainConfig.language_generation_component_factory",
+        ),
         sources=(
             "BoundProposition", "BoundRoleBinding", "EvidenceRecord",
             "LanguageBranch", "StructureSlotDefinition",
@@ -1685,7 +1689,7 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
             "assertion_record", "assertion_qualifier",
         ),
         readiness_eligible=False,
-        limitation="首个 formal 切片把唯一 selected Proposition 的命题本体、predicate、Role+ordinal filler 或注入常量映射为普通 S-07 slot，并由 active constraint 和 R-01 fact 形成 Representation/Use；不读取 Unicode、旧 PRECEDES、role_seq、token_seq 或 def_array。图内理论定义已与搜索预算、trace、Use key 等运行策略分离，并接入可跨 run 恢复的 H-00/H-04 候选生命周期和 typed stage4；当前仍只支持单命题和非嵌套 filler，默认课程、多命题 discourse、R-01 Use 账恢复和 legacy 全局退役尚缺。",
+        limitation="首个 formal 切片把唯一 selected Proposition 的命题本体、predicate、Role+ordinal filler 或注入常量映射为普通 S-07 slot，并由 active constraint 和 R-01 fact 形成 Representation/Use；不读取 Unicode、旧 PRECEDES、role_seq、token_seq 或 def_array。图内理论定义已与运行策略分离，版本化课程 loader 和默认 production builder 已正式接线；当前仍只支持单命题和非嵌套 filler，具体独立 verifier/R-01 课程来源、多命题 discourse、R-01 Use 账恢复和 legacy 全局退役尚缺。",
     ),
     MechanismRecord(
         mechanism_id="generation.connector_candidate_lifecycle",
@@ -1697,6 +1701,7 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
             "experiments.language_generation_connector_candidate:LanguageConnectorCandidateRuntime.register",
             "experiments.language_generation_connector_candidate:LanguageConnectorCandidateRuntime.recognize",
             "experiments.language_generation_connector_stage4:LanguageConnectorStage4Runtime.apply",
+            "experiments.language_generation_course:LanguageGenerationCourseLoader.load",
         ),
         readers=(
             "experiments.language_generation_connector_candidate:LanguageConnectorCandidateRuntime.active_registry",
@@ -1704,9 +1709,14 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
             "experiments.language_generation_connector_factory:ActiveLanguageConnectorFactory.build",
             "experiments.language_generation_connector_factory:TrialLanguageConnectorFactory.build",
             "experiments.language_generation_connector_factory:LanguageConnectorProductionFactory.build_installation",
+            "experiments.language_generation_connector_factory:DefaultLanguageConnectorProductionRuntimeBuilder.build",
             "experiments.formal_train:formal_train",
         ),
-        gates=("FormalTrainConfig.language_generation_runtime_factory",),
+        gates=(
+            "FormalTrainConfig.language_generation_runtime_factory",
+            "FormalTrainConfig.language_generation_course_loader",
+            "FormalTrainConfig.language_generation_component_factory",
+        ),
         sources=(
             "LanguageGenerationConnectorTemplate", "HypothesisKey",
             "EvidenceRecord", "ResolverDecision", "CandidateGraphProjection",
@@ -1718,10 +1728,12 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
             "assertion_record", "assertion_qualifier",
             "candidate_projection_event", "memory_event",
             "M03_Hypothesis_Evidence_Resolution",
+            "PH2_training_candidate_event",
+            "derived_stage4_processed_trace",
             "V06_cloned_candidate_owner_and_event_log",
         ),
         readiness_eligible=False,
-        limitation="connector 理论已作为一等图定义持久化，运行预算不入图；forming/trial/active/inactive/superseded 由 H-00/H-04 owner 管理，typed stage4 按 exact Hypothesis 批聚合多维反馈且 refute 优先，同次 production factory 共享候选 owner。H-00 Evidence/lifecycle、完整 ResolverDecision 链和图投影现可按完整 aggregate 协议跨 run 双向核验恢复，V-06 续写绑定 clone event log。stage4 已处理批次仍未持久化，默认理论课程和独立 verifier 来源未装配，多命题与全局旧链退役仍缺，因此不计 readiness。",
+        limitation="connector 理论已作为一等图定义持久化，运行预算不入图；forming/trial/active/inactive/superseded 由 H-00/H-04 owner 管理，typed stage4 按 exact Hypothesis 批聚合多维反馈且 refute 优先，同次 production factory 共享候选 owner。PH2 Core 与 PH3 Memory 历史已分流，stage4 processed 可从 Evidence/decision/图 Event 派生恢复；版本化内容锁课程 loader 会在宿主首写前预演完整 lifecycle，并由真实默认 builder 支持 V-06 重建。具体独立 verifier/R-01 课程来源、forming trial 动态调度、多命题与全局旧链退役仍缺，因此不计 readiness。",
     ),
     MechanismRecord(
         mechanism_id="generation.typed_production_bridge",
@@ -1738,8 +1750,13 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
             "cognition.shared.generation_plan:GenerationPlanner.plan",
             "cognition.shared.generation_surface:GenerationSurfacePreview.representations",
             "cognition.shared.representation_rendering:render_generation_preview",
+            "experiments.language_generation_connector_factory:DefaultLanguageConnectorProductionRuntimeBuilder.build",
         ),
-        gates=("FormalTrainConfig.language_generation_runtime_factory",),
+        gates=(
+            "FormalTrainConfig.language_generation_runtime_factory",
+            "FormalTrainConfig.language_generation_course_loader",
+            "FormalTrainConfig.language_generation_component_factory",
+        ),
         sources=(
             "ProductionGenerationRequestDecision", "GenerationPlanningRequest",
             "GenerationPlan", "GenerationSurfacePreview",
@@ -1747,7 +1764,7 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
         ),
         recovery=(),
         readiness_eligible=False,
-        limitation="显式安装 owner 的 formal language round 只执行同一次 G-00 至 G-03 artifact，先渲染完整 preview 再原子提交 R-01 use，并逐调用关闭旧 PRECEDES/role_seq/token_seq 写入；缺请求、typed 失败或 renderer 失败都不回退旧链。L-05B2B 的语义课程、Variable query、G-04、typed episode、H2/floor、单命题 connector 和 typed stage4 候选转换已接线；composite factory 核验 connector、S-07、R-01 与候选 owner 均属于当前 TrainContext，connector H-00/H-04 可跨 run 重建。默认课程、多命题生成、stage4 批次/报告恢复和全局退役仍未完成。",
+        limitation="显式安装 owner 的 formal language round 只执行同一次 G-00 至 G-03 artifact，先渲染完整 preview 再原子提交 R-01 use，并逐调用关闭旧 PRECEDES/role_seq/token_seq 写入；缺请求、typed 失败或 renderer 失败都不回退旧链。版本化 connector 课程 loader 与真实默认 builder 已进入 formal 配置入口，并核验 connector、S-07、R-01、G-04、候选 owner 和 V-06 facade 归属。具体独立 verifier/R-01 课程来源、多命题生成、R-01 Use 跨 run 和全局退役仍未完成。",
     ),
     MechanismRecord(
         mechanism_id="generation.post_surface_verification",
@@ -1777,7 +1794,7 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
         ),
         recovery=(),
         readiness_eligible=False,
-        limitation="G-04 已在同次 renderer 成功并提交 R-01 Use 后执行结构、命题、scope、Artifact、来源和任务六维只读复核；领域失败保留独立 verdict/claim/trace，不写 effect、Memory、标量 reward，也不回滚真实 Use。L-05B2B 课程请求和具有完整 template scope 的 Variable 只读恢复已接线；真实 parser/verifier 课程装配、S-07/R-01 恢复、G-05 Memory result signal 与剩余消费者迁移尚未完成。",
+        limitation="G-04 已在同次 renderer 成功并提交 R-01 Use 后执行结构、命题、scope、Artifact、来源和任务六维只读复核；领域失败保留独立 verdict/claim/trace，不写 effect、Memory、标量 reward，也不回滚真实 Use。默认 production builder 已要求注入并重建 parser/verifier owner；具体独立 verifier 课程来源、R-01 Use 恢复、G-05 Memory result signal 与剩余消费者迁移尚未完成。",
     ),
     MechanismRecord(
         mechanism_id="generation.typed_language_episode_reward",
@@ -1796,7 +1813,11 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
             "experiments.capability_exam:project_g_attribution",
             "experiments.capability_exam:project_layer0",
         ),
-        gates=("FormalTrainConfig.language_generation_runtime_factory",),
+        gates=(
+            "FormalTrainConfig.language_generation_runtime_factory",
+            "FormalTrainConfig.language_generation_course_loader",
+            "FormalTrainConfig.language_generation_component_factory",
+        ),
         sources=(
             "ProductionGenerationRun", "G04_VerificationReport",
             "supplemental_VerificationReport", "VerificationResult",
@@ -1804,7 +1825,7 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
         ),
         recovery=(),
         readiness_eligible=False,
-        limitation="formal round/batch、metrics 和 preflight 已消费同次 typed generation episode；G-04 与全部适用逻辑/数值/顺序 verifier 的 applicability/verdict/claim/detail/source/scope 逐维保留且绝不合成 reward:int，来源、scope、只读状态或维度冲突均 fail closed。旧 adapter artifact 不向 episode 列表泄漏，typed H2/floor 和 stage4 connector 消费合并后的分维信号，conduction/judge/dead-end/veto/anti-collapse/Layer0/G门统计继续分型隔离。当前只持久化聚合 metrics 和 detached report，不恢复完整 episode；G-05 Memory signal、默认课程、多命题 mapper 和剩余 legacy surface 退役尚缺。",
+        limitation="formal round/batch、metrics 和 preflight 已消费同次 typed generation episode；G-04 与全部适用逻辑/数值/顺序 verifier 的 applicability/verdict/claim/detail/source/scope 逐维保留且绝不合成 reward:int，来源、scope、只读状态或维度冲突均 fail closed。旧 adapter artifact 不向 episode 列表泄漏，typed H2/floor 和 stage4 connector 消费合并后的分维信号，conduction/judge/dead-end/veto/anti-collapse/Layer0/G门统计继续分型隔离。版本化默认课程入口已接线；当前仍只持久化聚合 metrics 和 detached report，不恢复完整 episode，G-05 Memory signal、多命题 mapper、具体独立 verifier 来源和剩余 legacy surface 退役尚缺。",
     ),
     MechanismRecord(
         mechanism_id="evaluation.typed_language_h2",

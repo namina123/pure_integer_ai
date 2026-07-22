@@ -463,24 +463,41 @@ class LanguageGenerationConnectorGraph:
             definition: LanguageGenerationConnectorTemplate,
             ) -> None:
         """核验 connector 定义与已持久化 S-07 structure/constraint 完整一致。"""
+        self.validate_against_order_graph(
+            self.order_graph,
+            self.value_protocol,
+            definition,
+        )
+
+    @staticmethod
+    def validate_against_order_graph(
+            order_graph: StructureOrderGraph,
+            value_protocol: LanguageConnectorValueProtocol,
+            definition: LanguageGenerationConnectorTemplate,
+            ) -> None:
+        """只读核验理论与 S-07 图，不要求先物化 connector predicate。"""
+        if not isinstance(order_graph, StructureOrderGraph):
+            raise TypeError("connector validation order_graph 类型错误")
+        if not isinstance(value_protocol, LanguageConnectorValueProtocol):
+            raise TypeError("connector validation value_protocol 类型错误")
         if not isinstance(definition, LanguageGenerationConnectorTemplate):
             raise TypeError("connector graph definition 类型错误")
         LanguageGenerationConnectorRegistry(
-            self.value_protocol, (definition,))
-        structure_ref = self.ontology.resolve(definition.structure)
+            value_protocol, (definition,))
+        structure_ref = order_graph.ontology.resolve(definition.structure)
         if structure_ref is None:
             raise LanguageConnectorGraphError("connector 引用的 S-07 structure 缺失")
-        materialized = self.order_graph.read_structure(structure_ref)
+        materialized = order_graph.read_structure(structure_ref)
         slots = tuple(item.definition for item in materialized.slots)
         if slots != definition.slots:
             raise LanguageConnectorGraphError(
                 "connector slot schema 与 S-07 图不一致")
         for constraint in definition.constraints:
-            constraint_ref = self.ontology.resolve(constraint)
+            constraint_ref = order_graph.ontology.resolve(constraint)
             if constraint_ref is None:
                 raise LanguageConnectorGraphError(
                     "connector 引用的 S-07 constraint 缺失")
-            restored = self.order_graph.read_constraint(constraint_ref)
+            restored = order_graph.read_constraint(constraint_ref)
             if restored.definition.structure != definition.structure:
                 raise LanguageConnectorGraphError(
                     "connector constraint 不属于目标 surface structure")
