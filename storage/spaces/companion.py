@@ -67,7 +67,8 @@ def register_companion_table(backend: StorageBackend) -> None:
     """注册 text_assoc 为非核心扩展表（L1·allow_text·非整数合法）。"""
     register_extension_table(backend, TEXT_ASSOC_TABLE, _TEXT_ASSOC_COLUMNS,
                              discipline=disc.DISC_APPEND_ONLY,
-                             indexes=_TEXT_ASSOC_INDEXES)
+                             indexes=_TEXT_ASSOC_INDEXES,
+                             recovery_key=("space_id", "assoc_id"))
 
 
 class CompanionSpace:

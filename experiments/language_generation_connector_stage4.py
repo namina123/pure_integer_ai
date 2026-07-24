@@ -12,6 +12,12 @@ from pure_integer_ai.cognition.shared.candidate_runtime import (
 from pure_integer_ai.cognition.shared.candidate_verifier import (
     RevealedObjectObservation,
 )
+from pure_integer_ai.cognition.shared.generation_surface import (
+    GenerationSurfaceSentenceAttribution,
+)
+from pure_integer_ai.cognition.shared.generation_structure_plan import (
+    GenerationSentenceInstance,
+)
 from pure_integer_ai.cognition.shared.evidence_candidate import (
     EVIDENCE_REFUTE,
     EVIDENCE_SUPPORT,
@@ -27,9 +33,6 @@ from pure_integer_ai.cognition.shared.scope_identity import document_scope
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.experiments.evaluation_protocol import ProtocolKey
 from pure_integer_ai.experiments.language_generation_connector import (
-    LanguageConnectorDiscourseMapper,
-    LanguageConnectorPropositionMapper,
-    LanguageConnectorSyntaxMapper,
     LanguageGenerationConnectorRegistry,
     LanguageGenerationConnectorTemplate,
 )
@@ -126,6 +129,18 @@ def _episode_identity(episode: TypedLanguageEpisode) -> tuple[int, ...]:
     )
 
 
+def _feedback_identity(
+        episode: TypedLanguageEpisode,
+        attribution: GenerationSurfaceSentenceAttribution,
+        ) -> tuple[int, ...]:
+    """用 episode、句实例和精确理论归属建立不可混用的反馈身份。"""
+    return (
+        2,
+        *_packed(_episode_identity(episode)),
+        *_packed(attribution.stable_key()),
+    )
+
+
 def _signal_trace(signal: TypedLanguageRewardSignal) -> tuple[int, ...]:
     """保留 stage4 实际消费字段，避免把递归 execution claim 内联进图事件。"""
     source_key = () if signal.source is None else signal.source.stable_key()
@@ -145,13 +160,13 @@ def _signal_trace(signal: TypedLanguageRewardSignal) -> tuple[int, ...]:
 
 
 def _batch_identity(
-        episode_keys: tuple[tuple[int, ...], ...],
+        feedback_keys: tuple[tuple[int, ...], ...],
         hypothesis: HypothesisKey,
         ) -> tuple[int, ...]:
-    """用规范 episode 集和 exact Hypothesis 建立顺序无关批次身份。"""
-    ordered = tuple(sorted(episode_keys))
+    """用逐句反馈集和 exact Hypothesis 建立顺序无关批次身份。"""
+    ordered = tuple(sorted(feedback_keys))
     return (
-        1,
+        2,
         len(ordered),
         *(value for key in ordered for value in _packed(key)),
         *_packed(hypothesis.stable_key()),
@@ -180,8 +195,12 @@ class LanguageConnectorSignalRoute:
             self.refute_outcomes,
             label="connector refute outcomes",
         )
-        if set(support) & set(refute):
-            raise ValueError("同一 signal outcome 不得同时支持和反驳")
+        if support != ((APPLICABILITY_APPLICABLE, VERDICT_SUPPORT),):
+            raise ValueError(
+                "connector support route 只能接受 applicable/support verdict")
+        if refute != ((APPLICABILITY_APPLICABLE, VERDICT_REFUTE),):
+            raise ValueError(
+                "connector refute route 只能接受 applicable/refute verdict")
         object.__setattr__(self, "support_outcomes", support)
         object.__setattr__(self, "refute_outcomes", refute)
 
@@ -307,10 +326,12 @@ class LanguageConnectorStage4Report:
 
 @dataclass(frozen=True)
 class _PreparedFeedback:
-    """批量零写预检后的唯一 connector、聚合 stance 和 trace。"""
+    """批量零写预检后的逐句归属、聚合 stance 和完整 trace。"""
 
     episode: TypedLanguageEpisode
     episode_key: tuple[int, ...]
+    feedback_key: tuple[int, ...]
+    attribution: GenerationSurfaceSentenceAttribution
     template: LanguageGenerationConnectorTemplate
     hypothesis: HypothesisKey
     stance: int
@@ -340,7 +361,7 @@ class LanguageConnectorStage4Runtime:
             self,
             episodes: tuple[TypedLanguageEpisode, ...],
             ) -> LanguageConnectorStage4Report:
-        """批量预检 typed 反馈后逐 connector 形成可回溯 lifecycle 转换。"""
+        """按逐句 claim 预检 typed 反馈，再按理论形成单次 lifecycle 转换。"""
         if not isinstance(episodes, tuple) or not episodes:
             raise ValueError("connector stage4 episodes 必须是非空 tuple")
         if any(not isinstance(item, TypedLanguageEpisode) for item in episodes):
@@ -348,22 +369,56 @@ class LanguageConnectorStage4Runtime:
         replayed = self._replayed_report(episodes)
         if replayed is not None:
             return replayed
-        prepared = tuple(self._prepare(item) for item in episodes)
-        episode_keys = tuple(item.episode_key for item in prepared)
-        if len(set(episode_keys)) != len(episode_keys):
-            raise ValueError("同批 stage4 episode 不得重复")
+        prepared = tuple(
+            prepared_item
+            for episode in episodes
+            for prepared_item in (
+                self._prepare(episode, attribution)
+                for attribution in self._episode_attributions(episode)
+            )
+        )
+        feedback_keys = tuple(item.feedback_key for item in prepared)
+        if len(set(feedback_keys)) != len(feedback_keys):
+            raise ValueError("同批 stage4 句实例反馈不得重复")
 
         outcomes = []
-        grouped: dict[HypothesisKey, list[_PreparedFeedback]] = {}
+        grouped: dict[
+            tuple[HypothesisKey, ObjectIdentity, ObjectIdentity],
+            list[_PreparedFeedback],
+        ] = {}
         for item in prepared:
-            grouped.setdefault(item.hypothesis, []).append(item)
-        for hypothesis in sorted(grouped, key=HypothesisKey.stable_key):
+            key = (
+                item.hypothesis,
+                item.template.connector,
+                item.attribution.purpose,
+            )
+            grouped.setdefault(key, []).append(item)
+        hypothesis_theories: dict[HypothesisKey, set[ObjectIdentity]] = {}
+        hypothesis_purposes: dict[HypothesisKey, set[ObjectIdentity]] = {}
+        for hypothesis, theory, purpose in grouped:
+            hypothesis_theories.setdefault(hypothesis, set()).add(theory)
+            hypothesis_purposes.setdefault(hypothesis, set()).add(purpose)
+        if any(len(values) != 1 for values in hypothesis_theories.values()):
+            raise ValueError("同一 connector Hypothesis 对应多个权威理论")
+        if any(len(values) != 1 for values in hypothesis_purposes.values()):
+            raise ValueError("同一 connector Hypothesis 对应多个 surface purpose")
+        for hypothesis, connector, purpose in sorted(
+                grouped,
+                key=lambda item: (
+                    item[0].stable_key(),
+                    item[1].stable_key(),
+                    item[2].stable_key(),
+                )):
             items = tuple(sorted(
-                grouped[hypothesis],
-                key=lambda current: current.episode_key,
+                grouped[(hypothesis, connector, purpose)],
+                key=lambda current: current.feedback_key,
             ))
             template = items[0].template
-            if any(item.template != template for item in items):
+            if any(
+                    item.template != template
+                    or item.attribution.theory != connector
+                    or item.attribution.purpose != purpose
+                    for item in items):
                 raise ValueError("同一 connector Hypothesis 对应多个权威理论")
             stances = tuple(item.stance for item in items)
             if EVIDENCE_REFUTE in stances:
@@ -373,7 +428,7 @@ class LanguageConnectorStage4Runtime:
             else:
                 stance = EVIDENCE_UNKNOWN
             batch_key = _batch_identity(
-                tuple(item.episode_key for item in items),
+                tuple(item.feedback_key for item in items),
                 hypothesis,
             )
             existing = self._processed.get(batch_key)
@@ -441,6 +496,33 @@ class LanguageConnectorStage4Runtime:
                 item.trace for item in items)
             outcomes.append(outcome)
         return LanguageConnectorStage4Report(tuple(outcomes))
+
+    def _episode_attributions(
+            self,
+            episode: TypedLanguageEpisode,
+            ) -> tuple[GenerationSurfaceSentenceAttribution, ...]:
+        """按 syntax 呈现序读取完整逐句理论归属，拒绝旧整次归属或残缺覆盖。"""
+        execution = episode.production.execution
+        if execution is None or execution.surface is None:
+            raise ValueError("connector stage4 surface 缺少显式理论归属")
+        request = execution.surface.preview.request
+        sentences = request.structure.syntax.sentences
+        instances = []
+        for sentence in sentences:
+            if not isinstance(sentence.instance, GenerationSentenceInstance):
+                raise ValueError("connector stage4 surface 缺少显式理论归属")
+            instances.append(sentence.instance)
+        if len(set(instances)) != len(instances):
+            raise ValueError("connector stage4 syntax 句实例身份重复")
+        attributions = request.sentence_attribution_map()
+        if (len(attributions) != len(request.sentence_attributions)
+                or set(attributions) != set(instances)):
+            raise ValueError("connector stage4 surface 缺少显式理论归属")
+        result = tuple(attributions[instance] for instance in instances)
+        if any(item.sentence != instance
+               for item, instance in zip(result, instances)):
+            raise RuntimeError("connector stage4 逐句理论归属索引漂移")
+        return result
 
     def _restore_processed(self) -> None:
         """从 H-00/H-04 与候选图重建 stage4 批次游标，不建立第二真源。"""
@@ -541,7 +623,7 @@ class LanguageConnectorStage4Runtime:
             self,
             trace: tuple[int, ...],
             ) -> tuple[tuple[tuple[int, ...], ...], tuple[tuple[int, ...], ...]]:
-        """从 CandidateVerification trace 恢复逐 episode 消费键和 episode 身份。"""
+        """从 CandidateVerification trace 恢复逐句反馈键和完整 trace。"""
         policy_key, cursor = _take(trace, 0, label="policy")
         if policy_key != self.policy.stable_key():
             raise RuntimeError("恢复 stage4 trace 的 policy 漂移")
@@ -552,32 +634,26 @@ class LanguageConnectorStage4Runtime:
         if type(count) is not int or count <= 0:
             raise RuntimeError("恢复 stage4 trace 的 episode 数量非法")
         traces = []
-        episode_keys = []
+        feedback_keys = []
         for _index in range(count):
             item, cursor = _take(trace, cursor, label="episode trace")
-            episode_key = self._validate_episode_trace(item)
+            feedback_key = self._validate_episode_trace(item)
             traces.append(item)
-            episode_keys.append(episode_key)
+            feedback_keys.append(feedback_key)
         if cursor != len(trace):
             raise RuntimeError("恢复 stage4 batch trace 含尾随字段")
-        return tuple(traces), tuple(episode_keys)
+        return tuple(traces), tuple(feedback_keys)
 
     def _validate_episode_trace(
             self,
             trace: tuple[int, ...],
             ) -> tuple[int, ...]:
-        """核验逐 episode trace 的 policy、purpose 和 routed signal 结构。"""
+        """核验逐句 trace 的 policy、反馈身份和 routed signal 结构。"""
         policy_key, cursor = _take(trace, 0, label="episode policy")
         if policy_key != self.policy.stable_key():
             raise RuntimeError("恢复 stage4 episode trace 的 policy 漂移")
-        episode_key, cursor = _take(
-            trace, cursor, label="episode identity")
-        purpose_key, cursor = _take(trace, cursor, label="surface purpose")
-        purpose = ObjectIdentity.from_stable_key(purpose_key)
-        if purpose not in {
-                self.policy.active_purpose,
-                self.policy.trial_purpose}:
-            raise RuntimeError("恢复 stage4 episode trace 的 purpose 未注册")
+        feedback_key, cursor = _take(
+            trace, cursor, label="sentence feedback identity")
         if cursor >= len(trace):
             raise RuntimeError("恢复 stage4 episode trace 缺 signal 数量")
         count = trace[cursor]
@@ -588,7 +664,7 @@ class LanguageConnectorStage4Runtime:
             _signal, cursor = _take(trace, cursor, label="signal trace")
         if cursor != len(trace):
             raise RuntimeError("恢复 stage4 episode trace 含尾随字段")
-        return episode_key
+        return feedback_key
 
     def _projection_for_decision(
             self,
@@ -631,35 +707,51 @@ class LanguageConnectorStage4Runtime:
             self,
             episodes: tuple[TypedLanguageEpisode, ...],
             ) -> LanguageConnectorStage4Report | None:
-        """在候选状态变化前识别完整旧批次，并拒绝同身份内容漂移。"""
+        """在写入前识别完整逐句反馈批次，拒绝重放时归属或 claim 漂移。"""
         episode_keys = tuple(_episode_identity(item) for item in episodes)
         if len(set(episode_keys)) != len(episode_keys):
             raise ValueError("同批 stage4 episode 不得重复")
-        grouped: dict[HypothesisKey, list[TypedLanguageEpisode]] = {}
+        raw: list[tuple[TypedLanguageEpisode,
+                        GenerationSurfaceSentenceAttribution]] = []
         for episode in episodes:
-            execution = episode.production.execution
-            if execution is None or execution.surface is None:
+            try:
+                raw.extend((episode, attribution) for attribution in (
+                    self._episode_attributions(episode)))
+            except ValueError:
                 return None
-            attribution = execution.surface.preview.request.attribution
-            if attribution is None:
-                return None
-            grouped.setdefault(attribution.hypothesis, []).append(episode)
+        grouped: dict[
+            tuple[HypothesisKey, ObjectIdentity, ObjectIdentity],
+            list[tuple[TypedLanguageEpisode,
+                       GenerationSurfaceSentenceAttribution]],
+        ] = {}
+        for episode, attribution in raw:
+            grouped.setdefault((
+                attribution.hypothesis,
+                attribution.theory,
+                attribution.purpose,
+            ), []).append((episode, attribution))
         outcomes = []
-        for hypothesis in sorted(grouped, key=HypothesisKey.stable_key):
-            items = tuple(sorted(
-                grouped[hypothesis],
-                key=_episode_identity,
+        for hypothesis, connector, purpose in sorted(
+                grouped,
+                key=lambda item: (
+                    item[0].stable_key(),
+                    item[1].stable_key(),
+                    item[2].stable_key(),
+                )):
+            raw_items = tuple(sorted(
+                grouped[(hypothesis, connector, purpose)],
+                key=lambda item: _feedback_identity(*item),
             ))
             batch_key = _batch_identity(
-                tuple(_episode_identity(item) for item in items),
+                tuple(_feedback_identity(*item) for item in raw_items),
                 hypothesis,
             )
             existing = self._processed.get(batch_key)
             if existing is None:
                 return None
             prepared = tuple(
-                self._prepare(item, restored=existing)
-                for item in items
+                self._prepare(episode, attribution, restored=existing)
+                for episode, attribution in raw_items
             )
             traces = tuple(item.trace for item in prepared)
             stances = tuple(item.stance for item in prepared)
@@ -673,24 +765,26 @@ class LanguageConnectorStage4Runtime:
             )
             if (self._processed_traces[batch_key] != traces
                     or existing.stance != stance
-                    or any(item.template != existing.connector
-                           or item.hypothesis != hypothesis
-                           for item in prepared)):
-                raise RuntimeError("已处理 stage4 episode 的消费内容漂移")
+                    or any(
+                        item.template != existing.connector
+                        or item.hypothesis != hypothesis
+                        or item.attribution.theory != connector
+                        or item.attribution.purpose != purpose
+                        for item in prepared)):
+                raise RuntimeError("已处理 stage4 句实例反馈的消费内容漂移")
             outcomes.append(existing)
         return LanguageConnectorStage4Report(tuple(outcomes))
 
     def _prepare(
             self,
             episode: TypedLanguageEpisode,
+            attribution: GenerationSurfaceSentenceAttribution,
             *,
             restored: LanguageConnectorStage4Outcome | None = None,
             ) -> _PreparedFeedback:
-        """零写核验 episode、active connector、完整 route 和聚合三态。"""
+        """零写核验一条句实例的 claim、理论、route 和三态反馈。"""
         if episode.read_only:
             raise ValueError("read-only typed episode 不得写 connector Evidence")
-        if episode.scope.source != episode.source:
-            raise ValueError("typed episode scope 未绑定同一 observation source")
         execution = episode.production.execution
         if (execution is None or execution.surface is None
                 or not episode.generation_complete):
@@ -699,9 +793,16 @@ class LanguageConnectorStage4Runtime:
             raise ValueError("connector stage4 缺少同次 G-04 typed signal")
         request = execution.surface.preview.request
         selection = request.structure.selection
-        attribution = request.attribution
-        if attribution is None:
-            raise ValueError("connector stage4 surface 缺少显式理论归属")
+        goal = selection.request.goal
+        if (episode.source != goal.source
+                or goal.scope.parent != episode.scope):
+            raise ValueError("typed episode 未绑定同次 generation query")
+        if not isinstance(attribution, GenerationSurfaceSentenceAttribution):
+            raise TypeError("connector stage4 attribution 类型错误")
+        if request.sentence_attribution_map().get(attribution.sentence) != attribution:
+            raise ValueError("connector stage4 句实例理论归属未绑定当前 surface")
+        if attribution.sentence.scope != goal.scope:
+            raise ValueError("connector stage4 句实例 query scope 漂移")
         if restored is not None:
             if (attribution.theory != restored.connector.connector
                     or attribution.hypothesis
@@ -725,12 +826,25 @@ class LanguageConnectorStage4Runtime:
             )
         else:
             raise ValueError("connector surface purpose 未被 stage4 注册")
-        template, candidate = registry.match(selection)
+        candidates = tuple(
+            item for item in registry.selected_candidates(selection)
+            if item.stable_key() == attribution.sentence.candidate_key
+        )
+        if len(candidates) != 1:
+            raise ValueError("connector stage4 句实例未唯一绑定 selected candidate")
+        candidate = candidates[0]
+        template, matched_candidate = registry.match_candidate(
+            selection,
+            candidate,
+        )
+        if matched_candidate != candidate:
+            raise RuntimeError("connector stage4 registry 替换了 selected candidate")
         self._validate_surface_binding(
             episode,
             registry,
             template,
             candidate,
+            attribution,
         )
         if attribution.theory != template.connector:
             raise ValueError("connector stage4 surface 理论归属漂移")
@@ -755,6 +869,11 @@ class LanguageConnectorStage4Runtime:
             signal = signals.get((route.dimension, route.verifier))
             if signal is None:
                 raise ValueError("typed episode 缺少 connector stage4 必需 route")
+            if attribution.sentence.candidate_key not in signal.claim_keys:
+                raise ValueError("G-04 signal 未显式 claim 当前 connector candidate")
+            if (signal.source != goal.source
+                    or signal.scope != goal.scope):
+                raise ValueError("G-04 signal 未绑定当前 generation query")
             routed.append(signal)
             stances.append(route.stance(signal))
         if EVIDENCE_REFUTE in stances:
@@ -765,8 +884,7 @@ class LanguageConnectorStage4Runtime:
             stance = EVIDENCE_UNKNOWN
         trace = (
             *_packed(self.policy.stable_key()),
-            *_packed(_episode_identity(episode)),
-            *_packed(attribution.purpose.stable_key()),
+            *_packed(_feedback_identity(episode, attribution)),
             len(routed),
             *(value for signal in routed
               for value in _packed(_signal_trace(signal))),
@@ -774,6 +892,8 @@ class LanguageConnectorStage4Runtime:
         return _PreparedFeedback(
             episode,
             _episode_identity(episode),
+            _feedback_identity(episode, attribution),
+            attribution,
             template,
             hypothesis,
             stance,
@@ -786,53 +906,52 @@ class LanguageConnectorStage4Runtime:
             registry,
             template: LanguageGenerationConnectorTemplate,
             candidate,
+            attribution: GenerationSurfaceSentenceAttribution,
             ) -> None:
-        """双向证明本次完整 surface 确由当前 active connector 生成。"""
+        """逐句证明 surface、S-07、模板和 exact attribution 未发生串线。"""
         execution = episode.production.execution
         if execution is None or execution.surface is None:
             raise ValueError("connector stage4 缺完整 surface")
         request = execution.surface.preview.request
         structure = request.structure
-        selection = structure.selection
-
-        discourse = LanguageConnectorDiscourseMapper(registry).plan(selection)
-        propositions = LanguageConnectorPropositionMapper().plan(
-            selection,
-            discourse,
-        )
-        syntax = LanguageConnectorSyntaxMapper(registry).plan(
-            selection,
-            discourse,
-            propositions,
-        )
-        if (structure.discourse != discourse
-                or structure.propositions != propositions
-                or structure.syntax != syntax):
-            raise ValueError("typed episode structure 未由当前 active connector 产生")
         if request.branch != template.language_branch:
             raise ValueError("typed episode surface branch 与 connector 不一致")
-
-        sentences = syntax.sentences
-        executed = request.execution.sentences
-        if len(sentences) != 1 or len(executed) != 1:
-            raise ValueError("connector stage4 当前只接受单句完整执行")
+        sentences = tuple(
+            item for item in structure.syntax.sentences
+            if item.address == attribution.sentence
+        )
+        obligations = tuple(
+            item for item in structure.syntax.linearization
+            if item.address == attribution.sentence
+        )
+        executed = tuple(
+            item for item in request.execution.sentences
+            if item.obligation.address == attribution.sentence
+        )
+        if (len(sentences) != 1 or len(obligations) != 1
+                or len(executed) != 1):
+            raise ValueError("connector stage4 句实例缺少唯一 syntax/S-07 execution")
         sentence = sentences[0]
+        obligation = obligations[0]
         actual_execution = executed[0]
         expected_values = registry.values(template, candidate.proposition)
-        if (sentence.sentence != template.sentence
+        if (sentence.instance != attribution.sentence
+                or sentence.sentence != template.sentence
                 or sentence.structure != template.structure
+                or sentence.proposition_keys
+                != (attribution.sentence.candidate_key,)
                 or sentence.slots != template.slots
                 or sentence.values != expected_values
-                or actual_execution.obligation != syntax.linearization[0]
+                or actual_execution.obligation != obligation
                 or actual_execution.graph_slots != template.slots):
             raise ValueError("typed episode sentence/slot/value 未绑定当前 connector")
         active_constraints = tuple(
             item.constraint.definition.constraint
             for item in actual_execution.active_constraints
         )
-        if (syntax.linearization[0].constraints != template.constraints
-                or syntax.linearization[0].context != template.context
-                or syntax.linearization[0].reason
+        if (actual_execution.obligation.constraints != template.constraints
+                or actual_execution.obligation.context != template.context
+                or actual_execution.obligation.reason
                 != template.linearization_reason
                 or active_constraints != template.constraints):
             raise ValueError("typed episode constraint/context 未绑定当前 connector")
@@ -840,12 +959,15 @@ class LanguageConnectorStage4Runtime:
         theory_by_slot = {item.slot: item for item in template.surface}
         directives = request.directive_map()
         expected_keys = {
-            (template.sentence, slot.slot) for slot in template.slots}
-        if set(directives) != expected_keys:
+            (attribution.sentence, slot.slot) for slot in template.slots}
+        actual_keys = {
+            key for key in directives if key[0] == attribution.sentence}
+        if actual_keys != expected_keys:
             raise ValueError("typed episode surface directive 未覆盖 connector slot")
-        for key, directive in directives.items():
+        for key in expected_keys:
+            directive = directives[key]
             theory = theory_by_slot[key[1]]
-            if (directive.sentence != template.sentence
+            if (directive.sentence != attribution.sentence
                     or directive.action != theory.action
                     or directive.instruction != theory.instruction
                     or directive.surface_prefix_steps

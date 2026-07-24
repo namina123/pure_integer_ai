@@ -17,26 +17,41 @@ CursorState / cursor_resume —— stage-skip 续训（E8·跳已完成 skippabl
 
 **几百G不重训红线**：每正式 run 新 run_id·续训从终 dump 起·已完成阶段不重跑（不部分白训）。
 
-per-space dump 形态（复用 paths.py C5）：
-  <run_dir>/<run_id>/space_<sid>.dump = JSON 行（该 space 的所有表行·filter_rows_for_space 过滤）
-  跨 space 边在两端 space dump 各留一份（append-only 可回溯·非跨 space 移动·§十五决策1）。
-  <run_dir>/<run_id>/global_identity.dump = 不属于单一 space 的身份索引完整快照。
+V-03 恢复包形态：
+  <run_dir>/<run_id>/space_<sid>.dump = 带 segment 头的有序 JSON 行。
+  <run_dir>/<run_id>/global_identity.dump = 无权威 space_id 列的全局表 segment。
+  <run_dir>/<run_id>/cursor.json = 与图同次封存的阶段游标。
+  <run_dir>/<run_id>/run.manifest.json + seal = schema、版本、依赖、epoch、
+  read fence、行数和校验真值源。manifest 最后发布，已发布 run 不覆盖。
+
+跨 space 边仍在两端 segment 保留物理副本，load 按原表 ordinal + 完整行核验
+只去除跨 segment 副本，不合并表内合法重复行。重复 load 精确包为零写；
+目标部分或漂移时 fail closed，中途异常恢复数据、id pool 和 IS_A 代次。
 
 铁律：纯整数（dump 行纯整·伴随 TEXT 合法·JSON 序列化无浮点）/ 确定性（per-space 文件+行序确定·bit-identical）/
   append-only（load 不改 dump 文件·续训写新 run_id）/ 几百G不重训（新 run_id·终 dump base）。
-诚实边界：dump 是存储快照非语义（stable≠correct）/ 续训跨 run 须重标定 reward 权重 H2（非 skippable）/
-  within-run 崩溃恢复是另一机制（E2 append_log·本模块只管终 dump 跨 run）。
+诚实边界：dump 是完整存储快照非语义（stable≠correct）/ 续训跨 run 须重标定
+  reward 权重 H2（非 skippable）/ 增量 segment、真分页、物理迁移和 within-run 崩溃点
+  由 K-02/M-10 在同一 SegmentDependency 与故障边界上继续实现。
 """
 from __future__ import annotations
 
-import json
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.storage.backend import StorageBackend
-from pure_integer_ai.storage import paths
+from pure_integer_ai.storage.recovery_package import (
+    load_recovery_package,
+    publish_recovery_package,
+    registered_space_ids,
+)
+from pure_integer_ai.storage.recovery_protocol import (
+    RecoveryDependency,
+    RecoveryFaultInjector,
+    RecoveryLoadResult,
+    RecoveryMigrationRegistry,
+)
 from pure_integer_ai.storage.assertion_identity import (
     ASSERTION_SUPERSEDE_TABLE,
     IDENTITY_HEADER_TABLE,
@@ -127,103 +142,143 @@ class CursorState:
 
 # ---- 终 dump（per-space·E1 权威 base） ----
 
-def _table_rows(backend: StorageBackend, table: str) -> list[dict[str, Any]]:
-    """取表全部行（确定性·无 where·backend.select 全扫）。"""
-    return backend.select(table, where=None)
+
+def _version_key(value: object | None) -> tuple[int, ...]:
+    """将 VersionBundle 或显式整数 tuple 转为恢复依赖键。"""
+    if value is None:
+        return ()
+    if isinstance(value, tuple):
+        key = value
+    else:
+        stable_key = getattr(value, "stable_key", None)
+        if not callable(stable_key):
+            raise TypeError("versions 必须是整数 tuple 或实现 stable_key")
+        key = stable_key()
+    if not isinstance(key, tuple) or any(type(item) is not int for item in key):
+        raise TypeError("versions stable_key 必须是严格整数 tuple")
+    return key
 
 
-def _serialize_value(v: Any) -> Any:
-    """JSON 序列化预处理：None/int/str 原样·其他转 str（防 tuple 等非 JSON 类型）。"""
-    if v is None or isinstance(v, (int, str, bool)):
-        return v
-    return str(v)
+def cursor_state_payload(state: CursorState) -> dict[str, Any]:
+    """将训练游标转为与 run manifest 同次发布的确定 payload。"""
+    if not isinstance(state, CursorState):
+        raise TypeError("cursor state 类型错误")
+    return {
+        "base_run_id": state.base_run_id,
+        "run_id": state.run_id,
+        "completed": sorted(state.completed),
+        "non_skippable": sorted(state.non_skippable),
+    }
+
+
+def cursor_state_from_payload(
+        payload: dict[str, Any] | None,
+        *, fallback_run_id: str,
+        ) -> CursorState | None:
+    """从已封存 payload 严格恢复训练游标。"""
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise TypeError("cursor payload 必须是 dict")
+    try:
+        base_run_id = payload.get("base_run_id", fallback_run_id)
+        run_id = payload.get("run_id", fallback_run_id)
+        completed = payload.get("completed", [])
+        non_skippable = payload.get("non_skippable", [])
+    except AttributeError as exc:
+        raise TypeError("cursor payload 字段非法") from exc
+    if (not isinstance(base_run_id, str) or not base_run_id
+            or not isinstance(run_id, str) or not run_id):
+        raise ValueError("cursor run_id 必须是非空字符串")
+    if (not isinstance(completed, list)
+            or not isinstance(non_skippable, list)
+            or any(type(item) is not int for item in completed + non_skippable)):
+        raise ValueError("cursor 阶段集必须是严格整数列表")
+    return CursorState(
+        base_run_id=base_run_id,
+        run_id=run_id,
+        completed=set(completed),
+        non_skippable=set(non_skippable),
+    )
 
 
 def dump_run(backend: StorageBackend, run_dir: str, run_id: str,
-             *, spaces: list[int],
-             tables: tuple[str, ...] = DUMP_TABLES) -> list[int]:
-    """终 dump（per-space·复用 paths.py·E1 权威 base）。
+             *, spaces: list[int] | None,
+             tables: tuple[str, ...] | None = DUMP_TABLES,
+             include_registered_tables: bool = False,
+             require_all_spaces: bool = False,
+             versions: object | None = None,
+             dependencies: tuple[RecoveryDependency, ...] = (),
+             publish_epoch: int = 1,
+             cursor_state: CursorState | None = None,
+             fault_injector: RecoveryFaultInjector | None = None,
+             ) -> list[int]:
+    """原子发布带 schema、segment、依赖和可选游标的终 dump。
 
-    每 space 一个文件 space_<sid>.dump（JSON 行·该 space 的所有表行过滤后）。
-    返已 dump 的 space_id 列表（升序·确定性）。run 正常结束才调此（产终 dump·跨 run 续训 base）。
+    所有 segment 先写 staging，manifest 和独立封印最后写入，只有完整
+    预检可读的包才会以单次目录替换发布。已发布 run 永不覆盖。
     """
-    paths.ensure_run_dir(run_dir, run_id)
-    dumped: list[int] = []
-    for sid in sorted(spaces):
+    resolved_spaces = (list(registered_space_ids(backend))
+                       if spaces is None else list(spaces))
+    for sid in resolved_spaces:
         assert_int(sid, _where="dump_run.space_id")
-        path = paths.space_dump_path(run_dir, run_id, sid)
-        with open(path, "w", encoding="utf-8") as f:
-            for table in tables:
-                if table in GLOBAL_DUMP_TABLES:
-                    continue
-                rows = paths.filter_rows_for_space(_table_rows(backend, table), sid)
-                for r in rows:
-                    record = {"_table": table,
-                              **{k: _serialize_value(v) for k, v in r.items()}}
-                    f.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
-                    f.write("\n")
-        dumped.append(sid)
-    global_tables = tuple(table for table in tables if table in GLOBAL_DUMP_TABLES)
-    if global_tables:
-        global_path = paths.global_identity_dump_path(run_dir, run_id)
-        with open(global_path, "w", encoding="utf-8") as f:
-            for table in global_tables:
-                for row in _table_rows(backend, table):
-                    record = {"_table": table,
-                              **{k: _serialize_value(v) for k, v in row.items()}}
-                    f.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
-                    f.write("\n")
-    return dumped
+    manifest = publish_recovery_package(
+        backend,
+        run_dir,
+        run_id,
+        spaces=tuple(resolved_spaces),
+        tables=tables,
+        include_registered_tables=include_registered_tables,
+        require_all_spaces=require_all_spaces,
+        version_key=_version_key(versions),
+        dependencies=dependencies,
+        publish_epoch=publish_epoch,
+        cursor_payload=(None if cursor_state is None
+                        else cursor_state_payload(cursor_state)),
+        fault_injector=fault_injector,
+    )
+    return list(manifest.space_ids)
 
 
-def load_run(backend: StorageBackend, run_dir: str, run_id: str) -> list[int]:
-    """续训 load（新 run_id 从终 dump 起·E8）。
+def load_run_package(
+        backend: StorageBackend,
+        run_dir: str,
+        run_id: str,
+        *,
+        expected_versions: object | None = None,
+        expected_dependencies: tuple[RecoveryDependency, ...] | None = None,
+        expected_publish_epoch: int | None = None,
+        migrations: RecoveryMigrationRegistry | None = None,
+        fault_injector: RecoveryFaultInjector | None = None,
+        ) -> RecoveryLoadResult:
+    """预检后幂等加载恢复包，返回空间、游标和实际写表。
 
-    读 space_*.dump 文件·按 _table 还原行 insert 到 backend。返已 load 的 space_id 列表（升序）。
-    幂等：重复 load 同一 space 会重插（caller 须用空 backend·续训新 run_id 从空起）。
-
-    **id_pool rebaseline（序列7·修 latent 续训 id-collision bug）**：next_id 从内存 _id_pool 自增·
-    非存储表·load 后须推高水位 ≥ 已载 max local_id·否则续训新分配从 1 起撞已载节点（DictBackend 静默
-    dup / SQLite 无 PK 亦静默·latent 续训 corrupt）。**自分配 local_id 的表**：concept_node
-    （ConceptIndex.ensure 经 next_id）+ memory_item（MemorySpace.new_local_id 经 next_id）——皆 space_id+
-    local_id 列。故**载入逐行跟踪**凡含 space_id+local_id 的行的 per-space max（含 composes_attr/def_array
-    等引用表·引用 local_id ≤ 分配 max·harmless 不影响正确水位）→ advance_id_pool 推高。逐行跟踪 robust
-    （未来新自分配表自动覆盖·无须硬编码表名·对抗审计 Finding2 修：原 concept_node-only 漏 memory_item）。
-    max 序无关 bit-identical。
+    加载前核验 manifest 封印、schema、依赖、epoch、segment 校验、
+    read fence 和跨空间副本。目标表只允许为空或与包完全一致，
+    因此精确重放是零写幂等，部分或漂移状态 fail closed。
     """
-    sids = paths.list_space_dumps(run_dir, run_id)
-    floor_by_space: dict[int, int] = {}   # id_pool rebaseline 跟踪（per-space max local_id·序列7 Gap2）
+    return load_recovery_package(
+        backend,
+        run_dir,
+        run_id,
+        expected_version_key=(None if expected_versions is None
+                              else _version_key(expected_versions)),
+        expected_dependencies=expected_dependencies,
+        expected_publish_epoch=expected_publish_epoch,
+        migrations=migrations,
+        fault_injector=fault_injector,
+    )
 
-    def load_file(path: str) -> None:
-        """载入单个确定性 dump 文件，并同步 id_pool 恢复水位。"""
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)
-                table = record.pop("_table", None)
-                if table is None:
-                    continue
-                row = {k: v for k, v in record.items()}
-                backend.insert(table, row)
-                lid_r = row.get("local_id")
-                if lid_r is not None and "space_id" in row:
-                    sid_r = row["space_id"]
-                    if lid_r > floor_by_space.get(sid_r, 0):
-                        floor_by_space[sid_r] = lid_r
 
-    for sid in sids:
-        path = paths.space_dump_path(run_dir, run_id, sid)
-        if not os.path.isfile(path):
-            continue
-        load_file(path)
-    global_path = paths.global_identity_dump_path(run_dir, run_id)
-    if os.path.isfile(global_path):
-        load_file(global_path)
-    for sid_r, floor in sorted(floor_by_space.items()):
-        backend.advance_id_pool(sid_r, floor)
-    return sids
+def load_run(
+        backend: StorageBackend,
+        run_dir: str,
+        run_id: str,
+        **kwargs: Any,
+        ) -> list[int]:
+    """保留旧返回形状的恢复入口，实际执行 V-03 完整协议。"""
+    return list(load_run_package(
+        backend, run_dir, run_id, **kwargs).space_ids)
 
 
 # ---- E4 replay 覆盖率前置校验 ----

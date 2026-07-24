@@ -12,11 +12,24 @@ from typing import Any
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.storage import discipline as disc
 from pure_integer_ai.storage.backend import StorageBackend, TYPE_INT
+from pure_integer_ai.storage.storage_role import (
+    STORAGE_ACCESS_APPEND_ONLY,
+    STORAGE_ACCESS_INDEXED_READ,
+    STORAGE_ROLE_AUTHORITATIVE,
+    StorageRoleDescriptor,
+)
 
 
 MEMORY_EVENT_TABLE = "memory_event"
 MEMORY_EVENT_PART_TABLE = "memory_event_part"
 MEMORY_EVENT_CHUNK_WIDTH = 16
+
+MEMORY_EVENT_STORAGE_DESCRIPTOR_KEY = (1, 1, 1)
+MEMORY_EVENT_STORAGE_DESCRIPTOR = StorageRoleDescriptor(
+    MEMORY_EVENT_STORAGE_DESCRIPTOR_KEY,
+    STORAGE_ROLE_AUTHORITATIVE,
+    (STORAGE_ACCESS_APPEND_ONLY, STORAGE_ACCESS_INDEXED_READ),
+)
 
 MEMORY_EVENT_COLUMNS = [
     ("event_hash", TYPE_INT),
@@ -35,7 +48,9 @@ MEMORY_EVENT_COLUMNS = [
     ("scope_hash", TYPE_INT),
     ("timestamp_hash", TYPE_INT),
     ("clock_hash", TYPE_INT),
+    ("timeline_timestamp_hash", TYPE_INT),
     ("event_seq", TYPE_INT),
+    ("timeline_seq", TYPE_INT),
     ("created_seq", TYPE_INT),
     ("observed_seq", TYPE_INT),
     ("used_seq", TYPE_INT),
@@ -65,6 +80,7 @@ MEMORY_EVENT_INDEXES = [
     ("space_id", "created_seq"),
     ("space_id", "observed_seq"),
     ("space_id", "used_seq"),
+    ("space_id", "timeline_seq"),
 ]
 
 
@@ -80,6 +96,7 @@ def register_memory_event_table(backend: StorageBackend) -> None:
         disc.DISC_APPEND_ONLY,
         MEMORY_EVENT_INDEXES,
         core=True,
+        recovery_key=("event_hash",),
     )
     backend.register_table(
         MEMORY_EVENT_PART_TABLE,
@@ -87,6 +104,7 @@ def register_memory_event_table(backend: StorageBackend) -> None:
         disc.DISC_APPEND_ONLY,
         MEMORY_EVENT_PART_INDEXES,
         core=True,
+        recovery_key=("event_hash", "chunk_index"),
     )
 
 
@@ -118,7 +136,9 @@ class MemoryEventRecord:
     scope_hash: int
     timestamp_hash: int
     clock_hash: int
+    timeline_timestamp_hash: int
     event_seq: int
+    timeline_seq: int
     created_seq: int
     observed_seq: int
     used_seq: int
@@ -134,6 +154,7 @@ class MemoryEventRecord:
                 ("scope_hash", self.scope_hash),
                 ("timestamp_hash", self.timestamp_hash),
                 ("clock_hash", self.clock_hash),
+                ("timeline_timestamp_hash", self.timeline_timestamp_hash),
                 ("event_seq", self.event_seq)):
             _strict_int(value, where=f"MemoryEventRecord.{name}", positive=True)
         _strict_int(
@@ -159,8 +180,13 @@ class MemoryEventRecord:
                 value, where=f"MemoryEventRecord.time_axis[{index}]",
                 nonnegative=True)
         nonzero = tuple(value for value in axes if value > 0)
-        if nonzero != (self.event_seq,):
-            raise ValueError("事件必须且只能在一个时间轴保存 event_seq")
+        _strict_int(
+            self.timeline_seq,
+            where="MemoryEventRecord.timeline_seq",
+            positive=True,
+        )
+        if nonzero != (self.timeline_seq,):
+            raise ValueError("事件必须且只能在一个时间轴保存 timeline_seq")
 
     def to_row(self) -> dict[str, int]:
         """把信封投影为 backend 行。"""
@@ -181,7 +207,9 @@ class MemoryEventRecord:
             "scope_hash": self.scope_hash,
             "timestamp_hash": self.timestamp_hash,
             "clock_hash": self.clock_hash,
+            "timeline_timestamp_hash": self.timeline_timestamp_hash,
             "event_seq": self.event_seq,
+            "timeline_seq": self.timeline_seq,
             "created_seq": self.created_seq,
             "observed_seq": self.observed_seq,
             "used_seq": self.used_seq,
@@ -212,7 +240,9 @@ class MemoryEventRecord:
                 row["scope_hash"],
                 row["timestamp_hash"],
                 row["clock_hash"],
+                row["timeline_timestamp_hash"],
                 row["event_seq"],
+                row["timeline_seq"],
                 row["created_seq"],
                 row["observed_seq"],
                 row["used_seq"],
@@ -354,6 +384,33 @@ class MemoryEventRecordStore:
             self._by_hash[record.event_hash] = record
         return records
 
+    def latest_timeline_record(
+            self,
+            space_id: int,
+            ) -> MemoryEventRecord | None:
+        """经 `(space_id, timeline_seq)` 索引读取物理 append-only 最大序。"""
+        _strict_int(
+            space_id, where="MemoryEventRecordStore.space_id", positive=True)
+        rows = self.backend.select(
+            MEMORY_EVENT_TABLE,
+            where={"space_id": space_id},
+            order_by="timeline_seq",
+            descending=True,
+            limit=2,
+        )
+        if not rows:
+            return None
+        records = tuple(MemoryEventRecord.from_row(row) for row in rows)
+        if (len(records) > 1
+                and records[0].timeline_seq == records[1].timeline_seq):
+            raise MemoryEventIntegrityError("Memory 物理 timeline 最大序重复")
+        for record in records:
+            cached = self._by_hash.get(record.event_hash)
+            if cached is not None and cached != record:
+                raise MemoryEventIntegrityError("Memory timeline 索引发现缓存后漂移")
+            self._by_hash[record.event_hash] = record
+        return records[0]
+
     def rows_for_object(self, object_hash: int) -> tuple[MemoryEventRecord, ...]:
         """跨 Memory 空间读取某对象的全部事件信封，供引用完整性核验。"""
         _strict_int(
@@ -408,6 +465,8 @@ class MemoryEventRecordStore:
 __all__ = [
     "MEMORY_EVENT_TABLE",
     "MEMORY_EVENT_PART_TABLE",
+    "MEMORY_EVENT_STORAGE_DESCRIPTOR",
+    "MEMORY_EVENT_STORAGE_DESCRIPTOR_KEY",
     "MemoryEventIntegrityError",
     "MemoryEventRecord",
     "MemoryEventRecordStore",

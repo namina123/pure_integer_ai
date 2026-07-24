@@ -20,11 +20,13 @@ from pure_integer_ai.cognition.shared.generation_structure_execution import (
     GenerationStructureExecutionRequest,
 )
 from pure_integer_ai.cognition.shared.generation_structure_plan import (
+    GenerationSentenceInstance,
     GenerationStructurePlan,
     GenerationStructurePlanner,
 )
 from pure_integer_ai.cognition.shared.generation_surface import (
     GenerationSurfaceAttribution,
+    GenerationSurfaceSentenceAttribution,
     GenerationSurfacePlan,
     GenerationSurfacePreview,
     GenerationSurfaceProtocol,
@@ -80,6 +82,17 @@ class SurfaceAttributionMapper(Protocol):
         ...
 
 
+class SentenceSurfaceAttributionMapper(Protocol):
+    """按运行期句实例返回 connector 理论、Hypothesis 和 purpose 归属。"""
+
+    def attributions_for(
+            self,
+            structure: GenerationStructurePlan,
+            ) -> tuple[GenerationSurfaceSentenceAttribution, ...]:
+        """返回精确覆盖每个 planned sentence 的逐句归属。"""
+        ...
+
+
 class GenerationSurfaceRequestBuilder(Protocol):
     """把重建的 G-02 structure plan 汇合为完整 G-03 请求。"""
 
@@ -100,6 +113,8 @@ class TypedGenerationSurfaceRequestBuilder:
             execution_requests: StructureExecutionRequestMapper,
             directives: SurfaceDirectiveMapper,
             attribution_mapper: SurfaceAttributionMapper | None = None,
+            sentence_attribution_mapper: SentenceSurfaceAttributionMapper
+            | None = None,
             ) -> None:
         if not isinstance(protocol, GenerationSurfaceProtocol):
             raise TypeError("surface request builder protocol 类型错误")
@@ -113,11 +128,18 @@ class TypedGenerationSurfaceRequestBuilder:
         if (attribution_mapper is not None
                 and not hasattr(attribution_mapper, "attribution")):
             raise TypeError("surface attribution mapper 必须实现 attribution")
+        if (sentence_attribution_mapper is not None
+                and not hasattr(
+                    sentence_attribution_mapper,
+                    "attributions_for",
+                )):
+            raise TypeError("surface sentence attribution mapper 必须实现 attributions_for")
         self._protocol = protocol
         self._execution_planner = execution_planner
         self._execution_requests = execution_requests
         self._directives = directives
         self._attribution_mapper = attribution_mapper
+        self._sentence_attribution_mapper = sentence_attribution_mapper
 
     def build(
             self, structure: GenerationStructurePlan,
@@ -147,6 +169,15 @@ class TypedGenerationSurfaceRequestBuilder:
                     and not isinstance(
                         attribution, GenerationSurfaceAttribution)):
                 raise TypeError("surface attribution mapper 返回类型错误")
+        sentence_attributions = ()
+        if self._sentence_attribution_mapper is not None:
+            sentence_attributions = (
+                self._sentence_attribution_mapper.attributions_for(structure))
+            if (not isinstance(sentence_attributions, tuple)
+                    or any(not isinstance(
+                        item, GenerationSurfaceSentenceAttribution)
+                           for item in sentence_attributions)):
+                raise TypeError("surface sentence attribution mapper 返回类型错误")
         return GenerationSurfaceRequest(
             self._protocol,
             structure,
@@ -154,6 +185,7 @@ class TypedGenerationSurfaceRequestBuilder:
             branch,
             directives,
             attribution,
+            sentence_attributions,
         )
 
 
@@ -318,22 +350,50 @@ class GenerationSurfaceRuntime:
             raise TypeError("surface commit preview 类型错误")
         if not preview.complete:
             raise ValueError("失败 surface preview 不得提交部分采用账")
-        use_context = None
-        attribution = preview.request.attribution
-        if attribution is not None:
-            goal = preview.request.structure.selection.request.goal
-            use_context = RelationUseContext(
+        sentence_attributions = preview.request.sentence_attribution_map()
+        legacy_attribution = preview.request.attribution
+        goal = preview.request.structure.selection.request.goal
+
+        def use_context_for(sentence) -> RelationUseContext | None:
+            """按句实例构造独立 Core Use context，保留旧单句兼容归属。"""
+            attribution = sentence_attributions.get(sentence)
+            if attribution is not None:
+                return RelationUseContext(
+                    goal.source,
+                    goal.scope,
+                    attribution.theory,
+                    attribution.purpose,
+                    attribution.hypothesis,
+                    sentence.stable_key(),
+                )
+            if legacy_attribution is None:
+                return None
+            if isinstance(sentence, GenerationSentenceInstance):
+                return RelationUseContext(
+                    goal.source,
+                    goal.scope,
+                    legacy_attribution.theory,
+                    legacy_attribution.purpose,
+                    legacy_attribution.hypothesis,
+                    sentence.stable_key(),
+                )
+            return RelationUseContext(
                 goal.source,
                 goal.scope,
-                attribution.theory,
-                attribution.purpose,
+                legacy_attribution.theory,
+                legacy_attribution.purpose,
             )
+
         commit_requests = []
         metadata = []
         for slot in preview.slots:
+            item_context = use_context_for(slot.directive.sentence)
             if slot.reference is not None:
                 commit_requests.append((
-                    slot.reference, slot.directive.reference_use_key))
+                    slot.reference,
+                    slot.directive.reference_use_key,
+                    item_context,
+                ))
                 metadata.append((
                     slot.directive.sentence,
                     slot.value.slot,
@@ -342,7 +402,10 @@ class GenerationSurfaceRuntime:
                 ))
             if slot.surface is not None:
                 commit_requests.append((
-                    slot.surface, slot.directive.surface_use_key))
+                    slot.surface,
+                    slot.directive.surface_use_key,
+                    item_context,
+                ))
                 metadata.append((
                     slot.directive.sentence,
                     slot.value.slot,
@@ -351,8 +414,7 @@ class GenerationSurfaceRuntime:
                 ))
         uses: tuple[AliasResolutionUse, ...] = ()
         if commit_requests:
-            uses = self._alias.commit_many(
-                tuple(commit_requests), context=use_context)
+            uses = self._alias.commit_many(tuple(commit_requests))
         if len(uses) != len(metadata):
             raise RuntimeError("R-01 批量采用数量与 surface proposal 不一致")
         adoptions = tuple(

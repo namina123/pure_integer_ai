@@ -1,7 +1,8 @@
 """cognition.shared.work_memory — WorkMemory（跨卷工作记忆·§十四 J4 / 卷二过程）。
 
 字段（规划 §一）：produced_refs / prior_topic_refs / pr_vector / round_id / weights /
-  promoted_transition_targets / ctx / replay_candidates / exclude_refs。
+  promoted_transition_targets / ctx / replay_candidates / exclude_refs /
+  attractor_state。
 
 卷一模块5（性质B pronoun）消费 prior_segments（FIFO window N=3·§十四J4低②）。
 卷二/三消费其余字段（Stage 4/5 接线）。
@@ -27,6 +28,7 @@ from pure_integer_ai.cognition.shared.scope_identity import (
 )
 
 if TYPE_CHECKING:
+    from pure_integer_ai.cognition.shared.attractor_state import AttractorState
     from pure_integer_ai.cognition.shared.formal_artifact import FormalArtifact
     from pure_integer_ai.cognition.shared.formal_artifact_bridge import (
         ArtifactInvocationResult,
@@ -127,6 +129,9 @@ class WorkMemory:
         default_factory=dict, init=False, repr=False)
     query_artifact_results: list[ArtifactInvocationResult] = field(
         default_factory=list, init=False, repr=False)
+    # A-10：只保存当前 query 的动态方向状态，长期候选仍归 Core/Memory。
+    attractor_state: AttractorState | None = field(
+        default=None, init=False, repr=False)
     # 生命周期活动身份。身份只作边界和隔离判据，不替代图中的本体对象。
     active_session_scope: ScopeIdentity | None = field(default=None, init=False, repr=False)
     active_document_scope: ScopeIdentity | None = field(default=None, init=False, repr=False)
@@ -138,6 +143,7 @@ class WorkMemory:
     _pending_replay_document: ScopeIdentity | None = field(default=None, init=False, repr=False)
     _pending_replay_candidates: list[Any] = field(default_factory=list, init=False, repr=False)
     _pending_exclude_refs: set[ConceptRef] = field(default_factory=set, init=False, repr=False)
+    _query_resources: list[Any] = field(default_factory=list, init=False, repr=False)
 
     @property
     def lifecycle_active(self) -> bool:
@@ -182,15 +188,18 @@ class WorkMemory:
 
     def _clear_query_state(self) -> None:
         """清理一次 query 的推理结果和上下文，保留文档级上下文。"""
+        self._close_query_resources()
         self.pr_vector = {}
         self.weights = {}
         self.promoted_transition_targets.clear()
         self.ctx = ()
         self.query_artifact_results.clear()
+        self.attractor_state = None
         self._clear_generation_state()
 
     def _clear_episode_state(self) -> None:
         """清理 episode 级事实，避免悬空、槽位和旧回放进入无关样本。"""
+        self._close_query_resources()
         self.dangling_units.clear()
         self._segment_dangling = 0
         self._current_segment_refs.clear()
@@ -322,6 +331,24 @@ class WorkMemory:
         self._clear_query_state()
         self.active_query_scope = scope
 
+    def register_query_resource(self, resource: Any) -> None:
+        """登记随当前 query 一起关闭的 context-local 资源。"""
+        if self.active_query_scope is None:
+            raise WorkMemoryScopeError("登记 query 资源需要活动 query")
+        close = getattr(resource, "close", None)
+        if not callable(close):
+            raise TypeError("query resource 必须提供可调用 close")
+        if any(item is resource for item in self._query_resources):
+            raise WorkMemoryScopeError("同一 query resource 不得重复登记")
+        self._query_resources.append(resource)
+
+    def _close_query_resources(self) -> None:
+        """按逆安装顺序关闭 query 资源，失败项保留以允许调用方重试。"""
+        while self._query_resources:
+            resource = self._query_resources[-1]
+            resource.close()
+            self._query_resources.pop()
+
     def end_query(self) -> None:
         """关闭 query；结果已由 Episode 复制后再清理临时状态。"""
         if self.active_query_scope is None:
@@ -437,6 +464,32 @@ class WorkMemory:
         if result.proof is not None:
             self.put_episode_artifact(result.proof)
         self.query_artifact_results.append(result)
+
+    def install_attractor_state(self, state: AttractorState) -> None:
+        """把唯一 A-10 状态绑定到活动 query，拒绝跨 owner/session 或重复安装。"""
+        from pure_integer_ai.cognition.shared.attractor_state import (
+            AttractorState,
+        )
+
+        if self.active_query_scope is None:
+            raise WorkMemoryScopeError("安装 AttractorState 需要活动 query")
+        if not isinstance(state, AttractorState):
+            raise TypeError("state 必须是 AttractorState")
+        if state.scope != self.active_query_scope:
+            raise WorkMemoryScopeError("AttractorState 不属于当前 query")
+        if self.attractor_state is not None:
+            raise WorkMemoryScopeError("当前 query 已安装 AttractorState")
+        self.attractor_state = state
+
+    def require_attractor_state(self) -> AttractorState:
+        """返回当前 query 的 A-10 状态；未安装时拒绝隐式空状态。"""
+        if self.active_query_scope is None:
+            raise WorkMemoryScopeError("读取 AttractorState 需要活动 query")
+        if self.attractor_state is None:
+            raise WorkMemoryScopeError("当前 query 尚未安装 AttractorState")
+        if self.attractor_state.scope != self.active_query_scope:
+            raise WorkMemoryScopeError("AttractorState 与活动 query 漂移")
+        return self.attractor_state
 
     @staticmethod
     def _scope_descends_from(

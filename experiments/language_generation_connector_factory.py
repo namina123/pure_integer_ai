@@ -64,6 +64,7 @@ from pure_integer_ai.experiments.generation_verification_runtime import (
     GenerationPostcheckRuntime,
 )
 from pure_integer_ai.experiments.language_generation_connector import (
+    LanguageConnectorDiscourseDeclarationProvider,
     LanguageGenerationConnector,
     LanguageGenerationConnectorRegistry,
     LanguageGenerationConnectorRuntimePolicy,
@@ -108,6 +109,34 @@ def _resolve_predicates(ontology, identities, *, label: str):
     if any(ref is None for ref in refs):
         raise RuntimeError(f"{label} predicate 未在当前图完整恢复")
     return refs
+
+
+def _require_discourse_declarations(
+        declarations: LanguageConnectorDiscourseDeclarationProvider | None,
+        ) -> LanguageConnectorDiscourseDeclarationProvider | None:
+    """核验篇章声明读取器能在 V-06 中独立克隆，禁止复用宿主可变状态。"""
+    if declarations is None:
+        return None
+    if any(not hasattr(declarations, method) for method in (
+            "declaration", "state_key", "clone_for_evaluation")):
+        raise TypeError("connector discourse declaration provider 协议不完整")
+    return declarations
+
+
+def _clone_discourse_declarations(
+        declarations: LanguageConnectorDiscourseDeclarationProvider | None,
+        ) -> LanguageConnectorDiscourseDeclarationProvider | None:
+    """克隆声明读取器并核验内容锁不漂移且不与宿主共用实例。"""
+    declarations = _require_discourse_declarations(declarations)
+    if declarations is None:
+        return None
+    cloned = _require_discourse_declarations(
+        declarations.clone_for_evaluation())
+    if cloned is declarations:
+        raise RuntimeError("connector discourse declaration provider 不得复用宿主实例")
+    if cloned.state_key() != declarations.state_key():
+        raise RuntimeError("connector discourse declaration provider clone 配置漂移")
+    return cloned
 
 
 def _rebuild_candidate_owner(
@@ -214,8 +243,10 @@ class ActiveLanguageConnectorFactory:
             runtime_policy: LanguageGenerationConnectorRuntimePolicy,
             surface_protocol: GenerationSurfaceProtocol,
             production_purpose: ObjectIdentity,
+            discourse_declarations: LanguageConnectorDiscourseDeclarationProvider
+            | None = None,
             ) -> None:
-        """保存可跨 context 恢复的候选协议、运行策略和 production purpose。"""
+        """保存候选协议、运行策略、purpose 和来源化篇章声明读取器。"""
         if not isinstance(candidates, LanguageConnectorCandidateRuntime):
             raise TypeError("connector factory candidates 类型错误")
         if not isinstance(
@@ -232,6 +263,8 @@ class ActiveLanguageConnectorFactory:
         self._runtime_policy = runtime_policy
         self._surface_protocol = surface_protocol
         self._production_purpose = production_purpose
+        self._discourse_declarations = _require_discourse_declarations(
+            discourse_declarations)
         self._order_predicates = _predicate_identities(
             source_ontology,
             candidates.definition_graph.order_graph.predicates.refs(),
@@ -264,6 +297,7 @@ class ActiveLanguageConnectorFactory:
                 )
                 for template in active_candidates.active_templates()
             ),
+            self._discourse_declarations,
         )
         return ActiveLanguageConnectorAssembly(
             connector,
@@ -282,6 +316,7 @@ class ActiveLanguageConnectorFactory:
             self._runtime_policy,
             self._surface_protocol,
             self._production_purpose,
+            _clone_discourse_declarations(self._discourse_declarations),
         )
 
     def state_key(self) -> tuple:
@@ -293,6 +328,8 @@ class ActiveLanguageConnectorFactory:
             self._runtime_policy.stable_key(),
             self._surface_protocol.stable_key(),
             self._production_purpose.stable_key(),
+            (() if self._discourse_declarations is None else (
+                self._discourse_declarations.state_key())),
         )
 
 
@@ -338,8 +375,10 @@ class TrialLanguageConnectorFactory:
             surface_protocol: GenerationSurfaceProtocol,
             hypothesis: HypothesisKey,
             trial_purpose: ObjectIdentity,
+            discourse_declarations: LanguageConnectorDiscourseDeclarationProvider
+            | None = None,
             ) -> None:
-        """保存 forming 候选、exact Hypothesis 和隔离 trial purpose。"""
+        """保存 forming 候选、exact Hypothesis、purpose 和篇章声明读取器。"""
         if not isinstance(candidates, LanguageConnectorCandidateRuntime):
             raise TypeError("trial connector factory candidates 类型错误")
         if not isinstance(
@@ -358,6 +397,8 @@ class TrialLanguageConnectorFactory:
         self._surface_protocol = surface_protocol
         self._hypothesis = hypothesis
         self._trial_purpose = trial_purpose
+        self._discourse_declarations = _require_discourse_declarations(
+            discourse_declarations)
         self._order_predicates = _predicate_identities(
             source_ontology,
             candidates.definition_graph.order_graph.predicates.refs(),
@@ -397,6 +438,7 @@ class TrialLanguageConnectorFactory:
                 self._hypothesis,
                 self._trial_purpose,
             ),),
+            self._discourse_declarations,
         )
         return TrialLanguageConnectorAssembly(
             connector,
@@ -417,6 +459,7 @@ class TrialLanguageConnectorFactory:
             self._surface_protocol,
             self._hypothesis,
             self._trial_purpose,
+            _clone_discourse_declarations(self._discourse_declarations),
         )
 
     def state_key(self) -> tuple:
@@ -429,6 +472,8 @@ class TrialLanguageConnectorFactory:
             self._surface_protocol.stable_key(),
             self._hypothesis.stable_key(),
             self._trial_purpose.stable_key(),
+            (() if self._discourse_declarations is None else (
+                self._discourse_declarations.state_key())),
         )
 
 
@@ -474,6 +519,8 @@ class ScheduledLanguageConnectorFactory(ActiveLanguageConnectorFactory):
             surface_protocol: GenerationSurfaceProtocol,
             active_purpose: ObjectIdentity,
             trial_purpose: ObjectIdentity,
+            discourse_declarations: LanguageConnectorDiscourseDeclarationProvider
+            | None = None,
             ) -> None:
         """保存候选恢复协议、全部运行策略和互异的 active/trial purpose。"""
         super().__init__(
@@ -481,6 +528,7 @@ class ScheduledLanguageConnectorFactory(ActiveLanguageConnectorFactory):
             runtime_policy,
             surface_protocol,
             active_purpose,
+            discourse_declarations,
         )
         if (not isinstance(trial_purpose, ObjectIdentity)
                 or trial_purpose.object_kind != OBJECT_MINIMAL_INSTRUCTION):
@@ -532,6 +580,7 @@ class ScheduledLanguageConnectorFactory(ActiveLanguageConnectorFactory):
             runtime_policy,
             self._surface_protocol,
             attributions,
+            self._discourse_declarations,
         )
         return ScheduledLanguageConnectorAssembly(
             connector,
@@ -551,6 +600,7 @@ class ScheduledLanguageConnectorFactory(ActiveLanguageConnectorFactory):
             self._surface_protocol,
             self._production_purpose,
             self._trial_purpose,
+            _clone_discourse_declarations(self._discourse_declarations),
         )
 
     def state_key(self) -> tuple:

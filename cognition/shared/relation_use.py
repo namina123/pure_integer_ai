@@ -71,34 +71,56 @@ def _take(
 
 @dataclass(frozen=True)
 class RelationUseContext:
-    """一次关系采用所属的 query 来源、scope、消费者和用途。"""
+    """一次关系采用的知识来源锚、运行 query、消费者和 connector 句归属。"""
 
     source: SourceRef
     scope: ScopeIdentity
     consumer: ObjectIdentity
     purpose: ObjectIdentity
+    connector_hypothesis: HypothesisKey | None = None
+    sentence_instance_key: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
-        """要求 query scope 明确绑定来源，消费者与用途保持一等身份。"""
+        """核验知识来源锚与运行边界，保留 V-06 的 owner-only scope 隔离。"""
         if not isinstance(self.source, SourceRef):
             raise TypeError("RelationUseContext.source 必须是 SourceRef")
         if not isinstance(self.scope, ScopeIdentity):
             raise TypeError("RelationUseContext.scope 必须是 ScopeIdentity")
-        if self.scope.source != self.source:
-            raise ValueError("RelationUseContext.scope 必须绑定 query source")
+        if self.scope.source is not None and self.scope.source != self.source:
+            raise ValueError(
+                "RelationUseContext 显式 source scope 必须绑定知识来源")
         for label, identity in (
                 ("consumer", self.consumer), ("purpose", self.purpose)):
             if not isinstance(identity, ObjectIdentity):
                 raise TypeError(f"RelationUseContext.{label} 必须是 ObjectIdentity")
+        if self.connector_hypothesis is not None and not isinstance(
+                self.connector_hypothesis, HypothesisKey):
+            raise TypeError("RelationUseContext.connector_hypothesis 类型错误")
+        _strict_key(
+            self.sentence_instance_key,
+            where="RelationUseContext.sentence_instance_key",
+            allow_empty=True,
+        )
+        if bool(self.sentence_instance_key) != (
+                self.connector_hypothesis is not None):
+            raise ValueError(
+                "RelationUseContext connector Hypothesis 与句实例键必须同时存在或同时缺失")
 
     def stable_key(self) -> tuple[int, ...]:
-        """返回 query 来源、scope、消费者和用途的完整稳定键。"""
-        return (
+        """返回 query、消费者、purpose 与可选 connector 句归属完整键。"""
+        result = [
             *_pack(self.source.stable_key()),
             *_pack(self.scope.stable_key()),
             *_pack(self.consumer.stable_key()),
             *_pack(self.purpose.stable_key()),
-        )
+        ]
+        if self.connector_hypothesis is None:
+            result.append(0)
+        else:
+            result.append(1)
+            result.extend(_pack(self.connector_hypothesis.stable_key()))
+            result.extend(_pack(self.sentence_instance_key))
+        return tuple(result)
 
     @classmethod
     def from_stable_key(cls, key: tuple[int, ...]) -> "RelationUseContext":
@@ -108,13 +130,28 @@ class RelationUseContext:
         scope_key, cursor = _take(key, cursor, label="context scope")
         consumer_key, cursor = _take(key, cursor, label="context consumer")
         purpose_key, cursor = _take(key, cursor, label="context purpose")
+        hypothesis = None
+        instance_key: tuple[int, ...] = ()
         if cursor != len(key):
-            raise RelationUseIntegrityError("Use context 含尾随字段")
+            has_connector = key[cursor]
+            cursor += 1
+            if has_connector not in (0, 1):
+                raise RelationUseIntegrityError("Use context connector 标记非法")
+            if has_connector:
+                hypothesis_key, cursor = _take(
+                    key, cursor, label="context connector hypothesis")
+                instance_key, cursor = _take(
+                    key, cursor, label="context sentence instance")
+                hypothesis = HypothesisKey.from_stable_key(hypothesis_key)
+            if cursor != len(key):
+                raise RelationUseIntegrityError("Use context 含尾随字段")
         return cls(
             SourceRef.from_stable_key(source_key),
             ScopeIdentity.from_stable_key(scope_key),
             ObjectIdentity.from_stable_key(consumer_key),
             ObjectIdentity.from_stable_key(purpose_key),
+            hypothesis,
+            instance_key,
         )
 
 

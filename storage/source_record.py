@@ -133,6 +133,7 @@ def register_source_record_table(backend: StorageBackend) -> None:
             ("text_hash",),
             ("source_kind", "source_id", "document_id"),
         ],
+        recovery_key=("source_hash",),
     )
 
 

@@ -109,7 +109,29 @@ class ScheduledLanguageGenerationConnectorRegistry(
             selection: AnswerContentSelection,
             ) -> tuple[LanguageGenerationConnectorTemplate, object]:
         """按 G-01 实际选择执行 active 优先和唯一 trial 的显式调度。"""
-        key, candidate = self.match_input(selection)
+        selected = self.selected_candidates(selection)
+        if len(selected) != 1:
+            raise LanguageGenerationConnectorError(
+                "单命题调度入口不得私选多命题 selection")
+        return self.match_candidate(selection, selected[0])
+
+    def match_candidate(
+            self,
+            selection: AnswerContentSelection,
+            candidate: object,
+            ) -> tuple[LanguageGenerationConnectorTemplate, object]:
+        """为一个 selected candidate 执行 active 优先和唯一 forming trial 调度。"""
+        selected = self.selected_candidates(selection)
+        candidate_key = getattr(candidate, "stable_key", None)
+        if not callable(candidate_key):
+            raise TypeError("scheduled connector candidate 缺少稳定身份")
+        key_value = candidate_key()
+        matches = tuple(
+            item for item in selected if item.stable_key() == key_value)
+        if len(matches) != 1 or matches[0] != candidate:
+            raise LanguageGenerationConnectorError(
+                "scheduled connector candidate 不属于当前精确 selection")
+        key = self.match_key_for_candidate(selection, candidate)
         active = self._active_by_key.get(key, ())
         if len(active) > 1:
             raise LanguageGenerationConnectorError(

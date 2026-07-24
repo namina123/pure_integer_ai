@@ -23,6 +23,7 @@ from pure_integer_ai.cognition.shared.memory_event import (
     MEMORY_EVENT_RETENTION,
     MEMORY_EVENT_RESOLUTION,
     MEMORY_EVENT_USE,
+    MEMORY_EVENT_USE_OUTCOME,
     MEMORY_OBJECT_INTAKE_MANIFEST,
     RETENTION_CONSOLIDATED,
     RETENTION_EPISODIC,
@@ -40,6 +41,8 @@ from pure_integer_ai.cognition.shared.memory_event import (
     ObservationPayload,
     ParseFailurePayload,
     RetentionTransitionPayload,
+    UseOutcomePayload,
+    UsePayload,
     source_reparse_lineage_key,
     declaration_object_key,
     payload_from_stable_key,
@@ -49,7 +52,15 @@ from pure_integer_ai.cognition.shared.memory_overlay import (
     MemoryAccessContext,
     MemoryOverlayQueryError,
 )
+from pure_integer_ai.cognition.shared.memory_owner import MemoryOwnerSelector
 from pure_integer_ai.cognition.shared.scoped_persistence import ScopedIdentityStore
+from pure_integer_ai.cognition.shared.scope_identity import (
+    CLOCK_MEMORY_TIMELINE,
+    LogicalClockIdentity,
+    LogicalTimestamp,
+    SCOPE_MEMORY_SPACE,
+    ScopeIdentity,
+)
 from pure_integer_ai.cognition.shared.hypothesis import (
     LIFECYCLE_ACTIVE,
 )
@@ -64,6 +75,12 @@ from pure_integer_ai.storage.memory_event import (
     MemoryEventIntegrityError,
     MemoryEventRecord,
     MemoryEventRecordStore,
+)
+from pure_integer_ai.storage.integer_codec import pack_key
+from pure_integer_ai.storage.memory_forget import MemoryForgetVisibility
+from pure_integer_ai.storage.memory_batch import (
+    MemoryBatchVisibility,
+    MemoryEventBatchLink,
 )
 from pure_integer_ai.storage.spaces.registry import (
     SPACE_TYPE_MEMORY,
@@ -89,11 +106,12 @@ _DECLARATION_EVENT_KINDS = frozenset({
 
 @dataclass(frozen=True)
 class MaterializedMemoryEvent:
-    """带物理 event/object hash 的已核验 Memory 事件。"""
+    """带物理 hash 和跨 scope 时间线的已核验 Memory 事件。"""
 
     event_hash: int
     object_hash: int
     event: MemoryEvent
+    timeline: LogicalTimestamp
 
 
 class _MemoryEventIdentityCodec:
@@ -207,10 +225,17 @@ class MemoryEventLog:
         self.backend = backend
         self.memory_space_id = memory_space_id
         self.memory_space_identity = memory_identity
+        self._timeline_clock_identity = LogicalClockIdentity(
+            ScopeIdentity(SCOPE_MEMORY_SPACE, memory_space_id),
+            CLOCK_MEMORY_TIMELINE,
+        )
         self.scoped_identities = scoped_identities
         self.core_identities = core_identities
         self._records = MemoryEventRecordStore(backend)
         self._append_listener = append_listener
+        self._batch_visibility: MemoryBatchVisibility | None = None
+        self._forget_visibility: MemoryForgetVisibility | None = None
+        self._validation_batch_hash: int | None = None
         codec = getattr(
             scoped_identities, "_memory_event_identity_codec", None)
         if codec is None:
@@ -244,102 +269,230 @@ class MemoryEventLog:
             raise ValueError("Memory event log 已绑定其他 append listener")
         self._append_listener = listener
 
-    def append(self, event: MemoryEvent) -> MaterializedMemoryEvent:
-        """追加一个完整事件，先核验所有 Core/Memory 引用和对象声明唯一性。"""
-        self._validate_event(event)
-        scope_hash = self.scoped_identities.register_scope(event.scope)
-        timestamp_hash = self.scoped_identities.register_timestamp(
-            event.timestamp)
-        clock_hash = self.scoped_identities.register_clock(
-            event.timestamp.clock)
-        registry = self.scoped_identities.registry
-        object_key = event.object_ref.stable_key()
-        event_key = event.stable_key()
-        object_hash = registry.identity_hash(
-            IDENTITY_MEMORY_OBJECT, object_key)
-        event_hash = registry.identity_hash(IDENTITY_MEMORY_EVENT, event_key)
-        object_identity = registry.find(IDENTITY_MEMORY_OBJECT, object_key)
-        object_rows = self._records.rows_for_object(object_hash)
-        declarations = tuple(
-            row for row in object_rows
-            if row.event_kind in _DECLARATION_EVENT_KINDS)
-        if event.is_declaration:
-            self._validate_declaration_state(
-                event, object_hash, object_identity, object_rows, declarations)
-        else:
-            if object_identity != object_hash or len(declarations) != 1:
+    def attach_batch_visibility(
+            self,
+            visibility: MemoryBatchVisibility,
+            ) -> None:
+        """安装 K-02 batch 可见性；同一 event log 不得切换到另一实例。"""
+        if not isinstance(visibility, MemoryBatchVisibility):
+            raise TypeError("visibility 必须是 MemoryBatchVisibility")
+        if visibility.links.backend is not self.backend:
+            raise ValueError("batch visibility 与 MemoryEventLog backend 不一致")
+        if (self._batch_visibility is not None
+                and self._batch_visibility is not visibility):
+            raise ValueError("MemoryEventLog 已绑定其他 batch visibility")
+        self._batch_visibility = visibility
+
+    def attach_forget_visibility(
+            self,
+            visibility: MemoryForgetVisibility,
+            ) -> None:
+        """安装 M-11 遗忘可见性；同一 event log 不得切换实例。"""
+        if not isinstance(visibility, MemoryForgetVisibility):
+            raise TypeError("visibility 必须是 MemoryForgetVisibility")
+        repository_backend = getattr(
+            visibility.store.store.repository, "backend", None)
+        if repository_backend is not None and repository_backend is not self.backend:
+            raise ValueError("forget visibility 与 MemoryEventLog backend 不一致")
+        if (self._forget_visibility is not None
+                and self._forget_visibility is not visibility):
+            raise ValueError("MemoryEventLog 已绑定其他 forget visibility")
+        self._forget_visibility = visibility
+
+    def notify_appended(
+            self,
+            materialized: MaterializedMemoryEvent,
+            ) -> None:
+        """幂等重放事件追加 listener，供批次恢复补齐可重建投影。"""
+        if not isinstance(materialized, MaterializedMemoryEvent):
+            raise TypeError("materialized 必须是 MaterializedMemoryEvent")
+        if materialized.event.object_ref.memory_space != self.memory_space_identity:
+            raise ValueError("materialized event 属于其他 Memory 空间")
+        if self._append_listener is not None:
+            self._append_listener(materialized)
+
+    def append(
+            self,
+            event: MemoryEvent,
+            *,
+            batch_hash: int | None = None,
+            source_batch_id: int | None = None,
+            batch_ordinal: int | None = None,
+            timeline_seq: int | None = None,
+            notify_listener: bool = True,
+            ) -> MaterializedMemoryEvent:
+        """追加完整事件；批次事件在 activation 前只对当前写入链可见。"""
+        if type(notify_listener) is not bool:
+            raise TypeError("notify_listener 必须是严格 bool")
+        if len({
+                batch_hash is None,
+                source_batch_id is None,
+                batch_ordinal is None,
+                }) != 1:
+            raise ValueError(
+                "batch_hash、source_batch_id 与 batch_ordinal 必须同时提供")
+        if batch_hash is not None:
+            if (type(batch_hash) is not int or batch_hash <= 0
+                    or type(source_batch_id) is not int
+                    or source_batch_id <= 0
+                    or type(batch_ordinal) is not int
+                    or batch_ordinal < 0):
+                raise ValueError("batch identity 和 ordinal 非法")
+            if self._batch_visibility is None:
+                raise MemoryEventIntegrityError(
+                    "批次事件缺少 K-02 batch visibility")
+        if timeline_seq is not None and (
+                type(timeline_seq) is not int or timeline_seq <= 0):
+            raise ValueError("timeline_seq 必须是正严格整数")
+        previous_batch = self._validation_batch_hash
+        self._validation_batch_hash = batch_hash
+        try:
+            self._validate_event(event)
+            scope_hash = self.scoped_identities.register_scope(event.scope)
+            timestamp_hash = self.scoped_identities.register_timestamp(
+                event.timestamp)
+            clock_hash = self.scoped_identities.register_clock(
+                event.timestamp.clock)
+            registry = self.scoped_identities.registry
+            object_key = event.object_ref.stable_key()
+            event_key = event.stable_key()
+            object_hash = registry.identity_hash(
+                IDENTITY_MEMORY_OBJECT, object_key)
+            event_hash = registry.identity_hash(
+                IDENTITY_MEMORY_EVENT, event_key)
+            if batch_hash is not None:
+                self._batch_visibility.links.add(MemoryEventBatchLink(
+                    batch_hash,
+                    source_batch_id,
+                    event_hash,
+                    self.memory_space_id,
+                    batch_ordinal,
+                ))
+            object_identity = registry.find(
+                IDENTITY_MEMORY_OBJECT, object_key)
+            object_rows = self._available_rows(
+                self._records.rows_for_object(object_hash))
+            declarations = tuple(
+                row for row in object_rows
+                if row.event_kind in _DECLARATION_EVENT_KINDS)
+            if event.is_declaration:
+                self._validate_declaration_state(
+                    event,
+                    object_hash,
+                    object_identity,
+                    object_rows,
+                    declarations,
+                )
+            elif object_identity != object_hash or len(declarations) != 1:
                 raise MemoryEventIntegrityError(
                     "状态事件目标没有唯一、完整的对象声明")
-        self._validate_memory_references(event)
+            self._validate_memory_references(event)
 
-        existing_event = registry.find(IDENTITY_MEMORY_EVENT, event_key)
-        event_rows = self.backend.select(
-            MEMORY_EVENT_TABLE, where={"event_hash": event_hash})
-        if event_rows or existing_event is not None:
-            if existing_event != event_hash or len(event_rows) != 1:
-                raise MemoryEventIntegrityError(
-                    "Memory event 身份和物理行存在半写或重复")
-            restored = self._restore(event_hash)
-            if restored.event != event:
-                raise MemoryEventIntegrityError(
-                    "同一 Memory event identity 命中不同内容")
-            return restored
-        self._validate_evidence_consistency(event)
-        self._validate_derivation_consistency(event)
-        self._validate_transition_append(event, object_hash)
-
-        record = self._record_for(
-            event_hash,
-            object_hash,
-            event,
-            scope_hash=scope_hash,
-            timestamp_hash=timestamp_hash,
-            clock_hash=clock_hash,
-        )
-        payload_key = event.payload.stable_key()
-
-        def write_event(_: int) -> None:
-            """把已计算身份对应的正规化信封和单份 payload 写入物理表。"""
-            self._records.add(record, payload_key)
-
-        if object_identity is None:
-            registered = registry.register_resolved(
-                IDENTITY_MEMORY_OBJECT,
-                object_key,
-                parent_hash=scope_hash,
-                ordinal=event.object_ref.object_kind,
-                writer=write_event,
+            existing_event = registry.find(
+                IDENTITY_MEMORY_EVENT, event_key)
+            event_rows = self.backend.select(
+                MEMORY_EVENT_TABLE,
+                where={"event_hash": event_hash},
             )
-            if registered != object_hash:
-                raise MemoryEventIntegrityError("Memory object hash 登记漂移")
-
-            def reject_duplicate_writer(_: int) -> None:
-                """对象 writer 已写同一事件，event resolver 仍缺失说明物理半写。"""
+            if event_rows or existing_event is not None:
+                if (existing_event != event_hash
+                        or len(event_rows) != 1
+                        or not self._record_available(
+                            MemoryEventRecord.from_row(event_rows[0]))):
+                    raise MemoryEventIntegrityError(
+                        "Memory event 身份和物理行存在半写、隐藏或重复")
+                restored = self._restore(event_hash)
+                if restored.event != event:
+                    raise MemoryEventIntegrityError(
+                        "同一 Memory event identity 命中不同内容")
+                if notify_listener and self._append_listener is not None:
+                    self._append_listener(restored)
+                return restored
+            self._validate_evidence_consistency(event)
+            self._validate_derivation_consistency(event)
+            self._validate_use_outcome_consistency(event)
+            self._validate_transition_append(event, object_hash)
+            if timeline_seq is None:
+                watermark = self.physical_timeline_watermark()
+                timeline_seq = 1 if watermark is None else watermark.seq + 1
+            timeline = LogicalTimestamp(
+                self._timeline_clock_identity,
+                timeline_seq,
+            )
+            timeline_timestamp_hash = (
+                self.scoped_identities.register_timestamp(timeline))
+            collisions = tuple(
+                MemoryEventRecord.from_row(row)
+                for row in self.backend.select(
+                    MEMORY_EVENT_TABLE,
+                    where={
+                        "space_id": self.memory_space_id,
+                        "timeline_seq": timeline.seq,
+                    },
+                )
+            )
+            if collisions:
                 raise MemoryEventIntegrityError(
-                    "Memory object 已写但 event 外部身份仍不可恢复")
+                    "Memory timeline 逻辑序已被物理 append-only 事件占用")
 
-            event_writer = reject_duplicate_writer
-        else:
-            event_writer = write_event
-        registered_event = registry.register_resolved(
-            IDENTITY_MEMORY_EVENT,
-            event_key,
-            parent_hash=object_hash,
-            ordinal=event.timestamp.seq,
-            writer=event_writer,
-        )
-        if registered_event != event_hash:
-            raise MemoryEventIntegrityError("Memory event hash 登记漂移")
-        restored = self._restore(event_hash)
-        if self._append_listener is not None:
-            self._append_listener(restored)
-        return restored
+            record = self._record_for(
+                event_hash,
+                object_hash,
+                event,
+                scope_hash=scope_hash,
+                timestamp_hash=timestamp_hash,
+                clock_hash=clock_hash,
+                timeline=timeline,
+                timeline_timestamp_hash=timeline_timestamp_hash,
+            )
+            payload_key = event.payload.stable_key()
+
+            def write_event(_: int) -> None:
+                """把已计算身份对应的正规化信封和单份 payload 写入物理表。"""
+                self._records.add(record, payload_key)
+
+            if object_identity is None:
+                registered = registry.register_resolved(
+                    IDENTITY_MEMORY_OBJECT,
+                    object_key,
+                    parent_hash=scope_hash,
+                    ordinal=event.object_ref.object_kind,
+                    writer=write_event,
+                )
+                if registered != object_hash:
+                    raise MemoryEventIntegrityError("Memory object hash 登记漂移")
+
+                def reject_duplicate_writer(_: int) -> None:
+                    """对象 writer 已写同一事件，event resolver 缺失说明物理半写。"""
+                    raise MemoryEventIntegrityError(
+                        "Memory object 已写但 event 外部身份仍不可恢复")
+
+                event_writer = reject_duplicate_writer
+            else:
+                event_writer = write_event
+            registered_event = registry.register_resolved(
+                IDENTITY_MEMORY_EVENT,
+                event_key,
+                parent_hash=object_hash,
+                ordinal=event.timestamp.seq,
+                writer=event_writer,
+            )
+            if registered_event != event_hash:
+                raise MemoryEventIntegrityError("Memory event hash 登记漂移")
+            restored = self._restore(event_hash)
+            if notify_listener and self._append_listener is not None:
+                self._append_listener(restored)
+            return restored
+        finally:
+            self._validation_batch_hash = previous_batch
 
     def read(self, event_hash: int, *,
              access: MemoryAccessContext) -> MaterializedMemoryEvent | None:
         """按显式 ACL 读取事件；不可见事件返回空且不泄露内容。"""
         self._require_access(access)
         record = self._records.read(event_hash)
+        if not self._record_visible(record):
+            return None
         from pure_integer_ai.cognition.shared.identity import OwnerScope
 
         if not access.can_read(OwnerScope(*record.owner_key)):
@@ -369,7 +522,32 @@ class MemoryEventLog:
                 event_kind=event_kind,
                 object_kind=object_kind,
                 object_hash=object_hash):
+            if not self._record_visible(record):
+                continue
             if not access.can_read(OwnerScope(*record.owner_key)):
+                continue
+            result.append(self._restore(record.event_hash))
+        result.sort(key=lambda item: item.event.stable_key())
+        return tuple(result)
+
+    def query_owned(
+            self,
+            selector: MemoryOwnerSelector,
+            *,
+            event_kind: int | None = None,
+            object_kind: int | None = None,
+            ) -> tuple[MaterializedMemoryEvent, ...]:
+        """供已授权管理 runtime 按 exact/subtree owner 读取正式事件。"""
+        if not isinstance(selector, MemoryOwnerSelector):
+            raise TypeError("selector 必须是 MemoryOwnerSelector")
+        result = []
+        for record in self._records.query(
+                space_id=self.memory_space_id,
+                event_kind=event_kind,
+                object_kind=object_kind):
+            if not self._record_visible(record):
+                continue
+            if not selector.matches(OwnerScope(*record.owner_key)):
                 continue
             result.append(self._restore(record.event_hash))
         result.sort(key=lambda item: item.event.stable_key())
@@ -378,6 +556,97 @@ class MemoryEventLog:
     def clear_runtime_caches(self) -> None:
         """清空物理信封缓存；完整 identity 缓存由共享 store 统一管理。"""
         self._records.clear_runtime_caches()
+
+    def timeline_watermark(self) -> LogicalTimestamp | None:
+        """返回当前 Memory 空间可比较时间线水位；空日志返回 None。"""
+        records = tuple(
+            record for record in self._records.query(
+                space_id=self.memory_space_id)
+            if self._record_visible(record)
+        )
+        if not records:
+            return None
+        current_seq = max(record.timeline_seq for record in records)
+        candidates = tuple(
+            record for record in records
+            if record.timeline_seq == current_seq
+        )
+        if len(candidates) != 1:
+            raise MemoryEventIntegrityError(
+                "可见 Memory timeline 水位存在重复序")
+        timestamp = self.scoped_identities.load_timestamp(
+            candidates[0].timeline_timestamp_hash)
+        if timestamp != LogicalTimestamp(
+                self._timeline_clock_identity, current_seq):
+            raise MemoryEventIntegrityError(
+                "Memory timeline 水位与持久化 timestamp 漂移")
+        return LogicalTimestamp(
+            self._timeline_clock_identity, current_seq)
+
+    def physical_timeline_watermark(self) -> LogicalTimestamp | None:
+        """经物理索引返回 append-only 最大序，不受 batch/forget 可见性改变。"""
+        record = self._records.latest_timeline_record(self.memory_space_id)
+        if record is None:
+            return None
+        timestamp = self.scoped_identities.load_timestamp(
+            record.timeline_timestamp_hash)
+        expected = LogicalTimestamp(
+            self._timeline_clock_identity, record.timeline_seq)
+        if timestamp != expected:
+            raise MemoryEventIntegrityError(
+                "Memory 物理 timeline 水位与 timestamp 漂移")
+        return expected
+
+    def projection_state_key(self) -> tuple[int, ...]:
+        """返回物理事件水位及 descriptor-scoped batch/forget 完整状态。"""
+        watermark = self.physical_timeline_watermark()
+        batch_state = (
+            (0,) if self._batch_visibility is None
+            else self._batch_visibility.state_key()
+        )
+        forget_state = (
+            (0,) if self._forget_visibility is None
+            else self._forget_visibility.state_key()
+        )
+        result = [0 if watermark is None else watermark.seq]
+        pack_key(result, batch_state)
+        pack_key(result, forget_state)
+        return tuple(result)
+
+    def _record_visible(self, record: MemoryEventRecord) -> bool:
+        """判断记录是否属于正式 activation 且未 rollback 的事件视图。"""
+        if (self._forget_visibility is not None
+                and self._forget_visibility.event_is_forgotten(
+                    record.space_id, record.event_hash, record.owner_key)):
+            return False
+        if self._batch_visibility is None:
+            return True
+        return self._batch_visibility.event_is_visible(
+            record.event_hash,
+            space_id=record.space_id,
+        )
+
+    def _record_available(self, record: MemoryEventRecord) -> bool:
+        """写入校验允许正式事件及当前批次已经登记 link 的事件。"""
+        if (self._forget_visibility is not None
+                and self._forget_visibility.event_is_forgotten(
+                    record.space_id, record.event_hash, record.owner_key)):
+            return False
+        if self._batch_visibility is None:
+            return True
+        return self._batch_visibility.event_is_available_to_batch(
+            record.event_hash,
+            space_id=record.space_id,
+            batch_hash=self._validation_batch_hash,
+        )
+
+    def _available_rows(
+            self,
+            records: tuple[MemoryEventRecord, ...],
+            ) -> tuple[MemoryEventRecord, ...]:
+        """从物理事件集合中剔除其他 pending 或已 rollback 批次。"""
+        return tuple(record for record in records
+                     if self._record_available(record))
 
     def _validate_declaration_state(
             self, event: MemoryEvent, object_hash: int,
@@ -439,7 +708,8 @@ class MemoryEventLog:
             IDENTITY_MEMORY_OBJECT, ref.stable_key())
         if object_hash is None:
             raise MemoryEventIntegrityError("Memory 引用目标 identity 不存在")
-        rows = self._records.rows_for_object(object_hash)
+        rows = self._available_rows(
+            self._records.rows_for_object(object_hash))
         declarations = tuple(
             row for row in rows
             if row.event_kind in _DECLARATION_EVENT_KINDS)
@@ -461,7 +731,8 @@ class MemoryEventLog:
         if object_hash is None:
             raise MemoryEventIntegrityError("Memory 对象 identity 不存在")
         rows = tuple(
-            row for row in self._records.rows_for_object(object_hash)
+            row for row in self._available_rows(
+                self._records.rows_for_object(object_hash))
             if row.event_kind in _DECLARATION_EVENT_KINDS)
         if len(rows) != 1:
             raise MemoryEventIntegrityError("Memory 对象没有唯一声明事件")
@@ -496,6 +767,9 @@ class MemoryEventLog:
         for row in self.backend.select(
                 MEMORY_EVENT_TABLE,
                 where={"event_kind": MEMORY_EVENT_EVIDENCE}):
+            physical = MemoryEventRecord.from_row(row)
+            if not self._record_available(physical):
+                continue
             candidate = MemoryEvent.from_stable_key(registry.read_key(
                 IDENTITY_MEMORY_EVENT, row["event_hash"]))
             candidate_payload = candidate.payload
@@ -561,6 +835,39 @@ class MemoryEventLog:
                 != payload.replacement_source):
             raise MemoryEventIntegrityError(
                 "superseded derivation 未指向新 manifest 的唯一同 lineage 对象")
+
+    def _validate_use_outcome_consistency(self, event: MemoryEvent) -> None:
+        """核验延迟结果只归因到带完整 M-08 trace 的精确 Use。"""
+        payload = event.payload
+        if not isinstance(payload, UseOutcomePayload):
+            return
+        use_event = self._declaration_event(payload.target_ref)
+        use = use_event.payload
+        if not isinstance(use, UsePayload):
+            raise MemoryEventIntegrityError("UseOutcome 目标不是 Use payload")
+        if (not use.decision_trace_key
+                or use.query_kind is None
+                or not use.context_key):
+            raise MemoryEventIntegrityError(
+                "UseOutcome 不得归因到缺少 M-08 trace 的兼容 Use")
+        if (payload.decision_trace_key != use.decision_trace_key
+                or payload.query_kind != use.query_kind
+                or payload.context_key != use.context_key):
+            raise MemoryEventIntegrityError(
+                "UseOutcome 的 decision/query/context 与目标 Use 不一致")
+        registry = self.scoped_identities.registry
+        object_hash = registry.identity_hash(
+            IDENTITY_MEMORY_OBJECT, payload.target_ref.stable_key())
+        for row in self._available_rows(
+                self._records.rows_for_object(object_hash)):
+            if row.event_kind != MEMORY_EVENT_USE_OUTCOME:
+                continue
+            existing = MemoryEvent.from_stable_key(registry.read_key(
+                IDENTITY_MEMORY_EVENT, row.event_hash)).payload
+            if (isinstance(existing, UseOutcomePayload)
+                    and existing.outcome_kind == payload.outcome_kind):
+                raise MemoryEventIntegrityError(
+                    "同一 Use 的同类延迟结果已存在")
 
     def _intake_manifest(
             self, source,
@@ -638,7 +945,8 @@ class MemoryEventLog:
         retention_clock = None
         lifecycle_clock = None
         registry = self.scoped_identities.registry
-        rows = self._records.rows_for_object(object_hash)
+        rows = self._available_rows(
+            self._records.rows_for_object(object_hash))
         for row in rows:
             if row.event_kind not in {
                     MEMORY_EVENT_RETENTION,
@@ -689,13 +997,17 @@ class MemoryEventLog:
 
     def _record_for(self, event_hash: int, object_hash: int,
                     event: MemoryEvent, *, scope_hash: int,
-                    timestamp_hash: int, clock_hash: int
+                    timestamp_hash: int, clock_hash: int,
+                    timeline: LogicalTimestamp,
+                    timeline_timestamp_hash: int,
                     ) -> MemoryEventRecord:
-        """把领域事件投影成固定查询信封和单一时间轴。"""
+        """把领域时钟和跨 scope 时间线投影成固定查询信封。"""
         seq = event.timestamp.seq
-        created = seq if event.time_axis == TIME_AXIS_CREATED else 0
-        observed = seq if event.time_axis == TIME_AXIS_OBSERVED else 0
-        used = seq if event.time_axis == TIME_AXIS_USED else 0
+        if timeline.clock != self._timeline_clock_identity:
+            raise MemoryEventIntegrityError("Memory event timeline 身份漂移")
+        created = timeline.seq if event.time_axis == TIME_AXIS_CREATED else 0
+        observed = timeline.seq if event.time_axis == TIME_AXIS_OBSERVED else 0
+        used = timeline.seq if event.time_axis == TIME_AXIS_USED else 0
         return MemoryEventRecord(
             event_hash,
             object_hash,
@@ -708,7 +1020,9 @@ class MemoryEventLog:
             scope_hash,
             timestamp_hash,
             clock_hash,
+            timeline_timestamp_hash,
             seq,
+            timeline.seq,
             created,
             observed,
             used,
@@ -732,6 +1046,11 @@ class MemoryEventLog:
         if self.scoped_identities.load_clock(
                 record.clock_hash) != event.timestamp.clock:
             raise MemoryEventIntegrityError("Memory event clock hash 漂移")
+        timeline = self.scoped_identities.load_timestamp(
+            record.timeline_timestamp_hash)
+        if (timeline.clock != self._timeline_clock_identity
+                or timeline.seq != record.timeline_seq):
+            raise MemoryEventIntegrityError("Memory event timeline 信封漂移")
         expected = self._record_for(
             event_hash,
             record.object_hash,
@@ -739,6 +1058,8 @@ class MemoryEventLog:
             scope_hash=record.scope_hash,
             timestamp_hash=record.timestamp_hash,
             clock_hash=record.clock_hash,
+            timeline=timeline,
+            timeline_timestamp_hash=record.timeline_timestamp_hash,
         )
         if expected != record:
             raise MemoryEventIntegrityError("Memory event 信封与完整事件键不一致")
@@ -746,7 +1067,8 @@ class MemoryEventLog:
         self._validate_event(event)
         self._validate_memory_references(event)
         self._validate_evidence_consistency(event)
-        return MaterializedMemoryEvent(event_hash, record.object_hash, event)
+        return MaterializedMemoryEvent(
+            event_hash, record.object_hash, event, timeline)
 
     @staticmethod
     def _require_access(access: MemoryAccessContext) -> None:

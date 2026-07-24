@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,12 +13,34 @@ from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.storage import discipline as disc
 from pure_integer_ai.storage.backend import StorageBackend, TYPE_INT
 from pure_integer_ai.storage.backend import register_extension_table
+from pure_integer_ai.storage.memory_event import MEMORY_EVENT_STORAGE_DESCRIPTOR_KEY
+from pure_integer_ai.storage.storage_role import (
+    STORAGE_ACCESS_INDEXED_READ,
+    STORAGE_ACCESS_MUTABLE,
+    STORAGE_ACCESS_REBUILD,
+    STORAGE_ROLE_REBUILDABLE,
+    StorageRoleDescriptor,
+)
 
 
 MEMORY_HYPOTHESIS_AGGREGATE_TABLE = "memory_hypothesis_aggregate"
 MEMORY_HYPOTHESIS_SOURCE_TABLE = "memory_hypothesis_source_index"
 MEMORY_HYPOTHESIS_EVENT_TABLE = "memory_hypothesis_event_index"
 MEMORY_HYPOTHESIS_DIRTY_TABLE = "memory_hypothesis_dirty"
+
+MEMORY_AGGREGATE_STORAGE_DESCRIPTOR_KEY = (1, 1, 2)
+MEMORY_AGGREGATE_REBUILD_PROTOCOL_KEY = (1, 1, 3)
+MEMORY_AGGREGATE_STORAGE_DESCRIPTOR = StorageRoleDescriptor(
+    MEMORY_AGGREGATE_STORAGE_DESCRIPTOR_KEY,
+    STORAGE_ROLE_REBUILDABLE,
+    (
+        STORAGE_ACCESS_MUTABLE,
+        STORAGE_ACCESS_INDEXED_READ,
+        STORAGE_ACCESS_REBUILD,
+    ),
+    dependency_keys=(MEMORY_EVENT_STORAGE_DESCRIPTOR_KEY,),
+    rebuild_protocol_key=MEMORY_AGGREGATE_REBUILD_PROTOCOL_KEY,
+)
 
 MEMORY_HYPOTHESIS_AGGREGATE_COLUMNS = [
     ("space_id", TYPE_INT),
@@ -90,6 +113,7 @@ MEMORY_HYPOTHESIS_AGGREGATE_INDEXES = [
     ("space_id", "hypothesis_hash"),
     ("space_id", "owner_visibility", "owner_tenant_id", "owner_user_id", "owner_session_id"),
     ("space_id", "hypothesis_kind_hash", "context_hash", "evidence_state"),
+    ("space_id", "source_hash"),
     ("space_id", "evidence_state", "lifecycle_state", "retention_state"),
     ("space_id", "created_seq"),
     ("space_id", "last_observed_seq"),
@@ -127,6 +151,7 @@ def register_memory_aggregate_tables(backend: StorageBackend) -> None:
         MEMORY_HYPOTHESIS_AGGREGATE_COLUMNS,
         disc.DISC_NONE,
         MEMORY_HYPOTHESIS_AGGREGATE_INDEXES,
+        recovery_key=("space_id", "hypothesis_hash"),
     )
     register_extension_table(
         backend,
@@ -134,6 +159,7 @@ def register_memory_aggregate_tables(backend: StorageBackend) -> None:
         MEMORY_HYPOTHESIS_SOURCE_COLUMNS,
         disc.DISC_NONE,
         MEMORY_HYPOTHESIS_SOURCE_INDEXES,
+        recovery_key=("space_id", "hypothesis_hash", "source_hash", "stance"),
     )
     register_extension_table(
         backend,
@@ -141,6 +167,7 @@ def register_memory_aggregate_tables(backend: StorageBackend) -> None:
         MEMORY_HYPOTHESIS_EVENT_COLUMNS,
         disc.DISC_NONE,
         MEMORY_HYPOTHESIS_EVENT_INDEXES,
+        recovery_key=("space_id", "event_hash"),
     )
     register_extension_table(
         backend,
@@ -148,6 +175,7 @@ def register_memory_aggregate_tables(backend: StorageBackend) -> None:
         MEMORY_HYPOTHESIS_DIRTY_COLUMNS,
         disc.DISC_NONE,
         MEMORY_HYPOTHESIS_DIRTY_INDEXES,
+        recovery_key=("space_id", "hypothesis_hash"),
     )
 
 
@@ -501,6 +529,58 @@ class MemoryAggregateStore:
             )
         )
 
+    def iter_aggregates_by_kind_owner(
+            self,
+            hypothesis_kind_hash: int,
+            owner_key: tuple[int, int, int, int],
+            *,
+            page_limit: int,
+            ) -> Iterator[MemoryHypothesisAggregateRecord]:
+        """按 kind 派生索引和完整 owner 流式读取稳定 Hypothesis hash 页。"""
+        _strict(
+            hypothesis_kind_hash,
+            where="iter_aggregates.hypothesis_kind_hash",
+            positive=True,
+        )
+        owner = _owner(owner_key, where="iter_aggregates.owner_key")
+        if type(page_limit) is not int or page_limit <= 0:
+            raise ValueError("iter_aggregates page_limit 必须是正严格整数")
+        where = {
+            "space_id": self.space_id,
+            "hypothesis_kind_hash": hypothesis_kind_hash,
+            "owner_tenant_id": owner[0],
+            "owner_user_id": owner[1],
+            "owner_session_id": owner[2],
+            "owner_visibility": owner[3],
+        }
+        after = 0
+        while True:
+            rows = self.backend.select(
+                MEMORY_HYPOTHESIS_AGGREGATE_TABLE,
+                where,
+                where_gt={"hypothesis_hash": after},
+                order_by="hypothesis_hash",
+                limit=page_limit,
+            )
+            if not rows:
+                return
+            records = tuple(
+                MemoryHypothesisAggregateRecord.from_row(row)
+                for row in rows
+            )
+            for record in records:
+                if (record.hypothesis_kind_hash != hypothesis_kind_hash
+                        or record.owner_key != owner):
+                    raise MemoryAggregateIntegrityError(
+                        "aggregate 分页返回了其他 kind/owner")
+                if record.hypothesis_hash <= after:
+                    raise MemoryAggregateIntegrityError(
+                        "aggregate 分页 Hypothesis hash 未严格递增")
+                after = record.hypothesis_hash
+                yield record
+            if len(records) < page_limit:
+                return
+
     def replace_sources(self, records: tuple[MemoryHypothesisSourceRecord, ...],
                        hypothesis_hash: int) -> None:
         """替换一个 Hypothesis 的来源索引行。"""
@@ -609,6 +689,31 @@ class MemoryAggregateStore:
         return tuple(sorted(records, key=lambda item: (
             item.dirty_seq, item.hypothesis_hash)))
 
+    def read_dirty(
+            self,
+            hypothesis_hash: int,
+            ) -> MemoryHypothesisDirtyRecord | None:
+        """按 Hypothesis hash 读取唯一 dirty 行，避免扫描整个队列。"""
+        _strict(
+            hypothesis_hash,
+            where="read_dirty.hypothesis_hash",
+            positive=True,
+        )
+        rows = self.backend.select(
+            MEMORY_HYPOTHESIS_DIRTY_TABLE,
+            {
+                "space_id": self.space_id,
+                "hypothesis_hash": hypothesis_hash,
+            },
+        )
+        if len(rows) > 1:
+            raise MemoryAggregateIntegrityError(
+                "同一 Hypothesis 存在重复 dirty 行")
+        return (
+            None if not rows
+            else MemoryHypothesisDirtyRecord.from_row(rows[0])
+        )
+
     def delete_dirty(self, hypothesis_hash: int) -> None:
         """删除一个已成功处理的 dirty 键。"""
         _strict(hypothesis_hash, where="delete_dirty.hypothesis_hash", positive=True)
@@ -632,6 +737,9 @@ __all__ = [
     "MEMORY_HYPOTHESIS_SOURCE_TABLE",
     "MEMORY_HYPOTHESIS_EVENT_TABLE",
     "MEMORY_HYPOTHESIS_DIRTY_TABLE",
+    "MEMORY_AGGREGATE_REBUILD_PROTOCOL_KEY",
+    "MEMORY_AGGREGATE_STORAGE_DESCRIPTOR",
+    "MEMORY_AGGREGATE_STORAGE_DESCRIPTOR_KEY",
     "MemoryAggregateIntegrityError",
     "MemoryHypothesisAggregateRecord",
     "MemoryHypothesisSourceRecord",

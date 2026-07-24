@@ -196,36 +196,40 @@ class AliasRelationRuntime:
 
     def commit_many(
             self,
-            requests: tuple[
-                tuple[AliasResolutionProposal, tuple[int, ...]], ...],
+            requests: tuple[tuple, ...],
             *,
             context: RelationUseContext | None = None,
             ) -> tuple[AliasResolutionUse, ...]:
-        """全量预检多项选择，再原子提交其全部 R-00 fact use 和 alias use。"""
+        """全量预检多项选择，逐项归属后原子提交全部 fact 与 alias Use。"""
         if not isinstance(requests, tuple) or not requests:
             raise ValueError("alias commit_many requests 必须是非空 tuple")
         if context is not None and not isinstance(context, RelationUseContext):
             raise TypeError("alias commit_many context 类型错误")
-        if self.closure.use_owner is not None and context is None:
-            raise ValueError("配置 Core Use owner 后 alias 必须提供完整 context")
         normalized: list[tuple[
             tuple[tuple[int, ...], tuple[int, ...]],
-            tuple[int, ...], AliasResolutionProposal,
+            tuple[int, ...], AliasResolutionProposal, RelationUseContext | None,
         ]] = []
         for request in requests:
-            if not isinstance(request, tuple) or len(request) != 2:
-                raise TypeError("alias commit request 必须是 proposal/use_key 对")
-            proposal, use_key = request
+            if not isinstance(request, tuple) or len(request) not in (2, 3):
+                raise TypeError(
+                    "alias commit request 必须是 proposal/use_key 或含 context 的三元组")
+            proposal, use_key = request[:2]
+            item_context = context if len(request) == 2 else request[2]
             if not isinstance(proposal, AliasResolutionProposal):
                 raise TypeError("alias commit proposal 类型错误")
+            if item_context is not None and not isinstance(
+                    item_context, RelationUseContext):
+                raise TypeError("alias commit request context 类型错误")
+            if self.closure.use_owner is not None and item_context is None:
+                raise ValueError("配置 Core Use owner 后 alias 必须提供完整 context")
             if proposal.result.protocol != self.selector.protocol:
                 raise ValueError("alias proposal 使用了其他 runtime protocol")
             key = _strict_key(use_key, label="AliasRelationRuntime.use_key")
             route = (
-                () if context is None else context.stable_key(),
+                () if item_context is None else item_context.stable_key(),
                 key,
             )
-            normalized.append((route, key, proposal))
+            normalized.append((route, key, proposal, item_context))
         routes = tuple(item[0] for item in normalized)
         if len(set(routes)) != len(routes):
             raise ValueError("同批 alias Use 路由不得重复")
@@ -234,18 +238,19 @@ class AliasRelationRuntime:
             tuple[tuple[int, ...], tuple[int, ...]], AliasResolutionUse
         ] = {}
         relation_requests: list[
-            tuple[ObjectIdentity, tuple[int, ...]]
+            tuple[ObjectIdentity, tuple[int, ...], RelationUseContext | None]
         ] = []
         pending: list[tuple[
             tuple[tuple[int, ...], tuple[int, ...]],
-            tuple[int, ...], AliasResolutionProposal, int, int,
+            tuple[int, ...], AliasResolutionProposal, RelationUseContext | None,
+            int, int,
         ]] = []
-        for route, key, proposal in normalized:
+        for route, key, proposal, item_context in normalized:
             existing = self._uses.get(route)
             if existing is not None:
                 if (existing.result != proposal.result
                         or existing.discovery != proposal.discovery
-                        or existing.context != context):
+                        or existing.context != item_context):
                     raise ValueError("同一 alias Use 路由已绑定不同选择结果")
                 prepared[route] = existing
                 continue
@@ -258,26 +263,35 @@ class AliasRelationRuntime:
                     ordinal,
                     *_packed(proposition.stable_key()),
                 )
-                relation_requests.append((proposition, relation_key))
+                relation_requests.append((
+                    proposition,
+                    relation_key,
+                    item_context,
+                ))
             pending.append((
-                route, key, proposal, start, len(relation_requests) - start))
+                route,
+                key,
+                proposal,
+                item_context,
+                start,
+                len(relation_requests) - start,
+            ))
 
         committed: tuple[RelationClosureUse, ...] = ()
         if relation_requests:
-            committed = self.closure.consume_many(
-                tuple(relation_requests), context=context)
-        for route, key, proposal, start, count in pending:
+            committed = self.closure.consume_many(tuple(relation_requests))
+        for route, key, proposal, item_context, start, count in pending:
             prepared[route] = AliasResolutionUse(
                 key,
                 proposal.result,
                 proposal.discovery,
                 committed[start:start + count],
-                context,
+                item_context,
             )
-        for route, _, _ in normalized:
+        for route, _, _, _ in normalized:
             if route not in self._uses:
                 self._uses[route] = prepared[route]
-        return tuple(prepared[route] for route, _, _ in normalized)
+        return tuple(prepared[route] for route, _, _, _ in normalized)
 
     def clone_for_runtime(
             self,

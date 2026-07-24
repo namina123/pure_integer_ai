@@ -74,6 +74,11 @@ from pure_integer_ai.storage.word_form_index import (
     WORD_FORM_LEGACY_BRIDGE_TABLE,
     register_word_form_index,
 )
+from pure_integer_ai.experiments.curriculum_mastery_runtime import (
+    CurriculumGateCheck,
+    CurriculumMasteryProtocol,
+    CurriculumMasteryRuntime,
+)
 from pure_integer_ai.cognition.understanding.emergent_role import POSITION_HIST_TABLE
 from pure_integer_ai.storage.spaces.registry import SPACE_TYPE_CORE, SpaceRegistry
 from pure_integer_ai.storage.spaces.abstract_space import AbstractSpace
@@ -251,8 +256,8 @@ from pure_integer_ai.training.mode_b_cross_verify import cross_verify_pair
 from pure_integer_ai.crosscut.integer import rational
 from pure_integer_ai.training.promote import promote_edge, promote_report, promote_memory_consolidate
 from pure_integer_ai.training.cursor import (
-    dump_run, load_run, CursorState, cursor_resume, check_replay_coverage,
-    mark_completed, DUMP_TABLES,
+    cursor_state_from_payload, dump_run, load_run_package, CursorState,
+    cursor_resume, check_replay_coverage, mark_completed, DUMP_TABLES,
 )
 from pure_integer_ai.storage.telemetry import (
     push_telemetry_scope,
@@ -433,6 +438,9 @@ class FormalTrainConfig:
     # R-07 因果闭环协议与课程必须成对注入；课程只提交 typed 请求，宿主不解释 cue 或旧边。
     language_causal_protocol: Any = None
     language_causal_course: Any = None
+    # R-02 集合关系 builder 与 course 必须成对注入；默认不构造关系 owner。
+    language_set_relation_builder: Any = None
+    language_set_relation_course: Any = None
     # L-05B2A typed formal generation owner factory；None 保留版本化 legacy 兼容链。
     # factory 必须从当前 TrainContext 的真实 S-02/S-07/R-01 owner 装配请求 mapper、planner 和 renderer。
     language_generation_runtime_factory: Any = None
@@ -448,6 +456,38 @@ class FormalTrainConfig:
     language_generation_h2_protocol: Any = None
     # L-05B2B typed floor 只使用 V-00 held-out split，并按注入阈值逐维验收。
     language_generation_floor_protocol: Any = None
+
+    # W-00 版本化 hard gate；None 保持旧课程兼容路径。
+    curriculum_mastery_protocol: CurriculumMasteryProtocol | None = None
+
+
+@dataclass(frozen=True)
+class FormalTrainStageEvidence:
+    """交给 W-00 注入式评测器的宿主阶段证据。"""
+
+    training_stage: int
+    legacy_gate_passed: bool
+    metrics: StageMetrics
+    typed_report: Any = None
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回不依赖对象地址的宿主检查证据键。"""
+        if type(self.training_stage) is not int:
+            raise TypeError("training_stage 必须是严格整数")
+        if type(self.legacy_gate_passed) is not bool:
+            raise TypeError("legacy_gate_passed 必须是 bool")
+        return (
+            self.training_stage,
+            int(self.legacy_gate_passed),
+            self.metrics.graph_size,
+            self.metrics.causes_coverage,
+            self.metrics.conduction_rate,
+            self.metrics.promote_rate,
+            self.metrics.realizes_rate,
+            self.metrics.oov_promote_rate,
+        )
+
+
 @dataclass
 class FormalTrainResult:
     """formal_train 产出（阶段完成集 + 最终度量 + dump spaces + 断奶报告）。"""
@@ -503,6 +543,7 @@ class FormalTrainResult:
     precedence_evidence_count: int = 0
     precedence_relation_reports: tuple[Any, ...] = ()
     causal_relation_reports: tuple[Any, ...] = ()
+    set_relation_reports: tuple[Any, ...] = ()
     span_count: int = 0
     span_candidate_fact_count: int = 0
     prediction_observation_count: int = 0
@@ -512,6 +553,7 @@ class FormalTrainResult:
     structure_boundary_report: Any = None
     sense_candidate_report: Any = None
     verification_reports: tuple[VerificationReport, ...] = ()
+    curriculum_stage_reports: list[Any] = field(default_factory=list)
     execution: FormalTrainExecutionStats = field(default_factory=FormalTrainExecutionStats)
 
 
@@ -577,6 +619,14 @@ def _formal_train_impl(config: FormalTrainConfig,
         boot_relations=config.curriculum_boot_relations,
     )
     requested_stages = list(train_scope.training_stages)
+    mastery_protocol = config.curriculum_mastery_protocol
+    mastery_stage_keys: tuple[tuple[int, ...], ...] = ()
+    if mastery_protocol is not None:
+        if not isinstance(mastery_protocol, CurriculumMasteryProtocol):
+            raise TypeError(
+                "curriculum_mastery_protocol 必须是 CurriculumMasteryProtocol")
+        mastery_stage_keys = mastery_protocol.stage_keys_for(
+            tuple(requested_stages))
     ctx = make_train_context(backend, teacher=teacher, weights=weights)
     language_course_configured = (
         config.language_course_root is not None,
@@ -610,10 +660,15 @@ def _formal_train_impl(config: FormalTrainConfig,
         run_id=config.run_id,
     )
     todo_stages = list(requested_stages)
+    mastery_runtime: CurriculumMasteryRuntime | None = None
     if config.resume and config.base_run_id is not None:
-        load_run(backend, config.run_dir, config.base_run_id)   # E1 终 dump base
+        recovery = load_run_package(
+            backend, config.run_dir, config.base_run_id)   # E1 终 dump base
         # E8：载入 base run 的 cursor state（已完成阶段集·skippable 跳过）
-        base_state = _load_cursor(config.run_dir, config.base_run_id)
+        base_state = cursor_state_from_payload(
+            recovery.cursor_payload,
+            fallback_run_id=config.base_run_id,
+        )
         if base_state is not None:
             state.completed = set(base_state.completed)
             state.non_skippable = set(base_state.non_skippable)
@@ -624,6 +679,16 @@ def _formal_train_impl(config: FormalTrainConfig,
                     "续训前置失败：teacher replay 覆盖率未达标（E4·禁续训防静默降级）")
         # E8 stage-skip（跳已完成 skippable·非 skippable 保留须重标 H2）
         todo_stages = cursor_resume(state, requested_stages, skippable=SKIPPABLE_STAGES)
+
+    if mastery_protocol is not None:
+        mastery_runtime = mastery_protocol.bind(backend)
+        pending_stage_keys = mastery_runtime.prepare(mastery_stage_keys)
+        pending_set = set(pending_stage_keys)
+        todo_stages = [
+            stage
+            for stage, stage_key in zip(requested_stages, mastery_stage_keys)
+            if stage_key in pending_set
+        ]
 
     if config.evaluation_plan is not None and config.probe_holdout > 0:
         raise ValueError("V-00 evaluation_plan 与旧 probe_holdout 尾切路径互斥")
@@ -759,6 +824,21 @@ def _formal_train_impl(config: FormalTrainConfig,
             ctx,
             config.language_causal_protocol,
             config.language_causal_course,
+        )
+    set_relation_configured = (
+        config.language_set_relation_builder is not None,
+        config.language_set_relation_course is not None,
+    )
+    if any(set_relation_configured) and not all(set_relation_configured):
+        raise ValueError("R-02 set relation builder 与 course 必须成对配置")
+    if all(set_relation_configured):
+        from pure_integer_ai.experiments.set_relation_runtime import (
+            install_set_relation_runtime,
+        )
+        install_set_relation_runtime(
+            ctx,
+            config.language_set_relation_builder,
+            config.language_set_relation_course,
         )
     generation_factory = config.language_generation_runtime_factory
     if all(default_generation_configured):
@@ -1476,6 +1556,32 @@ def _formal_train_impl(config: FormalTrainConfig,
             stage_started_ns = telemetry_clock.now_ns()
             if stage == STAGE5_MULTIMODAL:
                 # defer·非训练（机制骨架随模态扩展·§十二阶段5）
+                if mastery_runtime is not None:
+                    stage_key = mastery_protocol.stage_keys_for((stage,))[0]
+                    evidence = FormalTrainStageEvidence(
+                        stage,
+                        False,
+                        mc.snapshot(),
+                    )
+                    report = mastery_runtime.evaluate_and_record(
+                        stage_key,
+                        evidence,
+                        required_checks=(CurriculumGateCheck(
+                            mastery_protocol.host_gate_check_key,
+                            False,
+                            evidence.stable_key(),
+                        ),),
+                    )
+                    result.curriculum_stage_reports.append(report)
+                    execution_recorder.finish(
+                        "training_stage",
+                        stage_snapshot,
+                        elapsed_ns=telemetry_clock.now_ns() - stage_started_ns,
+                        stage=stage,
+                    )
+                    if stage_scope_token is not None:
+                        reset_telemetry_scope(stage_scope_token)
+                    break
                 result.stages_completed.append(stage)
                 execution_recorder.finish(
                     "training_stage",
@@ -1633,15 +1739,35 @@ def _formal_train_impl(config: FormalTrainConfig,
                     result.typed_language_floor_report.complete is True)
             else:
                 stage_gate_passed = stage_metric_gate(stage, snap)
+            if mastery_runtime is not None:
+                stage_key = mastery_protocol.stage_keys_for((stage,))[0]
+                typed_report = (
+                    typed_stage4_report
+                    if stage == STAGE4_PROMOTE_WEAN
+                    else result.typed_language_floor_report
+                    if stage == STAGE3_REWARD
+                    else None
+                )
+                evidence = FormalTrainStageEvidence(
+                    stage,
+                    bool(stage_gate_passed),
+                    snap,
+                    typed_report,
+                )
+                report = mastery_runtime.evaluate_and_record(
+                    stage_key,
+                    evidence,
+                    required_checks=(CurriculumGateCheck(
+                        mastery_protocol.host_gate_check_key,
+                        bool(stage_gate_passed),
+                        evidence.stable_key(),
+                    ),),
+                )
+                result.curriculum_stage_reports.append(report)
+                stage_gate_passed = report.passed == 1
             if stage_gate_passed:
                 mark_completed(state, stage, skippable=is_skippable(stage))
                 result.stages_completed.append(stage)
-            else:
-                # typed 阶段4报告是正式完成协议，失败只能保留在 requested，不能伪记 completed。
-                # legacy 阶段暂保留“已跑完轮次”的历史结果语义，等待对应课程门迁移时再拆分。
-                if not (stage == STAGE4_PROMOTE_WEAN
-                        and ctx.language_generation_runtime is not None):
-                    result.stages_completed.append(stage)
             execution_recorder.finish(
                 "training_stage",
                 stage_snapshot,
@@ -1858,10 +1984,13 @@ def _formal_train_impl(config: FormalTrainConfig,
             dump_started_ns = telemetry_clock.now_ns()
             result.dump_spaces = dump_run(
                 backend, config.run_dir, config.run_id,
-                spaces=[ctx.space_id], tables=config.dump_tables)
+                spaces=None,
+                tables=config.dump_tables,
+                include_registered_tables=True,
+                require_all_spaces=True,
+                cursor_state=state,
+            )
             result.execution.graph_dump_calls += 1
-            # E8：持久化 cursor state（已完成阶段集·供下次续训 stage-skip）
-            _save_cursor(state, config.run_dir, config.run_id)
             execution_recorder.finish(
                 "dump",
                 dump_snapshot,
@@ -1917,6 +2046,8 @@ def _formal_train_impl(config: FormalTrainConfig,
             ctx.precedence_relation_reports)
     if ctx.causal_relation_runtime is not None:
         result.causal_relation_reports = tuple(ctx.causal_relation_reports)
+    if ctx.set_relation_runtime is not None:
+        result.set_relation_reports = tuple(ctx.set_relation_reports)
     if ctx.span_index is not None:
         result.span_count = ctx.span_index.span_count()
         result.span_candidate_fact_count = len(
@@ -1971,39 +2102,3 @@ def _stage_items(corpus: list[CollectedItem], stage: int,
     if not corpus:
         return []
     return list(corpus)
-# ---- E8 cursor state 持久化（续训 stage-skip 用） ----
-
-def _cursor_path(run_dir: str, run_id: str) -> str:
-    return os.path.join(run_dir, run_id, "cursor.json")
-
-
-def _save_cursor(state: CursorState, run_dir: str, run_id: str) -> str:
-    """持久化 cursor state（已完成/非 skippable 阶段集·供下次续训 E8 stage-skip）。"""
-    import json as _json
-    path = _cursor_path(run_dir, run_id)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    payload = {
-        "base_run_id": state.base_run_id,
-        "run_id": state.run_id,
-        "completed": sorted(state.completed),
-        "non_skippable": sorted(state.non_skippable),
-    }
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(_json.dumps(payload, ensure_ascii=False, sort_keys=True))
-    return path
-
-
-def _load_cursor(run_dir: str, run_id: str) -> CursorState | None:
-    """载入 base run 的 cursor state（续训 E8 stage-skip 用·无文件返 None）。"""
-    import json as _json
-    path = _cursor_path(run_dir, run_id)
-    if not os.path.isfile(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        payload = _json.load(f)
-    return CursorState(
-        base_run_id=payload.get("base_run_id", run_id),
-        run_id=payload.get("run_id", run_id),
-        completed=set(payload.get("completed", [])),
-        non_skippable=set(payload.get("non_skippable", [])),
-    )

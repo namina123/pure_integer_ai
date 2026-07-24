@@ -25,6 +25,9 @@ from pure_integer_ai.cognition.shared.memory_event_log import MemoryEventLog
 from pure_integer_ai.cognition.shared.memory_aggregate import (
     MemoryHypothesisAggregateIndex,
 )
+from pure_integer_ai.cognition.shared.training_hypothesis import (
+    TrainingCandidateHistoryLog,
+)
 from pure_integer_ai.cognition.shared.scope_identity import session_scope
 from pure_integer_ai.cognition.shared.work_memory import WorkMemory
 from pure_integer_ai.cognition.result.graph_view import ConceptGraph
@@ -73,6 +76,7 @@ def _copy_backend_schema(source: StorageBackend, target: StorageBackend) -> None
             metadata["discipline"],
             list(metadata.get("indexes", ())),
             core=bool(metadata["core"]),
+            recovery_key=tuple(metadata.get("recovery_key", ())),
         )
 
 
@@ -283,6 +287,10 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
         concept_graph=ConceptGraph(backend),
         scoped_identity_store=scoped_identities,
         graph_ontology=graph_ontology,
+        training_candidate_history=TrainingCandidateHistoryLog(
+            backend,
+            core.space_id,
+        ),
         core_identity_catalog=core_identity_catalog,
         memory_read_overlay=memory_read_overlay,
         memory_interact_overlay=memory_interact_overlay,
@@ -334,6 +342,54 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
             install_memory_source_intakes,
         )
         install_memory_source_intakes(cloned, companion)
+    if ctx.memory_batch_config is not None:
+        from pure_integer_ai.cognition.shared.memory_batch import (
+            install_memory_batch_runtimes,
+        )
+        install_memory_batch_runtimes(
+            cloned,
+            ctx.memory_batch_config,
+        )
+    if ctx.memory_isolation_runtime is not None:
+        if cloned.memory_batch_config is None:
+            raise EvaluationIsolationError(
+                "M-11 isolation clone 缺少 M-10 batch runtime")
+        cloned.memory_isolation_runtime = (
+            ctx.memory_isolation_runtime.clone_for_context(cloned))
+    if ctx.memory_query_runtime is not None:
+        cloned.memory_query_runtime = (
+            ctx.memory_query_runtime.clone_for_context(cloned))
+    if ctx.memory_resolver_runtime is not None:
+        if cloned.memory_query_runtime is None:
+            raise EvaluationIsolationError(
+                "M-07 resolver clone 缺少 M-06 query runtime")
+        cloned.memory_resolver_runtime = (
+            ctx.memory_resolver_runtime.clone_for_context(cloned))
+    if ctx.memory_hot_set_runtime is not None:
+        if (cloned.memory_resolver_runtime is None
+                or cloned.tiered_segment_store is None):
+            raise EvaluationIsolationError(
+                "K-04 hot-set clone 缺少 M-07 resolver 或 K-02 store")
+        cloned.memory_hot_set_runtime = (
+            ctx.memory_hot_set_runtime.clone_for_context(cloned))
+    if ctx.attractor_runtime is not None:
+        if cloned.memory_resolver_runtime is None:
+            raise EvaluationIsolationError(
+                "A-10 runtime clone 缺少 M-07 resolver runtime")
+        cloned.attractor_runtime = ctx.attractor_runtime.clone_for_context(
+            cloned)
+    if ctx.memory_use_runtime is not None:
+        if cloned.attractor_runtime is None:
+            raise EvaluationIsolationError(
+                "M-08 runtime clone 缺少 A-10 attractor runtime")
+        cloned.memory_use_runtime = (
+            ctx.memory_use_runtime.clone_for_context(cloned))
+    if ctx.memory_maintenance_runtime is not None:
+        if cloned.memory_use_runtime is None:
+            raise EvaluationIsolationError(
+                "M-09 runtime clone 缺少 M-08 runtime")
+        cloned.memory_maintenance_runtime = (
+            ctx.memory_maintenance_runtime.clone_for_context(cloned))
     if ctx.unicode_intake is not None:
         cloned.unicode_intake = ctx.unicode_intake.clone_for_ontology(
             cloned.graph_ontology)
@@ -371,6 +427,11 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
     if ctx.causal_relation_runtime is not None:
         cloned.causal_relation_runtime = (
             ctx.causal_relation_runtime.clone_for_context(cloned))
+    if ctx.set_relation_runtime is not None:
+        cloned.set_relation_runtime = (
+            ctx.set_relation_runtime.clone_for_context(cloned))
+        cloned.set_relation_reports = copy.deepcopy(
+            ctx.set_relation_reports)
     if ctx.span_index is not None:
         cloned.span_index = ctx.span_index.clone_for_context(
             cloned.graph_ontology,
@@ -536,6 +597,34 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         () if ctx.language_prediction_runtime is None
         else ctx.language_prediction_runtime.state_key()
     )
+    memory_query_state = (
+        () if ctx.memory_query_runtime is None
+        else ctx.memory_query_runtime.state_key()
+    )
+    memory_resolver_state = (
+        () if ctx.memory_resolver_runtime is None
+        else ctx.memory_resolver_runtime.state_key()
+    )
+    memory_hot_set_state = (
+        () if ctx.memory_hot_set_runtime is None
+        else ctx.memory_hot_set_runtime.state_key()
+    )
+    attractor_state = (
+        () if ctx.attractor_runtime is None
+        else ctx.attractor_runtime.state_key()
+    )
+    memory_use_state = (
+        () if ctx.memory_use_runtime is None
+        else ctx.memory_use_runtime.state_key()
+    )
+    memory_maintenance_state = (
+        () if ctx.memory_maintenance_runtime is None
+        else ctx.memory_maintenance_runtime.state_key()
+    )
+    memory_isolation_state = (
+        () if ctx.memory_isolation_runtime is None
+        else ctx.memory_isolation_runtime.state_key()
+    )
     prediction_reports = copy.deepcopy(ctx.language_prediction_reports)
     structure_candidate_state = (
         () if ctx.structure_candidate_runtime is None
@@ -564,6 +653,10 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
     causal_state = (
         () if ctx.causal_relation_runtime is None
         else ctx.causal_relation_runtime.state_key()
+    )
+    set_relation_state = (
+        () if ctx.set_relation_runtime is None
+        else ctx.set_relation_runtime.state_key()
     )
     semantic_course_state = (
         () if ctx.language_semantic_course_runtime is None
@@ -595,6 +688,13 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         word_form_state,
         boundary_state,
         prediction_state,
+        memory_query_state,
+        memory_resolver_state,
+        memory_hot_set_state,
+        attractor_state,
+        memory_use_state,
+        memory_maintenance_state,
+        memory_isolation_state,
         prediction_reports,
         structure_candidate_state,
         sense_candidate_state,
@@ -603,6 +703,7 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         sense_course_state,
         precedence_state,
         causal_state,
+        set_relation_state,
         semantic_course_state,
         generation_factory_state,
         generation_stage4_state,
@@ -611,6 +712,7 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         copy.deepcopy(ctx.sense_candidate_reports),
         copy.deepcopy(ctx.precedence_relation_reports),
         copy.deepcopy(ctx.causal_relation_reports),
+        copy.deepcopy(ctx.set_relation_reports),
         copy.deepcopy(ctx.language_semantic_course_reports),
         copy.deepcopy(ctx.verification_reports),
     )

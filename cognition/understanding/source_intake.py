@@ -11,6 +11,7 @@ from pure_integer_ai.storage.source_record import (
     SourceRecordRepository,
     SourceRecordStorage,
 )
+from pure_integer_ai.storage.memory_forget import MemoryForgetVisibility
 from pure_integer_ai.storage.spaces.companion import CompanionSpace
 
 
@@ -44,6 +45,23 @@ class SourceIntake:
             raise RuntimeError("SourceRecord 与 Companion 必须使用同一 backend")
         self.repository = repository
         self.companion = companion
+        self._forget_visibility: MemoryForgetVisibility | None = None
+
+    def attach_forget_visibility(
+            self,
+            visibility: MemoryForgetVisibility,
+            ) -> None:
+        """安装 M-11 可见性，使来源重学不复用已遗忘完整键和伴随项。"""
+        if not isinstance(visibility, MemoryForgetVisibility):
+            raise TypeError("visibility 必须是 MemoryForgetVisibility")
+        repository_backend = getattr(
+            visibility.store.store.repository, "backend", None)
+        if repository_backend is not None and repository_backend is not self.repository.backend:
+            raise ValueError("forget visibility 与 SourceIntake backend 不一致")
+        if (self._forget_visibility is not None
+                and self._forget_visibility is not visibility):
+            raise ValueError("SourceIntake 已绑定其他 forget visibility")
+        self._forget_visibility = visibility
 
     def ensure(
             self, source: SourceRef, raw_text: str, *,
@@ -62,12 +80,18 @@ class SourceIntake:
 
         existing = self.repository.find(source.stable_key())
         if existing is not None:
+            if self._source_is_forgotten(existing):
+                raise SourceIntakeIntegrityError(
+                    "已遗忘的完整 SourceRef 不得按同一身份重放")
             self._verify_existing(
                 existing, raw_text=raw_text,
                 license_id=license_id, batch_id=batch_id)
             return existing
 
-        prior_versions = self.repository.versions_for(source.stable_key())
+        prior_versions = tuple(
+            item for item in self.repository.versions_for(source.stable_key())
+            if not self._source_is_forgotten(item)
+        )
         if prior_versions:
             prior = prior_versions[-1]
             if (prior.raw_text != raw_text
@@ -120,7 +144,8 @@ class SourceIntake:
                 or start < 0 or end < start):
             raise ValueError("来源切片区间非法")
         record = self.repository.find(source.stable_key())
-        if record is None or not record.metadata_complete:
+        if (record is None or not record.metadata_complete
+                or self._source_is_forgotten(record)):
             raise SourceIntakeIntegrityError("来源没有完整 Companion 记录")
         self._verify_companion(record)
         if end > len(record.raw_text):
@@ -154,6 +179,21 @@ class SourceIntake:
                 or row["meta"] != record.source_kind):
             raise SourceIntakeIntegrityError(
                 "Companion assoc 与 SourceRecord 来源内容不一致")
+
+    def _source_is_forgotten(self, record: SourceRecordStorage) -> bool:
+        """判断来源或其绑定的 Companion assoc 是否已退出正式逻辑视图。"""
+        visibility = self._forget_visibility
+        if visibility is None:
+            return False
+        assoc_key = (
+            record.companion_type_hash,
+            record.companion_name_hash,
+            record.companion_assoc_id,
+        )
+        return (
+            visibility.source_is_forgotten(record.source_key)
+            or visibility.companion_is_forgotten(assoc_key)
+        )
 
 
 __all__ = [

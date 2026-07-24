@@ -158,6 +158,19 @@ class MultipleVerificationEpisodesError(RuntimeError):
     """旧单 episode 接口遇到多维结果，要求调用方改用 run_round_many。"""
 
 
+def _uses_typed_language_pipeline(
+        ctx: TrainContext,
+        item: CollectedItem,
+        ) -> bool:
+    """判断当前语言项是否已进入 S-02 或 typed generation 管线。"""
+    if item.modality != MODALITY_LANGUAGE:
+        return False
+    return (
+        ctx.language_semantic_course_runtime is not None
+        or ctx.language_generation_runtime is not None
+    )
+
+
 class DefaultRoundRunner:
     """默认 per-round 执行（真接线：observe → episode_loop + build_judge_fn）。
 
@@ -193,6 +206,11 @@ class DefaultRoundRunner:
                        stage: int, round_id: int) -> RoundResult:
         """在统一 session/document/episode 边界内执行一轮训练。"""
         assert_int(stage, round_id, _where="DefaultRoundRunner.run_round_full")
+        if (stage >= STAGE3_REWARD
+                and _uses_typed_language_pipeline(ctx, item)
+                and ctx.language_generation_runtime is None):
+            raise RuntimeError(
+                "S-02 语义课程已启用，但 reward stage 缺少 typed generation owner")
         if (ctx.boundary_hypothesis_engine is not None
                 and item.boundary_parse is None):
             _prepare_item_boundary(
@@ -274,9 +292,7 @@ class DefaultRoundRunner:
                       position_histogram_state=ctx.position_histogram_state,
                       hub_degree_state=ctx.hub_degree_state,
                       write_legacy_language_sequences=(
-                          ctx.language_generation_runtime is None
-                          or item.modality != MODALITY_LANGUAGE
-                      ))
+                          not _uses_typed_language_pipeline(ctx, item)))
         _materialize_item_spans(ctx, item, obs)
         _run_item_predictions(ctx, item, obs)
         _run_item_sense_candidates(ctx, item, obs)
@@ -297,6 +313,14 @@ class DefaultRoundRunner:
                 read_only=ctx.scope_owner is not None,
             )
             ctx.causal_relation_reports.append(causal_report)
+        if ctx.set_relation_runtime is not None:
+            if raw.occurrence_scope_identity is None:
+                raise ValueError("R-02 runtime 缺少来源 occurrence scope")
+            set_relation_report = ctx.set_relation_runtime.process(
+                raw.occurrence_scope_identity,
+                read_only=ctx.scope_owner is not None,
+            )
+            ctx.set_relation_reports.append(set_relation_report)
 
         # #730 路径 W：捕获 code item 的 observe-built COMPOSES 根（__prog_* = obs.struct_refs[0]）供 task-driven
         # 代码模态 unparse（候选 A·observe 期建树一次·task-driven 纯读·幂等守 bit-identical）。code struct_ref

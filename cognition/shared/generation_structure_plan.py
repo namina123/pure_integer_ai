@@ -74,6 +74,18 @@ def _require_structure(identity: ObjectIdentity, *, label: str) -> ObjectIdentit
     return identity
 
 
+def generation_sentence_address_key(
+        value: ObjectIdentity | "GenerationSentenceInstance",
+        *,
+        label: str,
+        ) -> tuple[int, ...]:
+    """把模板句式或运行期句实例编码为不混淆的句级寻址键。"""
+    if isinstance(value, GenerationSentenceInstance):
+        return (1, *_packed(value.stable_key()))
+    _require_structure(value, label=label)
+    return (0, *_packed(value.stable_key()))
+
+
 def _object_tuple(values: tuple[ObjectIdentity, ...], *, label: str) -> None:
     """核验开放一等对象 tuple，并拒绝重复身份。"""
     if not isinstance(values, tuple):
@@ -109,6 +121,8 @@ def _slot_value_key(value: StructureSlotValue) -> tuple[int, ...]:
 def _topological_order(
         nodes: tuple[tuple[int, ...], ...],
         dependencies: tuple["DiscourseDependency", ...],
+        *,
+        require_unique: bool = False,
         ) -> tuple[tuple[int, ...], ...]:
     """对 typed 篇章依赖做确定性拓扑排序，环或端点漂移立即失败。"""
     node_set = set(nodes)
@@ -126,6 +140,8 @@ def _topological_order(
     ready = sorted(node for node, count in indegree.items() if count == 0)
     ordered: list[tuple[int, ...]] = []
     while ready:
+        if require_unique and len(ready) != 1:
+            raise ValueError("discourse dependency 未唯一确定句间顺序")
         node = ready.pop(0)
         ordered.append(node)
         for target in sorted(outgoing[node]):
@@ -183,6 +199,9 @@ class DiscoursePlan:
     dependencies: tuple[DiscourseDependency, ...]
     open_questions: tuple[ReasoningObligation, ...]
     context: tuple[ObjectIdentity, ...] = ()
+    require_unique_order: bool = False
+    declaration_source: SourceRef | None = None
+    declaration_trace: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         _strict_int_tuple(self.selection_key, label="discourse selection key")
@@ -212,12 +231,28 @@ class DiscoursePlan:
         if len(set(self.open_questions)) != len(self.open_questions):
             raise ValueError("discourse open question 不得重复")
         _object_tuple(self.context, label="discourse context")
+        if type(self.require_unique_order) is not bool:
+            raise TypeError("discourse require_unique_order 必须是严格 bool")
+        if self.declaration_source is not None and not isinstance(
+                self.declaration_source, SourceRef):
+            raise TypeError("discourse declaration_source 类型错误")
+        _strict_int_tuple(
+            self.declaration_trace,
+            label="discourse declaration trace",
+        )
+        if bool(self.declaration_trace) != (
+                self.declaration_source is not None):
+            raise ValueError("discourse declaration 来源和 trace 必须同时存在或同时缺失")
         candidate_keys = tuple(sorted(self.candidate_keys))
         dependencies = tuple(sorted(
             self.dependencies, key=lambda item: item.stable_key()))
         questions = tuple(sorted(
             self.open_questions, key=lambda item: item.stable_key()))
-        order = _topological_order(candidate_keys, dependencies)
+        order = _topological_order(
+            candidate_keys,
+            dependencies,
+            require_unique=self.require_unique_order,
+        )
         object.__setattr__(self, "candidate_keys", candidate_keys)
         object.__setattr__(self, "dependencies", dependencies)
         object.__setattr__(self, "open_questions", questions)
@@ -242,6 +277,11 @@ class DiscoursePlan:
         result.append(len(self.context))
         for identity in self.context:
             result.extend(_packed(identity.stable_key()))
+        result.append(int(self.require_unique_order))
+        result.append(0 if self.declaration_source is None else 1)
+        if self.declaration_source is not None:
+            result.extend(_packed(self.declaration_source.stable_key()))
+            result.extend(_packed(self.declaration_trace))
         result.append(len(self.topological_order))
         for key in self.topological_order:
             result.extend(_packed(key))
@@ -382,6 +422,44 @@ class PropositionSlotFiller:
 
 
 @dataclass(frozen=True)
+class GenerationSentenceInstance:
+    """一次输出内由候选、来源和序号限定的运行期句实例。"""
+
+    template: ObjectIdentity
+    candidate_key: tuple[int, ...]
+    ordinal: int
+    source: SourceRef
+    scope: ScopeIdentity
+
+    def __post_init__(self) -> None:
+        """核验实例不会把一等模板句式误作可复用的运行地址。"""
+        _require_structure(self.template, label="sentence instance template")
+        _strict_int_tuple(
+            self.candidate_key,
+            label="sentence instance candidate key",
+        )
+        if not self.candidate_key:
+            raise ValueError("sentence instance candidate key 不能为空")
+        assert_int(self.ordinal, _where="sentence instance ordinal")
+        if type(self.ordinal) is not int or self.ordinal < 0:
+            raise ValueError("sentence instance ordinal 必须是非负严格整数")
+        if not isinstance(self.source, SourceRef):
+            raise TypeError("sentence instance source 类型错误")
+        if not isinstance(self.scope, ScopeIdentity):
+            raise TypeError("sentence instance scope 类型错误")
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回模板、候选、序号和来源化 scope 的完整实例键。"""
+        return (
+            *_packed(self.template.stable_key()),
+            *_packed(self.candidate_key),
+            self.ordinal,
+            *_packed(self.source.stable_key()),
+            *_packed(self.scope.stable_key()),
+        )
+
+
+@dataclass(frozen=True)
 class PlannedSentence:
     """一个句子结构、成员命题、response act、slot/value 和显式边界。"""
 
@@ -396,6 +474,7 @@ class PlannedSentence:
     source: SourceRef
     scope: ScopeIdentity
     response_act: ObjectIdentity | None = None
+    instance: GenerationSentenceInstance | None = None
 
     def __post_init__(self) -> None:
         _require_structure(self.sentence, label="planned sentence")
@@ -463,6 +542,16 @@ class PlannedSentence:
             raise TypeError("planned sentence source 类型错误")
         if not isinstance(self.scope, ScopeIdentity):
             raise TypeError("planned sentence scope 类型错误")
+        if self.instance is not None:
+            if not isinstance(self.instance, GenerationSentenceInstance):
+                raise TypeError("planned sentence instance 类型错误")
+            if (self.instance.template != self.sentence
+                    or self.instance.ordinal != self.ordinal
+                    or self.instance.source != self.source
+                    or self.instance.scope != self.scope):
+                raise ValueError("planned sentence instance 与模板、序或来源漂移")
+            if self.instance.candidate_key not in self.proposition_keys:
+                raise ValueError("planned sentence instance 未绑定当前 Proposition")
         object.__setattr__(self, "proposition_keys", tuple(sorted(
             self.proposition_keys)))
         object.__setattr__(self, "slots", tuple(sorted(
@@ -473,6 +562,11 @@ class PlannedSentence:
             self.proposition_fillers,
             key=lambda item: item.candidate_key,
         )))
+
+    @property
+    def address(self) -> ObjectIdentity | GenerationSentenceInstance:
+        """返回下游执行和采用使用的句级地址。"""
+        return self.sentence if self.instance is None else self.instance
 
     def stable_key(self) -> tuple[int, ...]:
         """返回句子、结构、命题覆盖、slot/value、边界和归属完整键。"""
@@ -499,6 +593,9 @@ class PlannedSentence:
         result.append(0 if self.response_act is None else 1)
         if self.response_act is not None:
             result.extend(_packed(self.response_act.stable_key()))
+        result.append(0 if self.instance is None else 1)
+        if self.instance is not None:
+            result.extend(_packed(self.instance.stable_key()))
         return tuple(result)
 
 
@@ -511,6 +608,7 @@ class AnaphoraRequirement:
     antecedent_candidate_key: tuple[int, ...]
     instruction: ObjectIdentity
     trace: tuple[int, ...]
+    instance: GenerationSentenceInstance | None = None
 
     def __post_init__(self) -> None:
         _require_structure(self.sentence, label="anaphora sentence")
@@ -525,6 +623,16 @@ class AnaphoraRequirement:
         _strict_int_tuple(self.trace, label="anaphora trace")
         if not self.trace:
             raise ValueError("anaphora trace 不能为空")
+        if self.instance is not None:
+            if not isinstance(self.instance, GenerationSentenceInstance):
+                raise TypeError("anaphora instance 类型错误")
+            if self.instance.template != self.sentence:
+                raise ValueError("anaphora instance 与模板句式漂移")
+
+    @property
+    def address(self) -> ObjectIdentity | GenerationSentenceInstance:
+        """返回照应义务的句级运行地址。"""
+        return self.sentence if self.instance is None else self.instance
 
     def stable_key(self) -> tuple[int, ...]:
         """返回句子、slot、antecedent、指令和 trace 完整键。"""
@@ -534,6 +642,9 @@ class AnaphoraRequirement:
             *_packed(self.antecedent_candidate_key),
             *_packed(self.instruction.stable_key()),
             *_packed(self.trace),
+            0 if self.instance is None else 1,
+            *(() if self.instance is None
+              else _packed(self.instance.stable_key())),
         )
 
 
@@ -549,6 +660,7 @@ class SyntaxLinearizationObligation:
     reason: ObjectIdentity
     source: SourceRef
     scope: ScopeIdentity
+    instance: GenerationSentenceInstance | None = None
 
     def __post_init__(self) -> None:
         _require_structure(self.sentence, label="linearization sentence")
@@ -571,10 +683,22 @@ class SyntaxLinearizationObligation:
             raise TypeError("linearization source 类型错误")
         if not isinstance(self.scope, ScopeIdentity):
             raise TypeError("linearization scope 类型错误")
+        if self.instance is not None:
+            if not isinstance(self.instance, GenerationSentenceInstance):
+                raise TypeError("linearization instance 类型错误")
+            if (self.instance.template != self.sentence
+                    or self.instance.source != self.source
+                    or self.instance.scope != self.scope):
+                raise ValueError("linearization instance 与句子或来源漂移")
         object.__setattr__(self, "values", tuple(sorted(
             self.values, key=lambda item: item.slot.stable_key())))
         object.__setattr__(self, "constraints", tuple(sorted(
             self.constraints, key=lambda item: item.stable_key())))
+
+    @property
+    def address(self) -> ObjectIdentity | GenerationSentenceInstance:
+        """返回 S-07 execution 消费的句级地址。"""
+        return self.sentence if self.instance is None else self.instance
 
     def stable_key(self) -> tuple[int, ...]:
         """返回句子、结构、slot 值、约束、context、reason 和归属完整键。"""
@@ -594,6 +718,9 @@ class SyntaxLinearizationObligation:
         result.extend(_packed(self.reason.stable_key()))
         result.extend(_packed(self.source.stable_key()))
         result.extend(_packed(self.scope.stable_key()))
+        result.append(0 if self.instance is None else 1)
+        if self.instance is not None:
+            result.extend(_packed(self.instance.stable_key()))
         return tuple(result)
 
 
@@ -613,7 +740,7 @@ class SyntaxPlan:
         if not isinstance(self.sentences, tuple) or any(
                 not isinstance(item, PlannedSentence) for item in self.sentences):
             raise TypeError("syntax sentences 类型错误")
-        if len({item.sentence for item in self.sentences}) != len(self.sentences):
+        if len({item.address for item in self.sentences}) != len(self.sentences):
             raise ValueError("syntax sentence identity 不得重复")
         if len({item.ordinal for item in self.sentences}) != len(self.sentences):
             raise ValueError("syntax sentence ordinal 不得重复")
@@ -621,35 +748,36 @@ class SyntaxPlan:
                 not isinstance(item, AnaphoraRequirement) for item in self.anaphora):
             raise TypeError("syntax anaphora 类型错误")
         anaphora_slots = tuple(
-            (item.sentence, item.slot) for item in self.anaphora)
+            (item.address, item.slot) for item in self.anaphora)
         if len(set(anaphora_slots)) != len(anaphora_slots):
             raise ValueError("同一 sentence/slot 不得重复声明 anaphora")
         if not isinstance(self.linearization, tuple) or any(
                 not isinstance(item, SyntaxLinearizationObligation)
                 for item in self.linearization):
             raise TypeError("syntax linearization 类型错误")
-        sentence_map = {item.sentence: item for item in self.sentences}
-        if set(item.sentence for item in self.linearization) != set(sentence_map):
+        sentence_map = {item.address: item for item in self.sentences}
+        if set(item.address for item in self.linearization) != set(sentence_map):
             raise ValueError("每个 planned sentence 必须恰有一个 linearization obligation")
         if len(self.linearization) != len(self.sentences):
             raise ValueError("linearization obligation 不得重复覆盖 sentence")
         for obligation in self.linearization:
-            sentence = sentence_map[obligation.sentence]
+            sentence = sentence_map[obligation.address]
             if (obligation.structure != sentence.structure
                     or obligation.values != sentence.values
                     or obligation.source != sentence.source
-                    or obligation.scope != sentence.scope):
+                    or obligation.scope != sentence.scope
+                    or obligation.address != sentence.address):
                 raise ValueError("linearization obligation 与 sentence 内容不一致")
         selected_keys = {
             key for sentence in self.sentences for key in sentence.proposition_keys}
         slot_by_sentence = {
-            sentence.sentence: {slot.slot for slot in sentence.slots}
+            sentence.address: {slot.slot for slot in sentence.slots}
             for sentence in self.sentences
         }
         for requirement in self.anaphora:
-            if requirement.sentence not in sentence_map:
+            if requirement.address not in sentence_map:
                 raise ValueError("anaphora 引用了未知 sentence")
-            if requirement.slot not in slot_by_sentence[requirement.sentence]:
+            if requirement.slot not in slot_by_sentence[requirement.address]:
                 raise ValueError("anaphora 引用了 sentence 未声明 slot")
             if requirement.antecedent_candidate_key not in selected_keys:
                 raise ValueError("anaphora antecedent 不在 selected Proposition")
@@ -658,10 +786,10 @@ class SyntaxPlan:
         object.__setattr__(self, "anaphora", tuple(sorted(
             self.anaphora, key=lambda item: item.stable_key())))
         ordinal_by_sentence = {
-            item.sentence: item.ordinal for item in self.sentences}
+            item.address: item.ordinal for item in self.sentences}
         object.__setattr__(self, "linearization", tuple(sorted(
             self.linearization,
-            key=lambda item: ordinal_by_sentence[item.sentence],
+            key=lambda item: ordinal_by_sentence[item.address],
         )))
 
     def stable_key(self) -> tuple[int, ...]:
@@ -767,7 +895,7 @@ def _validate_syntax(
         raise ValueError("syntax plan 必须绑定当前 G-01 selection")
     selected_keys = set(selection.selected_candidate_keys)
     coverage: list[tuple[int, ...]] = []
-    sentence_map = {item.sentence: item for item in syntax.sentences}
+    sentence_map = {item.address: item for item in syntax.sentences}
     sentence_ordinal_by_candidate: dict[tuple[int, ...], int] = {}
     for sentence in syntax.sentences:
         coverage.extend(sentence.proposition_keys)
@@ -797,11 +925,11 @@ def _validate_syntax(
                     dependency.after_candidate_key]):
             raise ValueError("syntax sentence ordinal 违反 discourse dependency")
     sentence_ordinal_by_identity = {
-        item.sentence: item.ordinal for item in syntax.sentences}
+        item.address: item.ordinal for item in syntax.sentences}
     for requirement in syntax.anaphora:
         if (sentence_ordinal_by_candidate[
                 requirement.antecedent_candidate_key]
-                > sentence_ordinal_by_identity[requirement.sentence]):
+                > sentence_ordinal_by_identity[requirement.address]):
             raise ValueError("anaphora antecedent 不得位于未来 sentence")
 
 
@@ -1046,6 +1174,7 @@ __all__ = [
     "DiscoursePlanner",
     "GenerationDiscourseLayerResolver",
     "GenerationPropositionLayerResolver",
+    "GenerationSentenceInstance",
     "GenerationStructureLayerProtocol",
     "GenerationStructurePlan",
     "GenerationStructurePlanner",
@@ -1058,4 +1187,5 @@ __all__ = [
     "SyntaxLinearizationObligation",
     "SyntaxPlan",
     "SyntaxPlanner",
+    "generation_sentence_address_key",
 ]
