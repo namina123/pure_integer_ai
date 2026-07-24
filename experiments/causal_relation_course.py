@@ -275,6 +275,8 @@ class CausalRelationCourseRuntime:
             owner: CausalRelationRuntime,
             protocol_key: tuple[int, ...],
             course: CausalRelationCourse,
+            *,
+            shared_event_time: bool = False,
             ) -> None:
         """绑定唯一 causal owner、协议身份和可克隆课程 mapper。"""
         if not isinstance(owner, CausalRelationRuntime):
@@ -285,9 +287,12 @@ class CausalRelationCourseRuntime:
         )
         if not isinstance(course, CausalRelationCourse):
             raise TypeError("course 未实现 CausalRelationCourse")
+        if type(shared_event_time) is not bool:
+            raise TypeError("shared_event_time 必须是 bool")
         _strict_key(course.state_key(), where="CausalRelationCourse.state_key")
         self.owner = owner
         self.course = course
+        self.shared_event_time = shared_event_time
 
     def process(
             self, scope: ScopeIdentity, *, read_only: bool,
@@ -304,6 +309,9 @@ class CausalRelationCourseRuntime:
             raise ValueError("course.request 替换了 round scope")
         if read_only and request.formations:
             raise ValueError("held-out causal 请求不得形成新候选")
+        if self.shared_event_time and request.temporal_facts:
+            raise ValueError(
+                "联合 R-06B/R-07 causal 请求不得直写平行 temporal fact")
 
         temporal_facts = tuple(
             self.owner.event_time_facts.record(
@@ -363,10 +371,21 @@ class CausalRelationCourseRuntime:
         cloned_course = self.course.clone_for_evaluation()
         if not isinstance(cloned_course, CausalRelationCourse):
             raise TypeError("course clone 未实现 CausalRelationCourse")
+        event_time_runtime = getattr(
+            ctx, "event_time_relation_runtime", None)
+        if self.shared_event_time and event_time_runtime is None:
+            raise ValueError("联合 R-07 clone 缺少已重建的 R-06B runtime")
+        clone_kwargs = {}
+        if self.shared_event_time:
+            clone_kwargs = {
+                "event_time_facts": event_time_runtime.facts,
+                "event_time_verifier": event_time_runtime.verifier,
+            }
         return CausalRelationCourseRuntime(
-            self.owner.clone_for_context(ctx),
+            self.owner.clone_for_context(ctx, **clone_kwargs),
             self.protocol_key,
             cloned_course,
+            shared_event_time=self.shared_event_time,
         )
 
     def state_key(self) -> tuple:
@@ -375,7 +394,12 @@ class CausalRelationCourseRuntime:
             self.course.state_key(),
             where="CausalRelationCourse.state_key",
         )
-        return self.protocol_key, self.owner.state_key(), course_key
+        return (
+            self.protocol_key,
+            self.owner.state_key(),
+            course_key,
+            int(self.shared_event_time),
+        )
 
 
 def install_causal_relation_runtime(
@@ -402,10 +426,18 @@ def install_causal_relation_runtime(
         raise ValueError("causal protocol.build 未绑定 TrainContext 图")
     if owner.event_time_facts.ontology is not ctx.graph_ontology:
         raise ValueError("causal event-time facade 未绑定 TrainContext 图")
+    event_time_runtime = getattr(ctx, "event_time_relation_runtime", None)
+    shared_event_time = event_time_runtime is not None
+    if shared_event_time:
+        owner.bind_event_time(
+            event_time_runtime.facts,
+            event_time_runtime.verifier,
+        )
     runtime = CausalRelationCourseRuntime(
         owner,
         protocol_key,
         course,
+        shared_event_time=shared_event_time,
     )
     ctx.causal_relation_runtime = runtime
     return runtime

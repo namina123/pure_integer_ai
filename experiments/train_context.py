@@ -95,6 +95,8 @@ class TrainContext:
     occurrence_order_writer: Any = None
     precedence_relation_runtime: Any = None
     precedence_relation_reports: list[Any] = field(default_factory=list)
+    event_time_relation_runtime: Any = None
+    event_time_relation_reports: list[Any] = field(default_factory=list)
     causal_relation_runtime: Any = None
     causal_relation_reports: list[Any] = field(default_factory=list)
     set_relation_runtime: Any = None

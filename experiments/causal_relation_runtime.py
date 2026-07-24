@@ -721,6 +721,32 @@ class CausalRelationRuntime:
         self._execution_traces: dict[tuple[int, ...], CausalExecutionTrace] = {}
         self._generation_uses: dict[tuple[int, ...], CausalGenerationUse] = {}
 
+    def bind_event_time(
+            self,
+            event_time_facts: EventTimeFactIndex,
+            event_time_verifier: EventTimeVerifier,
+            ) -> None:
+        """改绑正式 R-06B 事实与过滤 verifier，阻断平行时间真值源。"""
+        if not isinstance(event_time_facts, EventTimeFactIndex):
+            raise TypeError("event_time_facts 必须是 EventTimeFactIndex")
+        if not isinstance(event_time_verifier, EventTimeVerifier):
+            raise TypeError("event_time_verifier 必须是 EventTimeVerifier")
+        if event_time_verifier.facts is not event_time_facts:
+            raise ValueError("共享 event-time verifier 必须绑定同一 typed facade")
+        if event_time_facts.ontology is not self.semantic_graph.ontology:
+            raise ValueError("共享 event-time facade 必须绑定 causal 语义图")
+        if self._execution_traces or self._generation_uses:
+            raise ValueError("已有 causal use 后不得改绑 event-time verifier")
+        self.event_time_facts = event_time_facts
+        self.event_time_verifier = event_time_verifier
+        self.adapter = CausalVerificationAdapter(
+            self.relation_runtime,
+            event_time_verifier,
+            self.executor.temporal_resolver,
+            self.executor.protocol,
+            self.verification_protocol,
+        )
+
     def form(
             self,
             spec: RelationClosureCandidateSpec,
@@ -838,16 +864,24 @@ class CausalRelationRuntime:
             semantic_graph: SemanticGraph,
             candidate_graph: CandidateProjectionGraph,
             event_time_facts: EventTimeFactIndex,
+            event_time_verifier: EventTimeVerifier | None = None,
             ) -> "CausalRelationRuntime":
         """复制 R-00 owner 并在克隆图上重建 event-time 和 causal facade。"""
         cloned_relation = self.relation_runtime.clone_for_evaluation(
             semantic_graph,
             candidate_graph,
         )
-        cloned_event_verifier = EventTimeVerifier(
-            event_time_facts,
-            self.event_time_verifier.resolver,
-        )
+        if event_time_verifier is None:
+            cloned_event_verifier = EventTimeVerifier(
+                event_time_facts,
+                self.event_time_verifier.resolver,
+            )
+        else:
+            if not isinstance(event_time_verifier, EventTimeVerifier):
+                raise TypeError("共享克隆 verifier 类型非法")
+            if event_time_verifier.facts is not event_time_facts:
+                raise ValueError("共享克隆 verifier 未绑定指定 event-time facade")
+            cloned_event_verifier = event_time_verifier
         cloned_executor = CausalExecutor(
             self.executor.protocol,
             self.executor.temporal_resolver,
@@ -864,10 +898,19 @@ class CausalRelationRuntime:
         cloned._generation_uses = dict(self._generation_uses)
         return cloned
 
-    def clone_for_context(self, ctx) -> "CausalRelationRuntime":
-        """在评测 TrainContext 的图和 scoped registry 上重建全部 typed facade。"""
+    def clone_for_context(
+            self,
+            ctx,
+            *,
+            event_time_facts: EventTimeFactIndex | None = None,
+            event_time_verifier: EventTimeVerifier | None = None,
+            ) -> "CausalRelationRuntime":
+        """在评测 context 重建 causal owner，并可复用克隆 R-06B verifier。"""
         if self.semantic_graph.ontology is not self.event_time_facts.ontology:
             raise ValueError("causal runtime 的语义图与 event-time 图必须一致")
+        if ((event_time_facts is None)
+                != (event_time_verifier is None)):
+            raise ValueError("共享 event-time facts/verifier 必须成对提供")
         predicate_identities = tuple(
             self.semantic_graph.ontology.identity_of(ref)
             for ref in self.semantic_graph.predicates.refs()
@@ -883,15 +926,21 @@ class CausalRelationRuntime:
             ctx.graph_ontology,
             self.relation_runtime.candidate_runtime.graph.protocol,
         )
-        from pure_integer_ai.cognition.shared.order_facts import OrderFactIndex
-        cloned_event_time = EventTimeFactIndex(OrderFactIndex(
-            ctx.graph_ontology,
-            ctx.scoped_identity_store,
-        ))
+        if event_time_facts is None:
+            from pure_integer_ai.cognition.shared.order_facts import (
+                OrderFactIndex,
+            )
+            cloned_event_time = EventTimeFactIndex(OrderFactIndex(
+                ctx.graph_ontology,
+                ctx.scoped_identity_store,
+            ))
+        else:
+            cloned_event_time = event_time_facts
         return self.clone_for_evaluation(
             cloned_semantic,
             cloned_candidates,
             cloned_event_time,
+            event_time_verifier,
         )
 
     def state_key(self) -> tuple:

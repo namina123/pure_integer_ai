@@ -117,6 +117,22 @@ TRAIN_MODULE_OWNERSHIP: tuple[TrainModuleOwnership, ...] = (
         forbids=("event_time_fact_inference", "causal_write", "scalar_merge"),
     ),
     TrainModuleOwnership(
+        module="experiments.event_time_runtime",
+        owns=(
+            "s02_event_time_evidence_mapping",
+            "event_time_hypothesis_history",
+            "active_event_time_projection",
+            "formal_event_time_round_orchestration",
+            "event_time_evaluation_clone",
+        ),
+        forbids=(
+            "surface_cue_semantics",
+            "occurrence_order_inference",
+            "causal_evidence_write",
+            "definitive_truth",
+        ),
+    ),
+    TrainModuleOwnership(
         module="experiments.precedence_relation_runtime",
         owns=(
             "occurrence_to_order_learning_orchestration",

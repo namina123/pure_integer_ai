@@ -158,6 +158,12 @@ class EventTimeRelationResolver(Protocol):
             ) -> ResolvedEventTimeRelation: ...
 
 
+class EventTimeFactAcceptance(Protocol):
+    """判断一条历史时间 statement 当前是否仍可被 verifier 消费。"""
+
+    def accepts(self, fact: OrderFact) -> bool: ...
+
+
 @dataclass(frozen=True)
 class EventTimeFactSet:
     """一个精确 scope 下按 relation 聚合的已核验时间事实。"""
@@ -273,6 +279,44 @@ class EventTimeFactIndex:
             qualifiers=qualifiers,
         )
 
+    def record_existing(
+            self,
+            relation: ObjectIdentity,
+            subject: ObjectIdentity,
+            object_identity: ObjectIdentity,
+            *,
+            scope: ScopeIdentity,
+            provenance_kind: int,
+            epistemic_origin: int = 0,
+            content_version: int = 0,
+            qualifiers: tuple[int, ...] = (),
+            ) -> OrderFact:
+        """只用图中已存在的 relation 和 S-02 端点追加时间投影。"""
+        if not isinstance(scope, ScopeIdentity):
+            raise TypeError("event-time scope 必须是 ScopeIdentity")
+        first = _endpoint(subject, where="event-time subject")
+        second = _endpoint(object_identity, where="event-time object")
+        if first == second:
+            raise ValueError("event-time 事实不得形成自环")
+        if first.owner != second.owner or first.owner != scope.owner:
+            raise ValueError("event-time 端点和 scope owner 必须一致")
+        if self.ontology.resolve(relation) is None:
+            raise ValueError("event-time relation 尚未由语义图物化")
+        subject_ref = self.ontology.resolve(first)
+        object_ref = self.ontology.resolve(second)
+        if subject_ref is None or object_ref is None:
+            raise ValueError("event-time 正式写入不得补造语义端点")
+        return self.facts.record(
+            relation,
+            subject_ref,
+            object_ref,
+            scope=scope,
+            provenance_kind=provenance_kind,
+            epistemic_origin=epistemic_origin,
+            content_version=content_version,
+            qualifiers=qualifiers,
+        )
+
     def read(
             self,
             relations: tuple[ObjectIdentity, ...],
@@ -305,6 +349,35 @@ class EventTimeFactIndex:
             ) -> "EventTimeFactIndex":
         """在克隆图的 OrderFactIndex 上重建独立 typed facade。"""
         return EventTimeFactIndex(facts)
+
+    def fact_by_assertion_hash(self, assertion_hash: int) -> OrderFact:
+        """按完整 assertion 恢复唯一时间事实，供显式版本替代使用。"""
+        assert_int(
+            assertion_hash,
+            _where="EventTimeFactIndex.fact_by_assertion_hash",
+        )
+        if type(assertion_hash) is not int or assertion_hash <= 0:
+            raise ValueError("event-time assertion hash 必须为严格正整数")
+        assertion = self.facts.scoped_identities.load_assertion(
+            assertion_hash)
+        matches = tuple(
+            statement
+            for statement in self.ontology.statements(
+                subject=assertion.subject,
+                object_ref=assertion.object,
+            )
+            if statement.assertion_hash == assertion_hash
+        )
+        if len(matches) != 1:
+            raise ValueError("event-time assertion 未对应唯一图 statement")
+        fact = OrderFact(matches[0])
+        relation = self.ontology.identity_of(fact.statement.predicate)
+        self._validate_fact(
+            fact,
+            relation=relation,
+            scope=fact.statement.assertion.scope,
+        )
+        return fact
 
     def supersede(
             self,
@@ -355,13 +428,19 @@ class EventTimeVerifier:
 
     def __init__(
             self, facts: EventTimeFactIndex,
-            resolver: EventTimeRelationResolver) -> None:
+            resolver: EventTimeRelationResolver,
+            acceptance: EventTimeFactAcceptance | None = None,
+            ) -> None:
         if not isinstance(facts, EventTimeFactIndex):
             raise TypeError("facts 必须是 EventTimeFactIndex")
         if not callable(getattr(resolver, "resolve", None)):
             raise TypeError("resolver 必须实现 resolve")
+        if (acceptance is not None
+                and not callable(getattr(acceptance, "accepts", None))):
+            raise TypeError("acceptance 必须实现 accepts")
         self.facts = facts
         self.resolver = resolver
+        self.acceptance = acceptance
 
     def verify(
             self,
@@ -371,6 +450,15 @@ class EventTimeVerifier:
             ) -> EventTimeVerificationResult:
         """核验同序压缩后的方向图，不把一致性提升为现实真值。"""
         fact_set = self.facts.read(relations, scope=scope)
+        if self.acceptance is not None:
+            fact_set = EventTimeFactSet(
+                fact_set.scope,
+                fact_set.relations,
+                tuple(
+                    fact for fact in fact_set.facts
+                    if self.acceptance.accepts(fact)
+                ),
+            )
         if not fact_set.facts:
             return EventTimeVerificationResult(
                 EVENT_TIME_EMPTY,
@@ -519,6 +607,7 @@ __all__ = [
     "EVENT_TIME_SAME",
     "EVENT_TIME_UNKNOWN",
     "EventTimeFactIndex",
+    "EventTimeFactAcceptance",
     "EventTimeFactSet",
     "EventTimeRelationResolver",
     "EventTimeVerificationResult",

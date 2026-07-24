@@ -424,9 +424,6 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
                 "R-06 runtime 缺少可克隆的 occurrence order reader")
         cloned.precedence_relation_runtime = (
             ctx.precedence_relation_runtime.clone_for_context(cloned))
-    if ctx.causal_relation_runtime is not None:
-        cloned.causal_relation_runtime = (
-            ctx.causal_relation_runtime.clone_for_context(cloned))
     if ctx.set_relation_runtime is not None:
         cloned.set_relation_runtime = (
             ctx.set_relation_runtime.clone_for_context(cloned))
@@ -563,6 +560,15 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
             ctx.language_semantic_course_runtime.clone_for_context(cloned))
         cloned.language_semantic_course_reports = copy.deepcopy(
             ctx.language_semantic_course_reports)
+    if ctx.event_time_relation_runtime is not None:
+        if cloned.language_semantic_course_runtime is None:
+            raise EvaluationIsolationError(
+                "R-06B runtime clone 缺少 S-02 semantic runtime")
+        cloned.event_time_relation_runtime = (
+            ctx.event_time_relation_runtime.clone_for_context(cloned))
+    if ctx.causal_relation_runtime is not None:
+        cloned.causal_relation_runtime = (
+            ctx.causal_relation_runtime.clone_for_context(cloned))
     if ctx.language_generation_runtime is not None:
         if ctx.language_generation_runtime_factory is None:
             raise EvaluationIsolationError(
@@ -665,6 +671,10 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         () if ctx.precedence_relation_runtime is None
         else ctx.precedence_relation_runtime.state_key()
     )
+    event_time_state = (
+        () if ctx.event_time_relation_runtime is None
+        else ctx.event_time_relation_runtime.state_key()
+    )
     causal_state = (
         () if ctx.causal_relation_runtime is None
         else ctx.causal_relation_runtime.state_key()
@@ -729,6 +739,7 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         structure_boundary_mapper_state,
         sense_course_state,
         precedence_state,
+        event_time_state,
         causal_state,
         set_relation_state,
         property_relation_state,
@@ -741,6 +752,7 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         copy.deepcopy(ctx.structure_boundary_report),
         copy.deepcopy(ctx.sense_candidate_reports),
         copy.deepcopy(ctx.precedence_relation_reports),
+        copy.deepcopy(ctx.event_time_relation_reports),
         copy.deepcopy(ctx.causal_relation_reports),
         copy.deepcopy(ctx.set_relation_reports),
         copy.deepcopy(ctx.property_relation_reports),

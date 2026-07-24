@@ -668,6 +668,56 @@ class HypothesisLedger:
         }
         return cloned
 
+    def clone_competitions(
+            self, anchors: tuple[HypothesisKey, ...],
+            ) -> "HypothesisLedger":
+        """只复制指定竞争组的候选与完整事件，供增量原子试算。"""
+        if not isinstance(anchors, tuple) or any(
+                not isinstance(item, HypothesisKey) for item in anchors):
+            raise TypeError("clone_competitions anchors 类型非法")
+        competition_keys = {
+            self._competition_index_key(anchor)
+            for anchor in anchors
+        }
+        members = {
+            hypothesis
+            for competition in competition_keys
+            for hypothesis in self._competition_members.get(
+                competition, ())
+        }
+        cloned = HypothesisLedger()
+        selected_evidence_ids: set[int] = set()
+        for hypothesis in sorted(members):
+            cloned._hypotheses[hypothesis] = self._hypotheses[hypothesis]
+            cloned._competition_members.setdefault(
+                self._competition_index_key(hypothesis), set(),
+            ).add(hypothesis)
+            cloned._candidate_members.setdefault(
+                self._candidate_index_key(hypothesis), set(),
+            ).add(hypothesis)
+            evidence_ids = list(
+                self._evidence_by_hypothesis[hypothesis])
+            transition_ids = list(
+                self._transitions_by_hypothesis[hypothesis])
+            cloned._evidence_by_hypothesis[hypothesis] = evidence_ids
+            cloned._transitions_by_hypothesis[hypothesis] = transition_ids
+            for evidence_id in evidence_ids:
+                cloned._evidence[evidence_id] = self._evidence[evidence_id]
+                selected_evidence_ids.add(evidence_id)
+            for event_id in transition_ids:
+                cloned._transitions[event_id] = self._transitions[event_id]
+        for evidence_id in selected_evidence_ids:
+            replacement_id = self._superseded_evidence.get(evidence_id)
+            if replacement_id is not None:
+                cloned._superseded_evidence[evidence_id] = replacement_id
+        return cloned
+
+    def has_hypothesis(self, hypothesis: HypothesisKey) -> bool:
+        """以常数时间判断完整候选是否已登记，不排序全 ledger。"""
+        if not isinstance(hypothesis, HypothesisKey):
+            raise TypeError("has_hypothesis 需要 HypothesisKey")
+        return hypothesis in self._hypotheses
+
     def state_key(self) -> tuple:
         """返回完整不可变状态，用于评测隔离和确定性回归核验。"""
         return (

@@ -432,6 +432,10 @@ class FormalTrainConfig:
     language_semantic_course_protocol: Any = None
     # L-05B2B 只读语义恢复；只能从 S-02 图和 active H-00 Evidence 重建请求。
     language_semantic_query_protocol: Any = None
+    # R-06B 事件时间生产链必须同时注入协议、方向语义和 S-02 请求课程。
+    language_event_time_protocol: Any = None
+    language_event_time_semantics: Any = None
+    language_event_time_course: Any = None
     # R-06 顺序闭环协议与课程必须成对注入；宿主不提供语言、Role 或阈值默认值。
     language_precedence_protocol: Any = None
     language_precedence_course: Any = None
@@ -551,6 +555,8 @@ class FormalTrainResult:
     occurrence_order_fact_count: int = 0
     precedence_evidence_count: int = 0
     precedence_relation_reports: tuple[Any, ...] = ()
+    event_time_evidence_count: int = 0
+    event_time_relation_reports: tuple[Any, ...] = ()
     causal_relation_reports: tuple[Any, ...] = ()
     set_relation_reports: tuple[Any, ...] = ()
     property_relation_reports: tuple[Any, ...] = ()
@@ -806,6 +812,25 @@ def _formal_train_impl(config: FormalTrainConfig,
             ctx,
             config.language_semantic_course_protocol,
             config.language_semantic_query_protocol,
+        )
+    event_time_configured = (
+        config.language_event_time_protocol is not None,
+        config.language_event_time_semantics is not None,
+        config.language_event_time_course is not None,
+    )
+    if any(event_time_configured) and not all(event_time_configured):
+        raise ValueError("R-06B protocol、semantics 与 course 必须成组配置")
+    if all(event_time_configured):
+        if config.language_semantic_course_protocol is None:
+            raise ValueError("R-06B production 必须配套正式 S-02 semantic course")
+        from pure_integer_ai.experiments.event_time_runtime import (
+            install_event_time_relation_runtime,
+        )
+        install_event_time_relation_runtime(
+            ctx,
+            config.language_event_time_protocol,
+            config.language_event_time_semantics,
+            config.language_event_time_course,
         )
     precedence_configured = (
         config.language_precedence_protocol is not None,
@@ -2104,6 +2129,11 @@ def _formal_train_impl(config: FormalTrainConfig,
             ctx.precedence_relation_runtime.evidence_count())
         result.precedence_relation_reports = tuple(
             ctx.precedence_relation_reports)
+    if ctx.event_time_relation_runtime is not None:
+        result.event_time_evidence_count = (
+            ctx.event_time_relation_runtime.evidence_count())
+        result.event_time_relation_reports = tuple(
+            ctx.event_time_relation_reports)
     if ctx.causal_relation_runtime is not None:
         result.causal_relation_reports = tuple(ctx.causal_relation_reports)
     if ctx.set_relation_runtime is not None:

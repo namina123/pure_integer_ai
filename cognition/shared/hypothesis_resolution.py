@@ -854,6 +854,37 @@ class HypothesisResolver:
         cloned._latest_by_competition = dict(self._latest_by_competition)
         return cloned
 
+    def clone_competitions(
+            self,
+            *,
+            ledger: HypothesisLedger,
+            anchors: tuple[HypothesisKey, ...],
+            ) -> "HypothesisResolver":
+        """只复制指定竞争组的完整决策链，并绑定对应局部 ledger。"""
+        if not isinstance(ledger, HypothesisLedger):
+            raise TypeError("clone_competitions.ledger 类型错误")
+        if not isinstance(anchors, tuple) or any(
+                not isinstance(item, HypothesisKey) for item in anchors):
+            raise TypeError("clone_competitions anchors 类型非法")
+        competition_keys = {
+            _competition_key(anchor)
+            for anchor in anchors
+        }
+        cloned = HypothesisResolver(ledger)
+        for competition in competition_keys:
+            latest_id = self._latest_by_competition.get(competition, 0)
+            if latest_id:
+                cloned._latest_by_competition[competition] = latest_id
+            decision_id = latest_id
+            while decision_id:
+                decision = self._decisions.get(decision_id)
+                if (decision is None
+                        or decision.competition_key != competition):
+                    raise ValueError("H-04 局部克隆遇到断裂或跨组决策链")
+                cloned._decisions[decision_id] = decision
+                decision_id = decision.previous_decision_id
+        return cloned
+
     def state_key(self) -> tuple:
         """返回决策历史和各竞争组最新指针的完整可比较状态。"""
         return (

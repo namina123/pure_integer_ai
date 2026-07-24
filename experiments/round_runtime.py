@@ -296,7 +296,19 @@ class DefaultRoundRunner:
         _materialize_item_spans(ctx, item, obs)
         _run_item_predictions(ctx, item, obs)
         _run_item_sense_candidates(ctx, item, obs)
-        _run_item_semantic_course(ctx, item, raw, obs)
+        semantic_course_run = _run_item_semantic_course(
+            ctx, item, raw, obs)
+        if ctx.event_time_relation_runtime is not None:
+            if raw.occurrence_scope_identity is None:
+                raise ValueError("R-06B runtime 缺少来源 occurrence scope")
+            if semantic_course_run is None:
+                raise ValueError("R-06B runtime 缺少同轮 S-02 semantic run")
+            event_time_report = ctx.event_time_relation_runtime.process(
+                raw.occurrence_scope_identity,
+                semantic_course_run,
+                read_only=ctx.scope_owner is not None,
+            )
+            ctx.event_time_relation_reports.append(event_time_report)
         if ctx.precedence_relation_runtime is not None:
             if raw.occurrence_scope_identity is None:
                 raise ValueError("R-06 runtime 缺少来源 occurrence scope")
