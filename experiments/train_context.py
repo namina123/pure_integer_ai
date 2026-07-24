@@ -101,6 +101,8 @@ class TrainContext:
     set_relation_reports: list[Any] = field(default_factory=list)
     property_relation_runtime: Any = None
     property_relation_reports: list[Any] = field(default_factory=list)
+    mereology_relation_runtime: Any = None
+    mereology_relation_reports: list[Any] = field(default_factory=list)
     language_semantic_course_runtime: Any = None
     language_semantic_course_reports: list[Any] = field(default_factory=list)
     alias_relation_course_report: Any = None

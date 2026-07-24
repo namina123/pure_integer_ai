@@ -1542,6 +1542,40 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
         limitation="R-03 已提供六维 typed PROPERTY、多来源四态聚合、唯一保守采用、Rational 强度解释、来源化 Use、formal 成对安装和 V-06 克隆；旧 PROPERTY/ATTR 只能经显式 mapper 迁移，共现或 cue 不能绕过 recognition。当前仅用 PH1 最小 fixture 验设施，尚未把 D-01/K 盘属性资料编成带反例、内容替换、跨表示和 held-out 的正式课程，也未让问答、推理与生成默认消费该 owner，因此不能进入 readiness。",
     ),
     MechanismRecord(
+        mechanism_id="relation.mereology_typed_closure",
+        scope=SCOPE_PRE_WEANING,
+        status=STATUS_OPT_IN,
+        owner="experiments.mereology_relation_runtime",
+        writers=(
+            "experiments.mereology_relation_runtime:MereologyCourseRuntime.process",
+            "experiments.relation_closure_runtime:RelationClosureRuntime.form_many",
+            "experiments.relation_closure_runtime:RelationClosureRuntime.recognize_many_at",
+            "experiments.relation_closure_runtime:RelationClosureRuntime.consume_many",
+        ),
+        readers=(
+            "experiments.relation_closure_runtime:RelationClosureRuntime.epistemic_snapshots",
+            "cognition.shared.mereology_relation:MereologyRelationEngine.evaluate",
+            "cognition.shared.mereology_relation:MereologyRelationEngine.select",
+            "experiments.mereology_relation_runtime:MereologyRelationRuntime.map_legacy",
+        ),
+        gates=(
+            "FormalTrainConfig.language_mereology_relation_builder",
+            "FormalTrainConfig.language_mereology_relation_course",
+        ),
+        sources=(
+            "typed relation family RelationSchema/part Role/whole Role",
+            "R00 current Evidence/H04 projection",
+            "explicit Transitive/Composition/Inverse/Irreflexive rule",
+            "explicit legacy mapper",
+        ),
+        recovery=(
+            "graph_object", "graph_statement", "candidate_projection",
+            "V06 cloned H00 owner and local Use ledger",
+        ),
+        readiness_eligible=False,
+        limitation="R-04 已提供注入式部分整体关系族、canonical Role 方向、显式同类传递/跨类复合/逆关系/反自反、有界 fixpoint、直接与派生四态、来源化 proof/Use、formal 成对安装和 V-06 克隆；旧 EDGE_MEREOLOGY、词典和 cue 只能经显式 mapper 进入 forming+recognition。当前仅用 PH1 最小 fixture 验设施，尚未把 D-01/K 盘部分整体资料编成带反例、关系分型、内容替换和 held-out 的正式课程，也未让问答、推理与生成默认消费该 owner，因此不能进入 readiness。",
+    ),
+    MechanismRecord(
         mechanism_id="relation.subset_eq_universal",
         scope=SCOPE_PRE_WEANING,
         status=STATUS_PRODUCTION,
