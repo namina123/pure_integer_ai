@@ -447,6 +447,9 @@ class FormalTrainConfig:
     # R-04 部分整体 builder 与 course 必须成对注入；宿主不解释关系分类、方向或规则。
     language_mereology_relation_builder: Any = None
     language_mereology_relation_course: Any = None
+    # R-05 双对称关系 builder 与 course 必须成对注入；宿主不解释近义、反义或采用目的。
+    language_semantic_pair_builder: Any = None
+    language_semantic_pair_course: Any = None
     # L-05B2A typed formal generation owner factory；None 保留版本化 legacy 兼容链。
     # factory 必须从当前 TrainContext 的真实 S-02/S-07/R-01 owner 装配请求 mapper、planner 和 renderer。
     language_generation_runtime_factory: Any = None
@@ -552,6 +555,7 @@ class FormalTrainResult:
     set_relation_reports: tuple[Any, ...] = ()
     property_relation_reports: tuple[Any, ...] = ()
     mereology_relation_reports: tuple[Any, ...] = ()
+    semantic_pair_reports: tuple[Any, ...] = ()
     span_count: int = 0
     span_candidate_fact_count: int = 0
     prediction_observation_count: int = 0
@@ -879,6 +883,22 @@ def _formal_train_impl(config: FormalTrainConfig,
             ctx,
             config.language_mereology_relation_builder,
             config.language_mereology_relation_course,
+        )
+    semantic_pair_configured = (
+        config.language_semantic_pair_builder is not None,
+        config.language_semantic_pair_course is not None,
+    )
+    if (any(semantic_pair_configured)
+            and not all(semantic_pair_configured)):
+        raise ValueError("R-05 semantic pair builder 与 course 必须成对配置")
+    if all(semantic_pair_configured):
+        from pure_integer_ai.experiments.semantic_pair_runtime import (
+            install_semantic_pair_runtime,
+        )
+        install_semantic_pair_runtime(
+            ctx,
+            config.language_semantic_pair_builder,
+            config.language_semantic_pair_course,
         )
     generation_factory = config.language_generation_runtime_factory
     if all(default_generation_configured):
@@ -2094,6 +2114,8 @@ def _formal_train_impl(config: FormalTrainConfig,
     if ctx.mereology_relation_runtime is not None:
         result.mereology_relation_reports = tuple(
             ctx.mereology_relation_reports)
+    if ctx.semantic_pair_runtime is not None:
+        result.semantic_pair_reports = tuple(ctx.semantic_pair_reports)
     if ctx.span_index is not None:
         result.span_count = ctx.span_index.span_count()
         result.span_candidate_fact_count = len(
