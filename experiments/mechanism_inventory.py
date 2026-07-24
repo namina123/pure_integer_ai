@@ -1576,6 +1576,41 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
         limitation="R-04 已提供注入式部分整体关系族、canonical Role 方向、显式同类传递/跨类复合/逆关系/反自反、有界 fixpoint、直接与派生四态、来源化 proof/Use、formal 成对安装和 V-06 克隆；旧 EDGE_MEREOLOGY、词典和 cue 只能经显式 mapper 进入 forming+recognition。当前仅用 PH1 最小 fixture 验设施，尚未把 D-01/K 盘部分整体资料编成带反例、关系分型、内容替换和 held-out 的正式课程，也未让问答、推理与生成默认消费该 owner，因此不能进入 readiness。",
     ),
     MechanismRecord(
+        mechanism_id="relation.semantic_pair_typed",
+        scope=SCOPE_PRE_WEANING,
+        status=STATUS_OPT_IN,
+        owner="experiments.semantic_pair_runtime",
+        writers=(
+            "experiments.semantic_pair_runtime:SemanticPairCourseRuntime.process",
+            "experiments.relation_closure_runtime:RelationClosureRuntime.form_many",
+            "experiments.relation_closure_runtime:RelationClosureRuntime.recognize_many_at",
+            "experiments.relation_closure_runtime:RelationClosureRuntime.consume_many",
+        ),
+        readers=(
+            "cognition.shared.symmetric_relation:SymmetricRelationEngine.evaluate",
+            "cognition.shared.symmetric_relation:SymmetricRelationEngine.select",
+            "experiments.symmetric_relation_runtime:SymmetricRelationChannelRuntime.map_legacy",
+            "experiments.semantic_pair_runtime:SemanticPairRuntime.query_similar",
+            "experiments.semantic_pair_runtime:SemanticPairRuntime.query_antonym",
+        ),
+        gates=(
+            "FormalTrainConfig.language_semantic_pair_builder",
+            "FormalTrainConfig.language_semantic_pair_course",
+        ),
+        sources=(
+            "two independent EvidenceCandidate hypothesis kinds",
+            "typed RelationSchema/endpoint Roles/SymmetricRule",
+            "R00 current Evidence/H04 projection",
+            "RelationUseContext", "explicit legacy mapper",
+        ),
+        recovery=(
+            "graph_object", "graph_statement", "candidate_projection",
+            "V06 cloned dual H00 owners and local Use ledgers",
+        ),
+        readiness_eligible=False,
+        limitation="R-05 已提供 SIMILAR/ANTONYM 双独立 hypothesis kind/owner、显式对称 canonical pair、双方向四态聚合、可选反自反、context-only 精确采用、来源化 Use、双 owner 总预算、formal 成对安装和 V-06 克隆；旧 EDGE_SIMILAR/EDGE_ANTONYM、词典和 cue 只能经各 channel 显式 mapper 进入 forming+recognition。当前仅用 PH1 最小 fixture 验设施，尚未把 D-01/K 盘关系资料编成带反例、sense 边界、内容替换和 held-out 的正式课程，也未让问答、推理与生成默认消费 typed owner，因此不能进入 readiness。",
+    ),
+    MechanismRecord(
         mechanism_id="relation.subset_eq_universal",
         scope=SCOPE_PRE_WEANING,
         status=STATUS_PRODUCTION,
@@ -1659,8 +1694,8 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
         gates=("SIMILAR_SLOT_MODE",),
         sources=("similar_facts", "bare_text"),
         recovery=("edge",),
-        readiness_eligible=True,
-        limitation="当前消费者是 slot 候选扩展，不包含相似关系代数和冲突模型。",
+        readiness_eligible=False,
+        limitation="当前消费者只是 legacy slot 候选扩展，不包含独立 hypothesis kind、typed 四态、冲突模型或 RelationUseContext；不能替代 R-05 typed owner，也不得进入断奶 readiness。",
     ),
     MechanismRecord(
         mechanism_id="relation.precedes",

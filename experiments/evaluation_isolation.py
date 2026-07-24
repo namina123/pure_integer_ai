@@ -442,6 +442,11 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
             ctx.mereology_relation_runtime.clone_for_context(cloned))
         cloned.mereology_relation_reports = copy.deepcopy(
             ctx.mereology_relation_reports)
+    if ctx.semantic_pair_runtime is not None:
+        cloned.semantic_pair_runtime = (
+            ctx.semantic_pair_runtime.clone_for_context(cloned))
+        cloned.semantic_pair_reports = copy.deepcopy(
+            ctx.semantic_pair_reports)
     if ctx.span_index is not None:
         cloned.span_index = ctx.span_index.clone_for_context(
             cloned.graph_ontology,
@@ -676,6 +681,10 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         () if ctx.mereology_relation_runtime is None
         else ctx.mereology_relation_runtime.state_key()
     )
+    semantic_pair_state = (
+        () if ctx.semantic_pair_runtime is None
+        else ctx.semantic_pair_runtime.state_key()
+    )
     semantic_course_state = (
         () if ctx.language_semantic_course_runtime is None
         else ctx.language_semantic_course_runtime.state_key()
@@ -724,6 +733,7 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         set_relation_state,
         property_relation_state,
         mereology_relation_state,
+        semantic_pair_state,
         semantic_course_state,
         generation_factory_state,
         generation_stage4_state,
@@ -735,6 +745,7 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         copy.deepcopy(ctx.set_relation_reports),
         copy.deepcopy(ctx.property_relation_reports),
         copy.deepcopy(ctx.mereology_relation_reports),
+        copy.deepcopy(ctx.semantic_pair_reports),
         copy.deepcopy(ctx.language_semantic_course_reports),
         copy.deepcopy(ctx.verification_reports),
     )

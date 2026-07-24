@@ -337,6 +337,14 @@ class DefaultRoundRunner:
                 read_only=ctx.scope_owner is not None,
             )
             ctx.mereology_relation_reports.append(mereology_relation_report)
+        if ctx.semantic_pair_runtime is not None:
+            if raw.occurrence_scope_identity is None:
+                raise ValueError("R-05 runtime 缺少来源 occurrence scope")
+            semantic_pair_report = ctx.semantic_pair_runtime.process(
+                raw.occurrence_scope_identity,
+                read_only=ctx.scope_owner is not None,
+            )
+            ctx.semantic_pair_reports.append(semantic_pair_report)
 
         # #730 路径 W：捕获 code item 的 observe-built COMPOSES 根（__prog_* = obs.struct_refs[0]）供 task-driven
         # 代码模态 unparse（候选 A·observe 期建树一次·task-driven 纯读·幂等守 bit-identical）。code struct_ref
