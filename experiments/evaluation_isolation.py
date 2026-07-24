@@ -432,6 +432,11 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
             ctx.set_relation_runtime.clone_for_context(cloned))
         cloned.set_relation_reports = copy.deepcopy(
             ctx.set_relation_reports)
+    if ctx.property_relation_runtime is not None:
+        cloned.property_relation_runtime = (
+            ctx.property_relation_runtime.clone_for_context(cloned))
+        cloned.property_relation_reports = copy.deepcopy(
+            ctx.property_relation_reports)
     if ctx.span_index is not None:
         cloned.span_index = ctx.span_index.clone_for_context(
             cloned.graph_ontology,
@@ -658,6 +663,10 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         () if ctx.set_relation_runtime is None
         else ctx.set_relation_runtime.state_key()
     )
+    property_relation_state = (
+        () if ctx.property_relation_runtime is None
+        else ctx.property_relation_runtime.state_key()
+    )
     semantic_course_state = (
         () if ctx.language_semantic_course_runtime is None
         else ctx.language_semantic_course_runtime.state_key()
@@ -704,6 +713,7 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         precedence_state,
         causal_state,
         set_relation_state,
+        property_relation_state,
         semantic_course_state,
         generation_factory_state,
         generation_stage4_state,
@@ -713,6 +723,7 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         copy.deepcopy(ctx.precedence_relation_reports),
         copy.deepcopy(ctx.causal_relation_reports),
         copy.deepcopy(ctx.set_relation_reports),
+        copy.deepcopy(ctx.property_relation_reports),
         copy.deepcopy(ctx.language_semantic_course_reports),
         copy.deepcopy(ctx.verification_reports),
     )
