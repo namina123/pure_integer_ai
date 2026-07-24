@@ -119,6 +119,7 @@ def register_assertion_identity_tables(backend: StorageBackend) -> None:
             ("parent_hash", "ordinal"),
         ],
         core=True,
+        recovery_key=("identity_kind", "identity_hash"),
     )
     backend.register_table(
         IDENTITY_PART_TABLE,
@@ -129,6 +130,8 @@ def register_assertion_identity_tables(backend: StorageBackend) -> None:
             ("identity_kind", "identity_hash", "part_index"),
         ],
         core=True,
+        recovery_key=(
+            "identity_kind", "identity_hash", "part_index"),
     )
     backend.register_table(
         ASSERTION_SUPERSEDE_TABLE,
@@ -140,6 +143,7 @@ def register_assertion_identity_tables(backend: StorageBackend) -> None:
             ("new_assertion_hash",),
         ],
         core=True,
+        recovery_key=("event_hash",),
     )
 
 

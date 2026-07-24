@@ -8,8 +8,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pure_integer_ai.cognition.shared.generation_structure_plan import (
+    GenerationSentenceInstance,
     SyntaxLinearizationObligation,
     SyntaxPlan,
+    generation_sentence_address_key,
 )
 from pure_integer_ai.cognition.shared.identity import (
     OBJECT_STRUCTURE_CONCEPT,
@@ -47,6 +49,16 @@ def _require_structure(
     if identity.object_kind != OBJECT_STRUCTURE_CONCEPT:
         raise ValueError(f"{label} 必须是 StructureConcept")
     return identity
+
+
+def _require_sentence_address(
+        value: ObjectIdentity | GenerationSentenceInstance,
+        *,
+        label: str,
+        ) -> ObjectIdentity | GenerationSentenceInstance:
+    """核验预算和执行使用模板句式或来源化运行期句实例。"""
+    generation_sentence_address_key(value, label=label)
+    return value
 
 
 def _slot_key(definition: StructureSlotDefinition) -> tuple[int, ...]:
@@ -157,17 +169,23 @@ def _linearization_key(
 class SentenceStructureExecutionBudget:
     """调用方为一个 G-02 sentence 注入的 S-07 搜索预算。"""
 
-    sentence: ObjectIdentity
+    sentence: ObjectIdentity | GenerationSentenceInstance
     budget: StructureOrderSearchBudget
 
     def __post_init__(self) -> None:
-        _require_structure(self.sentence, label="execution budget sentence")
+        _require_sentence_address(self.sentence, label="execution budget sentence")
         if not isinstance(self.budget, StructureOrderSearchBudget):
             raise TypeError("execution budget 类型错误")
 
     def stable_key(self) -> tuple[int, ...]:
         """返回句子和严格整数搜索上限。"""
-        return (*_packed(self.sentence.stable_key()), self.budget.max_states)
+        return (
+            *_packed(generation_sentence_address_key(
+                self.sentence,
+                label="execution budget sentence",
+            )),
+            self.budget.max_states,
+        )
 
 
 @dataclass(frozen=True)
@@ -184,14 +202,14 @@ class GenerationStructureExecutionRequest:
                 not isinstance(item, SentenceStructureExecutionBudget)
                 for item in self.budgets):
             raise TypeError("execution request budgets 类型错误")
-        sentence_order = tuple(item.sentence for item in self.syntax.sentences)
+        sentence_order = tuple(item.address for item in self.syntax.sentences)
         budget_sentences = tuple(item.sentence for item in self.budgets)
         if len(set(budget_sentences)) != len(budget_sentences):
             raise ValueError("同一 sentence 不得重复注入搜索预算")
         if set(budget_sentences) != set(sentence_order):
             raise ValueError("每个 planned sentence 必须恰有一个搜索预算")
         ordinal = {
-            sentence.sentence: sentence.ordinal
+            sentence.address: sentence.ordinal
             for sentence in self.syntax.sentences
         }
         object.__setattr__(self, "budgets", tuple(sorted(
@@ -281,11 +299,11 @@ class GenerationStructureExecutionPlan:
                 not isinstance(item, SentenceStructureExecution)
                 for item in self.sentences):
             raise TypeError("structure execution sentences 类型错误")
-        identities = tuple(item.obligation.sentence for item in self.sentences)
+        identities = tuple(item.obligation.address for item in self.sentences)
         if len(set(identities)) != len(identities):
             raise ValueError("structure execution sentence 不得重复")
         expected = tuple(
-            item.sentence for item in self.request.syntax.sentences)
+            item.address for item in self.request.syntax.sentences)
         if identities != expected:
             raise ValueError("structure execution 必须逐点覆盖 SyntaxPlan sentence")
 
@@ -331,13 +349,11 @@ class GenerationStructureExecutionPlanner:
             raise TypeError("execution planner request 类型错误")
         syntax = request.syntax
         budgets = {item.sentence: item.budget for item in request.budgets}
-        obligations = {
-            item.sentence: item for item in syntax.linearization
-        }
+        obligations = {item.address: item for item in syntax.linearization}
         executions: list[SentenceStructureExecution] = []
         ontology = self._lifecycle.order_graph.ontology
         for sentence in syntax.sentences:
-            obligation = obligations[sentence.sentence]
+            obligation = obligations[sentence.address]
             structure_ref = ontology.resolve(obligation.structure)
             if structure_ref is None:
                 raise ValueError("G-02 structure 尚未在 S-07 图中定义")
@@ -356,13 +372,13 @@ class GenerationStructureExecutionPlanner:
                 structure_ref,
                 obligation.values,
                 context=obligation.context,
-                budget=budgets[sentence.sentence],
+                budget=budgets[sentence.address],
             )
             executions.append(SentenceStructureExecution(
                 obligation,
                 graph_slots,
                 projections,
-                budgets[sentence.sentence],
+                budgets[sentence.address],
                 result,
             ))
         return GenerationStructureExecutionPlan(

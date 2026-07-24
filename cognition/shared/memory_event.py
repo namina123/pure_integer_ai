@@ -88,6 +88,7 @@ MEMORY_EVENT_PARSE_FAILURE = 11
 MEMORY_EVENT_INTAKE_MANIFEST = 12
 MEMORY_EVENT_DERIVATION = 13
 MEMORY_EVENT_RESOLUTION = 14
+MEMORY_EVENT_USE_OUTCOME = 15
 
 INTAKE_OUTCOME_SUCCESS = 1
 INTAKE_OUTCOME_FAILURE = 2
@@ -130,6 +131,7 @@ _OBJECT_REF_VERSION = 1
 _LINK_REF_VERSION = 1
 _EVENT_VERSION = 1
 _PAYLOAD_VERSION = 1
+_USE_IDENTITY_VERSION = 1
 
 
 def _strict_tuple(value: tuple[int, ...], *, where: str,
@@ -1174,6 +1176,9 @@ class UsePayload:
     influence_kind: MemoryLinkedRef
     outcome_ref: MemoryLinkedRef | None
     used_at: LogicalTimestamp
+    decision_trace_key: tuple[int, ...] = ()
+    query_kind: MemoryLinkedRef | None = None
+    context_key: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         """核验 Use 必须显式指向既有 Memory 对象和 Episode。"""
@@ -1191,10 +1196,29 @@ class UsePayload:
             raise TypeError("Use.outcome_ref 必须是一等引用或 None")
         if not isinstance(self.used_at, LogicalTimestamp):
             raise TypeError("Use.used_at 必须是 LogicalTimestamp")
+        _strict_tuple(
+            self.decision_trace_key,
+            where="Use.decision_trace_key",
+            allow_empty=True,
+        )
+        if self.query_kind is not None and not isinstance(
+                self.query_kind, MemoryLinkedRef):
+            raise TypeError("Use.query_kind 必须是一等引用或 None")
+        _strict_tuple(
+            self.context_key, where="Use.context_key", allow_empty=True)
+        extended = (
+            bool(self.decision_trace_key),
+            self.query_kind is not None,
+            bool(self.context_key),
+        )
+        if any(extended) and not all(extended):
+            raise ValueError("新 Use 必须同时保留 decision/query/context")
 
     def stable_key(self) -> tuple[int, ...]:
         """返回使用对象、Episode、影响类型、结果和 used 时钟的完整键。"""
         outcome = () if self.outcome_ref is None else self.outcome_ref.stable_key()
+        query_kind = (
+            () if self.query_kind is None else self.query_kind.stable_key())
         return (
             _PAYLOAD_VERSION,
             *_pack(self.memory_ref.stable_key()),
@@ -1202,6 +1226,19 @@ class UsePayload:
             *_pack(self.influence_kind.stable_key()),
             *_pack(outcome),
             *_pack(self.used_at.stable_key()),
+            *_pack(self.decision_trace_key),
+            *_pack(query_kind),
+            *_pack(self.context_key),
+        )
+
+    def identity_key(self) -> tuple[int, ...]:
+        """返回 Use 归因身份；兼容事件继续保留原完整 payload 身份。"""
+        if not self.decision_trace_key:
+            return self.stable_key()
+        return (
+            _USE_IDENTITY_VERSION,
+            *_pack(self.memory_ref.stable_key()),
+            *_pack(self.decision_trace_key),
         )
 
     @classmethod
@@ -1216,6 +1253,16 @@ class UsePayload:
         outcome_key, cursor = _take(
             key, cursor, where="Use.outcome_ref", allow_empty=True)
         timestamp_key, cursor = _take(key, cursor, where="Use.used_at")
+        decision_key = ()
+        query_kind_key = ()
+        context_key = ()
+        if cursor < len(key):
+            decision_key, cursor = _take(
+                key, cursor, where="Use.decision_trace", allow_empty=True)
+            query_kind_key, cursor = _take(
+                key, cursor, where="Use.query_kind", allow_empty=True)
+            context_key, cursor = _take(
+                key, cursor, where="Use.context", allow_empty=True)
         _finish(key, cursor, where="Use.stable_key")
         return cls(
             MemoryObjectRef.from_stable_key(memory_key),
@@ -1223,6 +1270,10 @@ class UsePayload:
             MemoryLinkedRef.from_stable_key(influence_key),
             None if not outcome_key else MemoryLinkedRef.from_stable_key(outcome_key),
             LogicalTimestamp.from_stable_key(timestamp_key),
+            decision_key,
+            None if not query_kind_key else MemoryLinkedRef.from_stable_key(
+                query_kind_key),
+            context_key,
         )
 
     def timestamp(self) -> LogicalTimestamp:
@@ -1234,12 +1285,112 @@ class UsePayload:
         result = list(self.influence_kind.core_refs())
         if self.outcome_ref is not None:
             result.extend(self.outcome_ref.core_refs())
+        if self.query_kind is not None:
+            result.extend(self.query_kind.core_refs())
         return tuple(result)
 
     def memory_refs(self) -> tuple[MemoryObjectRef, ...]:
         """返回被使用对象、Episode 以及可选 Memory 类型/结果端点。"""
         result = [self.memory_ref, self.episode_ref]
         result.extend(self.influence_kind.memory_refs())
+        if self.outcome_ref is not None:
+            result.extend(self.outcome_ref.memory_refs())
+        if self.query_kind is not None:
+            result.extend(self.query_kind.memory_refs())
+        return tuple(result)
+
+
+@dataclass(frozen=True)
+class UseOutcomePayload:
+    """延迟结果对一个精确 Use 的分型归因，不改写原 Use。"""
+
+    target_ref: MemoryObjectRef
+    decision_trace_key: tuple[int, ...]
+    query_kind: MemoryLinkedRef
+    context_key: tuple[int, ...]
+    outcome_kind: MemoryLinkedRef
+    outcome_ref: MemoryLinkedRef | None
+    observed_at: LogicalTimestamp
+
+    def __post_init__(self) -> None:
+        """核验结果精确指向 Use，并保留原决策、query 和 context。"""
+        if (not isinstance(self.target_ref, MemoryObjectRef)
+                or self.target_ref.object_kind != MEMORY_OBJECT_USE):
+            raise ValueError("UseOutcome.target_ref 必须指向 Use")
+        _strict_tuple(
+            self.decision_trace_key, where="UseOutcome.decision_trace_key")
+        if not isinstance(self.query_kind, MemoryLinkedRef):
+            raise TypeError("UseOutcome.query_kind 必须是一等引用")
+        _strict_tuple(self.context_key, where="UseOutcome.context_key")
+        if not isinstance(self.outcome_kind, MemoryLinkedRef):
+            raise TypeError("UseOutcome.outcome_kind 必须是一等引用")
+        if self.outcome_ref is not None and not isinstance(
+                self.outcome_ref, MemoryLinkedRef):
+            raise TypeError("UseOutcome.outcome_ref 必须是一等引用或 None")
+        if not isinstance(self.observed_at, LogicalTimestamp):
+            raise TypeError("UseOutcome.observed_at 必须是 LogicalTimestamp")
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回目标 Use、归因边界、结果类型和值及逻辑时间。"""
+        return (
+            _PAYLOAD_VERSION,
+            *_pack(self.target_ref.stable_key()),
+            *_pack(self.decision_trace_key),
+            *_pack(self.query_kind.stable_key()),
+            *_pack(self.context_key),
+            *_pack(self.outcome_kind.stable_key()),
+            *_pack(() if self.outcome_ref is None
+                   else self.outcome_ref.stable_key()),
+            *_pack(self.observed_at.stable_key()),
+        )
+
+    @classmethod
+    def from_stable_key(cls, key: tuple[int, ...]) -> "UseOutcomePayload":
+        """从稳定键恢复延迟 Use 结果并拒绝截断或尾随字段。"""
+        key = _strict_tuple(key, where="UseOutcome.stable_key")
+        if key[0] != _PAYLOAD_VERSION:
+            raise ValueError("UseOutcome payload 版本未注册")
+        target_key, cursor = _take(key, 1, where="UseOutcome.target")
+        decision_key, cursor = _take(
+            key, cursor, where="UseOutcome.decision")
+        query_key, cursor = _take(key, cursor, where="UseOutcome.query")
+        context_key, cursor = _take(key, cursor, where="UseOutcome.context")
+        outcome_kind_key, cursor = _take(
+            key, cursor, where="UseOutcome.outcome_kind")
+        outcome_key, cursor = _take(
+            key, cursor, where="UseOutcome.outcome_ref", allow_empty=True)
+        timestamp_key, cursor = _take(
+            key, cursor, where="UseOutcome.observed_at")
+        _finish(key, cursor, where="UseOutcome.stable_key")
+        return cls(
+            MemoryObjectRef.from_stable_key(target_key),
+            decision_key,
+            MemoryLinkedRef.from_stable_key(query_key),
+            context_key,
+            MemoryLinkedRef.from_stable_key(outcome_kind_key),
+            None if not outcome_key else MemoryLinkedRef.from_stable_key(
+                outcome_key),
+            LogicalTimestamp.from_stable_key(timestamp_key),
+        )
+
+    def timestamp(self) -> LogicalTimestamp:
+        """返回延迟结果的逻辑观察时间。"""
+        return self.observed_at
+
+    def core_refs(self) -> tuple[TypedRef, ...]:
+        """返回 query、结果类型和值中的 Core 引用。"""
+        result = [*self.query_kind.core_refs(), *self.outcome_kind.core_refs()]
+        if self.outcome_ref is not None:
+            result.extend(self.outcome_ref.core_refs())
+        return tuple(result)
+
+    def memory_refs(self) -> tuple[MemoryObjectRef, ...]:
+        """返回目标 Use 及 query、结果类型和值中的 Memory 引用。"""
+        result = [
+            self.target_ref,
+            *self.query_kind.memory_refs(),
+            *self.outcome_kind.memory_refs(),
+        ]
         if self.outcome_ref is not None:
             result.extend(self.outcome_ref.memory_refs())
         return tuple(result)
@@ -1829,6 +1980,7 @@ _PAYLOAD_TYPES = {
     MEMORY_EVENT_INTAKE_MANIFEST: IntakeManifestPayload,
     MEMORY_EVENT_DERIVATION: DerivationTransitionPayload,
     MEMORY_EVENT_RESOLUTION: ResolutionPayload,
+    MEMORY_EVENT_USE_OUTCOME: UseOutcomePayload,
 }
 
 _DECLARATION_OBJECT_KINDS = {
@@ -1889,6 +2041,8 @@ class MemoryEvent:
             return self.payload.hypothesis.stable_key()
         if isinstance(self.payload, ArtifactPayload):
             return self.payload.artifact.stable_key()
+        if isinstance(self.payload, UsePayload):
+            return self.payload.identity_key()
         if isinstance(self.payload, (ParseFailurePayload,
                                      IntakeManifestPayload,
                                      ResolutionPayload)):
@@ -1910,6 +2064,8 @@ class MemoryEvent:
         }:
             return TIME_AXIS_OBSERVED
         if self.event_kind == MEMORY_EVENT_USE:
+            return TIME_AXIS_USED
+        if self.event_kind == MEMORY_EVENT_USE_OUTCOME:
             return TIME_AXIS_USED
         return TIME_AXIS_CREATED
 
@@ -1982,6 +2138,8 @@ def declaration_object_key(event_kind: int,
         return payload.hypothesis.stable_key()
     if isinstance(payload, ArtifactPayload):
         return payload.artifact.stable_key()
+    if isinstance(payload, UsePayload):
+        return payload.identity_key()
     if isinstance(payload, (ParseFailurePayload, IntakeManifestPayload,
                             ResolutionPayload)):
         return payload.identity_key()
@@ -2021,6 +2179,7 @@ __all__ = [
     "MEMORY_EVENT_RETENTION",
     "MEMORY_EVENT_RESOLUTION",
     "MEMORY_EVENT_USE",
+    "MEMORY_EVENT_USE_OUTCOME",
     "MEMORY_OBJECT_ARTIFACT",
     "MEMORY_OBJECT_CAPABILITY",
     "MEMORY_OBJECT_EPISODE",
@@ -2045,6 +2204,7 @@ __all__ = [
     "TIME_AXIS_OBSERVED",
     "TIME_AXIS_USED",
     "UsePayload",
+    "UseOutcomePayload",
     "memory_object_ref",
     "declaration_object_key",
     "payload_from_stable_key",

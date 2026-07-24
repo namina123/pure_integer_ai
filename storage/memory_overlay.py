@@ -111,6 +111,7 @@ def register_memory_overlay_table(backend: StorageBackend) -> None:
             ("space_id", "object_space_id", "object_local_id"),
         ],
         core=True,
+        recovery_key=("identity_hash",),
     )
 
 

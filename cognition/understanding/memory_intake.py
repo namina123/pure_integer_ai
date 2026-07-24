@@ -55,6 +55,10 @@ from pure_integer_ai.cognition.shared.memory_event import (
     source_reparse_lineage_key,
 )
 from pure_integer_ai.cognition.shared.memory_event_log import MemoryEventLog
+from pure_integer_ai.cognition.shared.memory_batch import (
+    MemoryBatchFaultInjector,
+    MemoryBatchRuntime,
+)
 from pure_integer_ai.cognition.shared.memory_overlay import MemoryAccessContext
 from pure_integer_ai.cognition.shared.scope_identity import (
     CLOCK_MEMORY_CREATED,
@@ -69,8 +73,11 @@ from pure_integer_ai.cognition.understanding.source_intake import (
     SourceSlice,
 )
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
+from pure_integer_ai.storage.write_guard import forbid_backend_writes
 from pure_integer_ai.storage.source_record import SourceRecordStorage
 from pure_integer_ai.storage.source_record import SourceRecordRepository
+from pure_integer_ai.storage.memory_batch import source_record_dependency
+from pure_integer_ai.storage.segment_dependency import SegmentDependency
 from pure_integer_ai.storage.spaces.companion import CompanionSpace
 from pure_integer_ai.storage.spaces.registry import (
     SPACE_TYPE_MEMORY,
@@ -284,6 +291,7 @@ class MemorySourceIntake:
             self, source_intake: SourceIntake,
             event_log: MemoryEventLog,
             policy: MemoryIntakePolicy,
+            batch_runtime: MemoryBatchRuntime | None = None,
             ) -> None:
         if not isinstance(source_intake, SourceIntake):
             raise TypeError("source_intake 必须是 SourceIntake")
@@ -298,6 +306,21 @@ class MemorySourceIntake:
         self.source_intake = source_intake
         self.event_log = event_log
         self.policy = policy
+        self.batch_runtime: MemoryBatchRuntime | None = None
+        if batch_runtime is not None:
+            self.attach_batch_runtime(batch_runtime)
+
+    def attach_batch_runtime(self, runtime: MemoryBatchRuntime) -> None:
+        """安装与当前 event log 相同空间的 M-10 K-02 批次 runtime。"""
+        if not isinstance(runtime, MemoryBatchRuntime):
+            raise TypeError("runtime 必须是 MemoryBatchRuntime")
+        if runtime.event_log is not self.event_log:
+            raise MemoryIntakeIntegrityError(
+                "Memory intake batch runtime 绑定了其他 event log")
+        if self.batch_runtime is not None and self.batch_runtime is not runtime:
+            raise MemoryIntakeIntegrityError(
+                "Memory intake 已绑定其他 batch runtime")
+        self.batch_runtime = runtime
 
     def ingest(
             self, source: SourceRef, raw_text: str, *, license_id: str,
@@ -307,6 +330,7 @@ class MemorySourceIntake:
                                   ObservationIntakeDraft] | None = None,
             failure_classifier: Callable[[Exception],
                                          ParseFailureDraft] | None = None,
+            batch_fault_injector: MemoryBatchFaultInjector | None = None,
             ) -> MemoryIntakeResult:
         """先保存来源，再运行纯解析，成功后才允许 Core 物化和 Memory 写入。"""
         self._validate_request(
@@ -314,7 +338,20 @@ class MemorySourceIntake:
             supersedes_source=supersedes_source)
         record = self.source_intake.ensure(
             source, raw_text, license_id=license_id, batch_id=batch_id)
-        existing = self._manifest_for(source)
+        dependency = source_record_dependency(record)
+        recovered = None
+        if self.batch_runtime is not None:
+            recovered = self.batch_runtime.recover_unit(
+                source,
+                batch_id,
+                source_dependency=dependency,
+                fault_injector=batch_fault_injector,
+            )
+        if recovered is None:
+            existing = self._manifest_for(source)
+        else:
+            with self.batch_runtime.visibility.preview(recovered.batch_hash):
+                existing = self._manifest_for(source)
         if existing is not None:
             self._validate_existing_predecessor(
                 existing, supersedes_source=supersedes_source)
@@ -322,6 +359,7 @@ class MemorySourceIntake:
 
         prior = self._resolve_active_predecessor(
             source, supersedes_source=supersedes_source)
+        pending_events = [] if self.batch_runtime is not None else None
 
         source_slice = self.source_intake.read_slice(
             source, 0, len(record.raw_text))
@@ -337,9 +375,18 @@ class MemorySourceIntake:
                     "failure_classifier 必须返回 ParseFailureDraft") from exc
         if isinstance(outcome, ParseFailureDraft):
             manifest, failure_ref = self._append_failure(
-                source, batch_id, outcome, prior)
+                source, batch_id, outcome, prior,
+                pending_events=pending_events)
             replaced = self._supersede_prior(
-                source, prior, manifest, new_bindings=manifest.bindings)
+                source, prior, manifest, new_bindings=manifest.bindings,
+                pending_events=pending_events)
+            self._publish_pending(
+                source,
+                batch_id,
+                dependency,
+                pending_events,
+                fault_injector=batch_fault_injector,
+            )
             return MemoryIntakeResult(
                 record, self._manifest_ref(manifest),
                 INTAKE_OUTCOME_FAILURE, None, (), (),
@@ -348,13 +395,28 @@ class MemorySourceIntake:
             raise MemoryIntakeIntegrityError(
                 "parser 必须返回 ObservationIntakeDraft 或 ParseFailureDraft")
         if materialize is not None:
-            outcome = materialize(outcome)
+            with forbid_backend_writes():
+                outcome = materialize(outcome)
             if not isinstance(outcome, ObservationIntakeDraft):
                 raise MemoryIntakeIntegrityError(
                     "Core materialize 必须返回 ObservationIntakeDraft")
-        result = self._append_success(source, batch_id, outcome, prior)
+        result = self._append_success(
+            source,
+            batch_id,
+            outcome,
+            prior,
+            pending_events=pending_events,
+        )
         replaced = self._supersede_prior(
-            source, prior, result[0], new_bindings=result[1])
+            source, prior, result[0], new_bindings=result[1],
+            pending_events=pending_events)
+        self._publish_pending(
+            source,
+            batch_id,
+            dependency,
+            pending_events,
+            fault_injector=batch_fault_injector,
+        )
         return MemoryIntakeResult(
             record, self._manifest_ref(result[0]),
             INTAKE_OUTCOME_SUCCESS, result[2],
@@ -456,6 +518,8 @@ class MemorySourceIntake:
             self, source: SourceRef, batch_id: int,
             draft: ParseFailureDraft,
             prior: IntakeManifestPayload | None,
+            *,
+            pending_events: list[MemoryEvent] | None,
             ) -> tuple[IntakeManifestPayload, MemoryObjectRef]:
         """追加结构化 ParseFailure 和失败 manifest，不写 Observation/Core。"""
         scope = document_scope(source)
@@ -472,19 +536,22 @@ class MemorySourceIntake:
             owner=source.owner,
             versions=source.versions,
         )
-        self.event_log.append(MemoryEvent(
-            MEMORY_EVENT_PARSE_FAILURE, failure_ref, scope, payload))
+        self._emit_event(MemoryEvent(
+            MEMORY_EVENT_PARSE_FAILURE, failure_ref, scope, payload),
+            pending_events)
         binding = IntakeDerivedBinding(
             INTAKE_DERIVED_FAILURE, draft.lineage_key, failure_ref)
         manifest = self._append_manifest(
             source, batch_id, INTAKE_OUTCOME_FAILURE, (binding,), prior,
-            clock)
+            clock, pending_events=pending_events)
         return manifest, failure_ref
 
     def _append_success(
             self, source: SourceRef, batch_id: int,
             draft: ObservationIntakeDraft,
             prior: IntakeManifestPayload | None,
+            *,
+            pending_events: list[MemoryEvent] | None,
             ) -> tuple[
                 IntakeManifestPayload, tuple[IntakeDerivedBinding, ...],
                 MemoryObjectRef, tuple[MemoryObjectRef, ...],
@@ -510,9 +577,9 @@ class MemorySourceIntake:
             owner=source.owner,
             versions=source.versions,
         )
-        self.event_log.append(MemoryEvent(
+        self._emit_event(MemoryEvent(
             MEMORY_EVENT_OBSERVATION, observation_ref, scope,
-            observation_payload))
+            observation_payload), pending_events)
 
         created_clock = self.event_log.scoped_identities.resume_clock(
             LogicalClockIdentity(scope, CLOCK_MEMORY_CREATED))
@@ -537,9 +604,9 @@ class MemorySourceIntake:
                 owner=source.owner,
                 versions=source.versions,
             )
-            self.event_log.append(MemoryEvent(
+            self._emit_event(MemoryEvent(
                 MEMORY_EVENT_HYPOTHESIS, hypothesis_ref, scope,
-                hypothesis_payload))
+                hypothesis_payload), pending_events)
             evidence_payload = EvidencePayload(
                 hypothesis_ref,
                 item.stance,
@@ -558,9 +625,9 @@ class MemorySourceIntake:
                 owner=source.owner,
                 versions=source.versions,
             )
-            self.event_log.append(MemoryEvent(
+            self._emit_event(MemoryEvent(
                 MEMORY_EVENT_EVIDENCE, evidence_ref, scope,
-                evidence_payload))
+                evidence_payload), pending_events)
             hypothesis_refs.append(hypothesis_ref)
             evidence_refs.append(evidence_ref)
             bindings.extend((
@@ -573,7 +640,7 @@ class MemorySourceIntake:
             ))
         manifest = self._append_manifest(
             source, batch_id, INTAKE_OUTCOME_SUCCESS, tuple(bindings), prior,
-            observed_clock)
+            observed_clock, pending_events=pending_events)
         return (
             manifest, tuple(bindings), observation_ref,
             tuple(hypothesis_refs), tuple(evidence_refs),
@@ -590,7 +657,9 @@ class MemorySourceIntake:
             self, source: SourceRef, batch_id: int, outcome_kind: int,
             bindings: tuple[IntakeDerivedBinding, ...],
             prior: IntakeManifestPayload | None,
-            clock) -> IntakeManifestPayload:
+            clock, *,
+            pending_events: list[MemoryEvent] | None,
+            ) -> IntakeManifestPayload:
         """追加成功或失败 manifest，并把 batch/parser 绑定到同一事件链。"""
         scope = document_scope(source)
         prior_ref = None if prior is None else memory_object_ref(
@@ -616,8 +685,9 @@ class MemorySourceIntake:
             owner=source.owner,
             versions=source.versions,
         )
-        self.event_log.append(MemoryEvent(
-            MEMORY_EVENT_INTAKE_MANIFEST, manifest_ref, scope, payload))
+        self._emit_event(MemoryEvent(
+            MEMORY_EVENT_INTAKE_MANIFEST, manifest_ref, scope, payload),
+            pending_events)
         return payload
 
     def _supersede_prior(
@@ -625,6 +695,7 @@ class MemorySourceIntake:
             prior: IntakeManifestPayload | None,
             manifest: IntakeManifestPayload,
             *, new_bindings: tuple[IntakeDerivedBinding, ...],
+            pending_events: list[MemoryEvent] | None,
             ) -> tuple[MemoryObjectRef, ...]:
         """按 manifest lineage 显式替代旧派生对象，缺 successor 则归档。"""
         if prior is None:
@@ -668,14 +739,50 @@ class MemorySourceIntake:
                 lineage_key,
                 lifecycle_clock.advance(),
             )
-            self.event_log.append(MemoryEvent(
+            self._emit_event(MemoryEvent(
                 MEMORY_EVENT_DERIVATION,
                 target,
                 old_scope,
                 payload,
-            ))
+            ), pending_events)
             replaced.append(target)
         return tuple(sorted(replaced, key=lambda ref: ref.stable_key()))
+
+    def _emit_event(
+            self,
+            event: MemoryEvent,
+            pending_events: list[MemoryEvent] | None,
+            ) -> None:
+        """未安装 M-10 时立即追加；安装后只收集到有序 staged 事件集。"""
+        if pending_events is None:
+            self.event_log.append(event)
+            return
+        pending_events.append(event)
+
+    def _publish_pending(
+            self,
+            source: SourceRef,
+            batch_id: int,
+            dependency: SegmentDependency,
+            pending_events: list[MemoryEvent] | None,
+            *,
+            fault_injector: MemoryBatchFaultInjector | None,
+            ) -> None:
+        """把本次构造的完整事件集交给 M-10 runtime，activation 后才返回。"""
+        if self.batch_runtime is None:
+            if pending_events is not None:
+                raise MemoryIntakeIntegrityError(
+                    "未安装 batch runtime 却存在 staged 事件")
+            return
+        if pending_events is None or not pending_events:
+            raise MemoryIntakeIntegrityError("M-10 摄入没有形成事件集")
+        self.batch_runtime.publish(
+            source,
+            batch_id,
+            tuple(pending_events),
+            source_dependency=dependency,
+            fault_injector=fault_injector,
+        )
 
     @staticmethod
     def _binding_kind_for_ref(ref: MemoryObjectRef) -> int:

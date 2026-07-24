@@ -1,0 +1,40 @@
+"""K-04 Memory 候选冷投影的存储角色和重建依赖。"""
+from __future__ import annotations
+
+from pure_integer_ai.storage.memory_aggregate import (
+    MEMORY_AGGREGATE_STORAGE_DESCRIPTOR_KEY,
+)
+from pure_integer_ai.storage.memory_event import (
+    MEMORY_EVENT_STORAGE_DESCRIPTOR_KEY,
+)
+from pure_integer_ai.storage.storage_role import (
+    STORAGE_ACCESS_INDEXED_READ,
+    STORAGE_ACCESS_REBUILD,
+    STORAGE_ROLE_REBUILDABLE,
+    StorageRoleDescriptor,
+)
+
+
+MEMORY_QUERY_PROJECTION_DESCRIPTOR_KEY = (1, 1, 15)
+MEMORY_QUERY_PROJECTION_REBUILD_PROTOCOL_KEY = (1, 1, 16)
+
+MEMORY_QUERY_PROJECTION_DESCRIPTOR = StorageRoleDescriptor(
+    MEMORY_QUERY_PROJECTION_DESCRIPTOR_KEY,
+    STORAGE_ROLE_REBUILDABLE,
+    (
+        STORAGE_ACCESS_INDEXED_READ,
+        STORAGE_ACCESS_REBUILD,
+    ),
+    dependency_keys=(
+        MEMORY_EVENT_STORAGE_DESCRIPTOR_KEY,
+        MEMORY_AGGREGATE_STORAGE_DESCRIPTOR_KEY,
+    ),
+    rebuild_protocol_key=MEMORY_QUERY_PROJECTION_REBUILD_PROTOCOL_KEY,
+)
+
+
+__all__ = [
+    "MEMORY_QUERY_PROJECTION_DESCRIPTOR",
+    "MEMORY_QUERY_PROJECTION_DESCRIPTOR_KEY",
+    "MEMORY_QUERY_PROJECTION_REBUILD_PROTOCOL_KEY",
+]

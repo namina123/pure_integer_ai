@@ -71,8 +71,22 @@ class TrainContext:
     memory_interact_events: MemoryEventLog | None = None
     memory_read_aggregates: MemoryHypothesisAggregateIndex | None = None
     memory_interact_aggregates: MemoryHypothesisAggregateIndex | None = None
+    memory_query_runtime: Any = None
+    memory_resolver_runtime: Any = None
+    memory_hot_set_runtime: Any = None
+    attractor_runtime: Any = None
+    memory_use_runtime: Any = None
+    memory_maintenance_runtime: Any = None
     memory_read_intake: Any = None
     memory_interact_intake: Any = None
+    tiered_segment_store: Any = None
+    memory_batch_config: Any = None
+    memory_batch_visibility: Any = None
+    memory_batch_coordinator: Any = None
+    memory_read_batch_runtime: Any = None
+    memory_interact_batch_runtime: Any = None
+    memory_forget_visibility: Any = None
+    memory_isolation_runtime: Any = None
     unicode_intake: Any = None
     word_form_providers: Any = None
     word_form_course_report: Any = None
@@ -83,6 +97,8 @@ class TrainContext:
     precedence_relation_reports: list[Any] = field(default_factory=list)
     causal_relation_runtime: Any = None
     causal_relation_reports: list[Any] = field(default_factory=list)
+    set_relation_runtime: Any = None
+    set_relation_reports: list[Any] = field(default_factory=list)
     language_semantic_course_runtime: Any = None
     language_semantic_course_reports: list[Any] = field(default_factory=list)
     alias_relation_course_report: Any = None

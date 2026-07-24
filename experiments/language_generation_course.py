@@ -42,6 +42,7 @@ from pure_integer_ai.cognition.shared.training_hypothesis import (
 )
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.experiments.language_generation_connector import (
+    LanguageConnectorDiscourseDeclarationProvider,
     LanguageConnectorValueProtocol,
     LanguageGenerationConnector,
     LanguageGenerationConnectorRegistry,
@@ -243,9 +244,10 @@ class LanguageGenerationCourseManifest:
     runtime_policy: LanguageGenerationConnectorRuntimePolicy
     stage4_policy: LanguageConnectorStage4Policy
     templates: tuple[LanguageConnectorCourseTemplate, ...]
+    discourse_declarations: LanguageConnectorDiscourseDeclarationProvider | None = None
 
     def __post_init__(self) -> None:
-        """核验 manifest 协议、理论身份、运行策略和课程覆盖关系。"""
+        """核验 manifest 协议、理论身份、运行策略、声明读取器和课程覆盖。"""
         from pure_integer_ai.cognition.shared.generation_surface import (
             GenerationSurfaceProtocol,
         )
@@ -309,6 +311,14 @@ class LanguageGenerationCourseManifest:
                < self.learning_protocol.minimum_forming_sources
                for item in self.templates):
             raise ValueError("connector course forming 来源未达到学习协议下限")
+        if (self.discourse_declarations is not None
+                and any(not hasattr(self.discourse_declarations, method)
+                        for method in (
+                            "declaration",
+                            "state_key",
+                            "clone_for_evaluation",
+                        ))):
+            raise TypeError("connector course discourse declaration provider 协议不完整")
         LanguageGenerationConnector(
             LanguageGenerationConnectorRegistry(
                 self.value_protocol,
@@ -316,6 +326,7 @@ class LanguageGenerationCourseManifest:
             ),
             self.runtime_policy,
             self.surface_protocol,
+            discourse_declarations=self.discourse_declarations,
         )
 
     def stable_key(self) -> tuple[int, ...]:
@@ -361,6 +372,9 @@ class LanguageGenerationCourseManifest:
         ))
         for template in self.templates:
             result.extend(_packed(template.stable_key()))
+        result.append(0 if self.discourse_declarations is None else 1)
+        if self.discourse_declarations is not None:
+            result.extend(_packed(self.discourse_declarations.state_key()))
         return tuple(result)
 
     def sha256(self) -> str:
@@ -757,6 +771,7 @@ class LanguageGenerationCourseLoader:
             manifest.surface_protocol,
             manifest.stage4_policy.active_purpose,
             manifest.stage4_policy.trial_purpose,
+            manifest.discourse_declarations,
         )
         return LoadedLanguageGenerationCourse(
             factory,

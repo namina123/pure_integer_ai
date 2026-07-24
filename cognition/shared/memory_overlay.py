@@ -24,6 +24,7 @@ from pure_integer_ai.cognition.shared.identity import (
     VISIBILITY_USER,
     VersionBundle,
 )
+from pure_integer_ai.cognition.shared.memory_owner import MemoryOwnerSelector
 from pure_integer_ai.cognition.shared.scope_identity import ScopeIdentity
 from pure_integer_ai.cognition.shared.scoped_persistence import (
     ScopedIdentityStore,
@@ -38,6 +39,7 @@ from pure_integer_ai.storage.memory_overlay import (
     MemoryOverlayRecord,
     MemoryOverlayRecordStore,
 )
+from pure_integer_ai.storage.memory_forget import MemoryForgetVisibility
 from pure_integer_ai.storage.spaces.registry import (
     SPACE_TYPE_CORE,
     SPACE_TYPE_MEMORY,
@@ -328,6 +330,23 @@ class MemoryOverlay:
         self.scoped_identities = scoped_identities
         self.core_identities = core_identities
         self._records = MemoryOverlayRecordStore(backend)
+        self._forget_visibility: MemoryForgetVisibility | None = None
+
+    def attach_forget_visibility(
+            self,
+            visibility: MemoryForgetVisibility,
+            ) -> None:
+        """安装 M-11 遗忘可见性；同一 overlay 不得切换实例。"""
+        if not isinstance(visibility, MemoryForgetVisibility):
+            raise TypeError("visibility 必须是 MemoryForgetVisibility")
+        repository_backend = getattr(
+            visibility.store.store.repository, "backend", None)
+        if repository_backend is not None and repository_backend is not self.backend:
+            raise ValueError("forget visibility 与 MemoryOverlay backend 不一致")
+        if (self._forget_visibility is not None
+                and self._forget_visibility is not visibility):
+            raise ValueError("MemoryOverlay 已绑定其他 forget visibility")
+        self._forget_visibility = visibility
 
     def add(self, relation: MemoryOverlayRelation) -> MaterializedMemoryOverlay:
         """追加一条只引用 Core 的 overlay 关系，不写入 Core 图。"""
@@ -366,6 +385,10 @@ class MemoryOverlay:
         """按显式访问上下文读取关系；不可见关系返回空而不泄露存在性。"""
         self._require_access(access)
         record = self._records.read(identity_hash)
+        if (self._forget_visibility is not None
+                and self._forget_visibility.overlay_is_forgotten(
+                    record.space_id, record.identity_hash, record.owner_key)):
+            return None
         owner = OwnerScope(*record.owner_key)
         if not access.can_read(owner):
             return None
@@ -383,6 +406,11 @@ class MemoryOverlay:
                 self.core_identities.identity_of(ref)
         result: list[MaterializedMemoryOverlay] = []
         for record in self._records.query(space_id=self.memory_space_id):
+            if (self._forget_visibility is not None
+                    and self._forget_visibility.overlay_is_forgotten(
+                        record.space_id, record.identity_hash,
+                        record.owner_key)):
+                continue
             if not access.can_read(OwnerScope(*record.owner_key)):
                 continue
             entry = self._restore(record.identity_hash)
@@ -394,6 +422,26 @@ class MemoryOverlay:
             if object_ref is not None and relation.object_ref != object_ref:
                 continue
             result.append(entry)
+        result.sort(key=lambda item: item.relation.stable_key())
+        return tuple(result)
+
+    def query_owned(
+            self,
+            selector: MemoryOwnerSelector,
+            ) -> tuple[MaterializedMemoryOverlay, ...]:
+        """供已授权管理 runtime 按 exact/subtree owner 读取正式关系。"""
+        if not isinstance(selector, MemoryOwnerSelector):
+            raise TypeError("selector 必须是 MemoryOwnerSelector")
+        result = []
+        for record in self._records.query(space_id=self.memory_space_id):
+            if (self._forget_visibility is not None
+                    and self._forget_visibility.overlay_is_forgotten(
+                        record.space_id, record.identity_hash,
+                        record.owner_key)):
+                continue
+            if not selector.matches(OwnerScope(*record.owner_key)):
+                continue
+            result.append(self._restore(record.identity_hash))
         result.sort(key=lambda item: item.relation.stable_key())
         return tuple(result)
 

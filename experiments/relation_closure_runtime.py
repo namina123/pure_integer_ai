@@ -19,7 +19,9 @@ from pure_integer_ai.cognition.shared.hypothesis import (
     EVIDENCE_REFUTE,
     EVIDENCE_SUPPORT,
     EVIDENCE_UNKNOWN,
+    EvidenceRecord,
     HypothesisKey,
+    HypothesisSnapshot,
 )
 from pure_integer_ai.cognition.shared.identity import (
     OBJECT_OCCURRENCE,
@@ -202,6 +204,45 @@ class RelationClosureRecognitionTrace:
     input: RelationClosureRecognitionInput
     outcome: CandidateLearningOutcome
     active_fact: ActiveRelationClosureFact | None
+
+
+@dataclass(frozen=True)
+class RelationClosureEpistemicSnapshot:
+    """一个已 forming 关系候选的当前 H-00 状态、Evidence 和可采用投影。"""
+
+    formation: RelationClosureFormationTrace
+    snapshot: HypothesisSnapshot
+    evidence: tuple[EvidenceRecord, ...]
+    active_fact: ActiveRelationClosureFact | None
+
+    def __post_init__(self) -> None:
+        """交叉核验 forming、当前快照、有效 Evidence 和 active 投影身份。"""
+        if not isinstance(self.formation, RelationClosureFormationTrace):
+            raise TypeError("formation 必须是 RelationClosureFormationTrace")
+        if not isinstance(self.snapshot, HypothesisSnapshot):
+            raise TypeError("snapshot 必须是 HypothesisSnapshot")
+        if self.snapshot.hypothesis != self.formation.hypothesis:
+            raise ValueError("relation snapshot 与 forming Hypothesis 不一致")
+        if not isinstance(self.evidence, tuple):
+            raise TypeError("relation snapshot evidence 必须是 tuple")
+        if any(not isinstance(item, EvidenceRecord) for item in self.evidence):
+            raise TypeError("relation snapshot evidence 元素类型非法")
+        active_ids = frozenset((
+            *self.snapshot.support_evidence_ids,
+            *self.snapshot.refute_evidence_ids,
+            *self.snapshot.unknown_evidence_ids,
+        ))
+        if {item.evidence_id for item in self.evidence} != active_ids:
+            raise ValueError("relation snapshot 未完整保留当前有效 Evidence")
+        if any(item.hypothesis != self.snapshot.hypothesis
+               for item in self.evidence):
+            raise ValueError("relation snapshot Evidence 属于其他 Hypothesis")
+        if self.active_fact is not None:
+            if not isinstance(self.active_fact, ActiveRelationClosureFact):
+                raise TypeError("active_fact 类型非法")
+            if (self.active_fact.proposition.proposition
+                    != self.formation.spec.proposition.proposition):
+                raise ValueError("active relation 投影属于其他 Proposition")
 
 
 @dataclass(frozen=True)
@@ -423,6 +464,132 @@ class RelationClosureRuntime:
                         "恢复的 Core Use 路由发生竞争")
                 self._uses[route] = use
 
+    def preflight_many(
+            self,
+            formations: tuple[tuple[RelationClosureCandidateSpec, int], ...],
+            recognitions: tuple[
+                tuple[RelationClosureRecognitionInput, int, int, int], ...],
+            ) -> None:
+        """在零正式写入下预演 forming、prediction、reveal 和 H-04 决策。"""
+        if not isinstance(formations, tuple):
+            raise TypeError("relation preflight formations 必须是 tuple")
+        if not isinstance(recognitions, tuple):
+            raise TypeError("relation preflight recognitions 必须是 tuple")
+        if not formations and not recognitions:
+            raise ValueError("relation preflight 至少需要一个请求")
+        definitions = []
+        supplied: dict[ObjectIdentity, RelationClosureFormationTrace] = {}
+        for request in formations:
+            if not isinstance(request, tuple) or len(request) != 2:
+                raise TypeError("relation preflight forming 请求类型错误")
+            spec, timestamp_base = request
+            if not isinstance(spec, RelationClosureCandidateSpec):
+                raise TypeError("relation preflight spec 类型错误")
+            assert_int(timestamp_base, _where="relation preflight timestamp")
+            if type(timestamp_base) is not int or timestamp_base < 0:
+                raise ValueError("relation preflight timestamp 必须为非负严格整数")
+            proposition_ref = self.semantic_graph.ontology.resolve(
+                spec.proposition.proposition)
+            if proposition_ref is not None:
+                restored = self.semantic_graph.read_atomic(proposition_ref)
+                if restored.definition != spec.proposition:
+                    raise RelationClosureIncompleteError(
+                        "relation preflight 输入与 SemanticGraph 定义不一致")
+            existing = self._formations.get(spec.proposition.proposition)
+            if existing is not None and existing.spec != spec:
+                raise RelationClosureIncompleteError(
+                    "同一 Proposition 已绑定不同 relation closure spec")
+            definition = spec.candidate_definition(self.protocol)
+            hypothesis = definition.hypothesis(
+                self.candidate_runtime.engine.protocol)
+            supplied[spec.proposition.proposition] = (
+                existing or RelationClosureFormationTrace(spec, hypothesis))
+            definitions.append((definition, timestamp_base))
+        propositions = tuple(supplied)
+        if len(set(propositions)) != len(formations):
+            raise RelationClosureIncompleteError(
+                "同批 relation preflight 不得重复 forming Proposition")
+        if definitions:
+            self.candidate_runtime.preflight_register_many(tuple(definitions))
+
+        probe = self.candidate_runtime.engine.clone()
+        if definitions:
+            probe.register_many(tuple(definitions))
+        pending_routes = []
+        for request in recognitions:
+            if not isinstance(request, tuple) or len(request) != 4:
+                raise TypeError("relation preflight recognition 请求类型错误")
+            input_value, timestamp_seq, resolve_seq, projection_seq = request
+            if not isinstance(input_value, RelationClosureRecognitionInput):
+                raise TypeError("relation preflight recognition 输入类型错误")
+            formation = (
+                supplied.get(input_value.proposition)
+                or self._formations.get(input_value.proposition)
+            )
+            if formation is None:
+                raise RelationClosureIncompleteError(
+                    "relation preflight recognition 缺少 forming")
+            route = input_value.route_key()
+            existing = self._recognitions.get(route)
+            if existing is not None:
+                if existing.input != input_value:
+                    raise RelationClosureIncompleteError(
+                        "同一 recognition 路由绑定了不同输入")
+                continue
+            replacement = None
+            if input_value.replacement is not None:
+                replacement_formation = (
+                    supplied.get(input_value.replacement)
+                    or self._formations.get(input_value.replacement)
+                )
+                if replacement_formation is None:
+                    replacement = self.candidate_runtime.hypothesis_for_candidate(
+                        input_value.replacement)
+                else:
+                    replacement = replacement_formation.hypothesis
+            candidate_request = CandidateRecognitionRequest(
+                formation.hypothesis,
+                input_value.observation,
+                input_value.scope,
+                input_value.event_key,
+                input_value.visible_inputs,
+                input_value.proposition,
+                input_value.revealed,
+                timestamp_seq,
+                resolve_seq,
+                projection_seq,
+                archive_refuted=input_value.archive_refuted,
+                replacement=replacement,
+            )
+            pending_routes.append(route)
+            prediction = probe.predict(
+                candidate_request.hypothesis,
+                observation=candidate_request.observation,
+                scope=candidate_request.scope,
+                event_key=candidate_request.event_key,
+                visible_inputs=candidate_request.visible_inputs,
+                predicted=candidate_request.predicted,
+            )
+            verification = self.candidate_runtime.verifier.verify(
+                prediction,
+                candidate_request.revealed,
+            )
+            probe.reveal(
+                prediction,
+                verification,
+                timestamp_seq=candidate_request.timestamp_seq,
+            )
+            probe.resolve(
+                candidate_request.hypothesis,
+                timestamp_seq=candidate_request.resolve_timestamp_seq,
+                scorers=candidate_request.scorers,
+                archive_refuted=candidate_request.archive_refuted,
+                replacement=candidate_request.replacement,
+            )
+        if len(set(pending_routes)) != len(pending_routes):
+            raise RelationClosureIncompleteError(
+                "同批 relation preflight 不得重复 recognition 路由")
+
     def form(
             self, spec: RelationClosureCandidateSpec, *,
             timestamp_base: int = 0,
@@ -591,23 +758,28 @@ class RelationClosureRuntime:
 
     def consume_many(
             self,
-            requests: tuple[tuple[ObjectIdentity, tuple[int, ...]], ...],
+            requests: tuple[tuple, ...],
             *,
             context: RelationUseContext | None = None,
             ) -> tuple[RelationClosureUse, ...]:
-        """全量预检多事实采用，任一冲突时不留下部分 use ledger。"""
+        """全量预检多事实采用，并允许逐请求提供来源化 Core Use context。"""
         if not isinstance(requests, tuple) or not requests:
             raise ValueError("consume_many requests 必须是非空 tuple")
         if context is not None and not isinstance(context, RelationUseContext):
             raise TypeError("consume_many context 类型错误")
-        if self.use_owner is not None and context is None:
-            raise RelationClosureIncompleteError(
-                "配置 Core Use owner 后必须提供完整 RelationUseContext")
         prepared: list[RelationClosureUse] = []
         for request in requests:
-            if not isinstance(request, tuple) or len(request) != 2:
-                raise TypeError("consume_many request 必须是 proposition/use_key 对")
-            proposition, use_key = request
+            if not isinstance(request, tuple) or len(request) not in (2, 3):
+                raise TypeError(
+                    "consume_many request 必须是 proposition/use_key 或含 context 的三元组")
+            proposition, use_key = request[:2]
+            item_context = context if len(request) == 2 else request[2]
+            if item_context is not None and not isinstance(
+                    item_context, RelationUseContext):
+                raise TypeError("consume_many request context 类型错误")
+            if self.use_owner is not None and item_context is None:
+                raise RelationClosureIncompleteError(
+                    "配置 Core Use owner 后必须提供完整 RelationUseContext")
             if not isinstance(proposition, ObjectIdentity):
                 raise TypeError("consume_many proposition 类型错误")
             key = _strict_key(
@@ -620,7 +792,7 @@ class RelationClosureRuntime:
                 fact.evidence_keys,
                 fact.decision_key,
                 fact.read_only_recovered,
-                context,
+                item_context,
             ))
         routes = tuple(item.route_key() for item in prepared)
         if len(set(routes)) != len(routes):
@@ -723,6 +895,56 @@ class RelationClosureRuntime:
             performance,
         )
 
+    def formation_traces(self) -> tuple[RelationClosureFormationTrace, ...]:
+        """按完整 Proposition 身份返回当前 runtime 已登记的 forming 只读视图。"""
+        return tuple(
+            self._formations[key]
+            for key in sorted(
+                self._formations,
+                key=ObjectIdentity.stable_key,
+            )
+        )
+
+    def snapshot_for_proposition(
+            self, proposition: ObjectIdentity,
+            ) -> RelationClosureEpistemicSnapshot:
+        """读取一个 forming 候选的当前 H-00 四态、有效 Evidence 和 active 投影。"""
+        if not isinstance(proposition, ObjectIdentity):
+            raise TypeError("relation snapshot proposition 类型错误")
+        formation = self._formations.get(proposition)
+        if formation is None:
+            raise KeyError("Proposition 尚未在 relation runtime forming")
+        snapshot = self.candidate_runtime.engine.ledger.snapshot(
+            formation.hypothesis)
+        active_ids = frozenset((
+            *snapshot.support_evidence_ids,
+            *snapshot.refute_evidence_ids,
+            *snapshot.unknown_evidence_ids,
+        ))
+        evidence = tuple(
+            item
+            for item in self.candidate_runtime.engine.ledger.evidence_history(
+                formation.hypothesis)
+            if item.evidence_id in active_ids
+        )
+        facts = self.consumer.lookup_proposition(proposition)
+        active_fact = facts[0] if len(facts) == 1 else None
+        return RelationClosureEpistemicSnapshot(
+            formation,
+            snapshot,
+            evidence,
+            active_fact,
+        )
+
+    def epistemic_snapshots(
+            self,
+            ) -> tuple[RelationClosureEpistemicSnapshot, ...]:
+        """返回全部 forming 候选的当前只读认识论视图，不扫描未登记图对象。"""
+        return tuple(
+            self.snapshot_for_proposition(trace.spec.proposition.proposition)
+            for trace in self.formation_traces()
+        )
+
     def clone_for_evaluation(
             self, semantic_graph: SemanticGraph,
             candidate_graph: CandidateProjectionGraph,
@@ -803,6 +1025,7 @@ class RelationClosureRuntime:
 
 __all__ = [
     "RelationClosureAudit",
+    "RelationClosureEpistemicSnapshot",
     "RelationClosureFormationTrace",
     "RelationClosureIncompleteError",
     "RelationClosurePerformanceCounters",

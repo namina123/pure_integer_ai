@@ -17,7 +17,9 @@ from pure_integer_ai.cognition.shared.generation_structure_execution import (
     GenerationStructureExecutionPlan,
 )
 from pure_integer_ai.cognition.shared.generation_structure_plan import (
+    GenerationSentenceInstance,
     GenerationStructurePlan,
+    generation_sentence_address_key,
 )
 from pure_integer_ai.cognition.shared.hypothesis import HypothesisKey
 from pure_integer_ai.cognition.shared.identity import (
@@ -64,6 +66,16 @@ def _strict_key(
     return value
 
 
+def _sentence_address(
+        value: ObjectIdentity | GenerationSentenceInstance,
+        *,
+        label: str,
+        ) -> ObjectIdentity | GenerationSentenceInstance:
+    """核验 surface 地址仍指向模板句式或来源化运行期句实例。"""
+    generation_sentence_address_key(value, label=label)
+    return value
+
+
 @dataclass(frozen=True)
 class GenerationSurfaceAttribution:
     """把一次 surface artifact 显式归属到一等理论和完整 Hypothesis。"""
@@ -90,6 +102,37 @@ class GenerationSurfaceAttribution:
             *_packed(self.purpose.stable_key()),
         )
 
+
+@dataclass(frozen=True)
+class GenerationSurfaceSentenceAttribution:
+    """把一个运行期句实例精确归属到 connector 理论和 Hypothesis。"""
+
+    sentence: GenerationSentenceInstance
+    theory: ObjectIdentity
+    hypothesis: HypothesisKey
+    purpose: ObjectIdentity
+
+    def __post_init__(self) -> None:
+        """拒绝把模板句式或无候选的抽象归属充作逐句反馈。"""
+        if not isinstance(self.sentence, GenerationSentenceInstance):
+            raise TypeError("surface sentence attribution 必须绑定运行期句实例")
+        _identity(self.theory, label="surface sentence attribution theory")
+        if not isinstance(self.hypothesis, HypothesisKey):
+            raise TypeError("surface sentence attribution hypothesis 类型错误")
+        _identity(
+            self.purpose,
+            label="surface sentence attribution purpose",
+            kind=OBJECT_MINIMAL_INSTRUCTION,
+        )
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回句实例、理论、Hypothesis 和 purpose 的完整键。"""
+        return (
+            *_packed(self.sentence.stable_key()),
+            *_packed(self.theory.stable_key()),
+            *_packed(self.hypothesis.stable_key()),
+            *_packed(self.purpose.stable_key()),
+        )
 
 @dataclass(frozen=True)
 class GenerationSurfaceProtocol:
@@ -144,7 +187,7 @@ class GenerationSurfaceProtocol:
 class SurfaceSlotDirective:
     """为一个 planned slot 注入 emit/silent 和 R-01 搜索/采用预算。"""
 
-    sentence: ObjectIdentity
+    sentence: ObjectIdentity | GenerationSentenceInstance
     slot: ObjectIdentity
     action: ObjectIdentity
     instruction: ObjectIdentity
@@ -156,10 +199,9 @@ class SurfaceSlotDirective:
     reference_use_key: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
-        _identity(
+        _sentence_address(
             self.sentence,
             label="surface directive sentence",
-            kind=OBJECT_STRUCTURE_CONCEPT,
         )
         _identity(
             self.slot,
@@ -209,7 +251,10 @@ class SurfaceSlotDirective:
     def stable_key(self) -> tuple[int, ...]:
         """返回 slot、动作、预算、use key 和 mapper trace。"""
         result = [
-            *_packed(self.sentence.stable_key()),
+            *_packed(generation_sentence_address_key(
+                self.sentence,
+                label="surface directive sentence",
+            )),
             *_packed(self.slot.stable_key()),
             *_packed(self.action.stable_key()),
             *_packed(self.instruction.stable_key()),
@@ -239,6 +284,7 @@ class GenerationSurfaceRequest:
     branch: ObjectIdentity
     directives: tuple[SurfaceSlotDirective, ...]
     attribution: GenerationSurfaceAttribution | None = None
+    sentence_attributions: tuple[GenerationSurfaceSentenceAttribution, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.protocol, GenerationSurfaceProtocol):
@@ -267,22 +313,26 @@ class GenerationSurfaceRequest:
                 and not isinstance(
                     self.attribution, GenerationSurfaceAttribution)):
             raise TypeError("surface request attribution 类型错误")
+        if (not isinstance(self.sentence_attributions, tuple)
+                or any(not isinstance(item, GenerationSurfaceSentenceAttribution)
+                       for item in self.sentence_attributions)):
+            raise TypeError("surface request sentence_attributions 类型错误")
         if not self.execution.complete:
-            if self.directives:
+            if self.directives or self.sentence_attributions:
                 raise ValueError("incomplete structure execution 不得提前规划 surface directive")
             return
         by_key = {(item.sentence, item.slot): item for item in self.directives}
         if len(by_key) != len(self.directives):
             raise ValueError("同一 sentence/slot 不得重复注入 surface directive")
         expected_keys = tuple(
-            (sentence.sentence, value.slot)
+            (sentence.address, value.slot)
             for sentence in self.structure.syntax.sentences
             for value in sentence.values
         )
         if set(by_key) != set(expected_keys):
             raise ValueError("surface directive 必须精确覆盖全部 planned slot value")
         anaphora = {
-            (item.sentence, item.slot): item
+            (item.address, item.slot): item
             for item in self.structure.syntax.anaphora
         }
         use_keys: list[tuple[int, ...]] = []
@@ -320,11 +370,38 @@ class GenerationSurfaceRequest:
         if len(set(use_keys)) != len(use_keys):
             raise ValueError("surface request 的全部 R-01 use key 必须唯一")
         expected_sentences = {
-            item.sentence for item in self.structure.syntax.sentences}
+            item.address for item in self.structure.syntax.sentences}
         if emitted_sentences != expected_sentences:
             raise ValueError("每个 planned sentence 必须至少包含一个 emit slot")
+        sentence_attributions = {
+            item.sentence: item for item in self.sentence_attributions}
+        if len(sentence_attributions) != len(self.sentence_attributions):
+            raise ValueError("同一运行期句实例不得重复归属")
+        if sentence_attributions:
+            if set(sentence_attributions) != expected_sentences:
+                raise ValueError("逐句归属必须精确覆盖全部 planned sentence")
+            if any(not isinstance(item, GenerationSentenceInstance)
+                   for item in expected_sentences):
+                raise ValueError("逐句归属只接受运行期句实例地址")
+            if self.attribution is not None:
+                if len(expected_sentences) != 1:
+                    raise ValueError("多句 surface 不得复用整次 attribution")
+                sentence_attribution = next(iter(sentence_attributions.values()))
+                if (self.attribution.theory != sentence_attribution.theory
+                        or self.attribution.hypothesis
+                        != sentence_attribution.hypothesis
+                        or self.attribution.purpose
+                        != sentence_attribution.purpose):
+                    raise ValueError("旧整次 attribution 与逐句归属不一致")
+        elif self.attribution is not None and len(expected_sentences) != 1:
+            raise ValueError("多句 surface 不得复用整次 attribution")
         object.__setattr__(self, "directives", tuple(
             by_key[key] for key in expected_keys))
+        object.__setattr__(self, "sentence_attributions", tuple(
+            sentence_attributions[item.address]
+            for item in self.structure.syntax.sentences
+            if item.address in sentence_attributions
+        ))
 
     def directive_map(self) -> dict[
             tuple[ObjectIdentity, ObjectIdentity], SurfaceSlotDirective]:
@@ -336,7 +413,7 @@ class GenerationSurfaceRequest:
             tuple[ObjectIdentity, ObjectIdentity], StructureSlotValue]:
         """按 sentence/slot 返回 G-02 planned value。"""
         return {
-            (sentence.sentence, value.slot): value
+            (sentence.address, value.slot): value
             for sentence in self.structure.syntax.sentences
             for value in sentence.values
         }
@@ -350,7 +427,7 @@ class GenerationSurfaceRequest:
             for item in self.structure.propositions.propositions
         }
         return {
-            (item.sentence, item.slot): (
+            (item.address, item.slot): (
                 item.antecedent_candidate_key,
                 propositions[item.antecedent_candidate_key],
             )
@@ -363,7 +440,7 @@ class GenerationSurfaceRequest:
         if not self.execution.complete:
             return ()
         return tuple(
-            (sentence.obligation.sentence, value)
+            (sentence.obligation.address, value)
             for sentence in self.execution.sentences
             for value in sentence.result.values
         )
@@ -382,7 +459,15 @@ class GenerationSurfaceRequest:
         result.append(0 if self.attribution is None else 1)
         if self.attribution is not None:
             result.extend(_packed(self.attribution.stable_key()))
+        result.append(len(self.sentence_attributions))
+        for attribution in self.sentence_attributions:
+            result.extend(_packed(attribution.stable_key()))
         return tuple(result)
+
+    def sentence_attribution_map(self) -> dict[
+            GenerationSentenceInstance, GenerationSurfaceSentenceAttribution]:
+        """按运行期句实例返回精确 connector 归属。"""
+        return {item.sentence: item for item in self.sentence_attributions}
 
 
 @dataclass(frozen=True)
@@ -654,14 +739,14 @@ class GenerationSurfacePreview:
 class SurfaceAdoption:
     """一个 reference 或 surface proposal 提交后的完整 use 稳定键。"""
 
-    sentence: ObjectIdentity
+    sentence: ObjectIdentity | GenerationSentenceInstance
     slot: ObjectIdentity
     proposal: AliasResolutionProposal
     use_key: tuple[int, ...]
     use_stable_key: tuple[int, ...]
 
     def __post_init__(self) -> None:
-        _identity(self.sentence, label="surface adoption sentence")
+        _sentence_address(self.sentence, label="surface adoption sentence")
         _identity(self.slot, label="surface adoption slot")
         if not isinstance(self.proposal, AliasResolutionProposal):
             raise TypeError("surface adoption proposal 类型错误")
@@ -672,7 +757,10 @@ class SurfaceAdoption:
     def stable_key(self) -> tuple[int, ...]:
         """返回 slot、proposal 和实际采用账键。"""
         return (
-            *_packed(self.sentence.stable_key()),
+            *_packed(generation_sentence_address_key(
+                self.sentence,
+                label="surface adoption sentence",
+            )),
             *_packed(self.slot.stable_key()),
             *_packed(self.proposal.stable_key()),
             *_packed(self.use_key),
@@ -733,6 +821,7 @@ class GenerationSurfacePlan:
 
 __all__ = [
     "GenerationSurfaceAttribution",
+    "GenerationSurfaceSentenceAttribution",
     "GenerationSurfacePlan",
     "GenerationSurfacePreview",
     "GenerationSurfaceProtocol",

@@ -29,7 +29,10 @@ from pure_integer_ai.cognition.shared.memory_event import (
     RETENTION_EPISODIC,
     memory_object_ref,
 )
-from pure_integer_ai.cognition.shared.memory_event_log import MemoryEventLog
+from pure_integer_ai.cognition.shared.memory_event_log import (
+    MaterializedMemoryEvent,
+    MemoryEventLog,
+)
 from pure_integer_ai.cognition.shared.memory_overlay import MemoryAccessContext
 from pure_integer_ai.cognition.shared.scope_identity import (
     CLOCK_MEMORY_CREATED,
@@ -62,6 +65,8 @@ class MemoryHypothesisEventSink(HypothesisEventSink):
         self._decision_by_ledger_id: dict[
             tuple[tuple[int, ...], int], ResolverDecision
         ] = {}
+        self._hydrated_compatibility_boundaries: set[tuple[int, ...]] = set()
+        self._hydrated_decision_boundaries: set[tuple[int, ...]] = set()
 
     def append_hypothesis(self, hypothesis: HypothesisKey) -> None:
         """幂等声明 EPISODIC/ACTIVE Hypothesis，并分配持久 created 时钟。"""
@@ -103,7 +108,9 @@ class MemoryHypothesisEventSink(HypothesisEventSink):
         """把 H-00 Evidence 写成显式 legacy-reason Evidence，不丢原稳定键。"""
         if not isinstance(evidence, EvidenceRecord):
             raise TypeError("append_evidence 需要 EvidenceRecord")
-        self._hydrate_compatibility(evidence.hypothesis)
+        boundary = self._ledger_event_key(evidence.hypothesis, 1)[0]
+        if boundary not in self._hydrated_compatibility_boundaries:
+            self._hydrate_compatibility(evidence.hypothesis)
         cache_key = self._ledger_event_key(
             evidence.hypothesis, evidence.evidence_id)
         existing = self._evidence_by_ledger_id.get(cache_key)
@@ -157,7 +164,9 @@ class MemoryHypothesisEventSink(HypothesisEventSink):
         """把 H-00 生命周期转换写成引用理由 Evidence 的通用 lifecycle 事件。"""
         if not isinstance(transition, HypothesisTransition):
             raise TypeError("append_transition 需要 HypothesisTransition")
-        self._hydrate_compatibility(transition.hypothesis)
+        boundary = self._ledger_event_key(transition.hypothesis, 1)[0]
+        if boundary not in self._hydrated_compatibility_boundaries:
+            self._hydrate_compatibility(transition.hypothesis)
         cache_key = self._ledger_event_key(
             transition.hypothesis, transition.event_id)
         existing = self._transition_by_ledger_id.get(cache_key)
@@ -206,7 +215,9 @@ class MemoryHypothesisEventSink(HypothesisEventSink):
         if not hypotheses:
             raise MemoryHypothesisAdapterError("H-04 decision 不得没有候选")
         anchor = hypotheses[0]
-        self._hydrate_decisions(anchor)
+        boundary = self._ledger_event_key(anchor, 1)[0]
+        if boundary not in self._hydrated_decision_boundaries:
+            self._hydrate_decisions(anchor)
         cache_key = self._ledger_event_key(anchor, decision.decision_id)
         existing = self._decision_by_ledger_id.get(cache_key)
         if existing is not None:
@@ -270,6 +281,50 @@ class MemoryHypothesisEventSink(HypothesisEventSink):
         if len(by_id) != len(decisions):
             raise MemoryHypothesisAdapterError(
                 "可见 Resolution 含重复 decision id")
+        return tuple(sorted(
+            decisions,
+            key=lambda item: (
+                item.competition_key,
+                item.timestamp_seq,
+                item.decision_id,
+            ),
+        ))
+
+    def load_indexed_decisions(
+            self,
+            *,
+            hypotheses: tuple[HypothesisKey, ...],
+            events: tuple[MaterializedMemoryEvent, ...],
+            ) -> tuple[ResolverDecision, ...]:
+        """只从竞争组反向索引事件恢复 H-04 决策链。"""
+        selected = self._validate_indexed_inputs(hypotheses, events)
+        decisions: list[ResolverDecision] = []
+        for entry in events:
+            payload = entry.event.payload
+            if not isinstance(payload, ResolutionPayload):
+                continue
+            decision = ResolverDecision.from_stable_key(payload.decision_key)
+            candidates = frozenset(
+                item.hypothesis for item in decision.candidates)
+            if not candidates <= selected:
+                raise MemoryHypothesisAdapterError(
+                    "索引 Resolution 横跨请求竞争边界")
+            anchor = decision.candidates[0].hypothesis
+            cache_key = self._ledger_event_key(
+                anchor, decision.decision_id)
+            existing = self._decision_by_ledger_id.get(cache_key)
+            if existing is not None and existing != decision:
+                raise MemoryHypothesisAdapterError(
+                    "索引同一 decision id 对应不同内容")
+            self._decision_by_ledger_id[cache_key] = decision
+            decisions.append(decision)
+        by_id = {item.decision_id: item for item in decisions}
+        if len(by_id) != len(decisions):
+            raise MemoryHypothesisAdapterError(
+                "索引 Resolution 含重复 decision id")
+        for hypothesis in hypotheses:
+            self._hydrated_decision_boundaries.add(
+                self._ledger_event_key(hypothesis, 1)[0])
         return tuple(sorted(
             decisions,
             key=lambda item: (
@@ -367,6 +422,92 @@ class MemoryHypothesisEventSink(HypothesisEventSink):
             ledger.append_transition(transition)
         return ledger.with_sink(self) if attach_sink else ledger
 
+    def load_indexed_ledger(
+            self,
+            *,
+            hypotheses: tuple[HypothesisKey, ...],
+            events: tuple[MaterializedMemoryEvent, ...],
+            attach_sink: bool = False,
+            ) -> HypothesisLedger:
+        """只从调用方给出的竞争组索引事件重建 H-00 ledger。"""
+        selected_set = self._validate_indexed_inputs(hypotheses, events)
+        if type(attach_sink) is not bool:
+            raise TypeError("attach_sink 必须是 bool")
+        selected = tuple(sorted(
+            hypotheses, key=lambda item: item.stable_key()))
+        ledger = HypothesisLedger()
+        for hypothesis in selected:
+            ledger.register(hypothesis)
+
+        evidence: list[EvidenceRecord] = []
+        transitions: list[HypothesisTransition] = []
+        for entry in events:
+            payload = entry.event.payload
+            if (isinstance(payload, EvidencePayload)
+                    and payload.compatibility_record_key):
+                record = EvidenceRecord.from_stable_key(
+                    payload.compatibility_record_key)
+                if record.hypothesis not in selected_set:
+                    raise MemoryHypothesisAdapterError(
+                        "索引 Evidence 横跨请求竞争边界")
+                self._validate_evidence_projection(payload, record)
+                cache_key = self._ledger_event_key(
+                    record.hypothesis, record.evidence_id)
+                existing = self._evidence_by_ledger_id.get(cache_key)
+                if existing is not None and existing[0] != record:
+                    raise MemoryHypothesisAdapterError(
+                        "索引同一 evidence id 对应不同内容")
+                self._evidence_by_ledger_id[cache_key] = (
+                    record, entry.event.object_ref)
+                evidence.append(record)
+            elif (isinstance(payload, LifecycleTransitionPayload)
+                  and payload.compatibility_transition_key):
+                transition = HypothesisTransition.from_stable_key(
+                    payload.compatibility_transition_key)
+                if transition.hypothesis not in selected_set:
+                    raise MemoryHypothesisAdapterError(
+                        "索引 lifecycle 横跨请求竞争边界")
+                self._validate_transition_projection(payload, transition)
+                cache_key = self._ledger_event_key(
+                    transition.hypothesis, transition.event_id)
+                existing = self._transition_by_ledger_id.get(cache_key)
+                if existing is not None and existing != transition:
+                    raise MemoryHypothesisAdapterError(
+                        "索引同一 transition id 对应不同内容")
+                self._transition_by_ledger_id[cache_key] = transition
+                transitions.append(transition)
+        for record in self._evidence_topological(evidence):
+            ledger.append_evidence(record)
+        for transition in sorted(
+                transitions,
+                key=lambda item: (item.timestamp_seq, item.event_id)):
+            ledger.append_transition(transition)
+        for hypothesis in hypotheses:
+            self._hydrated_compatibility_boundaries.add(
+                self._ledger_event_key(hypothesis, 1)[0])
+        return ledger.with_sink(self) if attach_sink else ledger
+
+    @staticmethod
+    def _validate_indexed_inputs(
+            hypotheses: tuple[HypothesisKey, ...],
+            events: tuple[MaterializedMemoryEvent, ...],
+            ) -> frozenset[HypothesisKey]:
+        """核验竞争组候选、索引事件类型和 event hash 唯一性。"""
+        if (not isinstance(hypotheses, tuple)
+                or not hypotheses
+                or any(not isinstance(item, HypothesisKey)
+                       for item in hypotheses)
+                or len(set(hypotheses)) != len(hypotheses)):
+            raise TypeError("hypotheses 必须是非空无重复 HypothesisKey tuple")
+        if (not isinstance(events, tuple)
+                or any(not isinstance(item, MaterializedMemoryEvent)
+                       for item in events)):
+            raise TypeError("events 必须是 MaterializedMemoryEvent tuple")
+        hashes = tuple(item.event_hash for item in events)
+        if len(set(hashes)) != len(hashes):
+            raise ValueError("竞争组索引事件不得重复 event hash")
+        return frozenset(hypotheses)
+
     def _hydrate_compatibility(self, hypothesis: HypothesisKey) -> None:
         """按 owner 可见范围加载已有 H-00 事件，供新 adapter 幂等续写。"""
         access = self._access(hypothesis)
@@ -402,6 +543,8 @@ class MemoryHypothesisEventSink(HypothesisEventSink):
                 raise MemoryHypothesisAdapterError(
                     "持久层同一 owner/transition id 对应不同记录")
             self._transition_by_ledger_id[key] = transition
+        self._hydrated_compatibility_boundaries.add(
+            self._ledger_event_key(hypothesis, 1)[0])
 
     def _hydrate_decisions(self, hypothesis: HypothesisKey) -> None:
         """加载同 owner 可见 Resolution，供 decision id 碰撞和幂等核验。"""
@@ -421,6 +564,8 @@ class MemoryHypothesisEventSink(HypothesisEventSink):
                 raise MemoryHypothesisAdapterError(
                     "持久层同一 owner/decision id 对应不同记录")
             self._decision_by_ledger_id[key] = decision
+        self._hydrated_decision_boundaries.add(
+            self._ledger_event_key(hypothesis, 1)[0])
 
     def _require_hypothesis(self, hypothesis: HypothesisKey) -> MemoryObjectRef:
         """返回已唯一声明的 Hypothesis 引用，缺失时拒绝隐式创建。"""

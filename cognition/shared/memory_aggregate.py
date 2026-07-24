@@ -28,6 +28,7 @@ from pure_integer_ai.cognition.shared.memory_event import (
     MEMORY_EVENT_HYPOTHESIS,
     MEMORY_OBJECT_EVIDENCE,
     MEMORY_OBJECT_HYPOTHESIS,
+    MEMORY_OBJECT_USE,
     RETENTION_EPISODIC,
     DerivationTransitionPayload,
     EvidencePayload,
@@ -37,6 +38,8 @@ from pure_integer_ai.cognition.shared.memory_event import (
     MemoryObjectRef,
     ObservationPayload,
     RetentionTransitionPayload,
+    ResolutionPayload,
+    UseOutcomePayload,
     UsePayload,
 )
 from pure_integer_ai.cognition.shared.memory_event_log import (
@@ -161,14 +164,14 @@ class MemoryHypothesisAggregateIndex:
             materialized.event_hash,
             event.event_kind,
             materialized.object_hash,
-            event.timestamp.seq,
+            materialized.timeline.seq,
             owner_key,
         ))
         self.store.enqueue_dirty(MemoryHypothesisDirtyRecord(
             self.event_log.memory_space_id,
             hypothesis_hash,
             materialized.event_hash,
-            event.timestamp.seq,
+            materialized.timeline.seq,
             owner_key,
         ))
 
@@ -197,7 +200,7 @@ class MemoryHypothesisAggregateIndex:
                     materialized.event_hash,
                     materialized.event.event_kind,
                     materialized.object_hash,
-                    materialized.event.timestamp.seq,
+                    materialized.timeline.seq,
                     hypothesis_ref.owner.stable_key(),
                 ))
         declared = {
@@ -281,6 +284,51 @@ class MemoryHypothesisAggregateIndex:
             raise MemoryAggregateIntegrityError("aggregate hash 与完整引用漂移")
         return record
 
+    def rebuild(
+            self,
+            hypothesis_ref: MemoryObjectRef,
+            *,
+            access: MemoryAccessContext,
+            ) -> MemoryHypothesisAggregateRecord:
+        """只重建一个可见 Hypothesis，并清除它自己的 dirty 标记。"""
+        self._require_hypothesis_ref(hypothesis_ref)
+        self._require_access(access)
+        if not access.can_read(hypothesis_ref.owner):
+            raise PermissionError("当前 access 不可重建该 Hypothesis")
+        aggregate, _ = self._rebuild_hypothesis(
+            hypothesis_ref, access=access)
+        self.store.delete_dirty(aggregate.hypothesis_hash)
+        return aggregate
+
+    def hypothesis_ref_for_aggregate(
+            self,
+            aggregate: MemoryHypothesisAggregateRecord,
+            *,
+            access: MemoryAccessContext,
+            ) -> MemoryObjectRef | None:
+        """按 ACL 从 aggregate 恢复完整 Hypothesis 引用，拒绝 hash 越界。"""
+        if not isinstance(aggregate, MemoryHypothesisAggregateRecord):
+            raise TypeError("aggregate 必须是 MemoryHypothesisAggregateRecord")
+        self._require_access(access)
+        if aggregate.space_id != self.event_log.memory_space_id:
+            raise ValueError("aggregate 属于其他 Memory 空间")
+        owner = OwnerScope(*aggregate.owner_key)
+        if not access.can_read(owner):
+            return None
+        hypothesis_ref = self._hypothesis_ref_from_hash(
+            aggregate.hypothesis_hash)
+        if hypothesis_ref.memory_space != self.event_log.memory_space_identity:
+            raise MemoryAggregateIntegrityError(
+                "aggregate hash 恢复到其他 Memory 空间")
+        if hypothesis_ref.owner != owner:
+            raise MemoryAggregateIntegrityError(
+                "aggregate owner 与完整 Hypothesis 引用漂移")
+        stored = self.store.read_aggregate(aggregate.hypothesis_hash)
+        if stored != aggregate:
+            raise MemoryAggregateIntegrityError(
+                "aggregate 记录与完整 Hypothesis 引用的派生态不一致")
+        return hypothesis_ref
+
     def query(
             self,
             *,
@@ -291,8 +339,9 @@ class MemoryHypothesisAggregateIndex:
             lifecycle_state: int | None = None,
             retention_state: int | None = None,
             source: SourceRef | None = None,
+            observation_source: SourceRef | None = None,
             ) -> tuple[MemoryHypothesisAggregateRecord, ...]:
-        """先按 owner 与可选 kind/context/status/source 索引过滤 aggregate。"""
+        """按 owner、状态、证据来源和声明 observation 过滤 aggregate。"""
         self._require_access(access)
         where: dict[str, int] = {"space_id": self.event_log.memory_space_id}
         if hypothesis_kind is not None:
@@ -308,6 +357,10 @@ class MemoryHypothesisAggregateIndex:
                 if type(value) is not int or value <= 0:
                     raise ValueError(f"{name} 必须为正严格整数")
                 where[name] = value
+        if observation_source is not None:
+            if not isinstance(observation_source, SourceRef):
+                raise TypeError("observation_source 必须是 SourceRef")
+            where["source_hash"] = self.source_hash(observation_source)
         source_candidates = None
         if source is not None:
             if not isinstance(source, SourceRef):
@@ -342,7 +395,9 @@ class MemoryHypothesisAggregateIndex:
                 if (source_candidates is not None
                         and record.hypothesis_hash not in source_candidates):
                     continue
-                if hypothesis_kind is not None or context is not None:
+                if (hypothesis_kind is not None
+                        or context is not None
+                        or observation_source is not None):
                     hypothesis_ref = self._hypothesis_ref_from_hash(
                         record.hypothesis_hash)
                     declaration = self._declaration_event(
@@ -359,6 +414,10 @@ class MemoryHypothesisAggregateIndex:
                     if (context is not None
                             and declaration.hypothesis.scope.stable_key()
                             != context):
+                        continue
+                    if (observation_source is not None
+                            and declaration.hypothesis.observation
+                            != observation_source):
                         continue
                 previous = records.get(record.hypothesis_hash)
                 if previous is not None and previous != record:
@@ -391,6 +450,63 @@ class MemoryHypothesisAggregateIndex:
         )
         return tuple(sorted(records, key=lambda item: (
             item.source_hash, item.stance)))
+
+    def events(
+            self,
+            hypothesis_ref: MemoryObjectRef,
+            *,
+            access: MemoryAccessContext,
+            ) -> tuple[MaterializedMemoryEvent, ...]:
+        """从反向索引读取一个干净 Hypothesis 的全部关联事件。"""
+        self._require_hypothesis_ref(hypothesis_ref)
+        self._require_access(access)
+        self.require_hypothesis_clean(
+            hypothesis_ref, access=access)
+        if not access.can_read(hypothesis_ref.owner):
+            return ()
+        hypothesis_hash = self._hypothesis_hash(hypothesis_ref)
+        result: list[MaterializedMemoryEvent] = []
+        for index_record in self.store.list_events(hypothesis_hash):
+            materialized = self.event_log.read(
+                index_record.event_hash, access=access)
+            if materialized is None:
+                raise MemoryAggregateIntegrityError(
+                    "event index 指向当前 ACL 不可见事件")
+            if self._hypothesis_for_event(
+                    materialized.event, access=access) != hypothesis_ref:
+                raise MemoryAggregateIntegrityError(
+                    "event index 指向其他 Hypothesis")
+            if materialized.timeline.seq != index_record.event_seq:
+                raise MemoryAggregateIntegrityError(
+                    "event index timeline 序与权威事件漂移")
+            result.append(materialized)
+        return tuple(sorted(result, key=lambda item: (
+            item.timeline.seq, item.event_hash)))
+
+    def require_clean(self, *, access: MemoryAccessContext) -> None:
+        """要求当前 ACL 可见聚合没有待重建 dirty key，防止读取陈旧快照。"""
+        self._require_access(access)
+        for item in self.store.list_dirty():
+            if access.can_read(OwnerScope(*item.owner_key)):
+                raise MemoryAggregateIntegrityError(
+                    "Memory aggregate 存在可见 dirty Hypothesis，必须先重建")
+
+    def require_hypothesis_clean(
+            self,
+            hypothesis_ref: MemoryObjectRef,
+            *,
+            access: MemoryAccessContext,
+            ) -> None:
+        """要求一个可见 Hypothesis 没有 dirty 标记，不扫描其他对象事件。"""
+        self._require_hypothesis_ref(hypothesis_ref)
+        self._require_access(access)
+        if not access.can_read(hypothesis_ref.owner):
+            return
+        hypothesis_hash = self._hypothesis_hash(hypothesis_ref)
+        dirty = self.store.read_dirty(hypothesis_hash)
+        if dirty is not None:
+            raise MemoryAggregateIntegrityError(
+                "Memory Hypothesis aggregate 尚未完成增量重建")
 
     def hypothesis_kind_hash(self, key: tuple[int, ...]) -> int:
         """计算开放 Hypothesis kind 的稳定派生索引 hash。"""
@@ -492,13 +608,13 @@ class MemoryHypothesisAggregateIndex:
             source_by_key[source_key] = source
             source_buckets.setdefault(
                 (source_key, evidence.stance), []).append(
-                    evidence.observed_at.seq)
+                    item.timeline.seq)
             if evidence.stance == EVIDENCE_SUPPORT:
-                support_seqs.append(evidence.observed_at.seq)
+                support_seqs.append(item.timeline.seq)
             elif evidence.stance == EVIDENCE_REFUTE:
-                refute_seqs.append(evidence.observed_at.seq)
+                refute_seqs.append(item.timeline.seq)
             elif evidence.stance == EVIDENCE_UNKNOWN:
-                unknown_seqs.append(evidence.observed_at.seq)
+                unknown_seqs.append(item.timeline.seq)
             else:
                 raise MemoryAggregateIntegrityError("活动 Evidence stance 未注册")
 
@@ -535,10 +651,7 @@ class MemoryHypothesisAggregateIndex:
         lifecycle = payload.initial_lifecycle
         use_seqs: list[int] = []
         state_events = sorted(events, key=lambda item: (
-            item.event.timestamp.clock.stable_key(),
-            item.event.timestamp.seq,
-            item.event_hash,
-        ))
+            item.timeline.seq, item.event_hash))
         for item in state_events:
             event_payload = item.event.payload
             if isinstance(event_payload, RetentionTransitionPayload):
@@ -558,7 +671,7 @@ class MemoryHypothesisAggregateIndex:
                         "derivation lifecycle aggregate 重放不连续")
                 lifecycle = event_payload.to_state
             elif isinstance(event_payload, UsePayload):
-                use_seqs.append(event_payload.used_at.seq)
+                use_seqs.append(item.timeline.seq)
 
         hypothesis = payload.hypothesis
         source_records: list[MemoryHypothesisSourceRecord] = []
@@ -583,7 +696,7 @@ class MemoryHypothesisAggregateIndex:
                 _DERIVED_HASH_COMPETITION, hypothesis.competition_key),
             self.context_hash(hypothesis.scope.stable_key()),
             self.source_hash(hypothesis.observation),
-            payload.created_at.seq,
+            declarations[0].timeline.seq,
             max((*support_seqs, *refute_seqs, *unknown_seqs), default=0),
             max(support_seqs, default=0),
             max(refute_seqs, default=0),
@@ -653,6 +766,14 @@ class MemoryHypothesisAggregateIndex:
         if isinstance(payload, UsePayload):
             return self._hypothesis_for_ref(
                 payload.memory_ref, access=access)
+        if isinstance(payload, UseOutcomePayload):
+            return self._hypothesis_for_ref(
+                payload.target_ref, access=access)
+        if isinstance(payload, ResolutionPayload):
+            if not payload.hypothesis_refs:
+                raise MemoryAggregateIntegrityError(
+                    "Resolution 没有竞争组候选引用")
+            return payload.hypothesis_refs[0]
         return None
 
     def _hypothesis_for_ref(
@@ -664,6 +785,13 @@ class MemoryHypothesisAggregateIndex:
         """把 Hypothesis 或其 Evidence 引用归并到 Hypothesis。"""
         if ref.object_kind == MEMORY_OBJECT_HYPOTHESIS:
             return ref
+        if ref.object_kind == MEMORY_OBJECT_USE:
+            event = self._declaration_event(ref, access=access).event
+            payload = event.payload
+            if not isinstance(payload, UsePayload):
+                raise MemoryAggregateIntegrityError("Use 引用 payload 漂移")
+            return self._hypothesis_for_ref(
+                payload.memory_ref, access=access)
         if ref.object_kind != MEMORY_OBJECT_EVIDENCE:
             return None
         event = self._declaration_event(ref, access=access).event

@@ -59,6 +59,7 @@ def register_space_table(backend: StorageBackend) -> None:
         "space", _SPACE_COLUMNS,
         disc.DISC_APPEND_ONLY, [("space_id",), ("type_hash", "name_hash")],
         core=True,
+        recovery_key=("space_id",),
     )
 
 

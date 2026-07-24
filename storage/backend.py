@@ -24,6 +24,13 @@ from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.storage import discipline as disc
 from pure_integer_ai.storage.edge_types import EDGE_IS_A   # leaf 模块（无 backend import·无环）·perf #1144 IS_A gen counter
 from pure_integer_ai.storage.telemetry import active_backend_telemetry
+from pure_integer_ai.storage.backend_capability import (
+    BackendCapabilityProfile,
+    BackendDeviceBudget,
+    dict_backend_profile,
+    sqlite_backend_profile,
+)
+from pure_integer_ai.storage.write_guard import require_write_allowed
 
 # 列类型 → SQLite affinity（DictBackend 不用·仅 SQLiteBackend）。
 TYPE_INT = "INT"
@@ -54,7 +61,8 @@ class StorageBackend(Protocol):
 
     def register_table(self, table: str, columns: list[tuple[str, str]],
                        discipline: int, indexes: list[tuple[str, ...]] = (),
-                       *, core: bool = False, defer_indexes: bool = False) -> None: ...
+                       *, core: bool = False, defer_indexes: bool = False,
+                       recovery_key: tuple[str, ...] = ()) -> None: ...
     def ensure_index(self, table: str, columns: tuple[str, ...],
                      *, defer_indexes: bool = False) -> None: ...
     def insert(self, table: str, row: dict[str, Any]) -> None: ...
@@ -67,6 +75,12 @@ class StorageBackend(Protocol):
     def count(self, table: str, where: dict[str, Any] | None = None) -> int: ...
     def delete(self, table: str, where: dict[str, Any]) -> int: ...
     def next_id(self, space_id: int) -> int: ...
+    def advance_id_pool(self, space_id: int, floor: int) -> None: ...
+    def schema_snapshot(self) -> dict[str, dict[str, Any]]: ...
+    def snapshot(self) -> dict[str, list[dict[str, Any]]]: ...
+    def load_snapshot(self, snap: dict[str, list[dict[str, Any]]]) -> None: ...
+    def recovery_state_snapshot(self) -> dict[str, Any]: ...
+    def restore_recovery_state(self, state: dict[str, Any]) -> None: ...
     def commit(self) -> None: ...
     def close(self) -> None: ...
 
@@ -74,12 +88,20 @@ class StorageBackend(Protocol):
 def register_extension_table(backend: StorageBackend, table: str,
                              columns: list[tuple[str, str]],
                              discipline: int = disc.DISC_NONE,
-                             indexes: list[tuple[str, ...]] = ()) -> None:
+                             indexes: list[tuple[str, ...]] = (),
+                             *, recovery_key: tuple[str, ...] = ()) -> None:
     """非核心扩展表注册（L1 迁移·14 越层表归此·§十五决策8 残债收口）。
 
     core=False；挂纪律；guard 守。cognition 层扩展表经此注册，不直接建核心表。
     """
-    backend.register_table(table, columns, discipline, indexes, core=False)
+    backend.register_table(
+        table,
+        columns,
+        discipline,
+        indexes,
+        core=False,
+        recovery_key=recovery_key,
+    )
 
 
 # ---- _BaseBackend：纪律闸门 + _validate_row + 表注册元数据 ----
@@ -101,10 +123,18 @@ class _BaseBackend:
     # -- 表元数据 --
     def register_table(self, table: str, columns: list[tuple[str, str]],
                        discipline: int, indexes: list[tuple[str, ...]] = (),
-                       *, core: bool = False, defer_indexes: bool = False) -> None:
+                       *, core: bool = False, defer_indexes: bool = False,
+                       recovery_key: tuple[str, ...] = ()) -> None:
+        """注册表结构，并可声明跨恢复包合并使用的完整行身份列。"""
         if table in self._tables:
             return  # 幂等
         col_names = [c[0] for c in columns]
+        if (not isinstance(recovery_key, tuple)
+                or any(not isinstance(item, str) or not item
+                       for item in recovery_key)
+                or len(set(recovery_key)) != len(recovery_key)
+                or any(item not in col_names for item in recovery_key)):
+            raise ValueError("recovery_key 必须是表内唯一列名 tuple")
         is_core = core or disc.is_core(table)
         self._tables[table] = {
             "columns": col_names,
@@ -112,6 +142,7 @@ class _BaseBackend:
             "discipline": discipline,
             "core": is_core,
             "indexes": [tuple(index) for index in indexes],
+            "recovery_key": tuple(recovery_key),
         }
         self._do_create_table(table, columns)
         for idx in indexes:
@@ -133,8 +164,28 @@ class _BaseBackend:
             raise KeyError(f"未注册表 {table!r}")
         return m
 
+    def schema_snapshot(self) -> dict[str, dict[str, Any]]:
+        """返回确定性表结构快照，供恢复包冻结和兼容性核验。"""
+        result: dict[str, dict[str, Any]] = {}
+        for table in sorted(self._tables):
+            meta = self._tables[table]
+            columns = tuple(meta["columns"])
+            result[table] = {
+                "columns": columns,
+                "col_types": tuple(
+                    (column, meta["col_types"][column]) for column in columns),
+                "discipline": meta["discipline"],
+                "core": bool(meta["core"]),
+                "indexes": tuple(sorted(tuple(item)
+                                        for item in meta.get("indexes", ()))),
+                "recovery_key": tuple(meta.get("recovery_key", ())),
+            }
+        return result
+
     # -- 写操作（经纪律闸门） --
     def insert(self, table: str, row: dict[str, Any]) -> None:
+        """执行一次受运行时只读区和表纪律共同约束的插入。"""
+        require_write_allowed(table, "insert")
         telemetry = active_backend_telemetry()
         m = self._meta(table)
         allow_text = any(t == TYPE_TEXT for t in m["col_types"].values())
@@ -158,6 +209,8 @@ class _BaseBackend:
 
     def update(self, table: str, where: dict[str, Any],
                set_: dict[str, Any]) -> int:
+        """执行一次受运行时只读区和表纪律共同约束的更新。"""
+        require_write_allowed(table, "update")
         telemetry = active_backend_telemetry()
         m = self._meta(table)
         allow_text = any(t == TYPE_TEXT for t in m["col_types"].values())
@@ -179,6 +232,8 @@ class _BaseBackend:
         return affected
 
     def delete(self, table: str, where: dict[str, Any]) -> int:
+        """执行一次受运行时只读区和表纪律共同约束的删除。"""
+        require_write_allowed(table, "delete")
         telemetry = active_backend_telemetry()
         m = self._meta(table)
         disc.check_write(table, "delete", m["discipline"], m["core"])
@@ -259,6 +314,29 @@ class _BaseBackend:
         if floor > self._id_pool.get(space_id, 0):
             self._id_pool[space_id] = floor
 
+    def recovery_state_snapshot(self) -> dict[str, Any]:
+        """捕获数据与运行时水位，用于恢复失败后精确回滚。"""
+        return {
+            "tables": self.snapshot(),
+            "id_pool": dict(self._id_pool),
+            "isa_edge_gen": dict(self._isa_edge_gen),
+        }
+
+    def restore_recovery_state(self, state: dict[str, Any]) -> None:
+        """恢复加载前的数据、id 水位和 IS_A 拓扑代次。"""
+        if not isinstance(state, dict):
+            raise TypeError("recovery state 必须是 dict")
+        tables = state.get("tables")
+        id_pool = state.get("id_pool")
+        isa_edge_gen = state.get("isa_edge_gen")
+        if not isinstance(tables, dict):
+            raise TypeError("recovery state.tables 必须是 dict")
+        if not isinstance(id_pool, dict) or not isinstance(isa_edge_gen, dict):
+            raise TypeError("recovery state 水位必须是 dict")
+        self.load_snapshot(tables)
+        self._id_pool = dict(id_pool)
+        self._isa_edge_gen = dict(isa_edge_gen)
+
     def commit(self) -> None:
         pass
 
@@ -291,8 +369,24 @@ class DictBackend(_BaseBackend):
     更新非索引列（strength/sn/tn ·热路径）只就地改·零 rebuild·O(候选)。
     """
 
-    def __init__(self) -> None:
+    def __init__(
+            self,
+            *,
+            capability_profile: BackendCapabilityProfile | None = None,
+            device_budget: BackendDeviceBudget | None = None,
+            ) -> None:
+        """创建内存后端，并绑定调用方注入或标准物理能力 profile。"""
         super().__init__()
+        if capability_profile is not None and device_budget is not None:
+            raise ValueError("不能同时注入 capability_profile 和 device_budget")
+        if capability_profile is not None and not isinstance(
+                capability_profile, BackendCapabilityProfile):
+            raise TypeError("capability_profile 类型错误")
+        self._capability_profile = (
+            capability_profile
+            if capability_profile is not None
+            else dict_backend_profile(device_budget)
+        )
         self._data: dict[str, list[dict[str, Any]]] = {}
         # _idx: table → {cols_tuple → {value_tuple → [行 dict 引用·插入序]}}
         self._idx: dict[str, dict[tuple[str, ...], dict[tuple, list[dict[str, Any]]]]] = {}
@@ -302,6 +396,10 @@ class DictBackend(_BaseBackend):
         # 故 cache 的 best_cols 永指有效 cols。若未来加"删单 cols"功能须同时清本 cache（避 KeyError）。
         # best_cols 只影响 perf（选最选择性索引缩候选）不影响 correctness（caller 全 where 过滤保同集同序）。
         self._covering_idx_cache: dict[tuple[str, frozenset], tuple[str, ...] | None] = {}
+
+    def storage_capabilities(self) -> BackendCapabilityProfile:
+        """返回当前 DictBackend 实例的显式物理能力和预算。"""
+        return self._capability_profile
 
     def _do_create_table(self, table, columns):
         self._data[table] = []
@@ -455,10 +553,34 @@ class DictBackend(_BaseBackend):
 class SQLiteBackend(_BaseBackend):
     """sqlite3 backend。SQL 仅在本模块内部生成·绝不暴露给 cognition 层。"""
 
-    def __init__(self, path: str = ":memory:") -> None:
+    def __init__(
+            self,
+            path: str = ":memory:",
+            *,
+            capability_profile: BackendCapabilityProfile | None = None,
+            device_budget: BackendDeviceBudget | None = None,
+            ) -> None:
+        """创建 SQLite 后端，并按实例持久性或注入配置绑定能力 profile。"""
         super().__init__()
+        if capability_profile is not None and device_budget is not None:
+            raise ValueError("不能同时注入 capability_profile 和 device_budget")
+        if capability_profile is not None and not isinstance(
+                capability_profile, BackendCapabilityProfile):
+            raise TypeError("capability_profile 类型错误")
+        self._capability_profile = (
+            capability_profile
+            if capability_profile is not None
+            else sqlite_backend_profile(
+                persistent=path not in {"", ":memory:"},
+                budget=device_budget,
+            )
+        )
         self._conn = sqlite3.connect(path)
         self._conn.execute("PRAGMA foreign_keys=ON")
+
+    def storage_capabilities(self) -> BackendCapabilityProfile:
+        """返回当前 SQLiteBackend 实例的显式物理能力和预算。"""
+        return self._capability_profile
 
     def _q(self, name: str) -> str:
         return '"' + name.replace('"', '""') + '"'
