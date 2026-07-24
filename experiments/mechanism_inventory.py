@@ -1507,6 +1507,41 @@ MECHANISM_INVENTORY: tuple[MechanismRecord, ...] = (
         limitation="R-02 已有 SUBSET_EQ 自反/传递、PROPER_SUBSET 反自反/严格传递、MEMBER 单向提升、四态冲突、有限域 EXISTS/FORALL、预算失败、来源化 proof/Use、formal 成对安装和 V-06 克隆；旧关系只能经显式 mapper 成为 typed SUBSET_EQ。当前仅用 PH1 最小 fixture 验设施，尚未把 D-01/K 盘集合资料编成有反例、内容替换和 held-out 的正式课程，也未让旧 universal/existential 生产 verifier 默认消费新 owner，因此不能进入 readiness。",
     ),
     MechanismRecord(
+        mechanism_id="relation.property_typed",
+        scope=SCOPE_PRE_WEANING,
+        status=STATUS_OPT_IN,
+        owner="experiments.property_relation_runtime",
+        writers=(
+            "experiments.property_relation_runtime:PropertyCourseRuntime.process",
+            "experiments.relation_closure_runtime:RelationClosureRuntime.form_many",
+            "experiments.relation_closure_runtime:RelationClosureRuntime.recognize_many_at",
+            "experiments.relation_closure_runtime:RelationClosureRuntime.consume_many",
+        ),
+        readers=(
+            "experiments.relation_closure_runtime:RelationClosureRuntime.epistemic_snapshots",
+            "cognition.shared.property_relation:PropertyRelationEngine.evaluate",
+            "cognition.shared.property_relation:PropertyRelationEngine.select",
+            "experiments.property_relation_runtime:PropertyRelationRuntime.map_legacy",
+        ),
+        gates=(
+            "FormalTrainConfig.language_property_relation_builder",
+            "FormalTrainConfig.language_property_relation_course",
+        ),
+        sources=(
+            "typed PROPERTY RelationSchema/six Roles",
+            "subject/attribute/value/polarity/modality/intensity",
+            "Rational intensity resolver",
+            "R00 current Evidence/H04 projection",
+            "explicit legacy mapper",
+        ),
+        recovery=(
+            "graph_object", "graph_statement", "candidate_projection",
+            "V06 cloned H00 owner and local Use ledger",
+        ),
+        readiness_eligible=False,
+        limitation="R-03 已提供六维 typed PROPERTY、多来源四态聚合、唯一保守采用、Rational 强度解释、来源化 Use、formal 成对安装和 V-06 克隆；旧 PROPERTY/ATTR 只能经显式 mapper 迁移，共现或 cue 不能绕过 recognition。当前仅用 PH1 最小 fixture 验设施，尚未把 D-01/K 盘属性资料编成带反例、内容替换、跨表示和 held-out 的正式课程，也未让问答、推理与生成默认消费该 owner，因此不能进入 readiness。",
+    ),
+    MechanismRecord(
         mechanism_id="relation.subset_eq_universal",
         scope=SCOPE_PRE_WEANING,
         status=STATUS_PRODUCTION,

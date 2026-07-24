@@ -441,6 +441,9 @@ class FormalTrainConfig:
     # R-02 集合关系 builder 与 course 必须成对注入；默认不构造关系 owner。
     language_set_relation_builder: Any = None
     language_set_relation_course: Any = None
+    # R-03 PROPERTY builder 与 course 必须成对注入；宿主不解释六维 filler 或强度。
+    language_property_relation_builder: Any = None
+    language_property_relation_course: Any = None
     # L-05B2A typed formal generation owner factory；None 保留版本化 legacy 兼容链。
     # factory 必须从当前 TrainContext 的真实 S-02/S-07/R-01 owner 装配请求 mapper、planner 和 renderer。
     language_generation_runtime_factory: Any = None
@@ -544,6 +547,7 @@ class FormalTrainResult:
     precedence_relation_reports: tuple[Any, ...] = ()
     causal_relation_reports: tuple[Any, ...] = ()
     set_relation_reports: tuple[Any, ...] = ()
+    property_relation_reports: tuple[Any, ...] = ()
     span_count: int = 0
     span_candidate_fact_count: int = 0
     prediction_observation_count: int = 0
@@ -839,6 +843,22 @@ def _formal_train_impl(config: FormalTrainConfig,
             ctx,
             config.language_set_relation_builder,
             config.language_set_relation_course,
+        )
+    property_relation_configured = (
+        config.language_property_relation_builder is not None,
+        config.language_property_relation_course is not None,
+    )
+    if (any(property_relation_configured)
+            and not all(property_relation_configured)):
+        raise ValueError("R-03 property relation builder 与 course 必须成对配置")
+    if all(property_relation_configured):
+        from pure_integer_ai.experiments.property_relation_runtime import (
+            install_property_relation_runtime,
+        )
+        install_property_relation_runtime(
+            ctx,
+            config.language_property_relation_builder,
+            config.language_property_relation_course,
         )
     generation_factory = config.language_generation_runtime_factory
     if all(default_generation_configured):
@@ -2048,6 +2068,9 @@ def _formal_train_impl(config: FormalTrainConfig,
         result.causal_relation_reports = tuple(ctx.causal_relation_reports)
     if ctx.set_relation_runtime is not None:
         result.set_relation_reports = tuple(ctx.set_relation_reports)
+    if ctx.property_relation_runtime is not None:
+        result.property_relation_reports = tuple(
+            ctx.property_relation_reports)
     if ctx.span_index is not None:
         result.span_count = ctx.span_index.span_count()
         result.span_candidate_fact_count = len(
