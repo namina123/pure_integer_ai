@@ -1,0 +1,37 @@
+# IS_A facts 样例（ConceptNet IsA 三元组导出格式·每行 "child parent"·首段 child 末段 parent·中段忽略）
+#
+# **非 core 数据**（守「不写死」铁律）：
+#   - core 代码（pure_integer_ai/ 包）永不 import 此文件·core 不知 pair 内容·loader（collection.resolve_is_a_facts）
+#     是 pluggable 数据摄入（同 LocalDirSource 范式·§7.3 接口归系统）。
+#   - 生产 default 无此文件（PURE_INTEGER_AI_LOCAL_DIR 未设/文件不存在）→ resolve 返 [] → boot 零副作用 → bit-identical。
+#   - 与 cue_words frozenset（元定义非语义 enum 例外）不同范畴——cue_words 是 core 句法锚（非语义）·
+#     IS_A facts 文件是外部语义断言数据（ConceptNet 客观断言·来源① EPI_STRUCTURED·非系统教师判断）。
+#
+# 使用：用户把 ConceptNet IsA 三元组 / 自建本体导出为此格式·放 $PURE_INTEGER_AI_LOCAL_DIR/is_a_facts_zh.txt。
+# formal_train boot 段（make_train_context 后·lang 发现前）读此文件→bootstrap_is_a_edges 建 EDGE_ISA 边
+# →ancestor_map 非空→S3 第二刀 Interp2 LCA 聚类真火→held-out 抽象命中（如"狐狸追鸡"命中动物类骨架）。
+#
+# 诚实边界：文件真伪/质量 = 外部数据责任（接地墙）·系统不判·只落边。
+# 此样例仅供 dev/示意·生产用户自备 ConceptNet 导出。
+
+# 动物类（哺乳动物/家畜）
+猫 动物
+狗 动物
+狐狸 动物
+狼 动物
+老鼠 动物
+兔子 动物
+鸡 动物
+鸭 动物
+
+# 非生物类（无生命主体·对照动作兼容性·件5 选择倾向）
+石头 非生物
+砖 非生物
+墙 非生物
+地 非生物
+
+# 动作类（动词槽 IS_A LCA 上卷·件4 可变父·破动词常量锚）
+追 动作
+咬 动作
+跑 动作
+吃 动作

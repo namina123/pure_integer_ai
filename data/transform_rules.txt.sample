@@ -1,0 +1,50 @@
+# 符号变换规则语料样例（S5-S6·doc/重来_阶段断奶路线详设_2026-07-15 §三 + doc/重来_符号数学能力扩展设计_2026-07-15）。
+# 生产激活：拷贝本文件为 transform_rules.txt 放 PURE_INTEGER_AI_LOCAL_DIR 目录（CI default 无文件→loader 返 []→bit-identical）。
+# 格式（**TAB 分隔**·4 字段）：rule_name <TAB> lhs_source <TAB> rhs_source <TAB> held_out
+#   held_out：分号 ; 分隔的「input=>expected」对（空字段=无 held-out→不产 episode·反 theater）。
+#
+# ★ DSL 铁律（违者 build_composes_from_arith 抛 UnsupportedConstruct→该行 loader skip·E5 graceful）：
+#   1. lambda 参数禁用保留名 i / a（Sigma/Prod/Recur 魔法索引/累加器名）·用 x,y,z,b,n,p,q,u,v,w,...
+#   2. lhs 与 rhs 须**同参同序**（PARAM 按位置对齐·lhs 第 k 参 ↔ rhs 第 k 参）。
+#   3. 仅支持：+ - * /（/ 精确有理除）·Pow(base,exp)（变量指数·Call·d/dx 用）·Sigma/Prod/Recur（迭代）。
+#      禁止：//（整除）·%（取模）·比较运算符（== < > 等）·负数须写字面量 -1（非运算）。
+#   4. **多样性铁律**（反统一泛化边界）：同一规则的多条 held-out 须用**异 base 变量**（Pow(x,2)+Pow(y,3)
+#      非 Pow(x,2)+Pow(x,3)）·否则反统一抽不出 base 为 PARAM·规则过窄学不到通则。
+#   5. 规则名全局唯一（跨 transform_rules / inverse_relations·register_transform_rule 冲突 fail-loud）。
+#
+# 教师职责 level 2（教师陈述模板·humans 学法·非硬编码——规则是数据·code 是通用 register/apply/cross-verify 机制）。
+# verify_source=SELF_PRODUCED（single-source 自产自验·不准驱动停止·反 theater）。stable≠correct（#479 守）。
+
+# ===== S5 符号变换（重排·结构变换·输出同构可自归纳·此处教师陈述范式）=====
+
+# 加法交换律 a+b → b+a
+comm_add	lambda x,y: x+y	lambda x,y: y+x	lambda p,q: p+q=>lambda p,q: q+p;lambda m,n: m+n=>lambda m,n: n+m
+
+# 乘法交换律 a*b → b*a
+comm_mul	lambda x,y: x*y	lambda x,y: y*x	lambda p,q: p*q=>lambda p,q: q*p
+
+# 加法结合律 (a+b)+c → a+(b+c)
+assoc_add	lambda x,y,z: (x+y)+z	lambda x,y,z: x+(y+z)	lambda p,q,r: (p+q)+r=>lambda p,q,r: p+(q+r)
+
+# 分配律 a*(b+c) → a*b+a*c（两条异 base held-out·多样性铁律）
+distrib	lambda x,y,z: x*(y+z)	lambda x,y,z: x*y+x*z	lambda p,q,r: p*(q+r)=>lambda p,q,r: p*q+p*r;lambda u,v,w: u*(v+w)=>lambda u,v,w: u*v+u*w
+
+# 加法恒等 a+0 → a（化简·IR8 范式）
+ident_add	lambda x: x+0	lambda x: x	lambda p: p+0=>lambda p: p
+
+# 乘法恒等 a*1 → a（化简）
+ident_mul	lambda x: x*1	lambda x: x	lambda p: p*1=>lambda p: p
+
+# ===== S6 微积分（教师陈述·须 Pow pattern + 部分求值 _eval_rhs·d/dx 幂规则）=====
+
+# 幂函数求导 d/dx Pow(b,n) = n*Pow(b,n-1)（三条异 base+异指数 held-out·多样性铁律）
+ddx_pow	lambda b,n: Pow(b,n)	lambda b,n: n*Pow(b,n-1)	lambda x: Pow(x,2)=>lambda x: 2*x;lambda y: Pow(y,3)=>lambda y: 3*y*y;lambda z: Pow(z,4)=>lambda z: 4*z*z*z
+
+# 常数求导 d/dx c = 0（常数规则）
+ddx_const	lambda c: c	lambda c: 0	lambda p: 7=>lambda p: 0;lambda q: 3=>lambda q: 0
+
+# ===== S7 超越函数（DEFER·诚实边界）=====
+# 当前 DSL 无 sin/cos/exp/log 符号原语（Call 仅 Sigma/Prod/Recur/Pow/已注册算子·未知 Call→UnsupportedConstruct）。
+# 超越恒等式（sin²+cos²=1）须先扩展 DSL 加超越符号原语（pattern-level·同 Pow 范式）·defer 机制扩展。
+# 超越数值（sin(0.3)）= 有限精度级数（humans 同此·无穷精度真墙）·须级数展开机制·defer。
+# 本样本不含 S7 规则（避免 build 失败）·待 DSL 超越原语扩展后补。

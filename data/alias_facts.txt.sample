@@ -1,0 +1,34 @@
+# alias facts 样例（跨语言 / 同义 PURE_ALIAS 桥导出格式·每行 "surface_a lang_a surface_b lang_b"·
+# 两 surface 指同一抽象概念（等价类）·loader 映射 lang 码 en→LANG_EN=2 / zh→LANG_ZH=1·types.py:35-36）。
+#
+# **非 core 数据**（守「不写死」铁律·同 is_a_facts_zh.txt.sample / sense_facts_zh.txt.sample）：
+#   - core 代码（pure_integer_ai/ 包）永不 import 此文件·core 不知 pair 内容·loader（collection.resolve_alias_facts）
+#     是 pluggable 数据摄入（同 LocalDirSource 范式·§7.3 接口归系统）。
+#   - 生产 default 无此文件（PURE_INTEGER_AI_LOCAL_DIR 未设/文件不存在）→ resolve 返 [] → boot 零副作用 → bit-identical
+#     （bootstrap_alias_edges 空 pairs 首行短路·绝不调 ensure/set_mark/build_refers_stable_edge）。
+#   - alias facts 是外部跨语言词典 / Wikidata QID 翻译等价（来源① 结构化·EPI_STRUCTURED·非系统教师判断·
+#     非语义规则·类比 ConceptNet IsA）。
+#
+# 使用：用户把跨语言同义词典 / Wikidata dump 翻译等价对导出为此格式·放 $PURE_INTEGER_AI_LOCAL_DIR/alias_facts.txt
+# （**单一跨 lang 文件·无 lang 后缀**·镜像 struct_bind_pairs.txt 范式·aliases 横跨语言不属某 lang）。
+# formal_train boot 段（CAUSES 块后）读此文件→bootstrap_alias_edges 建 (a,b) 两 NODE_WORD + 各自 MARK_LANG
+# + 双向 REFERS_TO PURE_ALIAS 边（§3.1/§7.4 "苹果/apple 同节点"=等价类非同 local_id·铁律"永不合并节点"）。
+# 生成侧 activate_candidates(ref) 返全等价词形（含 self·PURE_ALIAS-gated 自包含）→dispatch_slot 按 target_lang
+# + MARK_LANG 选对词形（ZH 目标选苹果/EN 目标选 apple）→surface_of 产真字（P0a correspondence）。
+#
+# **身份模型**（Model A·铁律合规）：apple/苹果 各自 NODE_WORD（各携自己码点 correspondence + MARK_LANG）·
+# 双向 PURE_ALIAS 边连·REFERS_TO 等价类合一。**非** Model C（同 local_id·违"永不合并节点"铁律·不取）。
+#
+# 诚实边界：alias 真伪/覆盖度 = 外部数据责任（接地墙·#479 教师定义权·系统不判翻译对错·只落 PURE_ALIAS 边）。
+# 此样例仅供 dev/示意·生产用户自备 Wikidata/翻译词典导出。
+
+# 跨语言（EN↔ZH·典型翻译等价）
+apple	en	苹果	zh
+cat	en	猫	zh
+book	en	书	zh
+
+# 同语言别名（同义/别称·性质A 稳定定义同指·李白↔李太白纯任意能指）
+李白	zh	李太白	zh
+北京	zh	北平	zh
+
+# 注释行 / 空行 / 格式错行（<4 段）/ 未知 lang 码 / 自环（a==b）全 skip + 不抛崩（E5 graceful）

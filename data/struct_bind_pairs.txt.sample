@@ -1,0 +1,36 @@
+# STRUCT_BIND 跨模态绑定对样例（教师标注 discover 录制格式·每行 "name_a name_b a:b c:d ..."·#478·§8.7-P2）
+#
+# **非 core 数据**（守「不写死」铁律·同 is_a_facts/sense_facts）：
+#   - core 代码（pure_integer_ai/ 包）永不 import 此文件·core 不知 pair 内容·loader（collection.resolve_struct_bind_pairs）
+#     是 pluggable 数据摄入（同 LocalDirSource 范式·§7.3 接口归系统）。
+#   - 生产 default 无此文件（PURE_INTEGER_AI_LOCAL_DIR 未设/文件不存在）→ resolve 返 [] → boot 零副作用 → bit-identical。
+#   - STRUCT_BIND pairs 是外部教师标注（来源 a 结构化源①·§8.1c 合规·类比 ConceptNet IsA）·非系统教师判断·
+#     非语义规则·绑定真伪/对齐质量=外部数据责任（接地墙·#479·来源 b 跨模态结构对齐 defer）。
+#
+# 格式（doc/重来_任务0478_STRUCT_BIND_设计.md 决断 2 + 决断 4）：
+#   每行：name_a name_b slot_map
+#     name_a / name_b = 模态A / 模态B skeleton 注册名（DiscoveredOperator.name = `__op_disc_{h63}`·hash·
+#                       非人类可读·须由 discover 录制产出·非手写）。
+#     slot_map        = 空格分隔的 "a:b" 位序对（A 槽 a ↔ B 槽 b·按位序·非按 role 名增耦合）。
+#   "#" 注释行 skip·空行 skip·格式错行（<3 段）skip·slot 对解析失败 skip 该对（E5 graceful·不抛崩）。
+#
+# 使用：教师/discover 录制器把跨模态骨架配对导出为此格式·放 $PURE_INTEGER_AI_LOCAL_DIR/struct_bind_pairs.txt。
+# formal_train boot 段（lang discover 后·两模态 skeleton ref 就位·参照刀0 IS_A 范式）读此文件→
+# 经 discovered_operators 索引解析 name→skeleton_ref + collect_skeleton_slot_refs 解析 slot ref →
+# bootstrap_struct_bind_edges 建 EDGE_STRUCT_BIND 槽位级边（from=A 槽 ref·to=B 槽 ref·order_index=槽序）。
+# 消费侧 generate reader 落 #730（读 STRUCT_BIND 填语言槽·反 theater 锚闭环·解⑤长代码 NE）。
+#
+# **非 lang-keyed 单文件**（与 is_a_facts_{zh,en}.txt 异）：STRUCT_BIND 跨模态绑定横跨模态不属某 lang·
+# 单一 struct_bind_pairs.txt（无 lang 后缀）。
+#
+# 诚实边界：
+#   - stable≠correct：slot_map 位序是**结构对齐**非**语义绑定**（跨模态指称锚=接地墙·#479）·
+#     来源 b 跨模态结构对齐（coverage_overlap shape 对齐）defer（对齐位无指称锚·须来源 a 教师标注锚定）。
+#   - 边 theater 形态 2：#478 落地建边 live·但消费 reader 落 #730·落地瞬态=形态 2 theater（诚实标）·
+#     #730 跟进后合法（反 theater 锚·对照 SPATIAL_ADJ I1 范式）。
+#   - name 真伪/对齐=外部教师责任·系统不判·只落槽位绑定边。
+#
+# 此样例仅供 dev/示意（占位 hash name 非真实 discover 产物·长度仅示意·真实 DiscoveredOperator.name
+# = `__op_disc_{h63}`·h63 = 63-bit hash·hex 表示至多 16 字符·由 discover 录制器产出·非手写）·生产教师/discover 录制器自备。
+# 占位示例：bind 某 arith add 骨架（2 槽）↔ 某 lang "相加"骨架（2 槽）·slot 0↔0 / 1↔1。
+__op_disc_6575600255134327604 __op_disc_7725092591093092863 0:0 1:1

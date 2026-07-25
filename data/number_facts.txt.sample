@@ -1,0 +1,41 @@
+# number_facts.txt — 数字词接地（language-grounding piece 1·语言→算数 桥的数据源·doc/重来_语言通用接地 §七）
+#
+# 格式：surface <TAB> lang <TAB> value
+#   surface : 数字词词形（中文 一/二/三/.../十/十一/十二/...·EN one/two/.../ten/eleven/...）
+#   lang    : en / zh（经 _NUMBER_LANG_CODE 映射 LANG_EN/LANG_ZH·未知码 skip）
+#   value   : 接地整数（纯整数·arithmetic 真值·record_numeric 挂 CORR_NUMERIC）
+#
+# **非 core 数据**（守「不写死」·同 alias_facts/sense_facts）：core 永不 import·loader pluggable·
+# 生产 default 无文件 → resolve_number_facts 返 [] → bootstrap 零副作用 → bit-identical。
+# 真值责任 = 外部数据（接地墙·#479 教师定义权）·系统不判数字词义·只落图边 + 值。
+#
+# bootstrap（number_grounding.bootstrap_number_grounding）：每行 → ensure 整数概念 __int_{value}
+# （NODE_CONCEPT·跨词/lang dedup）+ record_numeric(value) + ensure 词形 NODE_WORD + MARK_LANG +
+# 双向 PURE_ALIAS 边（词↔整数概念·**关联在图中**·镜像 apple↔苹果）。
+#
+# 覆盖：中文 零..十 + 十一/十二（位值组合示意）·EN zero..ten。生产扩到 百/千 + higher（外部数据）。
+# 诚实边界：这是**数据接地**（table·非学习）·可学接地（从例证学 三↔3）= piece 3 defer（#479 墙）。
+零	zh	0
+一	zh	1
+二	zh	2
+三	zh	3
+四	zh	4
+五	zh	5
+六	zh	6
+七	zh	7
+八	zh	8
+九	zh	9
+十	zh	10
+十一	zh	11
+十二	zh	12
+zero	en	0
+one	en	1
+two	en	2
+three	en	3
+four	en	4
+five	en	5
+six	en	6
+seven	en	7
+eight	en	8
+nine	en	9
+ten	en	10

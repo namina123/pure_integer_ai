@@ -1,0 +1,30 @@
+# sense facts 样例（多义词词典导出格式·每行 "word sense1 sense2 ..."·首段=多义 token surface·其余=sense surfaces）
+#
+# **非 core 数据**（守「不写死」铁律·同 is_a_facts_zh.txt.sample）：
+#   - core 代码（pure_integer_ai/ 包）永不 import 此文件·core 不知 pair 内容·loader（collection.resolve_sense_facts）
+#     是 pluggable 数据摄入（同 LocalDirSource 范式·§7.3 接口归系统）。
+#   - 生产 default 无此文件（PURE_INTEGER_AI_LOCAL_DIR 未设/文件不存在）→ resolve 返 [] → boot 零副作用 → bit-identical
+#     （bootstrap_sense_candidates 空 pairs 首行短路·退化链 5 步）。
+#   - sense facts 是外部多义词典（来源① 结构化·EPI_STRUCTURED·非系统教师判断·非语义规则·类比 ConceptNet IsA）。
+#
+# 使用：用户把多义词词典 / WordNet synset 导出为此格式·放 $PURE_INTEGER_AI_LOCAL_DIR/sense_facts_zh.txt。
+# formal_train boot 段（make_train_context 后·IS_A 循环后·lang 发现前）读此文件→bootstrap_sense_candidates
+# 种 (word→[senses]) base_count=1→observe 写 sc_tn→理解侧 recognize clone 逐 sense 试骨架对齐（IS_A 共祖
+# 结构选优·"老鼠"命中"动物老鼠"不命中"鼠标"·非语义消歧·#479 墙不破）。
+#
+# **key 设计**（解 N10）：sense_candidates 表 key=surface_hash（非 ConceptRef）·两 sense 用不同 surface
+# ensure（"动物老鼠"/"鼠标"）得不同 ref。同 surface ensure 同 ref（content_hash dedup）·两 sense 不能同 ref。
+# 自环 sense（sense==word）loader 早跳（同 surface 同 ref·非 sense 候选）。
+#
+# 诚实边界：sense 真伪/覆盖度 = 外部数据责任（接地墙·#479 教师定义权·系统不判真消歧·只落候选台账·
+# 结构选优 stable≠correct）。此样例仅供 dev/示意·生产用户自备 WordNet/自建多义词典导出。
+
+# 动物/物品多义（"老鼠"动物 vs 鼠标·"苹果"水果 vs 公司·典型 polysemy）
+老鼠 动物老鼠 鼠标
+苹果 水果苹果 公司苹果
+蝙蝠 动物蝙蝠 运动蝙蝠
+
+# 动作多义（"打"击打 vs 打电话 vs 打架·动词多义）
+打 击打 打电话 打架
+
+# 注释行 / 空行 / 格式错行（<2 段）/ 自环 sense 全 skip + 不抛崩（E5 graceful）

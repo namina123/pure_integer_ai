@@ -1,0 +1,28 @@
+# 逆关系语料样例（S8 符号间运算关联·doc/重来_S8符号间关联机制设计_2026-07-15 + doc/重来_阶段断奶路线详设_2026-07-15 §三 S8）。
+# 生产激活：拷贝本文件为 inverse_relations.txt 放 PURE_INTEGER_AI_LOCAL_DIR 目录（CI default 无文件→loader 返 []→bit-identical）。
+# 格式（**TAB 分隔**·8 字段）：
+#   relation_name <TAB> a_name <TAB> a_lhs <TAB> a_rhs <TAB> b_name <TAB> b_lhs <TAB> b_rhs <TAB> samples
+#   samples：分号 ; 分隔的采样输入 lambda（B∘A 须还原这些 @ 探针·arity≤6·小素数采样）。
+#
+# ★ DSL 铁律（同 transform_rules.txt.sample 头注·违者 skip）：
+#   1. lambda 参数禁用 i/a · 2. a_lhs/a_rhs 与 b_lhs/b_rhs 各自同参同序 · 3. 仅 +-*/ Pow Sigma/Prod/Recur ·
+#   4. **div 用 /（精确有理除）非 //** → B∘A 精确还原（如 (x*2)/2 == x·rational 精确）·
+#   5. 规则名（a_name/b_name）全局唯一跨两文件（register_transform_rule 冲突 fail-loud·共享 rule_name 跨关系幂等 IR9）。
+#
+# 每条 = 两条独立变换规则 A↔B + 构造验证 B∘A=identity @ 采样（三值 True/False/None·反 theater 心脏）。
+# verify_source=SELF_PRODUCED（两规则 single-source 教师·self-consistency·非 R6 两源·守"全自产不准停"）。
+# 诚实边界：逆验证=统计非证明（6 探针≠数学逆·#479）·可复合约束（B LHS 须匹配 A 输出 shape）·d/dx↔∫ 多数 can't-verify defer。
+
+# 加倍 ↔ 减半（×2 / ÷2·B∘A=(e*2)/2=e·精确有理还原·IR2 旗舰）
+double_halve_inv	double	lambda x: x	lambda x: x*2	halve	lambda x: x	lambda x: x/2	lambda x: x+3;lambda x: x*5;lambda x: x-7
+
+# 加一 ↔ 减一（+1 / -1·B∘A=(e+1)-1=e）
+addsub_one_inv	add1	lambda x: x	lambda x: x+1	sub1	lambda x: x	lambda x: x-1	lambda x: x+3;lambda x: x*5
+
+# ×3 ↔ ÷3（B∘A=(e*3)/3=e·精确有理·异形 sample 防过窄）
+muldiv_three_inv	mul3	lambda x: x	lambda x: x*3	div3	lambda x: x	lambda x: x/3	lambda x: x+4;lambda x: x*5
+
+# ===== DEFER（诚实边界·本样本不含）=====
+# d/dx↔∫ 逆：apply_transform 总 lower Pow（concrete 指数→MUL）→ ∫ 的 LHS Pow(b,n) 不匹配 d/dx 输出（已 lower 成 MUL）
+#   → 多数 can't-verify(None)·诚实降级非 bug·须 ∫ LHS 设计匹配 d/dx 输出 shape（defer 机制扩展·doc §诚实边界 3）。
+# 链式法则 COMPOSITION（A∘B→C 派生新规则）：Phase 2 defer（独立派生机制·非 Phase 1 INVERSE）。

@@ -16,6 +16,10 @@ Thank you for your interest in PIDSLCA. Reproducible bug reports, design discuss
 3. State the current behavior, expected behavior, verification performed, and known coverage gaps.
 4. Do not present controlled-fixture results as proof of general capability, semantic correctness, or production readiness.
 
+贡献者不需要签署单独协议或转让权利。提交到本仓库的贡献按仓库现行 MIT License 提供；请只提交你有权公开的内容。
+
+Contributors do not need to sign a separate agreement or assign rights. Contributions submitted to this repository are provided under its current MIT License; submit only material you have the right to publish.
+
 ## 代码约束 / Code requirements
 
 - 保持纯整数核心、确定性执行、只追加审计和单向依赖约束。
@@ -30,14 +34,14 @@ Thank you for your interest in PIDSLCA. Reproducible bug reports, design discuss
 
 ## 本地检查 / Local checks
 
-从仓库根目录运行源码编译，再从父目录运行包守卫：
+从仓库根目录安装测试依赖并运行守卫与完整测试：
 
-Run source compilation from the repository root, then run package guards from its parent directory:
+Install test dependencies and run the guards and full suite from the repository root:
 
 ```bash
-python -m compileall -q .
-cd ..
+python -m pip install -e ".[test]"
 python -m pure_integer_ai.crosscut.guards.lint
+python -m pytest -q
 ```
 
 提交 Pull Request 时，请在说明中列出实际执行的检查。若未能运行某项检查，请明确说明原因。

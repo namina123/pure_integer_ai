@@ -1,0 +1,46 @@
+# MEREOLOGY facts 样例（ConceptNet PartOf / WordNet meronym 有向三元组导出格式·每行 "part whole"·首段 part 末段 whole·中段忽略）
+#
+# **MEREOLOGY ≠ IS_A**（部分-整体 ≠ 子集·语义正交）：
+#   - IS_A = proper subset（child⊂parent·"狗 是一种 动物"·狗是一种动物）→ is_a_facts
+#   - MEREOLOGY = part-of（part part-of whole·"车轮 是 汽车 的一部分"·车轮不是一种汽车）→ 本文件
+#   解 cue_words 首版 REL_MEREOLOGY 误路由入 IS_A_CUE（部分-整体被建成 IsA 边=语义误路由）·
+#   本文件 + EDGE_MEREOLOGY=25 + 路由修正（REL_MEREOLOGY→MEREOLOGY_CUE）独立单列·T-L1d 客观序 gap 补。
+#
+# **非 core 数据**（守「不写死」铁律·同 is_a_facts_zh.txt.sample）：
+#   - core 代码（pure_integer_ai/ 包）永不 import 此文件·core 不知 pair 内容·loader（collection.resolve_mereology_facts）
+#     是 pluggable 数据摄入·生产 default 无此文件（PURE_INTEGER_AI_LOCAL_DIR 未设/文件不存在）→ resolve 返 [] →
+#     boot 零副作用 → bit-identical。
+#   - mereology facts 文件是外部部分-整体断言数据（ConceptNet PartOf 客观断言·来源① EPI_STRUCTURED·非系统教师判断）。
+#
+# 使用：用户把 ConceptNet PartOf / WordNet meronym 三元组 / 自建本体导出为此格式·放 $PURE_INTEGER_AI_LOCAL_DIR/mereology_facts_zh.txt。
+# formal_train boot 段读此文件→bootstrap_mereology_edges 建 EDGE_MEREOLOGY 边（part→whole 有向·静态 base_strength·不接 reward）。
+# EN 同理 mereology_facts_en.txt（part whole·如 wheel car / finger hand / page book）。
+#
+# 诚实边界：文件真伪/质量 = 外部数据责任（接地墙）·系统不判·只落边。
+# 此样例仅供 dev/示意·生产用户自备 ConceptNet PartOf 导出。mereology 传递闭包 defer（closure 首版仅 EDGE_IS_A）。
+
+# 交通工具 部分-整体
+车轮 汽车
+方向盘 汽车
+发动机 汽车
+机翼 飞机
+船帆 帆船
+
+# 人体 部分-整体
+手指 手
+手臂 身体
+叶子 树
+树枝 树
+根 树
+
+# 建筑/物件 部分-整体
+页 书
+章节 书
+屋顶 房子
+墙 房子
+门 房子
+
+# 地理 部分-整体
+城市 国家
+省份 国家
+房间 建筑

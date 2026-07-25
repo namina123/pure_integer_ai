@@ -1,0 +1,54 @@
+# ANTONYM facts sample (ConceptNet /r/Antonym / WordNet export format, one pair per line "a b", symmetric, a<->b)
+#
+# **ANTONYM ~ EDGE_SIMILAR symmetric shape, distinct from SIMILAR semantics**:
+#   - SIMILAR = similar (big ~ tall, X like Y) -> similar_facts / EDGE_SIMILAR
+#   - ANTONYM = opposite (big <-> small, hot <-> cold, concept<->concept 1st-order) -> this file
+#   **not verify_inverse**: algebraic inverse = transform<->transform (d/dx<->int, +<->-, T-L4,
+#   verify_inverse verifies B.compose(A)=identity, math transforms only); language antonym =
+#   concept<->concept (verify_inverse returns None can't-verify for word pairs, #479 external seed).
+#
+# **symmetric storage**: unordered symmetric pair (a<->b, once per pair, canonical order a<=b),
+# bootstrap_antonym_edges builds single edge a->b; reader (pending wiring, mirrors similar_candidates
+# out_edges+in_edges bidirectional query) yields a<->b closure. Unlike alias explicit bidirectional.
+#
+# **not core data** (iron law "no hardcode", same as antonym_facts_zh.txt.sample):
+#   - core code (pure_integer_ai/ package) never imports this file, core does not know pair contents,
+#     loader (collection.resolve_antonym_facts) is pluggable data ingestion; production default has no
+#     this file (PURE_INTEGER_AI_LOCAL_DIR unset/file absent) -> resolve returns [] -> boot zero side effects
+#     -> bit-identical.
+#   - antonym facts file is external antonym pairs (ConceptNet/WordNet objective assertions,
+#     source (1) EPI_STRUCTURED, not system teacher judgment, #479).
+#
+# Usage: user exports ConceptNet /r/Antonym or WordNet antonym to this format,
+# place at $PURE_INTEGER_AI_LOCAL_DIR/antonym_facts_en.txt.
+# formal_train boot reads this -> bootstrap_antonym_edges builds EDGE_ANTONYM (a->b single,
+# static strength=1, not reward-connected).
+#
+# Honest boundary: file truth/quality = external data responsibility (grounding wall, #479);
+# system does not judge, only seeds edges. Not verify_inverse (language antonym != algebraic inverse).
+# This sample is dev/illustration only; production user supplies ConceptNet/WordNet export.
+
+# adjective opposition (degree/temperature/size)
+big small
+long short
+tall short
+hot cold
+light dark
+deep shallow
+thick thin
+wide narrow
+
+# direction / state opposition
+up down
+left right
+front back
+open close
+alive dead
+true false
+win lose
+
+# emotion / value opposition
+love hate
+good bad
+beautiful ugly
+reward punish

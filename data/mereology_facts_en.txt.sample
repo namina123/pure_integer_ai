@@ -1,0 +1,45 @@
+# MEREOLOGY facts sample (ConceptNet /r/PartOf / WordNet meronym export, one pair per line "part whole",
+# directional part->whole, source is part, target is whole)
+#
+# **MEREOLOGY != IS_A** (part-whole != subset): part-of is meronymic (wheel part-of car), distinct from
+# child->parent subset IS_A (dog is-a mammal). EDGE_MEREOLOGY=25 typed edge, orthogonal to EDGE_IS_A,
+# static base strength, not reward-connected / not in PR adjacency / dag_path doesn't traverse /
+# closure doesn't close (mirrors EDGE_IS_A structural-edge discipline).
+#
+# **directional**: part in front, whole at end (ConceptNet PartOf = part TAB whole, clean export).
+# load_mereology_facts_file takes parts[0]=part / parts[-1]=whole. bootstrap_mereology_edges builds
+# EDGE_MEREOLOGY part->whole directed edge. Self-loop (part==whole) skipped.
+# Closure defer (mereology transitive closure part-of transitivity needs independent design; closure
+# first version EDGE_IS_A only).
+#
+# **not core data** (iron law "no hardcode", same as antonym/is_a facts):
+#   - core code never imports this file, core doesn't know pair contents; loader
+#     (collection.resolve_mereology_facts) is pluggable; production default no file -> resolve [] ->
+#     boot zero side effects -> bit-identical.
+#   - mereology facts is external part-whole assertions (ConceptNet PartOf objective, source (1)
+#     EPI_STRUCTURED, not teacher judgment, #479).
+#
+# Usage: user exports ConceptNet /r/PartOf to this format, place at $PURE_INTEGER_AI_LOCAL_DIR/mereology_facts_en.txt.
+# formal_train boot reads this -> bootstrap_mereology_edges builds EDGE_MEREOLOGY (part->whole, static).
+#
+# Honest boundary: file truth/quality = external data responsibility (grounding wall, #479); system
+# does not judge, only seeds edges. This sample is dev/illustration only; production user supplies
+# ConceptNet/WordNet export.
+
+# physical part-whole
+wheel car
+engine car
+finger hand
+toe foot
+branch tree
+leaf tree
+page book
+room house
+door house
+leg table
+
+# functional part-whole
+key keyboard
+screen laptop
+wheel bicycle
+hand clock

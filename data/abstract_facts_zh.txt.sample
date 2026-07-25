@@ -1,0 +1,33 @@
+# ABSTRACT→IS_A facts 样例（每行 "child parent"·specific→general 泛化·抽象=IS_A·loader 复用 is_a 格式）。
+# zh 生产源 = ChineseSemanticKB 抽象关系库（liuhuanyong·specific,抽象,general→child parent·source=SOURCE_CHINESE_KB·#1133）·
+#   en 生产源 = ConceptNet /r/IsA（source=SOURCE_CONCEPTNET·走 is_a_facts·刀0 boot·非本文件）。
+#
+# **抽象 = IS_A 泛化（proper subset）·系统从始至今核心·非新 edge 类型**（#1133 纠偏·撤回初版 EDGE_ABSTRACT）：
+#   - abstraction.py（build_isa_ancestor_map/LCA common_is_a_ancestor/set_lca·激活 closure 引擎）+ EDGE_IS_A=10 +
+#     bootstrap_is_a_edges（source 可传）全在。抽象关系库 = IS_A 泛化数据·喂既有机制 enrich 抽象层。
+#   - 撤回初版「抽象≠IS_A·类 mereology 误路由」错误类比（mereology 部分-整体确实≠IS_A·但泛化/上位=IS_A 定义）。
+#
+# **异 ConceptNet is_a_facts 的 provenance**：本文件源 = SOURCE_CHINESE_KB（异 ConceptNet is_a_facts 的 SOURCE_CONCEPTNET）·
+#   build_isa_ancestor_map_external 刀C 验证 filter source=SOURCE_CONCEPTNET → abstract IS_A 边不污染该验证图（MED-1 式防御）。
+#
+# **非 core 数据**（守「不写死」铁律·同 is_a_facts_zh.txt.sample）：
+#   - core 代码永不 import 此文件·loader（collection.resolve_abstract_facts·复用 load_is_a_facts_file）pluggable·
+#     生产 default 无此文件 → resolve 返 [] → boot 零副作用 → bit-identical。
+#   - abstract facts = 外部泛化断言（ChineseSemanticKB 客观·来源① EPI_STRUCTURED·非系统教师判断·#479）。
+#
+# 使用：用户把 ChineseSemanticKB 抽象关系库导出为 `child parent` 格式·放 $PURE_INTEGER_AI_LOCAL_DIR/abstract_facts_zh.txt。
+# formal_train boot 段读此文件→bootstrap_is_a_edges(source=SOURCE_CHINESE_KB) 建 EDGE_IS_A 边（child→parent·静态测度）。
+#
+# 诚实边界：泛化真伪 = 外部数据责任（接地墙·#479）·IS_A 非证明（proper subset 结构断言）。此样例仅供 dev/示意。
+
+# 实体/类别泛化（specific IS_A general）
+苹果 水果
+猫 动物
+玫瑰 花
+北京大学 大学
+面 食物
+
+# 事件泛化（specific→general）
+人民币贬值 货币贬值
+跑步 运动
+地震 灾害
