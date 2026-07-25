@@ -19,10 +19,9 @@ surface polarity 承载 P0.3 done `_1_0` 后缀·不需要 ATTR_NEGATION marker�
 **abstract_mark 迁移目标登记**（TYPE_ATTR_MARKER canonical·D6 §一 abstract_mark MARK_MODALITY/LANG/DOMAIN
 全是先天分类该挂符号域却挂抽象空间·迁移目标登记于此·迁移本身 defer·disrupt 抽象空间消费者非 gating）。
 
-**激活**（2026-07-11 #940 否定词 D:11 readback）：ensure_symbol_types 有消费者 bootstrap_negation_signals
-（formal_train boot 调·镜像 ensure_operator_primitives/ensure_modal_primitives）·建 __TYPE_NEGATION__ concept
-+ ATTR_SYMBOL_TYPE=17 作否定词 D:11 readback target。readback 由 gate NEGATION_D11_READBACK_MODE 守
-（OFF 退化 frozenset is_negation_cue 第一源·bit-identical·D:11 边种但 readback 不读·同 operator/modal 范式）。
+**迁移兼容**：ensure_symbol_types 仍被 bootstrap_negation_signals 消费并建立旧 D:11 target，
+但 U-04 正式否定 reader 已改为来源化语言信号图主读。D:11 与 Python 词表只在显式
+compatibility 开启且图无候选时读取，不得计 readiness。
 **否定=符号域先天**（D6·¬ = TYPE_NEGATION 先天·非抽象空间）·故 ensure 只挂 ATTR_SYMBOL_TYPE·不挂 abstract_mark
 （同 operator_primitives·异 modal_primitives 双挂 ATTR+MARK）。
 
@@ -86,9 +85,8 @@ def ensure_symbol_types(concept_index, backend: StorageBackend, *,
 
     无条件 ensure 消费者需要的（元定义层常驻·类 REL_*）。
 
-    **已激活**（#940 否定词 D:11 readback）：本函数被 bootstrap_negation_signals 消费（formal_train boot
-    调·镜像 ensure_operator_primitives/ensure_modal_primitives）。readback 由 gate NEGATION_D11_READBACK_MODE
-    守（OFF 退化 frozenset is_negation_cue 第一源·bit-identical·D:11 边种但 readback 不读·同 operator/modal 范式）。
+    本函数仍被 bootstrap_negation_signals 用于迁移期 D:11 数据，但正式否定 reader
+    只有在图无候选且 compatibility 开启时才回退到这条旧路径。
 
     backend 显式传（镜像 ensure_relation_primitives 接 concept_index+backend 范式·record_composes_attr
     需 backend·不触 ConceptIndex 私有 _b）。
@@ -106,8 +104,7 @@ def ensure_symbol_types(concept_index, backend: StorageBackend, *,
 
 # ---- 元定义层种子词（lang → frozenset·镜像 cue_words._NEGATION_CUES·D:11 boot 种子·#940） ----
 # closed-class 否定词核心（不/没/非/无 + not/no/never）·D6·开放变体（未必/绝非/谈不上/休想 穷举不尽）走 D:11 教师晋升。
-# 与 cue_words._NEGATION_CUES 重叠是自然——_NEGATION_CUES=cue 检测第一源（frozenset·返 bool）·
-# _NEGATION_LEXICAL_CUE=D:11 boot 种子（第二源·建 word→__TYPE_NEGATION__ D:11 边·readback 返 bool）·加二源非替换。
+# 与 cue_words._NEGATION_CUES 重叠仅为迁移兼容：前者供 Python 回退，后者建立旧 D:11 回退。
 _NEGATION_LEXICAL_CUE: dict[int, frozenset[str]] = {
     LANG_ZH: frozenset({"不", "没", "非", "无"}),
     LANG_EN: frozenset({"not", "no", "never"}),

@@ -75,24 +75,26 @@ def _has_value_claim(segments: list[Segment]) -> bool:
     return False
 
 
-# ---- W7+B-PR1 动作意图命令判定（doc §16·命令词 OR 动作词·复用 cue_words.is_action_intent_cue 两源） ----
+# ---- W7+B-PR1 动作意图命令判定（U-04 图主读，旧词表/D:11 仅兼容） ----
 # 命令判定 = 任一 token 命中动作意图词（命令词 帮我/请→COMMAND_MOOD + 动作词 生成/计算→ACTION_*）。
-# 复用 cue_words.is_action_intent_cue（frozenset 第一源 action_primitives._ACTION_LEXICAL_CUE + D:11 readback 第二源·
-#   镜像 is_negation_cue #940 两源范式·gate ACTION_D11_READBACK_MODE）·不本地存词表（解命令词/动作词穷举不尽·开放变体走 D:11）。
-# **doc §16.1 推翻 §15.1 纠正③**：命令词走 D:11（非"不走 D:11"）·命令 mood 概念先天·命令词 alias 开放·D:11 学。
+# 复用 cue_words.is_action_intent_cue；来源化图是主 reader，旧字面与 D:11 只作兼容回退。
 
 
 def _has_action_intent(segments: list[Segment], *,
                        backend=None, edge_store=None,
-                       space_id: int | None = None, concept_index=None) -> bool:
+                       space_id: int | None = None, concept_index=None,
+                       language_signal_runtime=None,
+                       action_instruction_bindings: tuple[
+                           tuple[tuple[int, ...], int], ...] = (),
+                       language_signal_compatibility_enabled: bool = True) -> bool:
     """W7+B-PR1：输入 segments 含动作意图词（命令词 OR 动作词）→ type=INTENT_COMMAND（doc §16）。
 
     扫 segment.tokens·任意 token 命中 is_action_intent_cue→True。命令词（帮我/请·祈使引导词）+ 动作词
     （生成/计算·B-PR1 ACTION_*）都判命令（doc §16.4·一条命令 = 祈使 mood OR 动作内容·覆盖引导词祈使 + 有动作词裸祈使）。
 
     gate INTENT_COMMAND_MODE OFF → 返 False（守 bit-identical·type 永 QUESTION）。
-    is_action_intent_cue 两源：frozenset（gate OFF 基底）+ D:11 readback（gate ACTION_D11_READBACK_MODE·需 backend 等参数）。
-    backend 等参数 None → is_action_intent_cue 退化 frozenset（不读 D:11）。
+    注入 runtime 后由图指令和 action kind 绑定裁决；图冲突或未绑定直接为假。
+    未注入 runtime 时保留既有字面/D:11 兼容行为。
 
     诚实边界：纯句式祈使（去开门·无引导词无动作词）→ 漏判 QUESTION → 无回写 → 泛化 defer B-PR2 experience_count 扩散（§13.8）。
     误判代价当前为零（COMMAND=QUESTION dag_path:302 行为同）·B-PR2 落地后缓解=D3 三重防巧合。
@@ -103,7 +105,12 @@ def _has_action_intent(segments: list[Segment], *,
     for seg in segments:
         for tok in seg.tokens:
             if is_action_intent_cue(tok, seg.lang, backend=backend, edge_store=edge_store,
-                                    space_id=space_id, concept_index=concept_index):
+                                    space_id=space_id, concept_index=concept_index,
+                                    language_signal_runtime=language_signal_runtime,
+                                    action_instruction_bindings=(
+                                        action_instruction_bindings),
+                                    language_signal_compatibility_enabled=(
+                                        language_signal_compatibility_enabled)):
                 return True
     return False
 
@@ -111,7 +118,11 @@ def _has_action_intent(segments: list[Segment], *,
 def classify_intent(sink: ConceptRef | None,
                     segments: list[Segment], *,
                     backend=None, edge_store=None,
-                    space_id: int | None = None, concept_index=None) -> IntentType:
+                    space_id: int | None = None, concept_index=None,
+                    language_signal_runtime=None,
+                    action_instruction_bindings: tuple[
+                        tuple[tuple[int, ...], int], ...] = (),
+                    language_signal_compatibility_enabled: bool = True) -> IntentType:
     """M1片2：reward 阶段 + H2 标定共用·替换两处 ``IntentType(INTENT_QUESTION)`` 硬编码。
 
     **签名无 item**（审2 A 硬破口修）：CollectedItem 在 experiments（L8）·本模块在
@@ -123,8 +134,8 @@ def classify_intent(sink: ConceptRef | None,
       type   = INTENT_QUESTION 默认 / INTENT_COMMAND（W7+B-PR1·doc §16：子 gate INTENT_COMMAND_MODE ON 且
                _has_action_intent 命中动作意图词 命令词 帮我/请 OR 动作词 生成/计算。dag_path.py:302 早已
                tuple 含 COMMAND·Q/C 等价合法终止态·非 STATEMENT(3)→DEAD_END·故 COMMAND 不违终止态闸·零终止态差异）
-      **可选 backend/edge_store/space_id/concept_index**（B-PR1 D:11 readback·gate ACTION_D11_READBACK_MODE）：
-        None → _has_action_intent 退化 frozenset（is_action_intent_cue 第一源·gate OFF 基底·bit-identical）。
+      **可选 backend/edge_store/space_id/concept_index**：仅供显式 compatibility D:11 回退；
+        正式图路径由 language_signal_runtime 和 action_instruction_bindings 裁决。
       sink   透传 caller 的 struct_refs[-1]（选项 B·维持 reward 通路·禁 sink=None 杀陈述）
       is_causal_reasoning = _has_causes_signal(segments)  ← 解 G3a 核心
       is_structural_sequence_reasoning = False（语言域设计正确）
@@ -133,7 +144,11 @@ def classify_intent(sink: ConceptRef | None,
     return IntentType(
         type=INTENT_COMMAND if _has_action_intent(
             segments, backend=backend, edge_store=edge_store,
-            space_id=space_id, concept_index=concept_index) else INTENT_QUESTION,
+            space_id=space_id, concept_index=concept_index,
+            language_signal_runtime=language_signal_runtime,
+            action_instruction_bindings=action_instruction_bindings,
+            language_signal_compatibility_enabled=(
+                language_signal_compatibility_enabled)) else INTENT_QUESTION,
         sink=sink,
         is_causal_reasoning=_has_causes_signal(segments),
         is_structural_sequence_reasoning=False,

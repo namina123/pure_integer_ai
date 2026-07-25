@@ -8,6 +8,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from pure_integer_ai.crosscut.determinism.fingerprint import (
+    integer_tuple_fingerprint,
+)
+
 from pure_integer_ai.cognition.shared.formal_artifact_bridge import (
     ArtifactVerificationObservation,
     ArtifactVerificationRequest,
@@ -307,11 +311,17 @@ class GenerationPostcheckRun:
         return required.issubset(applicable)
 
     def stable_key(self) -> tuple[int, ...]:
-        """返回协议、请求、parse 和六维 verdict 的完整键。"""
+        """返回请求与 parse 内容引用、协议和六维 verdict。"""
         result = [
             len(self.protocol.bindings()),
-            *_packed(self.request.stable_key()),
-            *_packed(self.parsed.stable_key()),
+            *_packed(integer_tuple_fingerprint(
+                self.request.stable_key(),
+                domain="generation.postcheck.run.request.v1",
+            )),
+            *_packed(integer_tuple_fingerprint(
+                self.parsed.stable_key(),
+                domain="generation.postcheck.run.parsed.v1",
+            )),
             len(self.report.results),
         ]
         for dimension, verifier in self.protocol.bindings():
@@ -668,7 +678,8 @@ class GenerationPostcheckRuntime:
         missing = tuple(
             item.candidate_key
             for item in context.request.source_requirements
-            if item.citation_required and item.source not in citations
+            if item.citation_required and any(
+                source not in citations for source in item.evidence_sources)
         )
         goal = context.request.execution.plan.request.goal
         if missing:

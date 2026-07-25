@@ -115,7 +115,7 @@ def _run_task_driven_generate(ctx: TrainContext, corpus: list[CollectedItem],
     铁律：纯整数（input_args/expected/v_skel num/den 全 int·assert_int·Rational 经 make）/ bit-identical
     （rate 排序稳定 tiebreak BFS 序·同 recognize）/ 单向依赖（L8→L7 execute/L0 op_confidence 向下·不碰 L6 generate.py）/
     MUTABLE_MONOTONE（record_op_outcome 同表同键 UPDATE·R1 符号 sn 单调）/ 不写死（选算子=arity 结构匹配·rate 比较非硬编码）/
-    核心无墙钟 / 不走外挂 LLM（断奶前教师 Mode A）/ 危险词禁 / IS_A 不涉。
+    核心无墙钟 / 不走外挂 LLM（断奶前教师 Mode A）/ IS_A 不涉。
     诚实边界：①单候选构造性必过（仅 mul 时 skeleton(args)==expected 构造性必过·信号薄·同半环）·多候选信号实；
     ②mul/square 不可分（同 task 两都 verified·置信度正交于变量同一性·Half B arity 区分）；③stable≠correct；
     ④防双计 caller 责任（见上·机制不强制·rate 不受影响）；⑤闭环=生成侧 task-driven 探针（Mode A）+ 半环（自洽）=

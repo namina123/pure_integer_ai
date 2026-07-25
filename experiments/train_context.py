@@ -33,6 +33,7 @@ from pure_integer_ai.storage import bootstrap
 from pure_integer_ai.storage.backend import StorageBackend
 from pure_integer_ai.storage.edge_store import EdgeStore
 from pure_integer_ai.storage.node_store import NodeStore
+from pure_integer_ai.storage.source_trust import SourceTrustStorageRepository
 from pure_integer_ai.storage.spaces.abstract_space import AbstractSpace
 from pure_integer_ai.storage.spaces.companion import CompanionSpace
 from pure_integer_ai.storage.spaces.registry import (
@@ -87,9 +88,35 @@ class TrainContext:
     memory_interact_batch_runtime: Any = None
     memory_forget_visibility: Any = None
     memory_isolation_runtime: Any = None
+    source_trust_runtime: Any = None
+    source_trust_records: Any = None
     unicode_intake: Any = None
     word_form_providers: Any = None
     word_form_course_report: Any = None
+    language_signal_runtime: Any = None
+    language_property_attr_instruction_key: tuple[int, ...] | None = None
+    language_property_value_instruction_key: tuple[int, ...] | None = None
+    language_property_possess_instruction_key: tuple[int, ...] | None = None
+    language_similar_instruction_key: tuple[int, ...] | None = None
+    # U-04 代词 MinimalInstruction 到完整特征 profile 的调用方绑定。
+    language_pronoun_instruction_bindings: tuple[
+        tuple[tuple[int, ...], tuple[int, ...]], ...] = ()
+    language_action_instruction_bindings: tuple[
+        tuple[tuple[int, ...], int], ...] = ()
+    language_action_primitive_refs: tuple[
+        tuple[int, tuple[int, int]], ...] = ()
+    language_negation_instruction_key: tuple[int, ...] | None = None
+    language_modality_instruction_bindings: tuple[
+        tuple[tuple[int, ...], int], ...] = ()
+    language_arithmetic_instruction_bindings: tuple[
+        tuple[tuple[int, ...], int], ...] = ()
+    language_comparison_instruction_bindings: tuple[
+        tuple[tuple[int, ...], int], ...] = ()
+    language_condition_instruction_bindings: tuple[
+        tuple[tuple[int, ...], int], ...] = ()
+    language_cue_instruction_bindings: tuple[
+        tuple[tuple[int, ...], int], ...] = ()
+    language_signal_compatibility_enabled: bool = True
     occurrence_index: Any = None
     occurrence_order_reader: Any = None
     occurrence_order_writer: Any = None
@@ -107,6 +134,8 @@ class TrainContext:
     mereology_relation_reports: list[Any] = field(default_factory=list)
     semantic_pair_runtime: Any = None
     semantic_pair_reports: list[Any] = field(default_factory=list)
+    logic_closure_runtime: Any = None
+    logic_closure_reports: list[Any] = field(default_factory=list)
     language_semantic_course_runtime: Any = None
     language_semantic_course_reports: list[Any] = field(default_factory=list)
     alias_relation_course_report: Any = None
@@ -269,9 +298,12 @@ def make_train_context(
         scoped_identities,
         core_identity_catalog,
     )
-    memory_read_aggregates = MemoryHypothesisAggregateIndex(memory_read_events)
+    source_trust_records = SourceTrustStorageRepository(
+        backend, registry=scoped_identities.registry)
+    memory_read_aggregates = MemoryHypothesisAggregateIndex(
+        memory_read_events, source_trust_records=source_trust_records)
     memory_interact_aggregates = MemoryHypothesisAggregateIndex(
-        memory_interact_events)
+        memory_interact_events, source_trust_records=source_trust_records)
     ctx = TrainContext(
         backend=backend,
         core_space=core,
@@ -290,6 +322,7 @@ def make_train_context(
         memory_interact_events=memory_interact_events,
         memory_read_aggregates=memory_read_aggregates,
         memory_interact_aggregates=memory_interact_aggregates,
+        source_trust_records=source_trust_records,
         teacher=teacher,
         weights=weights or JudgeWeights(),
         work_memory=WorkMemory(),

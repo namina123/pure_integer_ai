@@ -22,6 +22,10 @@ from pure_integer_ai.cognition.shared.identity import (
 from pure_integer_ai.cognition.shared.memory_aggregate import (
     MemoryHypothesisAggregateIndex,
 )
+from pure_integer_ai.cognition.shared.memory_event import (
+    MEMORY_OBJECT_HYPOTHESIS,
+    require_memory_object_kind,
+)
 from pure_integer_ai.cognition.shared.memory_overlay import (
     MemoryAccessContext,
 )
@@ -37,7 +41,7 @@ from pure_integer_ai.storage.spaces.registry import (
 )
 
 
-_QUERY_PROTOCOL_VERSION = 1
+_QUERY_PROTOCOL_VERSION = 2
 _QUERY_REFERENCE_TYPED = 1
 _QUERY_REFERENCE_OBJECT = 2
 
@@ -287,12 +291,13 @@ class MemoryCurrentQuery:
 
 @dataclass(frozen=True)
 class MemoryQueryDefinition:
-    """一个由课程注册的 query kind、目标 Hypothesis kind、理由角色和预算。"""
+    """一个由课程注册的 query kind、目标 Memory 对象类型键、理由和预算。"""
 
     query_kind: ObjectIdentity
     hypothesis_kind: tuple[int, ...]
     reason_roles: tuple[ObjectIdentity, ...]
     budget: int
+    memory_object_kind: int = MEMORY_OBJECT_HYPOTHESIS
 
     def __post_init__(self) -> None:
         """拒绝未定义的 kind、空理由和非正预算。"""
@@ -301,6 +306,10 @@ class MemoryQueryDefinition:
         _strict_key(
             self.hypothesis_kind,
             label="MemoryQueryDefinition.hypothesis_kind",
+        )
+        require_memory_object_kind(
+            self.memory_object_kind,
+            where="MemoryQueryDefinition.memory_object_kind",
         )
         if not isinstance(self.reason_roles, tuple) or not self.reason_roles:
             raise ValueError("MemoryQueryDefinition.reason_roles 必须为非空 tuple")
@@ -318,6 +327,7 @@ class MemoryQueryDefinition:
         """返回注入定义的完整稳定键。"""
         result = [
             *_packed(self.query_kind.stable_key()),
+            self.memory_object_kind,
             *_packed(self.hypothesis_kind),
             self.budget,
             len(self.reason_roles),
@@ -380,6 +390,7 @@ class MemoryActivationRequest:
     logical_timestamp: LogicalTimestamp
     reasons: tuple[MemoryQueryReason, ...]
     budget: int
+    memory_object_kind: int = MEMORY_OBJECT_HYPOTHESIS
 
     def __post_init__(self) -> None:
         """校验 request 的 ACL、来源、时钟和理由均可完整审计。"""
@@ -394,6 +405,10 @@ class MemoryActivationRequest:
         _strict_key(
             self.hypothesis_kind,
             label="MemoryActivationRequest.hypothesis_kind",
+        )
+        require_memory_object_kind(
+            self.memory_object_kind,
+            where="MemoryActivationRequest.memory_object_kind",
         )
         if not isinstance(self.scope, ScopeIdentity):
             raise TypeError("MemoryActivationRequest.scope 类型错误")
@@ -429,6 +444,7 @@ class MemoryActivationRequest:
             *_packed(self.memory_space.stable_key()),
             *_packed(self.access.stable_key()),
             *_packed(self.query_kind.stable_key()),
+            self.memory_object_kind,
             *_packed(self.hypothesis_kind),
             *_packed(self.scope.stable_key()),
             *_packed(self.source.stable_key()),
@@ -539,6 +555,7 @@ class MemoryQueryCompiler:
                     current.logical_timestamp,
                     tuple(reasons),
                     definition.budget,
+                    definition.memory_object_kind,
                 ))
         return MemoryQueryCompilation(
             current,

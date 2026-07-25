@@ -9,6 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from pure_integer_ai.crosscut.determinism.fingerprint import (
+    integer_tuple_fingerprint,
+)
+
 from pure_integer_ai.cognition.shared.generation_content import (
     ContentArtifactAttachment,
 )
@@ -86,7 +90,7 @@ class RecoveredGenerationProposition:
 
 @dataclass(frozen=True)
 class GenerationSourceRequirement:
-    """一个 planned Proposition 对 citation 和独立可信度的显式要求。"""
+    """一个 planned Proposition 对归属来源和实际证据来源的核验要求。"""
 
     candidate_key: tuple[int, ...]
     source: SourceRef
@@ -94,6 +98,7 @@ class GenerationSourceRequirement:
     citation_required: bool
     trust_required: bool
     trace: tuple[int, ...]
+    evidence_sources: tuple[SourceRef, ...] = ()
 
     def __post_init__(self) -> None:
         _strict_key(self.candidate_key, label="source requirement candidate key")
@@ -107,17 +112,32 @@ class GenerationSourceRequirement:
         if not self.citation_required and not self.trust_required:
             raise ValueError("source requirement 至少要求 citation 或 trust")
         _strict_key(self.trace, label="source requirement trace")
+        if not isinstance(self.evidence_sources, tuple) or any(
+                not isinstance(item, SourceRef)
+                for item in self.evidence_sources):
+            raise TypeError("source requirement evidence_sources 类型错误")
+        evidence_sources = self.evidence_sources or (self.source,)
+        if len(set(evidence_sources)) != len(evidence_sources):
+            raise ValueError("source requirement evidence_sources 不得重复")
+        object.__setattr__(self, "evidence_sources", tuple(sorted(
+            evidence_sources,
+            key=lambda item: item.stable_key(),
+        )))
 
     def stable_key(self) -> tuple[int, ...]:
-        """返回候选、来源、scope、两类要求和 trace。"""
-        return (
+        """返回候选、归属、证据来源、scope、两类要求和 trace。"""
+        result = [
             *_packed(self.candidate_key),
             *_packed(self.source.stable_key()),
             *_packed(self.scope.stable_key()),
             int(self.citation_required),
             int(self.trust_required),
             *_packed(self.trace),
-        )
+            len(self.evidence_sources),
+        ]
+        for source in self.evidence_sources:
+            result.extend(_packed(source.stable_key()))
+        return tuple(result)
 
 
 @dataclass(frozen=True)
@@ -454,8 +474,11 @@ class GenerationPostcheckRequest:
             self.task_requirements, key=lambda item: item.task.stable_key())))
 
     def stable_key(self) -> tuple[int, ...]:
-        """返回 generation、全部 attachment、来源和任务要求完整键。"""
-        result = [*_packed(self.execution.stable_key()), len(self.artifacts)]
+        """返回 generation 内容引用及全部 attachment、来源和任务要求。"""
+        result = [*_packed(integer_tuple_fingerprint(
+            self.execution.stable_key(),
+            domain="generation.postcheck.execution.v1",
+        )), len(self.artifacts)]
         for artifact in self.artifacts:
             result.extend(_packed(artifact.stable_key()))
         result.append(len(self.source_requirements))

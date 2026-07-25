@@ -106,9 +106,9 @@ def generate_emergent_hypotheses(backend: StorageBackend, edge_store: EdgeStore,
       w 的 hits ≥ EMERGENT_CONNECTOR_MIN → 假设 w→rel_kind（首版 REL_CAUSES）
 
     **struct_ref 自然过滤**：struct_ref 的 PRECEDES 邻居跨段·COOCCURS(a,b)=0 < MIN·不匹配·天然排除。
-    **excluded_word_refs** = `_CUE_WORDS ∪ _REL_LEXICAL_CUE` 已种词 ConceptRefs（caller resolve surfaces→refs·
-      C9-bis §D 候选池排除清单·防 reward 调固化件）。REL_* 框架节点本身也排除（不应作 connector·防自指）。
-      已有 D:11 边的词排除（已种/已涌现·不重复假设）。
+    **excluded_word_refs** 由 caller 从来源化语言信号 catalog 构造；显式 compatibility
+      模式才合并旧 Python 表。REL_* 框架节点和已有 D:11 的词在本函数内继续排除，
+      但 caller 不得扫描任意学习 D:11 后把它误归为静态来源。
 
     **确定性**：candidates sorted by ConceptRef·(a,b) sorted·bit-identical（同输入同输出·CI===生产）。
     **签名→REL_CAUSES 映射** = 元定义层立法（共现+前驱是因果指纹·§8.1c-bis §6·非词义写死）。

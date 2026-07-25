@@ -1,8 +1,7 @@
-"""cognition.understanding.cue_words — 元定义层指向词/系词集（出厂硬件·§8.1c-bis 来源②锚）。
+"""cognition.understanding.cue_words — 来源化语言信号主读与旧词表兼容投影。
 
-CAUSES / IS_A 构造器（cue_extractor）的句法锚定词集。**元定义层固化·非语义规则·
-reward 不调·断奶前后不变**（§九铁律承认 enum 例外·同 space_routing META_DEFINITION /
-模态标记码点·C9-bis §D 注：元定义固化词不进学习型信号边候选池·两子集不重叠）。
+自然语言表示的正式作用由 U-04 LanguageAtom/Representation/MinimalInstruction 图和调用方
+绑定决定。模块内 Python 词表及旧 D:11 只服务显式 compatibility，不能计 readiness。
 
 三类（按句法方向分· extractor 按此判因/果/child/parent 方向）：
   CAUSES_CUE_FORWARD   前因后果（因在指向词前·果在后）：所以/因此/导致 ...
@@ -67,7 +66,7 @@ _REL_KIND_TO_CUE_TYPE: dict[int, int] = {
     REL_EQUAL: ARITH_EQUALS_CUE,
 }
 
-# ---- 元定义层词集（lang → {cue_type: frozenset[word]}) ----
+# ---- 迁移兼容词集（lang → {cue_type: frozenset[word]}) ----
 _CUE_WORDS: dict[int, dict[int, frozenset[str]]] = {
     LANG_ZH: {
         CAUSES_CUE_FORWARD: frozenset({
@@ -115,7 +114,7 @@ _CUE_WORDS: dict[int, dict[int, frozenset[str]]] = {
     },
 }
 
-# ---- 数值等式算子词（刀 B·元定义层固化·非 cue_type·表达式算子识别用） ----
+# ---- 数值等式算子兼容词表（刀 B·非 cue_type·表达式算子识别用） ----
 # ARITH_EQUALS_CUE 是等式声明锚（"等于"）·算子词（加/减/乘）是左式二目算术的算子识别·两者分离
 # （算子词非 claim 锚·不入 _CUE_WORDS·不参与 cue_type_of 判·extract_numeric_claims 单独查）。
 # 仅整数保持算术（+,-,×）·除法 defer（有理结果·须 Rational·首版窄域诚实 scope）。
@@ -133,27 +132,75 @@ _ARITH_OP_WORDS: dict[int, dict[str, int]] = {
 }
 
 
+def _graph_bound_integer(
+        token: str, lang: int, *, language_signal_runtime,
+        instruction_bindings: tuple[tuple[tuple[int, ...], int], ...],
+        label: str) -> tuple[bool, int | None]:
+    """把一致图指令解析为调用方整数作用，并保留冲突与无证据的区别。"""
+    resolution = language_signal_runtime.resolve_instruction(
+        token, language=lang)
+    if not resolution.has_evidence:
+        return False, None
+    if resolution.instruction_key is None:
+        return True, None
+    binding_map: dict[tuple[int, ...], int] = {}
+    for instruction_key, value in instruction_bindings:
+        if (not isinstance(instruction_key, tuple)
+                or not instruction_key
+                or any(type(item) is not int for item in instruction_key)):
+            raise TypeError(f"{label} instruction_key 必须是非空严格整数 tuple")
+        if type(value) is not int:
+            raise TypeError(f"{label} 作用值必须是严格整数")
+        if instruction_key in binding_map:
+            raise ValueError(f"{label} instruction_key 绑定重复")
+        binding_map[instruction_key] = value
+    return True, binding_map.get(resolution.instruction_key)
+
+
+def _graph_matches_instruction(
+        token: str, lang: int, *, language_signal_runtime,
+        instruction_key: tuple[int, ...] | None) -> bool | None:
+    """保留图无证据状态，并让缺失目标绑定在有证据时 fail closed。"""
+    resolution = language_signal_runtime.resolve_instruction(
+        token, language=lang)
+    if not resolution.has_evidence:
+        return None
+    if instruction_key is None or resolution.instruction_key is None:
+        return False
+    if (not isinstance(instruction_key, tuple) or not instruction_key
+            or any(type(item) is not int for item in instruction_key)):
+        raise TypeError("instruction_key 必须是非空严格整数 tuple")
+    return resolution.instruction_key == instruction_key
+
+
 def arith_op_of(token: str, lang: int, *,
                 backend=None, edge_store=None,
-                space_id: int | None = None, concept_index=None) -> int | None:
-    """token 是否数值算子词（刀 B·加/减/乘·元定义层固化）·返 OPCODE_* / None。
+                space_id: int | None = None, concept_index=None,
+                language_signal_runtime=None,
+                arithmetic_instruction_bindings: tuple[
+                    tuple[tuple[int, ...], int], ...] = (),
+                language_signal_compatibility_enabled: bool = True,
+                ) -> int | None:
+    """按一致图指令和调用方绑定解析算术作用，必要时读取迁移兼容源。
 
-    **两源**（STEP5 PR2·镜像 cue_type_of 范式）：
-      第一源（既有·元定义固化）：_ARITH_OP_WORDS frozenset exact 匹配（返 OPCODE_*·reward 不调·断奶前后不变）。
-      第二源（STEP5 PR2 新增·D:11 readback·gate OPERATOR_D11_READBACK_MODE）：
-        lookup token → word_ref → lookup_word_operator 读 D:11 PRIMARY 边 → OP_*（过滤算术 OP·OP_ADD/SUB/MUL）
-        → _OP_TO_OPCODE → OPCODE_*。反 theater：未验证 SHADOW 不注入（tier_filter=TIER_PRIMARY）。
-        冷启动（D:11 OP_* 无教师种子）→ 第二源返 None → 退化 frozenset。
-
-    **bit-identical 守卫**：gate OFF（默认）→ 只走第一源·退化纯 frozenset·回归零翻。
-    exact token 匹配（caller 须切算子词为独立 token·同 cue 词纪律）。
-    非算子词 / 他 lang 返 None（extract_numeric_claims 据此跳·守反统计契约·不凑配）。
+    图中存在候选但冲突或未绑定时返回 ``None``，旧词表和 D:11 不得覆盖。
     """
-    # 第一源：frozenset exact 匹配（既有·元定义固化）
+    if language_signal_runtime is not None:
+        has_evidence, value = _graph_bound_integer(
+            token, lang,
+            language_signal_runtime=language_signal_runtime,
+            instruction_bindings=arithmetic_instruction_bindings,
+            label="算术",
+        )
+        if has_evidence:
+            return value
+    if not language_signal_compatibility_enabled:
+        return None
+    # 迁移期第一兼容源：Python 字面词表。
     op = _ARITH_OP_WORDS.get(lang, {}).get(token)
     if op is not None:
         return op
-    # 第二源：D:11 readback（STEP5 PR2·gate 守·反 theater）
+    # 迁移期第二兼容源：D:11 PRIMARY readback。
     if not getattr(gates, "OPERATOR_D11_READBACK_MODE", False):
         return None
     if backend is None or edge_store is None or space_id is None or concept_index is None:
@@ -210,40 +257,72 @@ _PROPERTY_POSSESS_CUE: dict[int, frozenset[str]] = {
 }
 
 
-def is_property_attr_marker(token: str, lang: int) -> bool:
-    """token 是否属性标记（G1+#774·的·X 的 Y 是 Z·attr marker）·exact 匹配。
+def is_property_attr_marker(
+        token: str, lang: int, *, language_signal_runtime=None,
+        property_attr_instruction_key: tuple[int, ...] | None = None,
+        language_signal_compatibility_enabled: bool = True) -> bool:
+    """按图候选优先、旧词表显式兼容的顺序判断属性标记。
 
-    独立于 cue_type_of（不入 _CUE_WORDS·防 是/的 污染 extract_cues·见上注）。
-    不命中返 False（extract_property_claims 据此判 的 锚位·守反统计契约·固定窗口不凑配）。
+    图中一致候选只有匹配调用方注入的属性标记指令键才为真；混合候选或明确的
+    其他指令直接为假。只有图中完全无候选且兼容开关开启时才读取旧字面词表。
     """
+    if language_signal_runtime is not None:
+        graph_result = _graph_matches_instruction(
+            token, lang,
+            language_signal_runtime=language_signal_runtime,
+            instruction_key=property_attr_instruction_key,
+        )
+        if graph_result is not None:
+            return graph_result
+    if not language_signal_compatibility_enabled:
+        return False
     return token in _PROPERTY_ATTR_MARKER.get(lang, frozenset())
 
 
-def is_property_value_copula(token: str, lang: int) -> bool:
-    """token 是否值系词（G1+#774·是·X 的 Y 是 Z·value copula）·exact 匹配。
+def is_property_value_copula(
+        token: str, lang: int, *, language_signal_runtime=None,
+        property_value_instruction_key: tuple[int, ...] | None = None,
+        language_signal_compatibility_enabled: bool = True) -> bool:
+    """按图候选优先、旧词表显式兼容的顺序判断属性值系词。
 
-    独立于 cue_type_of（同 is_property_attr_marker 注）。裸 是 非 IS_A 的"是一种/是一类"
-    （后者多字 token·cue_type_of 走 IS_A_CUE 分支·零冲突）。不命中返 False。
+    裸系词与 IS_A 多字表示保持不同作用。图中冲突、未匹配目标或兼容关闭时均
+    fail closed，避免旧字面“是”覆盖来源化证据。
     """
+    if language_signal_runtime is not None:
+        graph_result = _graph_matches_instruction(
+            token, lang,
+            language_signal_runtime=language_signal_runtime,
+            instruction_key=property_value_instruction_key,
+        )
+        if graph_result is not None:
+            return graph_result
+    if not language_signal_compatibility_enabled:
+        return False
     return token in _PROPERTY_VALUE_COPULA.get(lang, frozenset())
 
 
 def is_property_possess_cue(token: str, lang: int, *,
                             backend=None, edge_store=None,
-                            space_id: int | None = None, concept_index=None) -> bool:
-    """token 是否领属句 cue（G1+#774·具有/有/has·X 具有 Z）·exact 匹配 + D:11 readback。
+                            space_id: int | None = None, concept_index=None,
+                            language_signal_runtime=None,
+                            property_possess_instruction_key: tuple[int, ...] | None = None,
+                            language_signal_compatibility_enabled: bool = True) -> bool:
+    """按来源化图候选判断领属 cue，并显式隔离迁移兼容源。
 
-    **两源**（STEP5 PR3·镜像 cue_type_of 范式）：
-      第一源（既有·元定义固化）：_PROPERTY_POSSESS_CUE frozenset exact 匹配（具有/有/has/have）。
-      第二源（STEP5 PR3 新增·D:11 readback·gate EMERGENT_RELATION_CUE_READBACK_MODE）：
-        lookup token → word_ref → lookup_word_concept 读 D:11 PRIMARY 边 → REL_PROPERTY → True。
-        反 theater：未验证 SHADOW 不注入（tier_filter=TIER_PRIMARY）。
-
-    **bit-identical 守卫**：gate OFF（默认）→ 只走第一源·退化纯 frozenset·回归零翻。
-    STEP5 PR3 possess un-defer：领属句（attr_idx<0）用 REL_PROPERTY 作默认 attr_type·build_property_edges
-    建命题节点 (subject,REL_PROPERTY,value)·G3b 消费（非首版 defer skip）。
-    独立于 cue_type_of。不命中返 False。
+    图中一致候选只有匹配调用方注入的领属指令键才为真；冲突或其他指令直接为
+    假。图完全无证据且兼容开启时，才依次读取 Python 字面和 D:11 PRIMARY；
+    D:11 仍只接受已晋升的 REL_PROPERTY，不得计作 U-04 readiness。
     """
+    if language_signal_runtime is not None:
+        graph_result = _graph_matches_instruction(
+            token, lang,
+            language_signal_runtime=language_signal_runtime,
+            instruction_key=property_possess_instruction_key,
+        )
+        if graph_result is not None:
+            return graph_result
+    if not language_signal_compatibility_enabled:
+        return False
     if token in _PROPERTY_POSSESS_CUE.get(lang, frozenset()):
         return True
     if not getattr(gates, "EMERGENT_RELATION_CUE_READBACK_MODE", False):
@@ -276,25 +355,32 @@ def _possess_from_d11_primary(token: str, space_id: int,
     return False
 
 
-# ---- STEP5 PR4：REL_SIMILAR 相似 cue（D:11-readback-only·不新增检测 frozenset·D6 更守不写死） ----
-# 设计 doc/重来_纠偏轮_round2_任务文档_2026-07-10.md §四-bis STEP5 PR4。相似词无既有检测 frozenset·
-# is_similar_cue 走 D:11 readback 唯一源（gate EMERGENT_RELATION_CUE_READBACK_MODE·镜像 is_property_possess_cue
-# 第二源·但无第一源 frozenset·更守 D6 少一份硬编码词表）。gate OFF→恒 False（bit-identical·无相似检测）。
+# ---- STEP5 PR4：REL_SIMILAR 相似 cue（U-04 图主读，D:11 仅兼容） ----
+# 设计 doc/重来_纠偏轮_round2_任务文档_2026-07-10.md §四-bis STEP5 PR4。
+# 来源化图负责表示到 MinimalInstruction 的关联，调用方注入相似作用键；旧 D:11 只在图无证据且
+# compatibility 开启时读取，不能计入 U-04 readiness。
 
 def is_similar_cue(token: str, lang: int, *,
                    backend=None, edge_store=None,
-                   space_id: int | None = None, concept_index=None) -> bool:
-    """token 是否相似关系 cue（STEP5 PR4·像/resembles·X 像 Y）·**D:11-readback-only**。
+                   space_id: int | None = None, concept_index=None,
+                   language_signal_runtime=None,
+                   similar_instruction_key: tuple[int, ...] | None = None,
+                   language_signal_compatibility_enabled: bool = True) -> bool:
+    """按来源化图候选判断相似 cue，并显式隔离旧 D:11 兼容源。
 
-    **单源**（D:11 readback·gate EMERGENT_RELATION_CUE_READBACK_MODE·无 frozenset 第一源）：
-      lookup token → word_ref → lookup_word_concept 读 D:11 PRIMARY 边 → REL_SIMILAR → True。
-      反 theater：未验证 SHADOW 不注入（tier_filter=TIER_PRIMARY）。
-
-    **bit-identical 守卫**：gate OFF（默认）→ 恒 False（无相似检测·退化现状）。
-    冷启动（D:11 REL_SIMILAR 无种子/教师）→ False。
-    seeded '像'（_REL_LEXICAL_CUE D:11 种子）→ gate ON True·gate OFF False（行为差可观测·反 theater）。
-    独立于 cue_type_of（不入 _CUE_WORDS·防 像 污染 extract_cues 邻居判·同 _ARITH_OP_WORDS 范式）。
+    图中一致候选只有匹配调用方注入的相似作用键才为真；冲突或未绑定直接为假。
+    只有图完全无证据且兼容开启时才读取已晋升的 D:11 REL_SIMILAR。
     """
+    if language_signal_runtime is not None:
+        graph_result = _graph_matches_instruction(
+            token, lang,
+            language_signal_runtime=language_signal_runtime,
+            instruction_key=similar_instruction_key,
+        )
+        if graph_result is not None:
+            return graph_result
+    if not language_signal_compatibility_enabled:
+        return False
     if not getattr(gates, "EMERGENT_RELATION_CUE_READBACK_MODE", False):
         return False
     if backend is None or edge_store is None or space_id is None or concept_index is None:
@@ -328,9 +414,8 @@ def _similar_from_d11_primary(token: str, space_id: int,
 # "X 的 Y 不 是 Z" → polarity=1（P0.3 命题节点扩展·pol 进 surface·B1 cue 抽取填值）。
 # 独立 helper（不入 _CUE_WORDS·防 不/没 污染 extract_cues 邻居判·同 _PROPERTY_* 范式）。
 # 守墙：结构否定（polarity 标记）墙内·否定语用（言外否定"我不觉得他来了"=他没来）= W2 defer。
-# **审计根治 #940**：D6 否定词穷举不尽（未必/绝非/谈不上 开放类）走 D:11 learnable 二源（frozenset 第一源 +
-# D:11 readback 第二源·镜像 modal/op 范式）·否定=符号域先天（TYPE_NEGATION=12·同 operator·复用 ATTR_SYMBOL_TYPE=17
-# 不挂 abstract_mark·激活 ensure_symbol_types）·开放变体走 D:11 教师晋升有路径。
+# U-04 迁移后，来源化 LanguageAtom/Representation/MinimalInstruction 图是主读。
+# 下列词表和 D:11 只服务显式开启的迁移兼容路径，不得计 readiness；关闭兼容后缺图证据 fail closed。
 _NEGATION_CUES: dict[int, frozenset[str]] = {
     LANG_ZH: frozenset({"不", "没", "非", "无"}),   # X 的 Y 不 是 Z（不）/ 没（罕·没是）/ 非文言 / 无文言
     LANG_EN: frozenset({"not", "no", "never"}),     # 英文例：X's Y is not Z / no Y is Z / never
@@ -339,29 +424,31 @@ _NEGATION_CUES: dict[int, frozenset[str]] = {
 
 def is_negation_cue(token: str, lang: int, *,
                     backend=None, edge_store=None,
-                    space_id: int | None = None, concept_index=None) -> bool:
-    """token 是否否定词（B1·不/没/非/无 + not/no/never·P0.3 polarity=1 填值）·exact 匹配。
+                    space_id: int | None = None, concept_index=None,
+                    language_signal_runtime=None,
+                    negation_instruction_key: tuple[int, ...] | None = None,
+                    language_signal_compatibility_enabled: bool = True) -> bool:
+    """按图候选优先、旧源显式兼容的顺序判断 token 是否表达否定。
 
-    **两源**（#940·镜像 modal_op_of / arith_op_of / comparison_op_of / is_property_possess_cue 范式）：
-      第一源（既有·元定义固化）：_NEGATION_CUES frozenset exact 匹配（返 bool·closed-class 否定词·
-        reward 不调·断奶前后不变·gate OFF 基底·bit-identical）。
-      第二源（#940 新增·D:11 readback·gate NEGATION_D11_READBACK_MODE）：
-        lookup token → word_ref → lookup_word_negation 读 D:11 PRIMARY 边 → 是否指向 TYPE_NEGATION concept
-        （否定词文字 alias 可学习·教师晋升新否定词如未必/绝非）。反 theater：未验证 SHADOW 不注入
-        （tier_filter=TIER_PRIMARY）。冷启动（D:11 无教师种子）→ 第二源返 False → 退化 frozenset。
-
-    独立于 cue_type_of（不入 _CUE_WORDS·防 不/没 污染 extract_cues·同 is_property_* 范式）。
-    extract_property_claims 据此判否定窗口（"X 的 Y 不 是 Z"·不 at j-1·pol=1）·gate NEGATION_MODE 守
-    （OFF → negation_on=False → 既有肯定窗口 pol=0·bit-identical）。不命中返 False。
-
-    **bit-identical 守卫**：gate OFF（默认）→ 只走第一源·退化纯 frozenset·回归零翻。
-    **守墙**：结构否定（polarity 标记）墙内·否定语用（言外否定"我不觉得他来了"=他没来）= W2 defer。
-    **否定=符号域先天**：¬ 概念先天（TYPE_NEGATION）·D:11 readback=文字 alias 可学习（同 operator）·非概念可学（异 modal）。
+    调用方同时注入语言信号 runtime 和否定指令键时，先读取全部图候选：一致命中
+    才为真，明确非目标或混合候选直接为假，旧词表不得覆盖冲突。只有图中完全
+    无候选且 compatibility 开启时，才读取 Python 词表和 D:11 PRIMARY 旧源。
+    compatibility 关闭后缺图证据一律 fail closed。
     """
-    # 第一源：_NEGATION_CUES frozenset exact 匹配（既有·元定义固化·gate OFF 基底）
+    if language_signal_runtime is not None:
+        graph_result = _graph_matches_instruction(
+            token, lang,
+            language_signal_runtime=language_signal_runtime,
+            instruction_key=negation_instruction_key,
+        )
+        if graph_result is not None:
+            return graph_result
+    if not language_signal_compatibility_enabled:
+        return False
+    # 迁移期第一兼容源：Python 字面词表。
     if token in _NEGATION_CUES.get(lang, frozenset()):
         return True
-    # 第二源：D:11 readback（#940·gate 守·反 theater）
+    # 迁移期第二兼容源：D:11 PRIMARY readback。
     if not getattr(gates, "NEGATION_D11_READBACK_MODE", False):
         return False
     if backend is None or edge_store is None or space_id is None or concept_index is None:
@@ -391,38 +478,142 @@ def _negation_from_d11_primary(token: str, space_id: int,
 # ---- B-PR1 动作意图 cue（命令词 帮我/请 + 动作词 生成/计算·W7 命令判定·doc §16·镜像 is_negation_cue #940） ----
 # 设计 doc/重来_真生成施工蓝图_2026-07-12.md §16。命令判定 = 命令词 OR 动作词命中任一（§16.4）。
 # 命令 mood 词（→INTENT_COMMAND_MOOD·帮我/请·祈使引导词·非动作动词·职责正交）+ 动作词（→ACTION_* 类别·生成/计算·B-PR1）。
-# 镜像 is_negation_cue 两源范式（frozenset 第一源 + D:11 readback 第二源）·解命令词/动作词穷举不尽（劳驾/编写/运算 开放变体）。
+# U-04 后来源化图为主读；下列 Python/D:11 只作显式迁移兼容，不能计 readiness。
 # **动作意图=符号域先天**（镜像 operator·异 modal·doc §16.3）·D:11 readback=文字 alias 可学习（同否定词/算子词）·非概念可学。
 # **覆盖**（doc §16.5）：引导词祈使（帮我生成·命令词+动作词）+ 有动作词裸祈使（生成代码·仅动作词）。
 # 纯句式祈使（去开门·无引导词无动作词）冷启动漏判·defer B-PR2 experience_count 回写扩散（结构意图后天学·§13.8）。
 def is_action_intent_cue(token: str, lang: int, *,
                          backend=None, edge_store=None,
-                         space_id: int | None = None, concept_index=None) -> bool:
-    """token 是否动作意图词（B-PR1·命令词 帮我/请 + 动作词 生成/计算·W7 命令判定·doc §16）·exact 匹配。
+                         space_id: int | None = None, concept_index=None,
+                         language_signal_runtime=None,
+                         action_instruction_bindings: tuple[
+                             tuple[tuple[int, ...], int], ...] = (),
+                         language_signal_compatibility_enabled: bool = True) -> bool:
+    """按图中动作 kind 绑定判断命令或动作 cue，旧源仅作显式兼容。
 
-    **两源**（镜像 is_negation_cue #940 范式）：
-      第一源（元定义固化）：action_primitives._ACTION_LEXICAL_CUE exact 匹配（命令词+动作词·closed-class 种子·
-        gate OFF 基底·bit-identical）。返 bool（命中任一 ACTION_INTENT_*·COMMAND_MOOD 或 ACTION_*）。
-      第二源（D:11 readback·gate ACTION_D11_READBACK_MODE）：lookup token → word_ref → lookup_word_action 读 D:11
-        PRIMARY 边 → 是否指向 ACTION_INTENT_* concept（命令词/动作词 alias 可学习·教师晋升劳驾/编写/运算）。
-        反 theater：未验证 SHADOW 不注入（tier_filter=TIER_PRIMARY）。冷启动→第二源返 False。
-
-    W7 命令判定（intent_classify._has_action_intent）：任一 token 命中→type=INTENT_COMMAND。
-
-    独立于 cue_type_of（不入 _CUE_WORDS·防 帮我/生成 污染 extract_cues·同 is_negation_cue 范式）。
-    **bit-identical 守卫**：gate OFF（默认）→ 只第一源·退化纯 frozenset·回归零翻。
+    图中有候选时必须得到唯一且合法的调用方动作 kind；混合、未绑定或非法候选
+    均为假，并压住 Python/D:11。图完全无证据时才按兼容开关读取旧词表和
+    PRIMARY D:11。该布尔入口只服务 intent 判断，ConceptRef 消费走
+    ``action_intent_targets_of``，不能从布尔值伪造对象身份。
     """
-    # 第一源：_ACTION_LEXICAL_CUE frozenset exact 匹配（命令词+动作词·gate OFF 基底）
+    if language_signal_runtime is not None:
+        has_evidence, action_kind = _graph_action_kind(
+            token, lang,
+            language_signal_runtime=language_signal_runtime,
+            action_instruction_bindings=action_instruction_bindings,
+        )
+        if has_evidence:
+            return action_kind is not None
+    if not language_signal_compatibility_enabled:
+        return False
     from pure_integer_ai.cognition.shared.action_primitives import _ACTION_LEXICAL_CUE
-    cues = _ACTION_LEXICAL_CUE.get(lang, {})
-    if token in cues:
+    if token in _ACTION_LEXICAL_CUE.get(lang, {}):
         return True
-    # 第二源：D:11 readback（gate 守·反 theater）
     if not getattr(gates, "ACTION_D11_READBACK_MODE", False):
         return False
     if backend is None or edge_store is None or space_id is None or concept_index is None:
         return False   # 参数不全→退化（不读 D:11）
     return _action_intent_from_d11_primary(token, space_id, backend, edge_store, concept_index)
+
+
+def _graph_action_kind(
+        token: str, lang: int, *, language_signal_runtime,
+        action_instruction_bindings: tuple[
+            tuple[tuple[int, ...], int], ...]) -> tuple[bool, int | None]:
+    """把一致图指令解析为合法动作 kind，并保留无证据与拒绝状态。"""
+    has_evidence, action_kind = _graph_bound_integer(
+        token, lang,
+        language_signal_runtime=language_signal_runtime,
+        instruction_bindings=action_instruction_bindings,
+        label="动作意图",
+    )
+    if not has_evidence or action_kind is None:
+        return has_evidence, None
+    from pure_integer_ai.cognition.shared.action_primitives import (
+        is_action_class_kind,
+        is_command_mood_kind,
+    )
+    if not (is_command_mood_kind(action_kind)
+            or is_action_class_kind(action_kind)):
+        raise ValueError("动作意图绑定值不属于已定义的动作 kind")
+    return True, action_kind
+
+
+def action_intent_of(
+        token: str, lang: int, *, backend=None, edge_store=None,
+        space_id: int | None = None, concept_index=None,
+        language_signal_runtime=None,
+        action_instruction_bindings: tuple[
+            tuple[tuple[int, ...], int], ...] = (),
+        language_signal_compatibility_enabled: bool = True) -> int | None:
+    """返回图优先的动作 kind；兼容 D:11 只有唯一 kind 时才投影为单值。"""
+    if language_signal_runtime is not None:
+        has_evidence, action_kind = _graph_action_kind(
+            token, lang,
+            language_signal_runtime=language_signal_runtime,
+            action_instruction_bindings=action_instruction_bindings,
+        )
+        if has_evidence:
+            return action_kind
+    if not language_signal_compatibility_enabled:
+        return None
+    from pure_integer_ai.cognition.shared.action_primitives import _ACTION_LEXICAL_CUE
+    lexical_kind = _ACTION_LEXICAL_CUE.get(lang, {}).get(token)
+    if lexical_kind is not None:
+        return lexical_kind
+    if (not getattr(gates, "ACTION_D11_READBACK_MODE", False)
+            or backend is None or edge_store is None
+            or space_id is None or concept_index is None):
+        return None
+    word_ref = concept_index.lookup(token, space_id)
+    if word_ref is None:
+        return None
+    from pure_integer_ai.cognition.shared.action_primitives import lookup_word_action
+    from pure_integer_ai.storage.node_store import TIER_PRIMARY
+    kinds = {
+        kind for _action_ref, kind in lookup_word_action(
+            backend, edge_store, word_ref,
+            space_id=space_id, tier_filter=TIER_PRIMARY)
+    }
+    return next(iter(kinds)) if len(kinds) == 1 else None
+
+
+def action_intent_targets_of(
+        token: str, lang: int, *, backend, edge_store,
+        space_id: int, concept_index,
+        language_signal_runtime=None,
+        action_instruction_bindings: tuple[
+            tuple[tuple[int, ...], int], ...] = (),
+        action_primitive_refs: tuple[
+            tuple[int, tuple[int, int]], ...] = (),
+        language_signal_compatibility_enabled: bool = True,
+        ) -> tuple[tuple[tuple[int, int], int], ...]:
+    """返回动作词对应的一等动作 ConceptRef 与 kind，不从布尔 cue 伪造 ref。"""
+    if language_signal_runtime is not None:
+        has_evidence, action_kind = _graph_action_kind(
+            token, lang,
+            language_signal_runtime=language_signal_runtime,
+            action_instruction_bindings=action_instruction_bindings,
+        )
+        if has_evidence:
+            if action_kind is None:
+                return ()
+            primitive_map = dict(action_primitive_refs)
+            action_ref = primitive_map.get(action_kind)
+            return () if action_ref is None else ((action_ref, action_kind),)
+    if not language_signal_compatibility_enabled:
+        return ()
+    word_ref = concept_index.lookup(token, space_id)
+    if word_ref is None:
+        return ()
+    from pure_integer_ai.cognition.shared.action_primitives import lookup_word_action
+    from pure_integer_ai.storage.node_store import TIER_PRIMARY
+    return tuple(sorted(
+        lookup_word_action(
+            backend, edge_store, word_ref,
+            space_id=space_id, tier_filter=TIER_PRIMARY),
+        key=lambda item: (item[0][0], item[0][1], item[1]),
+    ))
 
 
 def _action_intent_from_d11_primary(token: str, space_id: int,
@@ -445,20 +636,26 @@ def _action_intent_from_d11_primary(token: str, space_id: int,
     return len(hits) > 0
 
 
-def collect_action_intent_concepts(segments, *, backend, edge_store,
-                                   space_id: int, concept_index) -> list[tuple[tuple[int, int], int]]:
+def collect_action_intent_concepts(
+        segments, *, backend, edge_store, space_id: int, concept_index,
+        language_signal_runtime=None,
+        action_instruction_bindings: tuple[
+            tuple[tuple[int, ...], int], ...] = (),
+        action_primitive_refs: tuple[
+            tuple[int, tuple[int, int]], ...] = (),
+        language_signal_compatibility_enabled: bool = True,
+        ) -> list[tuple[tuple[int, int], int]]:
     """B-PR2：收集 segments 中命中 D:11 PRIMARY ACTION_* concept 的 distinct refs（doc §17·experience_count feed 用）。
 
     扫 segments.tokens·``concept_index.lookup(tok, space_id) → word_ref | None``·
     ``lookup_word_action(backend, edge_store, word_ref, space_id, tier_filter=TIER_PRIMARY) → [(action_ref, kind)]``·
     distinct by action_ref（同 episode 同 ACTION_* concept 只返一次·镜像 reward_propagate concept_targets set 去重 :208-210）。
 
-    **D:11 readback 单源**（非 is_action_intent_cue 两源·设计审 C CONFIRMED·§17.1 决断3）：B-PR2 须 concept **REF**（写
-    experience_count 须 (space_id, local_id) ref）·ref 只从 D:11 边来（lookup_word_action 返 [(action_ref, kind)]）·
-    frozenset 第一源给 bool 不给 ref → 单源 D:11 是唯一可用源。boot 种子词（帮我/请/生成/计算/分析/解决）+ 教师晋升 alias
-    （劳驾/编写）都有 D:11 PRIMARY 边（bootstrap_action_signals 种·word_concept_signal.py:114 tier=PRIMARY）→ 全命中。
+    U-04 图路径先把 MinimalInstruction 映射到调用方 action kind，再由当前 context 的
+    ``action_primitive_refs`` 映射到一等动作 ConceptRef；缺 ref 时不得从布尔 cue 伪造。
+    图无证据且兼容开启时才保留旧 D:11 PRIMARY ConceptRef 路径。
 
-    **tier_filter=TIER_PRIMARY**（反 theater）：未验证 SHADOW alias 不注入（SHADOW=涌现假设·未晋升·不应攒"验证率"）。
+    兼容 D:11 仍固定 ``TIER_PRIMARY``，未验证 SHADOW alias 不注入验证率。
 
     **返 kind**（int_a·0=COMMAND_MOOD / 1-4=ACTION_*）：caller（formal_train hook）写 experience_count 不区分 kind（同 rate 桶）·
     kind 仅供 caller 日志/未来 B-PR3 按类分流感（B-PR3 读 int_a 分流·非本 collector 责）。
@@ -466,23 +663,54 @@ def collect_action_intent_concepts(segments, *, backend, edge_store,
     **无 gate**（纯读 collector·gate 在 formal_train hook 守 ACTION_EXPERIENCE_FEED_MODE·gate OFF 不调本函数）。
     纯读（concept_index.lookup + lookup_word_action 均 select/read·无 insert/update·设计审 D CONFIRMED）。
     """
-    from pure_integer_ai.cognition.shared.action_primitives import lookup_word_action
-    from pure_integer_ai.storage.node_store import TIER_PRIMARY
     seen: set = set()
     out: list[tuple[tuple[int, int], int]] = []
     for seg in segments:
         for tok in seg.tokens:
-            word_ref = concept_index.lookup(tok, space_id)
-            if word_ref is None:
-                continue   # 词未概念化（冷启动·未 observe）·skip
-            for action_ref, kind in lookup_word_action(
-                    backend, edge_store, word_ref,
-                    space_id=space_id, tier_filter=TIER_PRIMARY):
+            for action_ref, kind in action_intent_targets_of(
+                    tok, seg.lang,
+                    backend=backend, edge_store=edge_store,
+                    space_id=space_id, concept_index=concept_index,
+                    language_signal_runtime=language_signal_runtime,
+                    action_instruction_bindings=action_instruction_bindings,
+                    action_primitive_refs=action_primitive_refs,
+                    language_signal_compatibility_enabled=(
+                        language_signal_compatibility_enabled)):
                 if action_ref in seen:
                     continue   # 同 concept distinct 去重（同 episode 同 ACTION_* 只 feed 一次）
                 seen.add(action_ref)
                 out.append((action_ref, kind))
     return out
+
+
+def collect_action_intent_word_decisions(
+        segments, *, space_id: int, concept_index,
+        language_signal_runtime=None,
+        action_instruction_bindings: tuple[
+            tuple[tuple[int, ...], int], ...] = (),
+        language_signal_compatibility_enabled: bool = True,
+        ) -> dict[tuple[int, int], bool]:
+    """为 dag_path 记录图已裁决的词概念，阻止后续 D:11 覆盖冲突。"""
+    decisions: dict[tuple[int, int], bool] = {}
+    if language_signal_runtime is None:
+        return decisions
+    for seg in segments:
+        for token in seg.tokens:
+            word_ref = concept_index.lookup(token, space_id)
+            if word_ref is None:
+                continue
+            has_evidence, action_kind = _graph_action_kind(
+                token, seg.lang,
+                language_signal_runtime=language_signal_runtime,
+                action_instruction_bindings=action_instruction_bindings,
+            )
+            if not has_evidence and language_signal_compatibility_enabled:
+                continue
+            decision = action_kind is not None if has_evidence else False
+            previous = decisions.get(word_ref)
+            decisions[word_ref] = (
+                decision if previous is None else previous and decision)
+    return decisions
 
 
 # ---- B2 情态 cue（独立于 cue_type_of·不入 _CUE_WORDS·镜像 _NEGATION_CUES 范式·P0.3 modality 填值） ----
@@ -492,10 +720,8 @@ def collect_action_intent_concepts(segments, *, backend, edge_store,
 # 返 modality 编码：0=实然/1=□必然/2=◇可能/3=道义必然/4=道义可能（P0.3 surface 后缀 _{pol}_{mod}）。
 # 独立 helper（不入 _CUE_WORDS·防 必然/可能 污染 extract_cues 邻居判·同 _NEGATION_CUES 范式）。
 # 守墙：T 公理形式层墙内（构造性检查·非 truth）·实质情态真值（认识/规范 W2 + 动力 W1）defer。
-# **审计根治 [严重-1]**：D6 模态种类归抽象空间后天可学习（D6:60）·走 D:11 learnable 二源（frozenset 第一源 +
-# D:11 readback 第二源·镜像 arith_op_of/comparison_op_of/is_property_possess_cue 范式）·开放变体（想必/势必/说不定）
-# 走 D:11 教师晋升有路径。建 modal_kind concept（modal_primitives.py）+ ATTR_MODAL_KIND=22 readback +
-# abstract_mark MARK_MODAL_KIND=5 D6 归属·不违 STOP（ATTR_* 非 TYPE_*）不违 D6（abstract_mark 归属）。
+# U-04 迁移后，来源化语言信号图是情态主读，指令到 modality 值的作用由调用方注入。
+# 下列词表和 D:11 只服务显式开启的迁移兼容路径，不得计 readiness。
 _MODAL_CUES: dict[int, dict[str, int]] = {
     LANG_ZH: {
         "必然": 1,   # □ 必然（认识·epistemic necessity）
@@ -511,31 +737,37 @@ _MODAL_CUES: dict[int, dict[str, int]] = {
 
 def modal_op_of(token: str, lang: int, *,
                 backend=None, edge_store=None,
-                space_id: int | None = None, concept_index=None) -> int | None:
-    """token 是否情态词（B2·必然/可能/也许/必须/应该/可以）·返 modality 0-4 / None。
+                space_id: int | None = None, concept_index=None,
+                language_signal_runtime=None,
+                modality_instruction_bindings: tuple[
+                    tuple[tuple[int, ...], int], ...] = (),
+                language_signal_compatibility_enabled: bool = True,
+                ) -> int | None:
+    """按图中一致指令和调用方绑定解析情态作用，必要时读取迁移兼容源。
 
-    **两源**（审计根治·镜像 arith_op_of / comparison_op_of / is_property_possess_cue 范式）：
-      第一源（既有·元定义固化）：_MODAL_CUES dict exact 匹配（返 modality 0-4·closed-class 情态副词·
-        reward 不调·断奶前后不变·gate OFF 基底·bit-identical）。
-      第二源（审计根治新增·D:11 readback·gate MODAL_D11_READBACK_MODE）：
-        lookup token → word_ref → lookup_word_modality 读 D:11 PRIMARY 边 → MODAL_KIND_*（= modality 编码·
-        modal_kind 即 modality 值·不需 opcode 映射·比 operator 简单）。反 theater：未验证 SHADOW 不注入
-        （tier_filter=TIER_PRIMARY）。冷启动（D:11 MODAL_KIND 无教师种子）→ 第二源返 None → 退化 frozenset。
-
-    返 modality 编码（0=实然/1=□必然/2=◇可能/3=道义必然/4=道义可能·P0.3 surface 后缀 _{pol}_{mod}）。
-    独立于 cue_type_of（不入 _CUE_WORDS·防 必然/可能 污染 extract_cues 邻居判·同 is_negation_cue 范式）。
-    extract_property_claims 情态窗口据此填 modality 值·gate MODALITY_MODE 守
-    （OFF → modality_on=False → 既有肯定窗口 modality=0 bit-identical）。不命中返 None。
-
-    **bit-identical 守卫**：gate OFF（默认）→ 只走第一源·退化纯 frozenset·回归零翻。
-    **守墙**：T 公理形式层墙内（构造性检查·非 truth·情态比命题多一口气=定理有效性层有形式锚）·
-    实质情态真值（认识/规范 W2 + 动力 W1）defer。
+    图中存在混合指令或一致指令未出现在绑定中时返回 ``None``，不得回退旧源。
+    只有图无候选时，compatibility 开关才允许读取 Python 词表和 D:11 PRIMARY。
+    T 公理等形式层处理只提供构造性机制，不证明实质情态真值；认识和规范真值
+    仍受 W2 限制，动力情态的物理接地仍受 W1 限制并保持 defer。
     """
-    # 第一源：_MODAL_CUES dict exact 匹配（既有·元定义固化·gate OFF 基底）
+    if language_signal_runtime is not None:
+        has_evidence, value = _graph_bound_integer(
+            token, lang,
+            language_signal_runtime=language_signal_runtime,
+            instruction_bindings=modality_instruction_bindings,
+            label="情态",
+        )
+        if has_evidence:
+            if value is not None and value <= 0:
+                raise ValueError("情态作用值必须是严格正整数")
+            return value
+    if not language_signal_compatibility_enabled:
+        return None
+    # 迁移期第一兼容源：Python 字面词表。
     op = _MODAL_CUES.get(lang, {}).get(token)
     if op is not None:
         return op
-    # 第二源：D:11 readback（审计根治·gate 守·反 theater）
+    # 迁移期第二兼容源：D:11 PRIMARY readback。
     if not getattr(gates, "MODAL_D11_READBACK_MODE", False):
         return None
     if backend is None or edge_store is None or space_id is None or concept_index is None:
@@ -569,17 +801,19 @@ def _modal_from_d11_primary(token: str, space_id: int,
 
 def is_modal_cue(token: str, lang: int, *,
                  backend=None, edge_store=None,
-                 space_id: int | None = None, concept_index=None) -> bool:
-    """token 是否情态词（B2·modal_op_of is not None·邻居判用·配对两端不取 modal token）。
-
-    独立于 cue_type_of（不入 _CUE_WORDS·防 必然/可能 污染 extract_cues·同 is_negation_cue 范式）。
-    extract_property_claims 据此判情态窗口（"X 的 Y [必然] 是 Z"·modal at j-1·modality 填值）·gate MODALITY_MODE 守
-    （OFF → modality_on=False → 既有肯定窗口 modality=0·bit-identical）。不命中返 False。
-    **审计根治**：透传 4 参→modal_op_of D:11 readback（gate ON 时非 frozenset 情态词亦判·与主调一致）。
-    默认 None→退化纯 frozenset（既有 caller 无 4 参·bit-identical）。
-    """
+                 space_id: int | None = None, concept_index=None,
+                 language_signal_runtime=None,
+                 modality_instruction_bindings: tuple[
+                     tuple[tuple[int, ...], int], ...] = (),
+                 language_signal_compatibility_enabled: bool = True) -> bool:
+    """复用 modal_op_of 的图优先裁决，判断 token 是否有确定情态作用。"""
     return modal_op_of(token, lang, backend=backend, edge_store=edge_store,
-                       space_id=space_id, concept_index=concept_index) is not None
+                       space_id=space_id, concept_index=concept_index,
+                       language_signal_runtime=language_signal_runtime,
+                       modality_instruction_bindings=(
+                           modality_instruction_bindings),
+                       language_signal_compatibility_enabled=(
+                           language_signal_compatibility_enabled)) is not None
 
 
 # ---- 程度 degree cue（#1134·degree 副词→Rational intensity·**file-driven 非 §九 frozenset**·gate DEGREE_MODE） ----
@@ -631,7 +865,7 @@ def is_degree_cue(token: str, lang: int) -> bool:
     return degree_intensity_of(token, lang) is not None
 
 
-# ---- 刀 D 比较 cue（独立于 cue_type_of·不入 _CUE_WORDS·bit-identical-safe·镜像 _ARITH_OP_WORDS 范式） ----
+# ---- 刀 D 比较 cue 兼容词表（独立于 cue_type_of·不入 _CUE_WORDS） ----
 # 设计 doc/重来_刀D比较cue设计_2026-07-09.md §四。比较声明 = NUM 比较OP NUM·比较 OP 词（大于/小于/不小于/不大于）
 # 既是声明锚又是序方向。**不入 _CUE_WORDS**（异刀B 等于入 _CUE_WORDS）：大于/小于若入 _CUE_WORDS 会让
 # cue_type_of(大于) 返非 None → extract_cues 邻居判把 大于 当 cue 跳过配对 → 改变 CAUSES/IS_A/PRECEDES
@@ -659,26 +893,32 @@ _COMPARISON_OP_WORDS: dict[int, dict[str, int]] = {
 
 def comparison_op_of(token: str, lang: int, *,
                      backend=None, edge_store=None,
-                     space_id: int | None = None, concept_index=None) -> int | None:
-    """token 是否比较 OP 词（刀 D·大于/小于/不小于/不大于·元定义层固化）·返 CMP_* / None。
+                     space_id: int | None = None, concept_index=None,
+                     language_signal_runtime=None,
+                     comparison_instruction_bindings: tuple[
+                         tuple[tuple[int, ...], int], ...] = (),
+                     language_signal_compatibility_enabled: bool = True,
+                     ) -> int | None:
+    """按一致图指令和调用方绑定解析比较作用，必要时读取迁移兼容源。
 
-    **两源**（STEP5 PR2·镜像 arith_op_of / cue_type_of 范式）：
-      第一源（既有·元定义固化）：_COMPARISON_OP_WORDS frozenset exact 匹配（返 CMP_*）。
-      第二源（STEP5 PR2 新增·D:11 readback·gate OPERATOR_D11_READBACK_MODE）：
-        lookup token → word_ref → lookup_word_operator 读 D:11 PRIMARY 边 → OP_*（过滤比较 OP·OP_GT/LT/GE/LE）
-        → _OP_TO_OPCODE → CMP_*。反 theater：未验证 SHADOW 不注入（tier_filter=TIER_PRIMARY）。
-
-    **bit-identical 守卫**：gate OFF（默认）→ 只走第一源·退化纯 frozenset·回归零翻。
-    exact token 匹配（caller 须切比较 OP 词为独立 token·同 cue/arith_op 词纪律）。
-    非 OP 词 / 他 lang 返 None（extract_comparison_claims 据此跳·守反统计契约·不凑配）。
-    独立于 cue_type_of（不入 _CUE_WORDS·防 大于/小于 污染 extract_cues·见上注）。
-    过滤比较 OP（OP_GT/LT/GE/LE）·非算术 OP（OP_ADD/SUB/MUL）·无交叉污染（arith_op_of 同范过滤算术 OP）。
+    图中存在候选但冲突或未绑定时返回 ``None``，旧词表和 D:11 不得覆盖。
     """
-    # 第一源：frozenset exact 匹配（既有·元定义固化）
+    if language_signal_runtime is not None:
+        has_evidence, value = _graph_bound_integer(
+            token, lang,
+            language_signal_runtime=language_signal_runtime,
+            instruction_bindings=comparison_instruction_bindings,
+            label="比较",
+        )
+        if has_evidence:
+            return value
+    if not language_signal_compatibility_enabled:
+        return None
+    # 迁移期第一兼容源：Python 字面词表。
     cmp = _COMPARISON_OP_WORDS.get(lang, {}).get(token)
     if cmp is not None:
         return cmp
-    # 第二源：D:11 readback（STEP5 PR2·gate 守·反 theater）
+    # 迁移期第二兼容源：D:11 PRIMARY readback。
     if not getattr(gates, "OPERATOR_D11_READBACK_MODE", False):
         return None
     if backend is None or edge_store is None or space_id is None or concept_index is None:
@@ -716,19 +956,28 @@ def _comparison_op_from_d11_primary(token: str, space_id: int,
 
 def is_comparison_op_token(token: str, lang: int, *,
                            backend=None, edge_store=None,
-                           space_id: int | None = None, concept_index=None) -> bool:
+                           space_id: int | None = None, concept_index=None,
+                           language_signal_runtime=None,
+                           comparison_instruction_bindings: tuple[
+                               tuple[tuple[int, ...], int], ...] = (),
+                           language_signal_compatibility_enabled: bool = True,
+                           ) -> bool:
     """token 是否任一比较 OP（exact·守反统计·配对两端不取 OP token·同 extract_cues:66 邻居判）。
     STEP5 PR2：透传 4 参→comparison_op_of D:11 readback（gate ON 时非 frozenset OP 词亦判·与主调一致）。
     默认 None→退化纯 frozenset（extract_cues 既有 caller 无 4 参·bit-identical）。
     """
     return comparison_op_of(token, lang, backend=backend, edge_store=edge_store,
-                            space_id=space_id, concept_index=concept_index) is not None
+                            space_id=space_id, concept_index=concept_index,
+                            language_signal_runtime=language_signal_runtime,
+                            comparison_instruction_bindings=(
+                                comparison_instruction_bindings),
+                            language_signal_compatibility_enabled=(
+                                language_signal_compatibility_enabled)) is not None
 
 
-# ---- 条件结构 cue（language→code piece 2·closed-class 句法锚·元定义层固化·§九例外） ----
+# ---- 条件结构 cue 兼容词表（language→code piece 2） ----
 # 设计 doc/重来_语言通用接地_2026-07-16 §七-bis。条件结构词（如果/那么/否则·if/then/else）= 控流保留字·
-# **闭类句法锚**（有限基数·标结构槽·无指称内容·同 加→ADD / 大于→CMP_GT）→ §九元定义 frozenset 种子
-# （非外部数据文件·构造非值·异数字词 number_facts·非写死行为·非语义关联）。
+# 正式结构槽由来源化图指令和调用方作用绑定决定；下表仅供迁移兼容。
 # **独立 _CUE_WORDS**（不入 extract_cues 邻居判·bit-identical-safe·镜像 _COMPARISON_OP_WORDS 范式）：
 # cue_type_of(如果/那么/否则) 仍返 None（零行为变）→ CAUSES/IS_A/PRECEDES 提取不变。
 # 唯一消费者 = code_problem.code_problem_value（无生产 caller·CI 零调用→bit-identical）。
@@ -741,47 +990,61 @@ _COND_KEYWORDS: dict[int, dict[str, int]] = {
 }
 
 
-def cond_keyword_of(token: str, lang: int) -> int | None:
-    """token 是否条件结构词（如果/那么/否则·元定义层固化·closed-class 句法锚·§九例外）·返 _COND_* / None。
+def cond_keyword_of(
+        token: str, lang: int, *, language_signal_runtime=None,
+        condition_instruction_bindings: tuple[
+            tuple[tuple[int, ...], int], ...] = (),
+        language_signal_compatibility_enabled: bool = True) -> int | None:
+    """按一致图指令和调用方绑定解析条件槽作用，必要时读取旧字面兼容源。
 
-    **第一源（元定义 frozenset exact 匹配·本函数仅此源）**：_COND_KEYWORDS（加/大于/如果 同为 closed-class
-    句法锚·§九元定义种子·非外部数据·非写死行为）。
-    **第二源 D:11 readback defer**：异 comparison_op_of/arith_op_of 两源——条件结构 cue 无对应 COND_* D:11
-    原语类型（须新建 control-flow-keyword 原语·piece 2.x+ defer·非本版 scope）。故本函数单源·教师无法经
-    D:11 注新条件词（倘/假使 defer）·诚实单源（非镜像 comparison_op_of 两源机制·仅镜像其 frozenset 第一源）。
-
-    独立于 cue_type_of（不入 _CUE_WORDS·防 如果/那么/否则 污染 extract_cues·bit-identical·镜像 _COMPARISON_OP_WORDS）。
-    非条件结构词 / 他 lang 返 None（code_problem_value 据此跳·守反统计契约·不凑配）。
+    图中存在候选但冲突或未绑定时返回 ``None``，compatibility 关闭后不读取
+    Python 条件词表。条件作用只描述结构槽，不宣称条件内容为真。
     """
+    if language_signal_runtime is not None:
+        has_evidence, value = _graph_bound_integer(
+            token, lang,
+            language_signal_runtime=language_signal_runtime,
+            instruction_bindings=condition_instruction_bindings,
+            label="条件",
+        )
+        if has_evidence:
+            return value
+    if not language_signal_compatibility_enabled:
+        return None
     return _COND_KEYWORDS.get(lang, {}).get(token)
 
 
 def cue_type_of(token: str, lang: int, *,
                 backend=None, edge_store=None,
-                space_id: int | None = None, concept_index=None) -> int | None:
-    """token 是否是某类 cue（exact 匹配）·返 cue_type / None。
+                space_id: int | None = None, concept_index=None,
+                language_signal_runtime=None,
+                cue_instruction_bindings: tuple[
+                    tuple[tuple[int, ...], int], ...] = (),
+                language_signal_compatibility_enabled: bool = True,
+                ) -> int | None:
+    """按一致图指令和调用方绑定解析关系/量化 cue 类型。
 
-    exact token 匹配（caller 须将指向词切为独立 token·首版纪律）。
-    不命中返 None·extractor 据此跳（守反统计契约·不凑配）。
-
-    **两源**（刀4 决断5）：
-      第一源（既有·元定义固化）：_CUE_WORDS frozenset exact 匹配（reward 不调·断奶前后不变）。
-      第二源（刀4 新增·D:11 readback·gate EMERGENT_RELATION_CUE_READBACK_MODE）：
-        lookup token → word_ref（concept_index.lookup）→ lookup_word_concept 读 D:11 PRIMARY 边
-        → REL_* → _REL_KIND_TO_CUE_TYPE 映射。**反 theater 关键**：涌现学习成果（promote PRIMARY）
-        反馈到 cue 识别·冷启动 frozenset 不含的词（如"引发"）经涌现晋升后第二轮返非 None。
-
-    **bit-identical 守卫**：gate OFF（默认）→ 只走第一源·退化纯 frozenset·回归零翻。
-      冷启动（D:11 全 SHADOW 未 promote）→ 第二源返 None → 退化 frozenset。
-      第二源只读 TIER_PRIMARY D:11 边（lookup_word_concept tier_filter=TIER_PRIMARY·未验证 SHADOW 不注入）。
+    图中存在候选但冲突或未绑定时返回 ``None``，不得由 Python 词表或 D:11
+    覆盖。只有图无证据且 compatibility 开启时才读取迁移期旧源。
     """
-    # 第一源：frozenset exact 匹配（既有·元定义固化）
+    if language_signal_runtime is not None:
+        has_evidence, value = _graph_bound_integer(
+            token, lang,
+            language_signal_runtime=language_signal_runtime,
+            instruction_bindings=cue_instruction_bindings,
+            label="关系 cue",
+        )
+        if has_evidence:
+            return value
+    if not language_signal_compatibility_enabled:
+        return None
+    # 迁移期第一兼容源：Python 字面词表。
     lang_set = _CUE_WORDS.get(lang)
     if lang_set is not None:
         for cue_type, words in lang_set.items():
             if token in words:
                 return cue_type
-    # 第二源：D:11 readback（刀4·gate 守·反 theater）
+    # 迁移期第二兼容源：D:11 PRIMARY readback。
     if not getattr(gates, "EMERGENT_RELATION_CUE_READBACK_MODE", False):
         return None
     if backend is None or edge_store is None or space_id is None or concept_index is None:
@@ -825,6 +1088,19 @@ def _cue_type_from_d11_primary(token: str, lang: int, space_id: int,
     return None
 
 
-def is_cue_token(token: str, lang: int) -> bool:
-    """token 是否任一类 cue（exact）。"""
-    return cue_type_of(token, lang) is not None
+def is_cue_token(
+        token: str, lang: int, *, backend=None, edge_store=None,
+        space_id: int | None = None, concept_index=None,
+        language_signal_runtime=None,
+        cue_instruction_bindings: tuple[
+            tuple[tuple[int, ...], int], ...] = (),
+        language_signal_compatibility_enabled: bool = True) -> bool:
+    """复用 cue_type_of 的图优先裁决，判断 token 是否有确定 cue 作用。"""
+    return cue_type_of(
+        token, lang,
+        backend=backend, edge_store=edge_store,
+        space_id=space_id, concept_index=concept_index,
+        language_signal_runtime=language_signal_runtime,
+        cue_instruction_bindings=cue_instruction_bindings,
+        language_signal_compatibility_enabled=(
+            language_signal_compatibility_enabled)) is not None

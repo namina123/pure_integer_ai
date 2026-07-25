@@ -26,6 +26,11 @@ from pure_integer_ai.cognition.shared.scope_identity import (
     SCOPE_SESSION,
     ScopeIdentity,
 )
+from pure_integer_ai.cognition.shared.work_memory_content import (
+    WorkMemoryContentItem,
+    WorkMemoryContentProtocol,
+    WorkMemoryContentStore,
+)
 
 if TYPE_CHECKING:
     from pure_integer_ai.cognition.shared.attractor_state import AttractorState
@@ -73,6 +78,8 @@ class WorkMemory:
     # append local_seeds/e_set（mirror #728 replay 扩张·PR 偏向动作拓扑邻域 §13.3）。gate ACTION_SEED_BIAS_MODE 守。
     # 默认 []（gate OFF / QUESTION intent → formal_train 不预算 → dag_path `if candidates:` 假 → 跳过 → bit-identical）。
     action_seed_candidates: list[Any] = field(default_factory=list)
+    # U-04 图侧对动作词概念的三态裁决；存在键时 dag_path 不得再用 D:11 覆盖图冲突。
+    action_intent_word_decisions: dict[ConceptRef, bool] = field(default_factory=dict)
     exclude_refs: set[ConceptRef] = field(default_factory=set)
     # ② fix（#733·J4 指代层3）：observe 段内代词悬空（resolve_pronoun_occurrence 返 None）→
     # _segment_dangling++ ·段末若 >0 标该段 struct_ref 进 dangling_units·judge check_closure ② 查
@@ -144,6 +151,9 @@ class WorkMemory:
     _pending_replay_candidates: list[Any] = field(default_factory=list, init=False, repr=False)
     _pending_exclude_refs: set[ConceptRef] = field(default_factory=set, init=False, repr=False)
     _query_resources: list[Any] = field(default_factory=list, init=False, repr=False)
+    # A-02 内容账本按实例注入协议；未安装时旧路径不获得任何隐式角色语义。
+    _content_store: WorkMemoryContentStore | None = field(
+        default=None, init=False, repr=False)
 
     @property
     def lifecycle_active(self) -> bool:
@@ -154,6 +164,54 @@ class WorkMemory:
     def episode_active(self) -> bool:
         """返回是否存在可写的当前 episode。"""
         return self.active_episode_scope is not None
+
+    def configure_content(self, protocol: WorkMemoryContentProtocol) -> None:
+        """在 session 外安装 A-02 角色与容量协议；相同协议可幂等重放。"""
+        if not isinstance(protocol, WorkMemoryContentProtocol):
+            raise TypeError("configure_content 需要 WorkMemoryContentProtocol")
+        if self.lifecycle_active:
+            raise WorkMemoryScopeError("活动 session 内不得替换 WorkMemory content 协议")
+        if self._content_store is not None:
+            if self._content_store.protocol == protocol:
+                return
+            raise WorkMemoryScopeError("WorkMemory content 协议已安装")
+        self._content_store = WorkMemoryContentStore(protocol)
+
+    def require_content_store(self) -> WorkMemoryContentStore:
+        """返回已安装的 A-02 内容账本；缺失时拒绝退回 legacy 字段。"""
+        if self._content_store is None:
+            raise WorkMemoryScopeError("WorkMemory 尚未安装 A-02 content 协议")
+        return self._content_store
+
+    def put_content(self, item: WorkMemoryContentItem) -> WorkMemoryContentItem:
+        """把来源化内容项提交给独立账本，不触碰长期 Memory 或 legacy FIFO。"""
+        return self.require_content_store().put(item)
+
+    def active_content(
+            self, *, role: ObjectIdentity | None = None,
+            ) -> tuple[WorkMemoryContentItem, ...]:
+        """读取全部或指定 Role 的 active 内容，不隐式选择最近项。"""
+        return self.require_content_store().active(role=role)
+
+    def content_history(
+            self, *, role: ObjectIdentity | None = None,
+            ) -> tuple[WorkMemoryContentItem, ...]:
+        """读取当前 lifespan 内含 superseded 项的 A-02 审计历史。"""
+        return self.require_content_store().history(role=role)
+
+    def content_state_key(self) -> tuple[int, ...]:
+        """返回 A-02 协议、活动 scope 和内容投影的完整确定性状态。"""
+        return self.require_content_store().state_key()
+
+    def _open_content_scope(self, scope: ScopeIdentity) -> None:
+        """在已安装 A-02 协议时同步打开一个 A-09 scope。"""
+        if self._content_store is not None:
+            self._content_store.open_scope(scope)
+
+    def _close_content_scope(self, scope: ScopeIdentity | None) -> None:
+        """在已安装 A-02 协议时同步关闭并清除此 lifespan 内容。"""
+        if self._content_store is not None and scope is not None:
+            self._content_store.close_scope(scope)
 
     def _require_scope(self, scope: ScopeIdentity | None, expected_kind: int,
                        where: str) -> ScopeIdentity:
@@ -209,6 +267,7 @@ class WorkMemory:
         self.promoted_transition_targets.clear()
         self.ctx = ()
         self.action_seed_candidates.clear()
+        self.action_intent_word_decisions.clear()
         self.episode_artifacts.clear()
         self.query_artifact_results.clear()
         self._clear_generation_state()
@@ -234,6 +293,7 @@ class WorkMemory:
             raise WorkMemoryScopeError("已有其他 session 未结束")
         self._clear_document_state()
         self.lang_skeleton_by_item.clear()
+        self._open_content_scope(scope)
         self.active_session_scope = scope
         self.active_document_scope = None
         self.active_episode_scope = None
@@ -249,6 +309,7 @@ class WorkMemory:
                 self.active_query_scope, self.active_generation_scope,
                 self.active_segment_index is not None)):
             raise WorkMemoryScopeError("关闭 session 前必须结束所有子生命周期")
+        self._close_content_scope(self.active_session_scope)
         self._clear_document_state()
         self.lang_skeleton_by_item.clear()
         self.active_session_scope = None
@@ -264,6 +325,7 @@ class WorkMemory:
         if self.active_document_scope is not None:
             raise WorkMemoryScopeError("已有 document 未结束")
         self._clear_document_state()
+        self._open_content_scope(scope)
         self.active_document_scope = scope
 
     def end_document(self) -> None:
@@ -273,6 +335,7 @@ class WorkMemory:
         if any((self.active_episode_scope, self.active_query_scope,
                 self.active_generation_scope, self.active_segment_index is not None)):
             raise WorkMemoryScopeError("关闭 document 前必须结束 episode/query/generation/segment")
+        self._close_content_scope(self.active_document_scope)
         self._clear_document_state()
         self.active_document_scope = None
 
@@ -282,6 +345,7 @@ class WorkMemory:
         self._require_active(scope, self.active_document_scope, "begin_episode")
         if self.active_episode_scope is not None:
             raise WorkMemoryScopeError("已有 episode 未结束")
+        self._open_content_scope(scope)
         self._clear_episode_state()
         if self._pending_replay_document == self.active_document_scope:
             self.replay_candidates.extend(self._pending_replay_candidates)
@@ -306,10 +370,14 @@ class WorkMemory:
         self._clear_episode_state()
         self.replay_candidates.clear()
         self.exclude_refs.clear()
+        self._close_content_scope(self.active_episode_scope)
         self.active_episode_scope = None
 
     def abort_episode(self) -> None:
         """异常中止 episode，丢弃所有待继承结果并恢复到干净文档状态。"""
+        generation_scope = self.active_generation_scope
+        query_scope = self.active_query_scope
+        episode_scope = self.active_episode_scope
         if self.active_segment_index is not None:
             self.active_segment_index = None
         self.active_generation_scope = None
@@ -320,6 +388,9 @@ class WorkMemory:
         self._clear_episode_state()
         self.replay_candidates.clear()
         self.exclude_refs.clear()
+        self._close_content_scope(generation_scope)
+        self._close_content_scope(query_scope)
+        self._close_content_scope(episode_scope)
         self.active_episode_scope = None
 
     def begin_query(self, scope: ScopeIdentity | None) -> None:
@@ -328,6 +399,7 @@ class WorkMemory:
         self._require_active(scope, self.active_episode_scope, "begin_query")
         if self.active_query_scope is not None:
             raise WorkMemoryScopeError("已有 query 未结束")
+        self._open_content_scope(scope)
         self._clear_query_state()
         self.active_query_scope = scope
 
@@ -356,6 +428,7 @@ class WorkMemory:
         if any((self.active_generation_scope, self.active_segment_index is not None)):
             raise WorkMemoryScopeError("关闭 query 前必须结束 generation/segment")
         self._clear_query_state()
+        self._close_content_scope(self.active_query_scope)
         self.active_query_scope = None
 
     def begin_generation(self, scope: ScopeIdentity | None) -> None:
@@ -364,6 +437,7 @@ class WorkMemory:
         self._require_active(scope, self.active_query_scope, "begin_generation")
         if self.active_generation_scope is not None:
             raise WorkMemoryScopeError("已有 generation 未结束")
+        self._open_content_scope(scope)
         self._clear_generation_state()
         self.active_generation_scope = scope
 
@@ -372,6 +446,7 @@ class WorkMemory:
         if self.active_generation_scope is None:
             return
         self._clear_generation_state()
+        self._close_content_scope(self.active_generation_scope)
         self.active_generation_scope = None
 
     def begin_segment(self, segment_index: int) -> None:

@@ -272,17 +272,32 @@ def _item_sentence_bounds(item: CollectedItem) -> list[tuple[int, int]]:
 def _split_item_to_segments(item: CollectedItem, *,
                             backend=None, edge_store=None,
                             space_id: int | None = None,
-                            concept_index=None) -> list[Segment]:
+                            concept_index=None,
+                            language_signal_runtime=None,
+                            property_attr_instruction_key: tuple[int, ...] | None = None,
+                            property_value_instruction_key: tuple[int, ...] | None = None,
+                            property_possess_instruction_key: tuple[int, ...] | None = None,
+                            similar_instruction_key: tuple[int, ...] | None = None,
+                            negation_instruction_key: tuple[int, ...] | None = None,
+                            modality_instruction_bindings: tuple[
+                                tuple[tuple[int, ...], int], ...] = (),
+                            arithmetic_instruction_bindings: tuple[
+                                tuple[tuple[int, ...], int], ...] = (),
+                            comparison_instruction_bindings: tuple[
+                                tuple[tuple[int, ...], int], ...] = (),
+                            cue_instruction_bindings: tuple[
+                                tuple[tuple[int, ...], int], ...] = (),
+                            language_signal_compatibility_enabled: bool = True,
+                            ) -> list[Segment]:
     """CollectedItem 段落 → 已决边界 Segment 列表。
 
     语言分段只消费 U-03 来源化 active 决定；无证据时整段保留。句段内 token 序保
     PRECEDES 骨架。单段输入只产一个结构根，reward caller 仍按既有规则处理。
     role_seq/causal_pairs/alias_cue_pairs 按 token 切片 + 段内 index 重映射（确定性）。
 
-    **刀5 件8 透传**（close 刀4 生产 gap）：4 可选参透传给 extract_cues_gated → cue_type_of
-    第二源 D:11 readback。生产 caller run_round_full 传 ctx.backend/edge_store/space_id/concept_index。
-    默认全 None → cue_type_of 退化纯 frozenset → 现状零行为变（bit-identical）。space_id 是
-    语言 token 概念化所在 core space（ctx.space_id·concept_index.lookup(surface, ctx.space_id)）。
+    生产 caller 注入来源化语言信号 runtime、各作用绑定和兼容开关；图证据冲突时
+    不得回退旧词表。未注入 runtime 时保留旧调用兼容，显式关闭兼容后缺图证据
+    fail closed。space_id 是语言 token 概念化所在 core space。
 
     **代码域分支**（C6 生产闭环·doc/重来_A3_代码域observe设计补充.md §二致命#2）：MODALITY_CODE
     不消费语言句界候选，一段一函数，Segment 带 code_source。
@@ -325,42 +340,82 @@ def _split_item_to_segments(item: CollectedItem, *,
         cue_pairs, is_a_seg_pairs, precedes_seg_pairs = extract_cues_gated(
             seg_tokens, lang=item.lang,
             backend=backend, edge_store=edge_store,
-            space_id=space_id, concept_index=concept_index)
+            space_id=space_id, concept_index=concept_index,
+            language_signal_runtime=language_signal_runtime,
+            cue_instruction_bindings=cue_instruction_bindings,
+            language_signal_compatibility_enabled=(
+                language_signal_compatibility_enabled))
         # 刀 B：数值等式声明提取（独立函数·不改 extract_cues 3-tuple·同 CUE_EXTRACTOR_MODE gate·
         # NUM OP NUM 等于 NUM 窗口扫描·闭包传 numeric_proof_fn 检查·构造性检查 SELF_PRODUCED）
         numeric_seg_claims = extract_numeric_claims_gated(
             seg_tokens, lang=item.lang,
             backend=backend, edge_store=edge_store,
-            space_id=space_id, concept_index=concept_index)
+            space_id=space_id, concept_index=concept_index,
+            language_signal_runtime=language_signal_runtime,
+            cue_instruction_bindings=cue_instruction_bindings,
+            arithmetic_instruction_bindings=(
+                arithmetic_instruction_bindings),
+            language_signal_compatibility_enabled=(
+                language_signal_compatibility_enabled))
         # 刀 C：全称量化声明提取（独立函数·同 CUE_EXTRACTOR_MODE gate·X 都是 Y 紧邻 pair·
         # resolve 在验序器·ConceptNet 外部源验·构造性验证 EXTERNAL·三值逻辑守属性全称墙）
         universal_seg_claims = extract_universal_claims_gated(
             seg_tokens, lang=item.lang,
             backend=backend, edge_store=edge_store,
-            space_id=space_id, concept_index=concept_index)
+            space_id=space_id, concept_index=concept_index,
+            language_signal_runtime=language_signal_runtime,
+            cue_instruction_bindings=cue_instruction_bindings,
+            language_signal_compatibility_enabled=(
+                language_signal_compatibility_enabled))
         # A1·STEP6：存在量化声明提取（独立函数·同 CUE_EXTRACTOR_MODE gate·有的 X 是 Y 起始 cue 窗口；
         # 这里只记录声明，MEMBER/nonempty/overlap/DISJOINT 证据由后续 typed adapter 提供）。
         existential_seg_claims = extract_existential_claims_gated(
             seg_tokens, lang=item.lang,
             backend=backend, edge_store=edge_store,
-            space_id=space_id, concept_index=concept_index)
+            space_id=space_id, concept_index=concept_index,
+            language_signal_runtime=language_signal_runtime,
+            cue_instruction_bindings=cue_instruction_bindings,
+            property_value_instruction_key=(
+                property_value_instruction_key),
+            language_signal_compatibility_enabled=(
+                language_signal_compatibility_enabled))
         # G1+#774：属性命题声明提取（独立函数·gate PROPOSITION_MODE·X 的 Y 是 Z 固定窗口 6-tuple·P0.3 扩 pol/mod·
         # observe build_property_edges 建命题节点+PROPERTY 出边·G3b 读判同(subject,attr_type)多值矛盾·入图非闭包传）
         property_seg_claims = extract_property_claims_gated(
             seg_tokens, lang=item.lang,
             backend=backend, edge_store=edge_store,
-            space_id=space_id, concept_index=concept_index)
+            space_id=space_id, concept_index=concept_index,
+            language_signal_runtime=language_signal_runtime,
+            property_attr_instruction_key=(
+                property_attr_instruction_key),
+            property_value_instruction_key=(
+                property_value_instruction_key),
+            property_possess_instruction_key=(
+                property_possess_instruction_key),
+            negation_instruction_key=negation_instruction_key,
+            modality_instruction_bindings=modality_instruction_bindings,
+            language_signal_compatibility_enabled=(
+                language_signal_compatibility_enabled))
         # 刀 D：比较声明提取（独立函数·gate CUE_EXTRACTOR_MODE·NUM 比较OP NUM 紧邻 3-token 窗口·
         # 闭包传 comparison_proof_fn 检查（cross_compare）·不入图·构造性检查 SELF_PRODUCED·同刀 B 范式）
         comparison_seg_claims = extract_comparison_claims_gated(
             seg_tokens, lang=item.lang,
             backend=backend, edge_store=edge_store,
-            space_id=space_id, concept_index=concept_index)
+            space_id=space_id, concept_index=concept_index,
+            language_signal_runtime=language_signal_runtime,
+            comparison_instruction_bindings=(
+                comparison_instruction_bindings),
+            language_signal_compatibility_enabled=(
+                language_signal_compatibility_enabled))
         # STEP5 PR4：相似声明提取（X 像 Y·EDGE_SIMILAR slot-filler 候选扩展·D2 合规非向量·gate CUE_EXTRACTOR_MODE）
         similar_seg_claims = extract_similar_claims_gated(
             seg_tokens, lang=item.lang,
             backend=backend, edge_store=edge_store,
-            space_id=space_id, concept_index=concept_index)
+            space_id=space_id, concept_index=concept_index,
+            language_signal_runtime=language_signal_runtime,
+            similar_instruction_key=similar_instruction_key,
+            language_signal_compatibility_enabled=(
+                language_signal_compatibility_enabled))
         segs.append(Segment(
             seg_id=len(segs),
             modality=item.modality, lang=item.lang, domain=item.domain,

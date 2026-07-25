@@ -17,6 +17,7 @@ from pure_integer_ai.cognition.shared.formal_artifact import (
     ArtifactInvocation,
     ArtifactParameter,
     FormalArtifact,
+    FormalArtifactDefinition,
     artifact_identity,
 )
 from pure_integer_ai.cognition.shared.identity import (
@@ -35,6 +36,7 @@ _PROOF_IDENTITY_VERSION = 1
 _PROOF_ACCEPTED = 1
 _PROOF_REJECTED = 2
 _PROOF_UNKNOWN = 3
+_RESULT_DECLARATION_SEGMENT_COUNT = 6
 
 
 def _packed(key: tuple[int, ...]) -> tuple[int, ...]:
@@ -52,6 +54,54 @@ def _strict_tuple(
     if any(type(item) is not int for item in value):
         raise ValueError(f"{label} 必须使用严格整数")
     return value
+
+
+def _take_packed_segment(
+        values: tuple[int, ...], cursor: int,
+        ) -> tuple[tuple[int, ...], int] | None:
+    """保守读取结果声明中的长度前缀段，非法布局返回空。"""
+    if cursor >= len(values):
+        return None
+    size = values[cursor]
+    if type(size) is not int or size < 0:
+        return None
+    start = cursor + 1
+    end = start + size
+    if end > len(values):
+        return None
+    return values[start:end], end
+
+
+def is_execution_result_artifact_of(
+        artifact: FormalArtifact,
+        definition: FormalArtifactDefinition,
+        ) -> bool:
+    """判断 Artifact 是否带有指定 program/executor 的 S-06 result provenance。"""
+    if not isinstance(artifact, FormalArtifact):
+        raise TypeError("artifact 必须是 FormalArtifact")
+    if not isinstance(definition, FormalArtifactDefinition):
+        raise TypeError("definition 必须是 FormalArtifactDefinition")
+    values = artifact.declaration_key
+    if not values or values[0] != _RESULT_IDENTITY_VERSION:
+        return False
+    segments: list[tuple[int, ...]] = []
+    cursor = 1
+    for _ in range(_RESULT_DECLARATION_SEGMENT_COUNT):
+        parsed = _take_packed_segment(values, cursor)
+        if parsed is None:
+            return False
+        segment, cursor = parsed
+        segments.append(segment)
+    if cursor != len(values):
+        return False
+    _, program_key, _, _, executor_key, output_payload = segments
+    return (
+        artifact.artifact_kind == definition.result_kind
+        and artifact.schema == definition.result_schema
+        and program_key == definition.program.identity.stable_key()
+        and executor_key == definition.executor.stable_key()
+        and output_payload == artifact.payload
+    )
 
 
 def _require_reason(identity: ObjectIdentity, *, label: str) -> ObjectIdentity:
@@ -695,4 +745,5 @@ __all__ = [
     "FormalArtifactFailure",
     "FormalArtifactFailureProtocol",
     "FormalArtifactVerifier",
+    "is_execution_result_artifact_of",
 ]

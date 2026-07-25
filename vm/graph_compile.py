@@ -7,7 +7,7 @@ compile_graph 从 root 沿 COMPOSES 遍历 emit Instruction 序列：
   - STORE 节点（有子 + store_target_of）→ emit 值源子 + STORE 目标变量（A2·控制流体回写 env）
   - 控制流根（operator_of=CTRL_IF/IFELSE/WHILE）→ lower 成 JZ/JMP（A2·见下）
 
-**限深环保护**（§九铁律·禁无限递归·术语脱钩 loop_closure_defect）：
+**限深环保护**（§九铁律·禁无限递归）：
   - max_depth：递归深度上限（超 → LoopClosureDefect·不静默截断）
   - path 栈：检测 COMPOSES 环（图即程序不允许环·环 → LoopClosureDefect）
   COMPOSES 是组合关系·组合环 = 结构矛盾（一个整体直接/间接包含自身）·必须报错非兜底。
@@ -45,7 +45,7 @@ DEFAULT_MAX_DEPTH = 64  # COMPOSES 嵌套深度上限（防病态深递归·代�
 
 
 class LoopClosureDefect(RuntimeError):
-    """COMPOSES 环 / 超限深 退化（loop_closure_defect·术语脱钩安全词）。
+    """表示 COMPOSES 环或超限深退化。
 
     图即程序的组合关系不允许环（整体不能包含自身）·超限深同样报错非截断。
     """

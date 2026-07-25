@@ -257,7 +257,25 @@ class DefaultRoundRunner:
         # 刀5 件8：透传 ctx 4 参 → cue_extractor → cue_type_of 第二源 D:11 readback（生产路径·close 刀4 gap）
         segments = _split_item_to_segments(
             item, backend=ctx.backend, edge_store=ctx.edge_store,
-            space_id=ctx.space_id, concept_index=ctx.concept_index)
+            space_id=ctx.space_id, concept_index=ctx.concept_index,
+            language_signal_runtime=ctx.language_signal_runtime,
+            property_attr_instruction_key=(
+                ctx.language_property_attr_instruction_key),
+            property_value_instruction_key=(
+                ctx.language_property_value_instruction_key),
+            property_possess_instruction_key=(
+                ctx.language_property_possess_instruction_key),
+            similar_instruction_key=ctx.language_similar_instruction_key,
+            negation_instruction_key=ctx.language_negation_instruction_key,
+            modality_instruction_bindings=(
+                ctx.language_modality_instruction_bindings),
+            arithmetic_instruction_bindings=(
+                ctx.language_arithmetic_instruction_bindings),
+            comparison_instruction_bindings=(
+                ctx.language_comparison_instruction_bindings),
+            cue_instruction_bindings=ctx.language_cue_instruction_bindings,
+            language_signal_compatibility_enabled=(
+                ctx.language_signal_compatibility_enabled))
         if not segments:
             return RoundResult()
         if ctx.unicode_intake is not None:
@@ -291,6 +309,13 @@ class DefaultRoundRunner:
                       occurrence_order_writer=ctx.occurrence_order_writer,
                       position_histogram_state=ctx.position_histogram_state,
                       hub_degree_state=ctx.hub_degree_state,
+                      language_signal_runtime=ctx.language_signal_runtime,
+                      property_attr_instruction_key=(
+                          ctx.language_property_attr_instruction_key),
+                      pronoun_instruction_bindings=(
+                          ctx.language_pronoun_instruction_bindings),
+                      language_signal_compatibility_enabled=(
+                          ctx.language_signal_compatibility_enabled),
                       write_legacy_language_sequences=(
                           not _uses_typed_language_pipeline(ctx, item)))
         _materialize_item_spans(ctx, item, obs)
@@ -357,6 +382,14 @@ class DefaultRoundRunner:
                 read_only=ctx.scope_owner is not None,
             )
             ctx.semantic_pair_reports.append(semantic_pair_report)
+        if ctx.logic_closure_runtime is not None:
+            if raw.occurrence_scope_identity is None:
+                raise ValueError("R-08 runtime 缺少来源 occurrence scope")
+            logic_closure_report = ctx.logic_closure_runtime.process(
+                raw.occurrence_scope_identity,
+                read_only=ctx.scope_owner is not None,
+            )
+            ctx.logic_closure_reports.append(logic_closure_report)
 
         # #730 路径 W：捕获 code item 的 observe-built COMPOSES 根（__prog_* = obs.struct_refs[0]）供 task-driven
         # 代码模态 unparse（候选 A·observe 期建树一次·task-driven 纯读·幂等守 bit-identical）。code struct_ref
@@ -456,11 +489,31 @@ class DefaultRoundRunner:
             intent = classify_intent(
                 sink, raw.segments,
                 backend=ctx.backend, edge_store=ctx.edge_store,
-                space_id=ctx.space_id, concept_index=ctx.concept_index)
+                space_id=ctx.space_id, concept_index=ctx.concept_index,
+                language_signal_runtime=ctx.language_signal_runtime,
+                action_instruction_bindings=(
+                    ctx.language_action_instruction_bindings),
+                language_signal_compatibility_enabled=(
+                    ctx.language_signal_compatibility_enabled))
         else:
             intent = IntentType(type=INTENT_QUESTION, sink=sink)
         raw.intent = intent
         raw.key_skeleton = list(struct_refs)
+        from pure_integer_ai.cognition.understanding.cue_words import (
+            collect_action_intent_word_decisions,
+        )
+        ctx.work_memory.action_intent_word_decisions = (
+            collect_action_intent_word_decisions(
+                raw.segments,
+                space_id=ctx.space_id,
+                concept_index=ctx.concept_index,
+                language_signal_runtime=ctx.language_signal_runtime,
+                action_instruction_bindings=(
+                    ctx.language_action_instruction_bindings),
+                language_signal_compatibility_enabled=(
+                    ctx.language_signal_compatibility_enabled),
+            )
+        )
         # perf round5：dag_path 仅消费 {PRECEDES, CAUSES, T_STEP}（dag_path_step 8 消费者全核证·见 a2_stepper/
         # a3_pr_wrapper/attractor/dead_end）·select(where=None) 全边 dict-copy（n=656 ~195K 行·~90% COOCCURS 死载
         # copy 后 dag_path 零读）→ 按型三 select 仅 copy 需要的 ~20K。COOCCURS/SIMILAR/IS_A/D:11/REFERS_TO(non-occ)
@@ -527,6 +580,12 @@ class DefaultRoundRunner:
                 ctx.work_memory.action_seed_candidates = _collect_action_seed_candidates(
                     segments=raw.segments, backend=ctx.backend, edge_store=ctx.edge_store,
                     space_id=ctx.space_id, concept_index=ctx.concept_index,
+                    language_signal_runtime=ctx.language_signal_runtime,
+                    action_instruction_bindings=(
+                        ctx.language_action_instruction_bindings),
+                    action_primitive_refs=ctx.language_action_primitive_refs,
+                    language_signal_compatibility_enabled=(
+                        ctx.language_signal_compatibility_enabled),
                     intent_type=intent.type,
                     ctx_code=pack_ctx_code(raw.domain, raw.modality, 0, intent.type))
             else:
@@ -568,6 +627,12 @@ class DefaultRoundRunner:
             _feed_action_experience(
                 backend=ctx.backend, edge_store=ctx.edge_store,
                 space_id=ctx.space_id, concept_index=ctx.concept_index,
+                language_signal_runtime=ctx.language_signal_runtime,
+                action_instruction_bindings=(
+                    ctx.language_action_instruction_bindings),
+                action_primitive_refs=ctx.language_action_primitive_refs,
+                language_signal_compatibility_enabled=(
+                    ctx.language_signal_compatibility_enabled),
                 segments=raw.segments, domain=raw.domain, modality=raw.modality,
                 intent_type=intent.type, reward=ep.reward, terminal=ep.terminal)
         return RoundResult(episode=ep, output=output, dag_path=path_result)
@@ -1344,25 +1409,31 @@ def _build_space_ctx(ctx: TrainContext):
         weaning_phase=ctx.weaning_phase,
     )
 def _resolve_emergent_excluded_refs(ctx: TrainContext, lang: int) -> set:
-    """刀4：C9-bis §D 候选池排除清单 = `_CUE_WORDS ∪ _REL_LEXICAL_CUE` surfaces（全 lang）→ ConceptRefs。
+    """把来源化 catalog 的已知语言信号映射为涌现候选排除概念。
 
-    防 reward 调固化件（"导致"等已种词不涌为新关系）。surfaces 静态（元定义固化）·ConceptRefs
-    按 observe 后已概念化的词 lookup（未 observe 的 cue 词 lookup None·skip·诚实）。
-
-    **对抗审 RISK-1/4 修**：扫全 lang 集（非仅当前 lang）·因 generate_emergent_hypotheses 扫全 space
-    PRECEDES（跨 lang 段）·单 lang 漏排他 lang cue 词（混合 lang 语料风险）。
+    涌现扫描覆盖整个空间，所以目录按全部语言分支读取；``lang`` 仅保留既有调用契约。
+    关闭 compatibility 后不得读取 Python 字面表，也不得把学习产生的任意 D:11
+    误当静态排除项。尚未在旧 ConceptIndex 中物化的表示保持无副作用跳过。
     """
-    from pure_integer_ai.cognition.understanding.cue_words import _CUE_WORDS
-    from pure_integer_ai.cognition.understanding.word_concept_signal import _REL_LEXICAL_CUE
+    if type(lang) is not int:
+        raise TypeError("lang 必须是严格整数")
     surfaces: set[str] = set()
-    for _lang_words in _CUE_WORDS.values():
-        for _words in _lang_words.values():
-            surfaces.update(_words)
-    for _lang_words in _REL_LEXICAL_CUE.values():
-        surfaces.update(_lang_words.keys())
+    runtime = ctx.language_signal_runtime
+    if runtime is not None:
+        surfaces.update(seed.surface for seed in runtime.catalog.entries)
+    if ctx.language_signal_compatibility_enabled:
+        from pure_integer_ai.cognition.understanding.cue_words import _CUE_WORDS
+        from pure_integer_ai.cognition.understanding.word_concept_signal import (
+            _REL_LEXICAL_CUE,
+        )
+        for language_words in _CUE_WORDS.values():
+            for words in language_words.values():
+                surfaces.update(words)
+        for language_words in _REL_LEXICAL_CUE.values():
+            surfaces.update(language_words.keys())
     excluded: set = set()
-    for s in surfaces:
-        ref = ctx.concept_index.lookup(s, ctx.space_id)
+    for surface in surfaces:
+        ref = ctx.concept_index.lookup(surface, ctx.space_id)
         if ref is not None:
             excluded.add(ref)
     return excluded
@@ -1390,12 +1461,16 @@ def _run_emergence_hook(ctx: TrainContext, lang: int) -> None:
 
 
 def _feed_action_experience(*, backend, edge_store, space_id: int, concept_index,
+                            language_signal_runtime=None,
+                            action_instruction_bindings=(),
+                            action_primitive_refs=(),
+                            language_signal_compatibility_enabled: bool = True,
                             segments, domain: int, modality: int,
                             intent_type: int, reward: int, terminal: int) -> None:
     """B-PR2 动作意图经验回写（doc §17·ACTION_* concept 动作验证率·reward round episode_loop 后调·对偶 op_confidence）。
 
-    D3 激活（intent_type==INTENT_COMMAND + terminal==TERMINAL_REACHED_SINK）→ collect_action_intent_concepts 扫
-    segments D:11 PRIMARY → distinct ACTION_* refs → record_experience_outcome 写 experience_count（R1 符号）。
+    D3 激活后由统一动作 resolver 收集 distinct ACTION_* refs；图路径保留 kind 和一等
+    ConceptRef，图无证据且兼容开启时才读取 D:11 PRIMARY。
     ctx_code = pack_ctx_code(domain, modality, 0, intent_type)（task=0 defer·同 _ctx_tag·写桶==episode_loop :82 读桶·设计审 F）。
 
     **reward>0 = R1 成功臂非排除闸**（设计审 B CONFIRMED·§17.1 决断2）：reward>0→e_sn++&e_tn++ / reward==0 veto→e_tn++ only →
@@ -1415,16 +1490,26 @@ def _feed_action_experience(*, backend, edge_store, space_id: int, concept_index
     _ctx_code = pack_ctx_code(domain, modality, 0, intent_type)   # task=0 defer·同 _ctx_tag 写桶==读桶
     for _act_ref, _act_kind in collect_action_intent_concepts(
             segments, backend=backend, edge_store=edge_store,
-            space_id=space_id, concept_index=concept_index):
+            space_id=space_id, concept_index=concept_index,
+            language_signal_runtime=language_signal_runtime,
+            action_instruction_bindings=action_instruction_bindings,
+            action_primitive_refs=action_primitive_refs,
+            language_signal_compatibility_enabled=(
+                language_signal_compatibility_enabled)):
         record_experience_outcome(backend, ref=_act_ref, reward=reward, ctx_code=_ctx_code)
 
 
 def _collect_action_seed_candidates(*, segments, backend, edge_store, space_id: int,
                                      concept_index, intent_type: int,
-                                     ctx_code: int) -> list[ConceptRef]:
+                                     ctx_code: int,
+                                     language_signal_runtime=None,
+                                     action_instruction_bindings=(),
+                                     action_primitive_refs=(),
+                                     language_signal_compatibility_enabled: bool = True,
+                                     ) -> list[ConceptRef]:
     """B-PR4 动作词种子候选预算（doc §19·_run_reward_round episode_loop 前调·写 workmem.action_seed_candidates）。
 
-    扫 segments tokens → concept_index.lookup → lookup_word_action(D:11 PRIMARY) → per action_ref
+    扫 segments tokens → concept_index.lookup → 图动作目标或兼容 D:11 PRIMARY → per action_ref
     read_experience_count(ctx_code) → **洗净 filter（sn==0 tested-never-verified 滤除·ACTIVE 率消费者·非 theater）**
     + rate（None 冷启动→0 给机会 / sn>0→sn×1000//(sn+tn)）→ 收 (rate, word_ref) → stable sort 率降序 → 返 word_ref list。
 
@@ -1445,8 +1530,9 @@ def _collect_action_seed_candidates(*, segments, backend, edge_store, space_id: 
     """
     if intent_type != INTENT_COMMAND:
         return []   # intent 守（mirror B-PR2·caller 守 gate·helper 守 intent·QUESTION 不预算）
-    from pure_integer_ai.cognition.shared.action_primitives import lookup_word_action
-    from pure_integer_ai.storage.node_store import TIER_PRIMARY
+    from pure_integer_ai.cognition.understanding.cue_words import (
+        action_intent_targets_of,
+    )
     from pure_integer_ai.storage.experience_count import read_experience_count
     # 率 ×1000 缩放（sn/(sn+tn)→rate·同 structure_discover _OP_CONF_RATE_SCALE 既有约定·pure int）
     _RATE_SCALE = 1000
@@ -1457,8 +1543,20 @@ def _collect_action_seed_candidates(*, segments, backend, edge_store, space_id: 
             word_ref = concept_index.lookup(tok, space_id)
             if word_ref is None or word_ref in seen_words:
                 continue   # 词未概念化 / 已收（distinct by word token）
-            actions = lookup_word_action(backend, edge_store, word_ref,
-                                         space_id=space_id, tier_filter=TIER_PRIMARY)
+            segment_lang = getattr(seg, "lang", 0)
+            if (language_signal_runtime is not None
+                    and (type(segment_lang) is not int or segment_lang <= 0)):
+                raise TypeError("图动作 seed 的 segment.lang 必须是严格正整数")
+            actions = action_intent_targets_of(
+                tok, segment_lang,
+                backend=backend, edge_store=edge_store,
+                space_id=space_id, concept_index=concept_index,
+                language_signal_runtime=language_signal_runtime,
+                action_instruction_bindings=action_instruction_bindings,
+                action_primitive_refs=action_primitive_refs,
+                language_signal_compatibility_enabled=(
+                    language_signal_compatibility_enabled),
+            )
             if not actions:
                 continue   # 非动作词（无 D:11 PRIMARY ACTION_* 边）
             seen_words.add(word_ref)

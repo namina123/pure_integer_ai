@@ -370,6 +370,119 @@ class FormalArtifactDefinition:
         return tuple(parts)
 
 
+def artifact_schema_from_stable_key(key: tuple[int, ...]) -> ArtifactSchema:
+    """从完整整数键恢复 Artifact schema，并拒绝截断或尾随字段。"""
+    values = _strict_tuple(key, label="ArtifactSchema.stable_key")
+    value_type_key, cursor = _take_packed(
+        values, 0, label="schema value_type")
+    unit_key, cursor = _take_packed(values, cursor, label="schema unit")
+    if cursor != len(values):
+        raise ValueError("ArtifactSchema 稳定键含尾随字段")
+    return ArtifactSchema(
+        ObjectIdentity.from_stable_key(value_type_key),
+        ObjectIdentity.from_stable_key(unit_key),
+    )
+
+
+def artifact_authority_from_stable_key(
+        key: tuple[int, ...],
+        ) -> ArtifactAuthority:
+    """从完整整数键恢复 executor/verifier authority 及其版本身份。"""
+    values = _strict_tuple(key, label="ArtifactAuthority.stable_key")
+    identity_key, cursor = _take_packed(
+        values, 0, label="authority identity")
+    version_key, cursor = _take_packed(
+        values, cursor, label="authority version")
+    if cursor != len(values):
+        raise ValueError("ArtifactAuthority 稳定键含尾随字段")
+    return ArtifactAuthority(
+        ObjectIdentity.from_stable_key(identity_key),
+        ObjectIdentity.from_stable_key(version_key),
+    )
+
+
+def formal_artifact_from_identity(identity: ObjectIdentity) -> FormalArtifact:
+    """从权威 Artifact 身份恢复完整值对象，不接受外置 payload 覆盖。"""
+    descriptor = describe_artifact_identity(identity)
+    return FormalArtifact(
+        identity,
+        descriptor.artifact_kind,
+        descriptor.schema,
+        descriptor.source,
+        descriptor.payload,
+        descriptor.scope,
+    )
+
+
+def artifact_parameter_from_stable_key(
+        key: tuple[int, ...],
+        ) -> ArtifactParameter:
+    """从完整整数键恢复 Variable、schema 和 executor binding。"""
+    values = _strict_tuple(key, label="ArtifactParameter.stable_key")
+    variable_key, cursor = _take_packed(
+        values, 0, label="parameter variable")
+    schema_key, cursor = _take_packed(
+        values, cursor, label="parameter schema")
+    binding_key, cursor = _take_packed(
+        values, cursor, label="parameter binding")
+    if cursor != len(values):
+        raise ValueError("ArtifactParameter 稳定键含尾随字段")
+    return ArtifactParameter(
+        ObjectIdentity.from_stable_key(variable_key),
+        artifact_schema_from_stable_key(schema_key),
+        binding_key,
+    )
+
+
+def formal_artifact_definition_from_stable_key(
+        key: tuple[int, ...],
+        ) -> FormalArtifactDefinition:
+    """对称恢复程序、参数、结果、proof 及双 authority 的完整调用契约。"""
+    values = _strict_tuple(key, label="FormalArtifactDefinition.stable_key")
+    program_key, cursor = _take_packed(
+        values, 0, label="definition program")
+    if cursor >= len(values):
+        raise ValueError("FormalArtifactDefinition 缺少参数数量")
+    parameter_count = values[cursor]
+    cursor += 1
+    if type(parameter_count) is not int or parameter_count < 0:
+        raise ValueError("FormalArtifactDefinition 参数数量非法")
+    parameters = []
+    for _ in range(parameter_count):
+        parameter_key, cursor = _take_packed(
+            values, cursor, label="definition parameter")
+        parameters.append(artifact_parameter_from_stable_key(parameter_key))
+    labels = (
+        "result kind",
+        "result schema",
+        "proof kind",
+        "proof schema",
+        "executor",
+        "verifier",
+    )
+    fields = []
+    for label in labels:
+        field, cursor = _take_packed(
+            values, cursor, label=f"definition {label}")
+        fields.append(field)
+    if cursor != len(values):
+        raise ValueError("FormalArtifactDefinition 稳定键含尾随字段")
+    definition = FormalArtifactDefinition(
+        formal_artifact_from_identity(
+            ObjectIdentity.from_stable_key(program_key)),
+        tuple(parameters),
+        ObjectIdentity.from_stable_key(fields[0]),
+        artifact_schema_from_stable_key(fields[1]),
+        ObjectIdentity.from_stable_key(fields[2]),
+        artifact_schema_from_stable_key(fields[3]),
+        artifact_authority_from_stable_key(fields[4]),
+        artifact_authority_from_stable_key(fields[5]),
+    )
+    if definition.stable_key() != values:
+        raise ValueError("FormalArtifactDefinition 恢复结果与输入不一致")
+    return definition
+
+
 @dataclass(frozen=True)
 class ArtifactArgument:
     """一次 invocation 中显式指向参数 Variable 的当前 Artifact 值。"""
@@ -508,5 +621,10 @@ __all__ = [
     "FormalArtifact",
     "FormalArtifactDefinition",
     "artifact_identity",
+    "artifact_authority_from_stable_key",
+    "artifact_parameter_from_stable_key",
+    "artifact_schema_from_stable_key",
     "describe_artifact_identity",
+    "formal_artifact_definition_from_stable_key",
+    "formal_artifact_from_identity",
 ]

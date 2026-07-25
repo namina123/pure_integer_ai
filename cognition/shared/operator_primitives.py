@@ -6,7 +6,7 @@
 
 **符号空间 vs 抽象空间**（D6·AGENT.md:54-77·勿混）：算子/比较 = 符号域**先天·冻结·元定义·不学**
 （"节点**是**什么"·参照 UD closed-class + 形式逻辑原语 + Spelke 核心知识）。文字 alias（加/大于/等于）
-是开放类 surface·走 D:11 learnable 二源（frozenset 冷启动种子 + D:11 readback 教师晋升）·非硬编码穷举。
+是开放类 surface；U-04 正式 reader 走来源化语言信号图，本模块 D:11 只保留迁移兼容。
 
 **与 OPCODE_*/CMP_* 的关系**：OPCODE_*（numeric/symbol_domain·KIND_OPCODE·axis_symbol_id 大整数）+
 CMP_*（crosscut/integer/compare·1-4）是 VM/crosscut 的 opcode 整数（dispatch 用·非 ConceptRef）。
@@ -70,10 +70,7 @@ _OP_SURFACE: dict[int, str] = {
 }
 
 # ---- 元定义层种子词（lang → {word: op_kind}·镜像 cue_words._ARITH_OP_WORDS + _COMPARISON_OP_WORDS
-# closed-class 核心·D6·开放变体（相加/超过/增加 等穷举不尽）走 D:11 教师晋升非硬编码） ----
-# 与 cue_words._ARITH_OP_WORDS/_COMPARISON_OP_WORDS 重叠是自然——两者都识别算子/比较词·
-# _ARITH_OP_WORDS=cue 检测 frozenset（第一源·返 OPCODE_*）·_OP_LEXICAL_CUE=D:11 boot 种子（第二源·
-# 建 word→OP_* concept D:11 边·readback 返 OP_*→opcode）·加二源非替换（D6 关键区分4）·互补非冲突。
+# 迁移期 D:11 兼容 boot；正式作用由来源化图指令和调用方绑定决定） ----
 _OP_LEXICAL_CUE: dict[int, dict[str, int]] = {
     LANG_ZH: {
         "加": OP_ADD, "加上": OP_ADD,

@@ -5,6 +5,9 @@ from pure_integer_ai.cognition.shared.attractor_reasoning import (
     ReasoningAgendaConsumer,
     ReasoningAgendaConsumption,
 )
+from pure_integer_ai.cognition.shared.capability_activation import (
+    AttractorMapperRouter,
+)
 from pure_integer_ai.cognition.shared.attractor_state import (
     AttractorActivationMapper,
     AttractorBudget,
@@ -54,6 +57,15 @@ class AttractorRuntime:
         self.budget = budget
         self.mapper = mapper
         self.recompute_strategy = recompute_strategy
+
+    def register_mapper_route(self, route: object) -> None:
+        """在当前 query activation 前追加一个 Memory typed mapper route。"""
+        if self._ctx.work_memory.attractor_state is not None:
+            raise RuntimeError("AttractorState 安装后不得改变 mapper route")
+        if isinstance(self.mapper, AttractorMapperRouter):
+            self.mapper.register_route(route)
+            return
+        self.mapper = AttractorMapperRouter(self.mapper, (route,))
 
     def resolve_and_activate(
             self,

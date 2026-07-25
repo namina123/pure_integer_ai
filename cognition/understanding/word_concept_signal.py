@@ -7,17 +7,15 @@ first-class 节点的 typed signal 边。record_word_concept 建边·lookup_word
 若误传入 loud assert fail 非偷注入）·不进 PR/closure（PR 邻接只 {PRECEDES,CAUSES,REFERS_TO}·D:11 不内）·
 §8.1c-bis 合规：D:11 边端点 exempt closure type filter + effective_weight assertion。
 
-**种子来源**（Plan agent 路线决断 ii）：_REL_LEXICAL_CUE inline frozenset（元定义层固化·同 cue_words.py
-范式·§九铁律承认 enum 例外）。closed-class relation-signal 词（系词/连词·是/导致/属于 等）→ REL_*。
-与 cue_words._CUE_WORDS 部分重叠（导致/属于）是自然——两者都识别关系信号词·cue_words=observe 时
-transient 检测·本表=boot 时 persistent D:11 种子·互补非冲突。cue_words.py:5"元定义固化词不进学习型
-信号边候选池"=刀4 涌现学习约束（候选池排除已知 cue）·非禁刀3 教师种子。
+**迁移兼容来源**：_REL_LEXICAL_CUE 只为旧 D:11 boot 和兼容回归保留，不是元定义
+或 readiness 真源。正式 reader 读取来源化语言信号图；formal_train 仅在显式开启
+``language_signal_compatibility_enabled`` 时调用本模块的五类静态 boot。
 
 **consumers**（刀3 无生产 caller·基建）：刀4 涌现学习（emergent 假设新词→D:11 SHADOW→验证→晋升）/
 刀5 件8 词→概念（cue_extractor 从硬编码 frozenset→种子+涌现）。lookup_word_concept 提供 read API·
 刀3 测 round-trip 证活。
 
-铁律：纯整数 / 确定性（query_from 幂等 + stable surface hash）/ 不写死（_REL_LEXICAL_CUE=meta定义例外）/
+铁律：纯整数 / 确定性（query_from 幂等 + stable surface hash）/ 不写死（自然语言表仅 compatibility）/
   外部只启发（D:11 是 signal 边非语义内容边·REL_* 是 meta定义概念非事实断言）/ IS_A 永不写死
   （D:11≠IS_A·REL_* 新建 NODE_CONCEPT 非合并）/ §8.1c（D:11 不接 reward）/ epistemic 闭合（镜像 is_a.py:54 assert）。
 """
@@ -172,12 +170,13 @@ def lookup_word_concept(backend: StorageBackend, edge_store: EdgeStore,
 def bootstrap_word_concept_signals(concept_index, edge_store: EdgeStore,
                                    backend: StorageBackend, *,
                                    space_id: int, langs: set[int]) -> int:
-    """formal_train boot 种子入口（刀3 件1·镜像刀0 bootstrap_is_a_edges boot 接线范式）。
+    """按旧关系字面表写入迁移期 D:11 兼容种子。
 
     ① ensure_relation_primitives(concept_index, backend, space_id) 建 REL_* NODE_CONCEPT + 标记 → rel_refs map
     ② 按 langs 集（corpus 唯一 lang）循环 _REL_LEXICAL_CUE → record_word_concept 种 D:11 边。
     返建边总数。
 
+    正式训练仅在 compatibility 开启时调用；本入口不能计 U-04 readiness。
     backend 显式传（ensure_relation_primitives 的 record_composes_attr 需 backend）。
     """
     assert_int(space_id, _where="bootstrap_word_concept_signals.space_id")
@@ -208,9 +207,8 @@ def bootstrap_operator_signals(concept_index, edge_store: EdgeStore,
     tier=PRIMARY·幂等）。OP_* target 挂 ATTR_OPERATOR_PRIMITIVE=18·与 REL_* target（ATTR_RELATION_PRIMITIVE=10）
     隔离（lookup_word_concept 过滤 REL_PRIMITIVE·lookup_word_operator 过滤 OP_PRIMITIVE·kind==0 skip·无交叉污染）。
 
-    **加二源非替换**（D6）：_OP_LEXICAL_CUE closed-class 核心（加/减/乘/大于/小于·镜像 cue_words
-    _ARITH_OP_WORDS/_COMPARISON_OP_WORDS）作 D:11 boot 种子·frozenset 检测第一源保留不变·D:11 为 gate-ON
-    learnable 二源。开放变体（相加/超过）走 D:11 教师晋升非硬编码。
+    U-04 后本入口只保留迁移兼容数据。正式算术和比较 reader 优先读取来源化语言
+    信号图，并由调用方注入指令到 opcode 的绑定；兼容关闭后不读取这些 D:11 关联。
 
     位于 word_concept_signal（L4）·import operator_primitives（L0）向下合规（L0 不能 import L4 record_word_concept）。
     """
@@ -246,9 +244,9 @@ def bootstrap_modal_signals(concept_index, edge_store: EdgeStore,
     OP_* target（ATTR_OPERATOR_PRIMITIVE=18）隔离（lookup_word_concept/operator/modality 各过滤·kind==0 skip·
     无交叉污染）。
 
-    **加二源非替换**（D6·解 [严重-1] _MODAL_CUES 换名字写死）：_MODAL_LEXICAL_CUE closed-class 核心
-    （必然/可能/必须/应该/可以·镜像 cue_words _MODAL_CUES）作 D:11 boot 种子·frozenset 检测第一源
-    （_MODAL_CUES）保留不变·D:11 为 gate-ON learnable 二源。开放变体（想必/势必/说不定）走 D:11 教师晋升非硬编码。
+    U-04 后本入口只保留迁移兼容数据：_MODAL_LEXICAL_CUE 用于旧 D:11 boot，
+    不再是 readiness 真源。正式情态 reader 优先读取来源化语言信号图，并由调用方
+    注入指令到 modality 值的绑定；兼容关闭后不读取本入口产生的 D:11 关联。
 
     位于 word_concept_signal（L4）·import modal_primitives（L0）向下合规（L0 不能 import L4 record_word_concept）。
     """
@@ -283,9 +281,9 @@ def bootstrap_negation_signals(concept_index, edge_store: EdgeStore,
     tier=PRIMARY·幂等）。TYPE_NEGATION target 挂 ATTR_SYMBOL_TYPE=17·与 REL_*（ATTR_RELATION_PRIMITIVE=10）/
     OP_*（ATTR_OPERATOR_PRIMITIVE=18）/MODAL_KIND（ATTR_MODAL_KIND=22）隔离（各 lookup 过滤·无交叉污染）。
 
-    **加二源非替换**（D6）：_NEGATION_LEXICAL_CUE closed-class 核心（不/没/非/无·镜像 cue_words _NEGATION_CUES）
-    作 D:11 boot 种子·frozenset 检测第一源（_NEGATION_CUES）保留不变·D:11 为 gate-ON learnable 二源。
-    开放变体（未必/绝非/谈不上）走 D:11 教师晋升非硬编码。
+    U-04 后本入口只保留迁移兼容数据：_NEGATION_LEXICAL_CUE 用于旧 D:11 boot，
+    不再是 readiness 真源。正式否定 reader 优先读取来源化语言信号图；兼容关闭后
+    不读取本入口产生的 D:11 关联。
 
     **否定=符号域先天**（同 operator·异 modal）：¬ 概念先天冻结（TYPE_NEGATION）·D:11 readback 意义=否定词
     文字 alias 可学习·非概念可学。只挂 ATTR_SYMBOL_TYPE·不挂 abstract_mark（operator 范式·非 modal 双挂）。
@@ -312,7 +310,7 @@ def bootstrap_negation_signals(concept_index, edge_store: EdgeStore,
 def bootstrap_action_signals(concept_index, edge_store: EdgeStore,
                              backend: StorageBackend, *,
                              space_id: int, langs: set[int]) -> int:
-    """formal_train boot 种子入口（B-PR1·镜像 bootstrap_operator_signals·action D:11 种子·doc §16）。
+    """按旧动作字面表写入迁移期 D:11 兼容种子。
 
     ① ensure_action_primitives(concept_index, backend, space_id) 建 5 ACTION_INTENT_* NODE_CONCEPT +
        ATTR_OPERATION_INTENT=23 旗标 → action_refs map
@@ -324,9 +322,8 @@ def bootstrap_action_signals(concept_index, edge_store: EdgeStore,
     OP_*（ATTR_OPERATOR_PRIMITIVE）/MODAL_KIND（ATTR_MODAL_KIND）/TYPE_NEGATION（ATTR_SYMBOL_TYPE）隔离
     （各 lookup 过滤·无交叉污染）。
 
-    **加二源非替换**（D6）：_ACTION_LEXICAL_CUE closed-class 核心（帮我/请/生成/计算·命令词+动作词）作 D:11 boot 种子·
-    frozenset 检测第一源（cue_words.is_action_intent_cue）保留·D:11 为 gate-ON learnable 二源。开放变体（劳驾/编写/运算）
-    走 D:11 教师晋升非硬编码。
+    U-04 正式 reader 以来源化图为主；Python 检测表和本入口产生的 D:11 都只在
+    compatibility 开启时回退，图冲突或未绑定不得被旧来源覆盖。
 
     **命令词 + 动作词同基建**（doc §16.4）：_ACTION_LEXICAL_CUE 含两类词——命令 mood 词（→INTENT_COMMAND_MOOD·
     帮我/请·W7 命令判定）+ 动作词（→ACTION_* 类别·B-PR1）。W7 命令判定 = 命令词 OR 动作词命中任一。

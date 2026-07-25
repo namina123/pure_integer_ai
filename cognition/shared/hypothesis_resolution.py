@@ -854,6 +854,16 @@ class HypothesisResolver:
         cloned._latest_by_competition = dict(self._latest_by_competition)
         return cloned
 
+    def _restore_runtime_state(self, snapshot: "HypothesisResolver") -> None:
+        """从无 sink 的决策快照恢复内存态，并继续绑定当前 ledger 和 sink。"""
+        if not isinstance(snapshot, HypothesisResolver):
+            raise TypeError("H-04 恢复快照必须是 HypothesisResolver")
+        if snapshot.event_sink is not None:
+            raise ValueError("H-04 恢复快照不得携带决策 sink")
+        self._decisions = dict(snapshot._decisions)
+        self._latest_by_competition = dict(
+            snapshot._latest_by_competition)
+
     def clone_competitions(
             self,
             *,

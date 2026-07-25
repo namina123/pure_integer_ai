@@ -6,8 +6,8 @@
 同 REL_* / OP_* / OPCODE_* / ORIGIN_*·reward 不调·断奶前后不变）。
 
 **符号空间 vs 抽象空间**（D6·AGENT.md:54-77·勿混）：模态种类（alethic/deontic）= 抽象空间**后天·可学习·归纳**
-（D6:60 明确·"节点**属于**哪个抽象"）。文字 alias（必然/可能/必须/应该/可以）是开放类 surface·
-走 D:11 learnable 二源（frozenset 冷启动种子 + D:11 readback 教师晋升）·非硬编码穷举。
+（D6:60 明确·"节点**属于**哪个抽象"）。文字 alias（必然/可能/必须/应该/可以）是开放类 surface；
+U-04 正式 reader 走来源化语言信号图，本模块 D:11 只保留迁移兼容。
 
 **审计根治 [严重-1]**（解 _MODAL_CUES 换名字写死）：STEP6 B2 情态 _MODAL_CUES dict 把模态种类从词硬编码到
 int·modal_op_of 无 D:11 readback 4 参（异 arith_op_of/comparison_op_of/is_property_possess_cue 全有二源）·
@@ -76,10 +76,8 @@ _MODAL_SURFACE: dict[int, str] = {
 }
 
 # ---- 元定义层种子词（lang → {word: modal_kind}·镜像 cue_words._MODAL_CUES + operator_primitives._OP_LEXICAL_CUE
-# closed-class 情态副词核心·D6·开放变体（想必/势必/说不定 等穷举不尽）走 D:11 教师晋升非硬编码） ----
-# 与 cue_words._MODAL_CUES 重叠是自然——两者都识别情态词·_MODAL_CUES=cue 检测 dict（第一源·返 modality int）·
-# _MODAL_LEXICAL_CUE=D:11 boot 种子（第二源·建 word→MODAL_KIND concept D:11 边·readback 返 modal_kind=modality）·
-# 加二源非替换（D6 关键区分4）·互补非冲突。
+# closed-class 情态副词核心，只为迁移期 D:11 兼容 boot 保留） ----
+# `_MODAL_CUES` 和本表均非 U-04 readiness 真源；正式作用由图指令和调用方绑定决定。
 _MODAL_LEXICAL_CUE: dict[int, dict[str, int]] = {
     LANG_ZH: {
         "必然": MODAL_KIND_BOX_NECESSITY,

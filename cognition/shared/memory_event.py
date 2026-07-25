@@ -89,6 +89,7 @@ MEMORY_EVENT_INTAKE_MANIFEST = 12
 MEMORY_EVENT_DERIVATION = 13
 MEMORY_EVENT_RESOLUTION = 14
 MEMORY_EVENT_USE_OUTCOME = 15
+MEMORY_EVENT_CAPABILITY_ATTEMPT_OUTCOME = 16
 
 INTAKE_OUTCOME_SUCCESS = 1
 INTAKE_OUTCOME_FAILURE = 2
@@ -161,6 +162,14 @@ def _nonnegative(value: int, *, where: str) -> int:
     return value
 
 
+def require_memory_object_kind(value: int, *, where: str) -> int:
+    """核验 Memory 对象种类属于统一注册表，并返回原严格整数。"""
+    _positive(value, where=where)
+    if value not in _MEMORY_OBJECT_KINDS:
+        raise ValueError(f"{where} 未注册")
+    return value
+
+
 def _pack(key: tuple[int, ...]) -> tuple[int, ...]:
     """为可变长整数键增加长度边界。"""
     return len(key), *key
@@ -223,9 +232,8 @@ class MemoryObjectRef:
             raise TypeError("MemoryObjectRef.owner 必须是 OwnerScope")
         if not isinstance(self.versions, VersionBundle):
             raise TypeError("MemoryObjectRef.versions 必须是 VersionBundle")
-        _positive(self.object_kind, where="MemoryObjectRef.object_kind")
-        if self.object_kind not in _MEMORY_OBJECT_KINDS:
-            raise ValueError("MemoryObjectRef.object_kind 未注册")
+        require_memory_object_kind(
+            self.object_kind, where="MemoryObjectRef.object_kind")
         _strict_tuple(self.object_key, where="MemoryObjectRef.object_key")
 
     def stable_key(self) -> tuple[int, ...]:
@@ -1311,6 +1319,7 @@ class UseOutcomePayload:
     outcome_kind: MemoryLinkedRef
     outcome_ref: MemoryLinkedRef | None
     observed_at: LogicalTimestamp
+    outcome_trace_key: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         """核验结果精确指向 Use，并保留原决策、query 和 context。"""
@@ -1329,10 +1338,15 @@ class UseOutcomePayload:
             raise TypeError("UseOutcome.outcome_ref 必须是一等引用或 None")
         if not isinstance(self.observed_at, LogicalTimestamp):
             raise TypeError("UseOutcome.observed_at 必须是 LogicalTimestamp")
+        if self.outcome_trace_key:
+            _strict_tuple(
+                self.outcome_trace_key,
+                where="UseOutcome.outcome_trace_key",
+            )
 
     def stable_key(self) -> tuple[int, ...]:
         """返回目标 Use、归因边界、结果类型和值及逻辑时间。"""
-        return (
+        result = (
             _PAYLOAD_VERSION,
             *_pack(self.target_ref.stable_key()),
             *_pack(self.decision_trace_key),
@@ -1343,6 +1357,9 @@ class UseOutcomePayload:
                    else self.outcome_ref.stable_key()),
             *_pack(self.observed_at.stable_key()),
         )
+        if not self.outcome_trace_key:
+            return result
+        return (*result, *_pack(self.outcome_trace_key))
 
     @classmethod
     def from_stable_key(cls, key: tuple[int, ...]) -> "UseOutcomePayload":
@@ -1361,6 +1378,10 @@ class UseOutcomePayload:
             key, cursor, where="UseOutcome.outcome_ref", allow_empty=True)
         timestamp_key, cursor = _take(
             key, cursor, where="UseOutcome.observed_at")
+        outcome_trace_key = ()
+        if cursor < len(key):
+            outcome_trace_key, cursor = _take(
+                key, cursor, where="UseOutcome.outcome_trace_key")
         _finish(key, cursor, where="UseOutcome.stable_key")
         return cls(
             MemoryObjectRef.from_stable_key(target_key),
@@ -1371,6 +1392,7 @@ class UseOutcomePayload:
             None if not outcome_key else MemoryLinkedRef.from_stable_key(
                 outcome_key),
             LogicalTimestamp.from_stable_key(timestamp_key),
+            outcome_trace_key,
         )
 
     def timestamp(self) -> LogicalTimestamp:
@@ -1386,6 +1408,122 @@ class UseOutcomePayload:
 
     def memory_refs(self) -> tuple[MemoryObjectRef, ...]:
         """返回目标 Use 及 query、结果类型和值中的 Memory 引用。"""
+        result = [
+            self.target_ref,
+            *self.query_kind.memory_refs(),
+            *self.outcome_kind.memory_refs(),
+        ]
+        if self.outcome_ref is not None:
+            result.extend(self.outcome_ref.memory_refs())
+        return tuple(result)
+
+
+@dataclass(frozen=True)
+class CapabilityAttemptOutcomePayload:
+    """一次真实 Capability 尝试失败对目标声明的精确追加归因。"""
+
+    target_ref: MemoryObjectRef
+    query_kind: MemoryLinkedRef
+    binding_run_key: tuple[int, ...]
+    context_trace_key: tuple[int, ...]
+    outcome_kind: MemoryLinkedRef
+    outcome_ref: MemoryLinkedRef | None
+    observed_at: LogicalTimestamp
+
+    def __post_init__(self) -> None:
+        """核验失败结果只指向 Capability，并保留调用与上下文完整引用。"""
+        if (not isinstance(self.target_ref, MemoryObjectRef)
+                or self.target_ref.object_kind != MEMORY_OBJECT_CAPABILITY):
+            raise ValueError(
+                "CapabilityAttemptOutcome.target_ref 必须指向 Capability")
+        if not isinstance(self.query_kind, MemoryLinkedRef):
+            raise TypeError("CapabilityAttemptOutcome.query_kind 必须是一等引用")
+        _strict_tuple(
+            self.binding_run_key,
+            where="CapabilityAttemptOutcome.binding_run_key",
+        )
+        _strict_tuple(
+            self.context_trace_key,
+            where="CapabilityAttemptOutcome.context_trace_key",
+        )
+        if not isinstance(self.outcome_kind, MemoryLinkedRef):
+            raise TypeError(
+                "CapabilityAttemptOutcome.outcome_kind 必须是一等引用")
+        if self.outcome_ref is not None and not isinstance(
+                self.outcome_ref, MemoryLinkedRef):
+            raise TypeError(
+                "CapabilityAttemptOutcome.outcome_ref 必须是一等引用或 None")
+        if not isinstance(self.observed_at, LogicalTimestamp):
+            raise TypeError(
+                "CapabilityAttemptOutcome.observed_at 必须是 LogicalTimestamp")
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回目标、query、binding、上下文、结果和逻辑时间的完整键。"""
+        return (
+            _PAYLOAD_VERSION,
+            *_pack(self.target_ref.stable_key()),
+            *_pack(self.query_kind.stable_key()),
+            *_pack(self.binding_run_key),
+            *_pack(self.context_trace_key),
+            *_pack(self.outcome_kind.stable_key()),
+            *_pack(() if self.outcome_ref is None
+                   else self.outcome_ref.stable_key()),
+            *_pack(self.observed_at.stable_key()),
+        )
+
+    @classmethod
+    def from_stable_key(
+            cls,
+            key: tuple[int, ...],
+            ) -> "CapabilityAttemptOutcomePayload":
+        """从稳定键恢复 Capability 尝试结果并拒绝截断或尾随字段。"""
+        key = _strict_tuple(
+            key, where="CapabilityAttemptOutcome.stable_key")
+        if key[0] != _PAYLOAD_VERSION:
+            raise ValueError("CapabilityAttemptOutcome payload 版本未注册")
+        target_key, cursor = _take(
+            key, 1, where="CapabilityAttemptOutcome.target")
+        query_key, cursor = _take(
+            key, cursor, where="CapabilityAttemptOutcome.query")
+        binding_key, cursor = _take(
+            key, cursor, where="CapabilityAttemptOutcome.binding")
+        context_key, cursor = _take(
+            key, cursor, where="CapabilityAttemptOutcome.context")
+        outcome_kind_key, cursor = _take(
+            key, cursor, where="CapabilityAttemptOutcome.outcome_kind")
+        outcome_key, cursor = _take(
+            key,
+            cursor,
+            where="CapabilityAttemptOutcome.outcome_ref",
+            allow_empty=True,
+        )
+        timestamp_key, cursor = _take(
+            key, cursor, where="CapabilityAttemptOutcome.observed_at")
+        _finish(key, cursor, where="CapabilityAttemptOutcome.stable_key")
+        return cls(
+            MemoryObjectRef.from_stable_key(target_key),
+            MemoryLinkedRef.from_stable_key(query_key),
+            binding_key,
+            context_key,
+            MemoryLinkedRef.from_stable_key(outcome_kind_key),
+            None if not outcome_key else MemoryLinkedRef.from_stable_key(
+                outcome_key),
+            LogicalTimestamp.from_stable_key(timestamp_key),
+        )
+
+    def timestamp(self) -> LogicalTimestamp:
+        """返回尝试结果的逻辑观察时间。"""
+        return self.observed_at
+
+    def core_refs(self) -> tuple[TypedRef, ...]:
+        """返回 query、结果类型和值中的 Core 引用。"""
+        result = [*self.query_kind.core_refs(), *self.outcome_kind.core_refs()]
+        if self.outcome_ref is not None:
+            result.extend(self.outcome_ref.core_refs())
+        return tuple(result)
+
+    def memory_refs(self) -> tuple[MemoryObjectRef, ...]:
+        """返回目标 Capability 及 query、结果类型和值中的 Memory 引用。"""
         result = [
             self.target_ref,
             *self.query_kind.memory_refs(),
@@ -1981,6 +2119,7 @@ _PAYLOAD_TYPES = {
     MEMORY_EVENT_DERIVATION: DerivationTransitionPayload,
     MEMORY_EVENT_RESOLUTION: ResolutionPayload,
     MEMORY_EVENT_USE_OUTCOME: UseOutcomePayload,
+    MEMORY_EVENT_CAPABILITY_ATTEMPT_OUTCOME: CapabilityAttemptOutcomePayload,
 }
 
 _DECLARATION_OBJECT_KINDS = {
@@ -2065,7 +2204,10 @@ class MemoryEvent:
             return TIME_AXIS_OBSERVED
         if self.event_kind == MEMORY_EVENT_USE:
             return TIME_AXIS_USED
-        if self.event_kind == MEMORY_EVENT_USE_OUTCOME:
+        if self.event_kind in {
+                MEMORY_EVENT_USE_OUTCOME,
+                MEMORY_EVENT_CAPABILITY_ATTEMPT_OUTCOME,
+        }:
             return TIME_AXIS_USED
         return TIME_AXIS_CREATED
 
@@ -2148,6 +2290,7 @@ def declaration_object_key(event_kind: int,
 
 __all__ = [
     "ArtifactPayload",
+    "CapabilityAttemptOutcomePayload",
     "CapabilityPayload",
     "DerivationTransitionPayload",
     "EpisodePayload",
@@ -2167,6 +2310,7 @@ __all__ = [
     "LegacyImportPayload",
     "MEMORY_EVENT_ARTIFACT",
     "MEMORY_EVENT_CAPABILITY",
+    "MEMORY_EVENT_CAPABILITY_ATTEMPT_OUTCOME",
     "MEMORY_EVENT_DERIVATION",
     "MEMORY_EVENT_EPISODE",
     "MEMORY_EVENT_EVIDENCE",
@@ -2208,5 +2352,6 @@ __all__ = [
     "memory_object_ref",
     "declaration_object_key",
     "payload_from_stable_key",
+    "require_memory_object_kind",
     "source_reparse_lineage_key",
 ]

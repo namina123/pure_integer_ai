@@ -38,6 +38,7 @@ from pure_integer_ai.storage.backend import (
     StorageBackend,
 )
 from pure_integer_ai.storage.node_store import NodeStore
+from pure_integer_ai.storage.source_trust import SourceTrustStorageRepository
 from pure_integer_ai.storage.edge_store import EdgeStore
 from pure_integer_ai.storage.telemetry import telemetry_scope
 from pure_integer_ai.storage.spaces.abstract_space import AbstractSpace
@@ -270,13 +271,21 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
             core_identity_catalog,
         )
     )
+    source_trust_records = SourceTrustStorageRepository(
+        backend, registry=scoped_identities.registry)
     memory_read_aggregates = (
         None if memory_read_events is None
-        else MemoryHypothesisAggregateIndex(memory_read_events)
+        else MemoryHypothesisAggregateIndex(
+            memory_read_events,
+            source_trust_records=source_trust_records,
+        )
     )
     memory_interact_aggregates = (
         None if memory_interact_events is None
-        else MemoryHypothesisAggregateIndex(memory_interact_events)
+        else MemoryHypothesisAggregateIndex(
+            memory_interact_events,
+            source_trust_records=source_trust_records,
+        )
     )
     cloned = TrainContext(
         backend=backend,
@@ -298,7 +307,37 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
         memory_interact_events=memory_interact_events,
         memory_read_aggregates=memory_read_aggregates,
         memory_interact_aggregates=memory_interact_aggregates,
+        source_trust_records=source_trust_records,
         word_form_course_report=ctx.word_form_course_report,
+        language_signal_runtime=None,
+        language_property_attr_instruction_key=(
+            ctx.language_property_attr_instruction_key),
+        language_property_value_instruction_key=(
+            ctx.language_property_value_instruction_key),
+        language_property_possess_instruction_key=(
+            ctx.language_property_possess_instruction_key),
+        language_similar_instruction_key=(
+            ctx.language_similar_instruction_key),
+        language_pronoun_instruction_bindings=(
+            ctx.language_pronoun_instruction_bindings),
+        language_action_instruction_bindings=(
+            ctx.language_action_instruction_bindings),
+        language_action_primitive_refs=(
+            ctx.language_action_primitive_refs),
+        language_negation_instruction_key=(
+            ctx.language_negation_instruction_key),
+        language_modality_instruction_bindings=(
+            ctx.language_modality_instruction_bindings),
+        language_arithmetic_instruction_bindings=(
+            ctx.language_arithmetic_instruction_bindings),
+        language_comparison_instruction_bindings=(
+            ctx.language_comparison_instruction_bindings),
+        language_condition_instruction_bindings=(
+            ctx.language_condition_instruction_bindings),
+        language_cue_instruction_bindings=(
+            ctx.language_cue_instruction_bindings),
+        language_signal_compatibility_enabled=(
+            ctx.language_signal_compatibility_enabled),
         alias_relation_course_report=ctx.alias_relation_course_report,
         language_generation_course_report=(
             ctx.language_generation_course_report),
@@ -350,6 +389,12 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
             cloned,
             ctx.memory_batch_config,
         )
+    if ctx.source_trust_runtime is not None:
+        if cloned.memory_batch_coordinator is None:
+            raise EvaluationIsolationError(
+                "A-05 来源准入 clone 缺少 M-10 batch coordinator")
+        cloned.source_trust_runtime = (
+            ctx.source_trust_runtime.clone_for_context(cloned))
     if ctx.memory_isolation_runtime is not None:
         if cloned.memory_batch_config is None:
             raise EvaluationIsolationError(
@@ -399,6 +444,15 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
             concept_index=cloned.concept_index,
             ontology=cloned.graph_ontology,
         )
+    if ctx.language_signal_runtime is not None:
+        cloned.language_signal_runtime = (
+            ctx.language_signal_runtime.clone_for_context(
+                backend=backend,
+                concept_index=cloned.concept_index,
+                ontology=cloned.graph_ontology,
+            )
+        )
+        cloned.language_signal_runtime.install()
     if ctx.occurrence_index is not None:
         cloned.occurrence_index = ctx.occurrence_index.clone_for_context(
             cloned.graph_ontology,
@@ -444,6 +498,11 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
             ctx.semantic_pair_runtime.clone_for_context(cloned))
         cloned.semantic_pair_reports = copy.deepcopy(
             ctx.semantic_pair_reports)
+    if ctx.logic_closure_runtime is not None:
+        cloned.logic_closure_runtime = (
+            ctx.logic_closure_runtime.clone_for_context(cloned))
+        cloned.logic_closure_reports = copy.deepcopy(
+            ctx.logic_closure_reports)
     if ctx.span_index is not None:
         cloned.span_index = ctx.span_index.clone_for_context(
             cloned.graph_ontology,

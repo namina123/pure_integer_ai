@@ -60,7 +60,7 @@ def resolve_pronoun_occurrence(edge_store: EdgeStore, concept_index: ConceptInde
                                *, work_memory: WorkMemory,
                                memory_space_id: int,
                                timestamp_seq: int,
-                               pronoun_features: int | None = None,
+                               pronoun_features: int | tuple[int, ...] | None = None,
                                theta_num: int = THETA_PRONOUN_NUM,
                                theta_den: int = THETA_PRONOUN_DEN,
                                backend: StorageBackend | None = None,
@@ -134,17 +134,23 @@ def resolve_pronoun_occurrence(edge_store: EdgeStore, concept_index: ConceptInde
         if score <= 0:
             continue   # 衰减归零·honest forgetting·不入候选
         candidates.append(((e["space_id_to"], e["local_id_to"]), score))
-    # 代词特征软兜（PROPERTY 边进 PR 种子 e·防 PR 软排序把"他"指向"苹果"）
-    if pronoun_features is not None:
-        feat_ref = concept_index.ensure(pronoun_features, space_id=memory_space_id,
-                                        tier=TIER_PRIMARY)
-        edge_store.add(
-            space_id_from=pronoun_ref[0], local_id_from=pronoun_ref[1],
-            space_id_to=feat_ref[0], local_id_to=feat_ref[1],
-            edge_type=EDGE_PROPERTY, strength=1,
-            source=6,  # SOURCE_DERIVED
-            epistemic_origin=None, tier=TIER_PRIMARY,
-        )
+    # 代词特征软兜（PROPERTY 边进 PR 种子 e·防"他"指向"苹果"；支持多特征 profile）。
+    if pronoun_features:
+        feature_keys = ((pronoun_features,)
+                        if type(pronoun_features) is int else pronoun_features)
+        if (not isinstance(feature_keys, tuple)
+                or any(type(value) is not int for value in feature_keys)):
+            raise TypeError("pronoun_features 必须是整数或整数 tuple")
+        for feature_key in dict.fromkeys(feature_keys):
+            feat_ref = concept_index.ensure(
+                feature_key, space_id=memory_space_id, tier=TIER_PRIMARY)
+            edge_store.add(
+                space_id_from=pronoun_ref[0], local_id_from=pronoun_ref[1],
+                space_id_to=feat_ref[0], local_id_to=feat_ref[1],
+                edge_type=EDGE_PROPERTY, strength=1,
+                source=6,  # SOURCE_DERIVED
+                epistemic_origin=None, tier=TIER_PRIMARY,
+            )
     # 候选排序（近因优先·确定性 tiebreak 按 ref·layer 3 recent 高分 dominate FIFO·设计故意：
     # OCCURRENCE 边是已记录解析·比 FIFO 通用近因 ref 更可靠·代词 anaphora 跨句倾向同先行词）
     if not candidates:

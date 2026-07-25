@@ -74,6 +74,8 @@ MEMORY_HYPOTHESIS_SOURCE_COLUMNS = [
     ("space_id", TYPE_INT),
     ("hypothesis_hash", TYPE_INT),
     ("source_hash", TYPE_INT),
+    ("assessment_hash", TYPE_INT),
+    ("cluster_hash", TYPE_INT),
     ("stance", TYPE_INT),
     ("first_observed_seq", TYPE_INT),
     ("last_observed_seq", TYPE_INT),
@@ -124,6 +126,7 @@ MEMORY_HYPOTHESIS_SOURCE_INDEXES = [
     ("space_id", "source_hash"),
     ("space_id", "hypothesis_hash"),
     ("space_id", "stance", "source_hash"),
+    ("space_id", "cluster_hash"),
 ]
 
 MEMORY_HYPOTHESIS_EVENT_INDEXES = [
@@ -321,6 +324,8 @@ class MemoryHypothesisSourceRecord:
     space_id: int
     hypothesis_hash: int
     source_hash: int
+    assessment_hash: int
+    cluster_hash: int
     stance: int
     first_observed_seq: int
     last_observed_seq: int
@@ -333,6 +338,10 @@ class MemoryHypothesisSourceRecord:
         _strict(self.space_id, where="source.space_id", positive=True)
         _strict(self.hypothesis_hash, where="source.hypothesis_hash", positive=True)
         _strict(self.source_hash, where="source.source_hash", positive=True)
+        _strict(self.assessment_hash, where="source.assessment_hash")
+        _strict(self.cluster_hash, where="source.cluster_hash")
+        if (self.assessment_hash == 0) != (self.cluster_hash == 0):
+            raise ValueError("source assessment/cluster hash 必须同时存在或缺席")
         _strict(self.stance, where="source.stance", positive=True)
         for name, value in (
                 ("first_observed_seq", self.first_observed_seq),
@@ -352,6 +361,8 @@ class MemoryHypothesisSourceRecord:
             "space_id": self.space_id,
             "hypothesis_hash": self.hypothesis_hash,
             "source_hash": self.source_hash,
+            "assessment_hash": self.assessment_hash,
+            "cluster_hash": self.cluster_hash,
             "stance": self.stance,
             "first_observed_seq": self.first_observed_seq,
             "last_observed_seq": self.last_observed_seq,
@@ -372,7 +383,8 @@ class MemoryHypothesisSourceRecord:
         try:
             return cls(
                 row["space_id"], row["hypothesis_hash"], row["source_hash"],
-                row["stance"], row["first_observed_seq"],
+                row["assessment_hash"], row["cluster_hash"], row["stance"],
+                row["first_observed_seq"],
                 row["last_observed_seq"], row["evidence_count"],
                 (
                     row["owner_tenant_id"], row["owner_user_id"],

@@ -9,6 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
+from pure_integer_ai.crosscut.determinism.fingerprint import (
+    integer_tuple_fingerprint,
+)
+
 from pure_integer_ai.cognition.shared.formal_artifact_bridge import (
     ArtifactInvocationResult,
 )
@@ -246,20 +250,25 @@ class AnswerContentSelection:
             raise ValueError("answer content selection trace 不能为空")
 
     def stable_key(self) -> tuple[int, ...]:
-        """返回请求、协议、立场、采用项和 policy trace 的完整键。"""
+        """返回请求、协议、立场、采用项和 policy trace 的内容引用键。"""
         result = [
-            *_packed(self.request.stable_key()),
-            *_packed(self.protocol.stable_key()),
+            *_packed(integer_tuple_fingerprint(
+                self.request.stable_key(), domain="generation.selection.request.v1")),
+            *_packed(integer_tuple_fingerprint(
+                self.protocol.stable_key(), domain="generation.selection.protocol.v1")),
             *_packed(self.stance.stable_key()),
             *_packed(self.reason.stable_key()),
             len(self.selected_candidate_keys),
         ]
         for key in self.selected_candidate_keys:
-            result.extend(_packed(key))
+            result.extend(_packed(integer_tuple_fingerprint(
+                key, domain="generation.selection.candidate.v1")))
         result.append(len(self.selected_artifact_keys))
         for key in self.selected_artifact_keys:
-            result.extend(_packed(key))
-        result.extend(_packed(self.trace))
+            result.extend(_packed(integer_tuple_fingerprint(
+                key, domain="generation.selection.artifact.v1")))
+        result.extend(_packed(integer_tuple_fingerprint(
+            self.trace, domain="generation.selection.trace.v1")))
         return tuple(result)
 
 

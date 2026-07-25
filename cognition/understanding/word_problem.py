@@ -7,11 +7,11 @@ word_problem_value(tokens, ...) -> Rational | None
 
 **language→arith 桥首刀（语言域主攻·语言嵌入算数·doc/重来_语言通用接地 §六 piece 1）**：
 - 结构→结构（语言表达式有可恢复结构 [num op num] + 形式域可执行验）·**不撞 D墙**（架构审视 §5·非"自然语言需求→结构"）。
-- 复用既有解决（closure-falsified 从语料学机制）：数字接地（number_grounding·bootstrap 种图边）+ 算子 cue（arith_op_of·元定义+D:11）+ arith builder（arith_observe）+ vm_proof（execute·ground truth）。
+- 复用既有解决（closure-falsified 从语料学机制）：数字接地（number_grounding·bootstrap 种图边）+ 算子 cue（arith_op_of·来源化图主读）+ arith builder（arith_observe）+ vm_proof（execute·ground truth）。
 - 反 theater：vm_proof 真执行验值（非 parser 输出当答案）·数字值经图遍历取得（关联在图中）。
 
 **不写死 + 关联在图中**：数字词→整数经图边（resolve_number_word·PURE_ALIAS→CORR_NUMERIC·非旁侧表）·
-算子词→opcode 经 cue（元定义种子+D:11 图）·代码只解析结构（[num op num]）非硬编关联。
+算子词→opcode 经来源化图指令和调用方绑定；旧字面/D:11 仅作 compatibility。
 
 首版 scope：简单二元 NUM OP NUM（左操作数 算子词 右操作数）·无优先级/多步/括号（piece 1.2+）。
 诚实边界：piece 1 = 数据接地（number_facts 种子·非学习）·纯语义 word-problem（无可恢复结构·意图推理）= D墙搁置。
@@ -53,11 +53,15 @@ _WP_EXEC_SEQ = count(1)
 
 def word_problem_value(tokens: list[str], *, concept_index: ConceptIndex,
                        edge_store: EdgeStore, backend, space_id: int,
-                       lang: int) -> Rational | None:
+                       lang: int, language_signal_runtime=None,
+                       arithmetic_instruction_bindings: tuple[
+                           tuple[tuple[int, ...], int], ...] = (),
+                       language_signal_compatibility_enabled: bool = True,
+                       ) -> Rational | None:
     """语言应用题 tokens → arith 估值（vm_proof）·简单二元 [num, op, num]·返 Rational | None。
 
     tokens : 已切词的 token 列表（caller 须切数字词/算子词为独立 token·同 cue 纪律）·首版须恰好 3 个 [num, op, num]。
-    lang   : 语言码（LANG_ZH/EN·arith_op_of 第一源 frozenset + 第二源 D:11 按 lang 分）。
+    lang   : 语言码；arith_op_of 按图语言分支查询，兼容模式才读取旧字面/D:11。
     返 Rational（vm_proof 真执行估值）| None（非二元 / 数字词未接地 / 算子未识别 / DSL 不支持→诚实不伪造）。
 
     flow：resolve_number_word(左) + arith_op_of(中) + resolve_number_word(右) → 三段非 None
@@ -70,7 +74,12 @@ def word_problem_value(tokens: list[str], *, concept_index: ConceptIndex,
         return None   # 首版只支持简单二元 NUM OP NUM（多步/优先级 = piece 1.2+）
     n1 = resolve_number_word(concept_index, edge_store, backend, tokens[0], space_id=space_id)
     op = arith_op_of(tokens[1], lang, backend=backend, edge_store=edge_store,
-                     space_id=space_id, concept_index=concept_index)
+                     space_id=space_id, concept_index=concept_index,
+                     language_signal_runtime=language_signal_runtime,
+                     arithmetic_instruction_bindings=(
+                         arithmetic_instruction_bindings),
+                     language_signal_compatibility_enabled=(
+                         language_signal_compatibility_enabled))
     n2 = resolve_number_word(concept_index, edge_store, backend, tokens[2], space_id=space_id)
     if n1 is None or op is None or n2 is None:
         return None   # 数字词未接地 / 算子未识别 → 诚实不伪造（守反统计契约·非凑配）

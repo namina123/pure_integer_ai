@@ -668,6 +668,33 @@ class HypothesisLedger:
         }
         return cloned
 
+    def _restore_runtime_state(self, snapshot: "HypothesisLedger") -> None:
+        """从无 sink 的领域快照恢复内存态，并保留当前持久化 sink 绑定。"""
+        if not isinstance(snapshot, HypothesisLedger):
+            raise TypeError("H-00 恢复快照必须是 HypothesisLedger")
+        if snapshot.event_sink is not None:
+            raise ValueError("H-00 恢复快照不得携带事件 sink")
+        self._hypotheses = dict(snapshot._hypotheses)
+        self._evidence = dict(snapshot._evidence)
+        self._superseded_evidence = dict(snapshot._superseded_evidence)
+        self._transitions = dict(snapshot._transitions)
+        self._competition_members = {
+            key: set(value)
+            for key, value in snapshot._competition_members.items()
+        }
+        self._candidate_members = {
+            key: set(value)
+            for key, value in snapshot._candidate_members.items()
+        }
+        self._evidence_by_hypothesis = {
+            key: list(value)
+            for key, value in snapshot._evidence_by_hypothesis.items()
+        }
+        self._transitions_by_hypothesis = {
+            key: list(value)
+            for key, value in snapshot._transitions_by_hypothesis.items()
+        }
+
     def clone_competitions(
             self, anchors: tuple[HypothesisKey, ...],
             ) -> "HypothesisLedger":

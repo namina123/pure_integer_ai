@@ -322,6 +322,56 @@ class MemorySourceIntake:
                 "Memory intake 已绑定其他 batch runtime")
         self.batch_runtime = runtime
 
+    def manifest(self, source: SourceRef) -> IntakeManifestPayload | None:
+        """按完整来源只读返回唯一 intake manifest，不登记新身份。"""
+        if not isinstance(source, SourceRef):
+            raise TypeError("source 必须是 SourceRef")
+        if not self.policy.accepts(source):
+            raise MemoryIntakeIntegrityError(
+                "来源 owner visibility 不符合当前 Memory 通道")
+        return self._manifest_for(source)
+
+    def require_current_manifest(
+            self,
+            source: SourceRef,
+            ) -> IntakeManifestPayload:
+        """要求指定来源是同谱系唯一活动 manifest，并返回其完整载荷。"""
+        if not isinstance(source, SourceRef):
+            raise TypeError("source 必须是 SourceRef")
+        if not self.policy.accepts(source):
+            raise MemoryIntakeIntegrityError(
+                "来源 owner visibility 不符合当前 Memory 通道")
+        manifests = tuple(
+            candidate
+            for record in self.source_intake.repository.versions_for(
+                source.stable_key())
+            for candidate_source in (
+                SourceRef.from_stable_key(record.source_key),)
+            for candidate in (self._manifest_for(candidate_source),)
+            if candidate is not None
+        )
+        inactive = self._inactive_manifest_refs(source, manifests)
+        active = tuple(
+            item for item in manifests
+            if self._manifest_ref(item) not in inactive
+        )
+        if len(active) != 1:
+            raise MemoryIntakeIntegrityError(
+                "同一来源谱系没有唯一活动 intake manifest")
+        if active[0].source != source:
+            raise MemoryIntakeIntegrityError(
+                "指定来源不是当前活动 intake manifest")
+        return active[0]
+
+    def result_for_source(self, source: SourceRef) -> MemoryIntakeResult:
+        """从既有来源和 manifest 恢复结果，不重跑 parser 或写事件。"""
+        manifest = self.manifest(source)
+        record = self.source_intake.repository.find(source.stable_key())
+        if manifest is None or record is None:
+            raise MemoryIntakeIntegrityError(
+                "来源没有可恢复的完整 intake 结果")
+        return self._result_from_manifest(record, manifest)
+
     def ingest(
             self, source: SourceRef, raw_text: str, *, license_id: str,
             batch_id: int, parser: MemoryIntakeParser,
@@ -485,20 +535,8 @@ class MemorySourceIntake:
                     "重新解析必须显式指向已存在的旧 manifest")
             return None
 
-        transitions = self.event_log.query(
-            access=self._access(source),
-            event_kind=MEMORY_EVENT_DERIVATION,
-        )
-        inactive_manifest_refs = {
-            item.event.payload.target_ref
-            for item in transitions
-            if (isinstance(item.event.payload, DerivationTransitionPayload)
-                and item.event.payload.binding_kind
-                == INTAKE_DERIVED_MANIFEST
-                and source_reparse_lineage_key(
-                    item.event.payload.prior_source)
-                == source_reparse_lineage_key(source))
-        }
+        inactive_manifest_refs = self._inactive_manifest_refs(
+            source, tuple(manifests))
         active = tuple(
             item for item in manifests
             if self._manifest_ref(item) not in inactive_manifest_refs
@@ -513,6 +551,31 @@ class MemorySourceIntake:
             raise MemoryIntakeIntegrityError(
                 "supersedes_source 不是同谱系当前活跃 manifest")
         return active[0]
+
+    def _inactive_manifest_refs(
+            self,
+            source: SourceRef,
+            manifests: tuple[IntakeManifestPayload, ...],
+            ) -> set[MemoryObjectRef]:
+        """按 manifest 完整引用定点恢复同谱系 inactive 集，避免全历史扫描。"""
+        access = self._access(source)
+        inactive: set[MemoryObjectRef] = set()
+        for manifest in manifests:
+            manifest_ref = self._manifest_ref(manifest)
+            entries = self.event_log.query(
+                access=access,
+                event_kind=MEMORY_EVENT_DERIVATION,
+                object_ref=manifest_ref,
+            )
+            for entry in entries:
+                payload = entry.event.payload
+                if (isinstance(payload, DerivationTransitionPayload)
+                        and payload.binding_kind
+                        == INTAKE_DERIVED_MANIFEST
+                        and source_reparse_lineage_key(payload.prior_source)
+                        == source_reparse_lineage_key(source)):
+                    inactive.add(payload.target_ref)
+        return inactive
 
     def _append_failure(
             self, source: SourceRef, batch_id: int,

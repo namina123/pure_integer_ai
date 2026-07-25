@@ -4,9 +4,14 @@ from __future__ import annotations
 from pure_integer_ai.cognition.shared.memory_aggregate import (
     MemoryHypothesisAggregateIndex,
 )
+from pure_integer_ai.cognition.shared.memory_event import (
+    MEMORY_OBJECT_HYPOTHESIS,
+    require_memory_object_kind,
+)
 from pure_integer_ai.cognition.shared.memory_query import MemoryQueryCompilation
 from pure_integer_ai.cognition.shared.memory_resolver import (
     MemoryResolution,
+    ResolvedCandidateSet,
 )
 from pure_integer_ai.cognition.shared.memory_resolver_engine import (
     MemoryOverlayResolver,
@@ -21,6 +26,7 @@ class MemoryResolverRuntime:
             self,
             ctx: TrainContext,
             resolver: MemoryOverlayResolver,
+            routes: tuple[object, ...] = (),
             ) -> None:
         """绑定上下文、M-06 query runtime 和同空间 aggregate/Core facade。"""
         if not isinstance(ctx, TrainContext):
@@ -40,6 +46,27 @@ class MemoryResolverRuntime:
             raise ValueError("M-07 resolver aggregate 不属于当前 TrainContext")
         self._ctx = ctx
         self.resolver = resolver
+        self._routes: dict[int, object] = {}
+        if not isinstance(routes, tuple):
+            raise TypeError("M-07 routes 必须是 tuple")
+        for route in routes:
+            self.register_route(route)
+
+    def register_route(self, route: object) -> None:
+        """按公开 Memory object kind 注册唯一只读 resolver route。"""
+        object_kind = getattr(route, "memory_object_kind", None)
+        require_memory_object_kind(
+            object_kind, where="Memory resolver route object kind")
+        if object_kind == MEMORY_OBJECT_HYPOTHESIS:
+            raise ValueError("Hypothesis route 由 M-07 主 resolver 承担")
+        if not callable(getattr(route, "resolve", None)):
+            raise TypeError("Memory resolver route 缺少 resolve")
+        state_key = getattr(route, "state_key", None)
+        if not callable(state_key) or not state_key():
+            raise TypeError("Memory resolver route 缺少非空 state_key")
+        if object_kind in self._routes:
+            raise ValueError("同一 Memory object kind 已注册 resolver route")
+        self._routes[object_kind] = route
 
     def resolve(self, compilation: MemoryQueryCompilation) -> MemoryResolution:
         """在活动 query scope 内执行只读仲裁，拒绝陈旧或跨上下文 compilation。"""
@@ -52,6 +79,46 @@ class MemoryResolverRuntime:
             raise ValueError("Memory resolution 输入与活动 WorkMemory query 不一致")
         if compilation.memory_space != self.resolver.aggregates.event_log.memory_space_identity:
             raise ValueError("Memory resolution compilation 属于其他 Memory 空间")
+        if all(request.memory_object_kind == MEMORY_OBJECT_HYPOTHESIS
+               for request in compilation.requests):
+            return self._resolve_hypotheses(compilation)
+        resolved: dict[tuple[int, ...], ResolvedCandidateSet] = {}
+        hypothesis_requests = tuple(
+            request for request in compilation.requests
+            if request.memory_object_kind == MEMORY_OBJECT_HYPOTHESIS
+        )
+        if hypothesis_requests:
+            hypothesis_compilation = MemoryQueryCompilation(
+                compilation.current,
+                compilation.access,
+                compilation.memory_space,
+                hypothesis_requests,
+            )
+            for item in self._resolve_hypotheses(hypothesis_compilation).sets:
+                resolved[item.request.stable_key()] = item
+        for request in compilation.requests:
+            if request.memory_object_kind == MEMORY_OBJECT_HYPOTHESIS:
+                continue
+            route = self._routes.get(request.memory_object_kind)
+            if route is None:
+                raise ValueError("当前 Memory object kind 未安装 resolver route")
+            item = route.resolve(request)
+            if not isinstance(item, ResolvedCandidateSet):
+                raise TypeError("Memory resolver route 返回类型错误")
+            if item.request != request:
+                raise ValueError("Memory resolver route 替换了 request")
+            resolved[request.stable_key()] = item
+        return MemoryResolution(
+            compilation,
+            tuple(resolved[request.stable_key()]
+                  for request in compilation.requests),
+        )
+
+    def _resolve_hypotheses(
+            self,
+            compilation: MemoryQueryCompilation,
+            ) -> MemoryResolution:
+        """保持原 Hypothesis/hot-set 路径，供全量和混合 request 复用。"""
         if self._ctx.memory_hot_set_runtime is not None:
             return self._ctx.memory_hot_set_runtime.resolve(compilation)
         return self.resolver.resolve(compilation)
@@ -87,11 +154,22 @@ class MemoryResolverRuntime:
         )
         if cloned.state_key() != self.resolver.state_key():
             raise ValueError("M-07 resolver 克隆改变了注入协议状态")
-        return MemoryResolverRuntime(ctx, cloned)
+        routes = tuple(
+            _clone_component(self._routes[key], ctx)
+            for key in sorted(self._routes)
+        )
+        return MemoryResolverRuntime(ctx, cloned, routes)
 
     def state_key(self) -> tuple[int, ...]:
         """返回 resolver 的只读协议状态，供 V-06 宿主污染检查。"""
-        return self.resolver.state_key()
+        if not self._routes:
+            return self.resolver.state_key()
+        result = [2, len(self.resolver.state_key()), *self.resolver.state_key()]
+        result.append(len(self._routes))
+        for object_kind in sorted(self._routes):
+            route_key = self._routes[object_kind].state_key()
+            result.extend((object_kind, len(route_key), *route_key))
+        return tuple(result)
 
 
 def _clone_component(component: object, ctx: TrainContext) -> object:
@@ -107,6 +185,8 @@ def _clone_component(component: object, ctx: TrainContext) -> object:
 def install_memory_resolver_runtime(
         ctx: TrainContext,
         resolver: MemoryOverlayResolver,
+        *,
+        routes: tuple[object, ...] = (),
         ) -> MemoryResolverRuntime:
     """在已安装 M-06 的 TrainContext 上安装唯一 M-07 resolver runtime。"""
     if not isinstance(ctx, TrainContext):
@@ -115,7 +195,7 @@ def install_memory_resolver_runtime(
         raise TypeError("resolver 必须是 MemoryOverlayResolver")
     if ctx.memory_resolver_runtime is not None:
         raise ValueError("TrainContext 已安装 Memory resolver runtime")
-    runtime = MemoryResolverRuntime(ctx, resolver)
+    runtime = MemoryResolverRuntime(ctx, resolver, routes)
     ctx.memory_resolver_runtime = runtime
     return runtime
 

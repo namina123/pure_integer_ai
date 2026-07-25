@@ -45,6 +45,7 @@ from pure_integer_ai.storage.segment_repository import (
     SEGMENT_OBJECT_TOMBSTONE_TABLE,
 )
 from pure_integer_ai.storage.source_record import SOURCE_RECORD_TABLE
+from pure_integer_ai.storage.source_trust import SOURCE_TRUST_ASSESSMENT_TABLE
 from pure_integer_ai.storage.spaces.companion import TEXT_ASSOC_TABLE
 from pure_integer_ai.storage.spaces.registry import (
     SPACE_TYPE_COMPANION,
@@ -86,6 +87,7 @@ _PACKAGE_TABLES = (
     MEMORY_HYPOTHESIS_DIRTY_TABLE,
     MEMORY_EVENT_BATCH_LINK_TABLE,
     SOURCE_RECORD_TABLE,
+    SOURCE_TRUST_ASSESSMENT_TABLE,
     TEXT_ASSOC_TABLE,
     SEGMENT_OBJECT_RESERVATION_TABLE,
     SEGMENT_OBJECT_PART_TABLE,
@@ -220,6 +222,15 @@ def build_memory_recovery_projection(
         in companion_identities
     }
     identity_hashes = set(source_hashes)
+    for row in backend.select(SOURCE_TRUST_ASSESSMENT_TABLE, where=None):
+        if row.get("source_hash") not in source_hashes:
+            continue
+        for column in ("assessment_hash", "cluster_hash"):
+            value = row.get(column)
+            if type(value) is not int or value <= 0:
+                raise RecoveryIntegrityError(
+                    f"source_trust_assessment 缺少合法 {column}")
+            identity_hashes.add(value)
     memory_ids = set(memory_space_ids)
     for row in backend.select(MEMORY_EVENT_TABLE, where=None):
         if row.get("space_id") not in memory_ids:
@@ -269,6 +280,8 @@ def _selector(projection: MemoryRecoveryProjection):
             return (row.get("identity_kind"), row.get("identity_hash")) in (
                 projection.identity_rows)
         if table == SOURCE_RECORD_TABLE:
+            return row.get("source_hash") in projection.source_hashes
+        if table == SOURCE_TRUST_ASSESSMENT_TABLE:
             return row.get("source_hash") in projection.source_hashes
         if table == TEXT_ASSOC_TABLE:
             return row.get("space_id") in companion_spaces

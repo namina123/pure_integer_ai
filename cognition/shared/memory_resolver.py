@@ -19,6 +19,9 @@ from pure_integer_ai.cognition.shared.memory_aggregate import (
     MemoryHypothesisAggregateRecord,
 )
 from pure_integer_ai.cognition.shared.memory_event import (
+    MEMORY_OBJECT_CAPABILITY,
+    MEMORY_OBJECT_HYPOTHESIS,
+    CapabilityPayload,
     MemoryObjectRef,
 )
 from pure_integer_ai.cognition.shared.memory_query import (
@@ -31,7 +34,7 @@ from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 
 RESOLUTION_ORIGIN_CORE = 1
 RESOLUTION_ORIGIN_MEMORY = 2
-MEMORY_RESOLVER_PROTOCOL_VERSION = 1
+MEMORY_RESOLVER_PROTOCOL_VERSION = 2
 
 
 def _strict_tuple(
@@ -169,6 +172,8 @@ class MemorySourceTrace:
     """一个 Memory 候选的完整来源、立场和活动证据统计。"""
 
     source: SourceRef
+    source_cluster_key: tuple[int, ...]
+    source_assessment_key: tuple[int, ...]
     stance: int
     first_observed_seq: int
     last_observed_seq: int
@@ -178,6 +183,15 @@ class MemorySourceTrace:
         """校验来源分账的对象身份、立场和逻辑序计数。"""
         if not isinstance(self.source, SourceRef):
             raise TypeError("MemorySourceTrace.source 必须是 SourceRef")
+        _strict_tuple(
+            self.source_cluster_key,
+            label="MemorySourceTrace.source_cluster_key",
+        )
+        _strict_tuple(
+            self.source_assessment_key,
+            label="MemorySourceTrace.source_assessment_key",
+            allow_empty=True,
+        )
         assert_int(
             self.stance,
             self.first_observed_seq,
@@ -205,6 +219,8 @@ class MemorySourceTrace:
         """返回来源、立场、逻辑序和证据数的完整稳定键。"""
         return (
             *_packed(self.source.stable_key()),
+            *_packed(self.source_cluster_key),
+            *_packed(self.source_assessment_key),
             self.stance,
             self.first_observed_seq,
             self.last_observed_seq,
@@ -288,7 +304,19 @@ class MemoryCandidateBundle:
         }))
         if traced_sources != source_keys:
             raise ValueError("Memory candidate 来源集合与分账不一致")
-        if self.aggregate.independent_source_count != len(self.sources):
+        cluster_by_source: dict[tuple[int, ...], tuple[int, ...]] = {}
+        assessment_by_source: dict[tuple[int, ...], tuple[int, ...]] = {}
+        for trace in self.source_traces:
+            source_key = trace.source.stable_key()
+            prior_cluster = cluster_by_source.setdefault(
+                source_key, trace.source_cluster_key)
+            prior_assessment = assessment_by_source.setdefault(
+                source_key, trace.source_assessment_key)
+            if (prior_cluster != trace.source_cluster_key
+                    or prior_assessment != trace.source_assessment_key):
+                raise ValueError("同一 SourceRef 的来源簇或 assessment 漂移")
+        independent_count = len(set(cluster_by_source.values()))
+        if self.aggregate.independent_source_count != independent_count:
             raise ValueError("Memory candidate 独立来源数与 aggregate 不一致")
 
     def stable_key(self) -> tuple[int, ...]:
@@ -429,8 +457,9 @@ class SourceDiversityPolicy(Protocol):
             hypothesis: HypothesisKey,
             aggregate: MemoryHypothesisAggregateRecord,
             sources: tuple[SourceRef, ...],
+            source_traces: tuple[MemorySourceTrace, ...],
         ) -> SourceDiversityAssessment:
-        """返回来源调整和理由，不把同源重复计为独立来源。"""
+        """按显式来源簇返回调整和理由，不把同簇文档计为独立来源。"""
 
     def select(
             self,
@@ -473,6 +502,7 @@ class ResolvedCandidate:
     score: int
     score_reasons: tuple[ActivationScoreReason, ...]
     diversity: SourceDiversityAssessment | None
+    capability: CapabilityPayload | None = None
 
     def __post_init__(self) -> None:
         """核验候选来源分支互斥，禁止用 hash 或半成品对象冒充身份。"""
@@ -519,7 +549,7 @@ class ResolvedCandidate:
                 raise TypeError("Core 候选必须保留 TypedRef")
             if any(item is not None for item in (
                     self.memory_ref, self.hypothesis, self.aggregate,
-                    self.diversity)):
+                    self.diversity, self.capability)):
                 raise ValueError("Core 候选不得携带 Memory 派生字段")
             if self.memory_source_traces:
                 raise ValueError("Core 候选不得携带 Memory 来源分账")
@@ -528,20 +558,41 @@ class ResolvedCandidate:
         else:
             if not isinstance(self.memory_ref, MemoryObjectRef):
                 raise TypeError("Memory 候选必须保留 MemoryObjectRef")
-            if not isinstance(self.hypothesis, HypothesisKey):
-                raise TypeError("Memory 候选必须保留 HypothesisKey")
-            if not isinstance(
-                    self.aggregate, MemoryHypothesisAggregateRecord):
-                raise TypeError("Memory 候选必须保留 aggregate")
-            if not isinstance(self.diversity, SourceDiversityAssessment):
-                raise TypeError("Memory 候选必须保留来源多样性评估")
             if self.candidate_key != self.memory_ref.stable_key():
                 raise ValueError("Memory 候选 candidate_key 与完整引用不一致")
-            trace_sources = {
-                item.source.stable_key() for item in self.memory_source_traces}
-            if trace_sources != {
-                    item.stable_key() for item in self.sources}:
-                raise ValueError("Memory 来源集合与来源分账不一致")
+            if self.memory_ref.object_kind == MEMORY_OBJECT_HYPOTHESIS:
+                if not isinstance(self.hypothesis, HypothesisKey):
+                    raise TypeError("Hypothesis 候选必须保留 HypothesisKey")
+                if not isinstance(
+                        self.aggregate, MemoryHypothesisAggregateRecord):
+                    raise TypeError("Hypothesis 候选必须保留 aggregate")
+                if not isinstance(self.diversity, SourceDiversityAssessment):
+                    raise TypeError("Hypothesis 候选必须保留来源多样性评估")
+                if self.capability is not None:
+                    raise ValueError("Hypothesis 候选不得携带 Capability")
+                trace_sources = {
+                    item.source.stable_key()
+                    for item in self.memory_source_traces
+                }
+                if trace_sources != {
+                        item.stable_key() for item in self.sources}:
+                    raise ValueError("Hypothesis 来源集合与来源分账不一致")
+            elif self.memory_ref.object_kind == MEMORY_OBJECT_CAPABILITY:
+                if not isinstance(self.capability, CapabilityPayload):
+                    raise TypeError("Capability 候选必须保留 CapabilityPayload")
+                if any(item is not None for item in (
+                        self.hypothesis, self.aggregate, self.diversity)):
+                    raise ValueError(
+                        "Capability 候选不得伪造 Hypothesis 派生字段")
+                if self.memory_source_traces:
+                    raise ValueError(
+                        "Capability 候选不得伪造 Hypothesis 来源分账")
+                if self.memory_ref.object_key != self.capability.stable_key():
+                    raise ValueError("Capability 引用与声明 payload 漂移")
+                if self.candidate_scope is None:
+                    raise ValueError("Capability 候选必须保留声明 scope")
+            else:
+                raise ValueError("M-07 Memory 候选对象种类尚未注册 resolver 分支")
 
     def stable_key(self) -> tuple[int, ...]:
         """返回结果中全部权威身份和派生 trace 的确定性键。"""
@@ -562,6 +613,8 @@ class ResolvedCandidate:
             result.extend(_packed(source_trace.stable_key()))
         result.extend(_packed(
             () if self.aggregate is None else _aggregate_key(self.aggregate)))
+        result.extend(_packed(
+            () if self.capability is None else self.capability.stable_key()))
         result.extend((self.score, len(self.score_reasons)))
         for reason in self.score_reasons:
             result.extend(_packed(reason.stable_key()))

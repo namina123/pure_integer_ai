@@ -321,31 +321,25 @@ CAUSES_REWARD_DOMAIN_FILTER_MODE = _flag("pure_integer_ai_CAUSES_REWARD_DOMAIN_F
 # 冷启动退化：D:11 全 SHADOW（未 promote）→ 第二源返 None → 退化纯 frozenset。
 EMERGENT_RELATION_CUE_READBACK_MODE = _flag("pure_integer_ai_EMERGENT_RELATION_CUE_READBACK_MODE", False)
 
-# STEP5 PR2：operator-level D:11 文字 alias 迁（arith_op_of/comparison_op_of 第二源·读 D:11 PRIMARY 边
-# →OP_* concept→opcode·镜像 EMERGENT_RELATION_CUE_READBACK_MODE 两源范式·D6 开放类文字走 D:11 learnable）。
-# default OFF·守回归（OFF = arith_op_of/comparison_op_of 纯 frozenset _ARITH_OP_WORDS/_COMPARISON_OP_WORDS·退化现状）。
-# 冷启动退化：D:11 OP_* 无教师种子 → 第二源返 None → 退化纯 frozenset。反 theater：未验证 SHADOW 不注入。
+# 迁移期 operator D:11 兼容回退；来源化图 reader 存在时图裁决优先且冲突 fail closed。
+# default OFF 只控制旧 D:11，不决定 U-04 图 reader 是否启用。
 OPERATOR_D11_READBACK_MODE = _flag("pure_integer_ai_OPERATOR_D11_READBACK_MODE", False)
 
-# 审计根治：modal-level D:11 文字 alias 迁（modal_op_of/is_modal_cue 第二源·读 D:11 PRIMARY 边
-# →MODAL_KIND_* concept→modality·镜像 OPERATOR_D11_READBACK_MODE 两源范式·D6 模态种类归抽象空间后天可学习）。
-# 解 [严重-1] _MODAL_CUES 换名字写死（"无 REL_MODALITY 故无 D:11"循环论证偷渡）·建 modal_kind concept +
-# ATTR_MODAL_KIND=22 readback（镜像 OP_*）+ abstract_mark MARK_MODAL_KIND=5 D6 归属·不违 STOP（ATTR_* 非 TYPE_*）
-# 不违 D6（abstract_mark 归属）。default OFF·守回归（OFF = modal_op_of/is_modal_cue 纯 frozenset _MODAL_CUES·退化现状）。
-# 冷启动退化：D:11 MODAL_KIND 无教师种子 → 第二源返 None → 退化纯 frozenset。反 theater：未验证 SHADOW 不注入。
+# 迁移期 modal D:11 兼容回退；正式情态作用由来源化图和调用方绑定决定。
+# default OFF 只关闭旧 D:11，不把 Python 字面提升为 readiness 真源。
 MODAL_D11_READBACK_MODE = _flag("pure_integer_ai_MODAL_D11_READBACK_MODE", False)
 
-# #940 否定词 D:11 readback 第二源（is_negation_cue 读 D:11 PRIMARY→TYPE_NEGATION concept·镜像 MODAL_D11_READBACK_MODE 两源范式）。
+# #940 否定词 D:11 compatibility 回退（is_negation_cue 读 D:11 PRIMARY→TYPE_NEGATION concept）。
 # 否定=符号域先天（TYPE_NEGATION=12·同 operator·非 modal 抽象空间）·复用 ATTR_SYMBOL_TYPE=17 不挂 abstract_mark·
 # 激活 ensure_symbol_types（shadow→活·bootstrap_negation_signals 消费）。default OFF·守回归
-# （OFF = is_negation_cue 纯 frozenset _NEGATION_CUES·退化现状）。冷启动退化：D:11 无教师种子 → 第二源返 False → 退化 frozenset。
+# 该 gate 不控制来源化图主 reader；Python 字面与 D:11 均不计 readiness。
 # 反 theater：未验证 SHADOW 不注入（tier_filter=TIER_PRIMARY）。
 NEGATION_D11_READBACK_MODE = _flag("pure_integer_ai_NEGATION_D11_READBACK_MODE", False)
 
-# B-PR1 action D:11 readback 第二源（is_action_intent_cue 读 D:11 PRIMARY→ACTION_INTENT_* concept·doc §16·镜像 NEGATION_D11_READBACK_MODE 两源范式）。
+# B-PR1 action D:11 compatibility 回退（is_action_intent_cue 读 D:11 PRIMARY→ACTION_INTENT_* concept）。
 # 动作意图=符号域先天（INTENT_COMMAND_MOOD + ACTION_*·镜像 operator·非 modal 抽象空间）·挂 ATTR_OPERATION_INTENT=23
 # 不挂 abstract_mark·ensure_action_primitives（bootstrap_action_signals 消费）。命令词（帮我/请→COMMAND_MOOD）+ 动作词（生成/计算→ACTION_*）。
-# default OFF·守回归（OFF = is_action_intent_cue 纯 frozenset _ACTION_LEXICAL_CUE·退化现状）。冷启动退化：D:11 无教师种子→第二源返 False→退化 frozenset。
+# 该 gate 不控制来源化图主 reader；Python 字面与 D:11 均不计 readiness。
 # 反 theater：未验证 SHADOW 不注入（tier_filter=TIER_PRIMARY）。**W7 命令判定复用此**（_has_action_intent 调 is_action_intent_cue·命中任一→type=COMMAND）。
 ACTION_D11_READBACK_MODE = _flag("pure_integer_ai_ACTION_D11_READBACK_MODE", False)
 

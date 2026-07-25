@@ -47,6 +47,10 @@ from pure_integer_ai.cognition.shared.memory_event_log import (
     MemoryEventLog,
 )
 from pure_integer_ai.cognition.shared.memory_overlay import MemoryAccessContext
+from pure_integer_ai.cognition.shared.source_trust import (
+    SourceTrustAssessment,
+    SourceTrustRequest,
+)
 from pure_integer_ai.storage.assertion_identity import (
     IDENTITY_MEMORY_OBJECT,
     IDENTITY_SOURCE_RECORD,
@@ -62,6 +66,9 @@ from pure_integer_ai.storage.memory_aggregate import (
     MemoryHypothesisDirtyRecord,
     MemoryHypothesisEventIndexRecord,
     MemoryHypothesisSourceRecord,
+)
+from pure_integer_ai.storage.source_trust import (
+    SourceTrustStorageRepository,
 )
 
 
@@ -134,6 +141,8 @@ class MemoryHypothesisAggregateIndex:
             self,
             event_log: MemoryEventLog,
             corroboration_policy: MemoryCorroborationPolicy | None = None,
+            *,
+            source_trust_records: SourceTrustStorageRepository | None = None,
             ) -> None:
         """绑定事件日志并安装新事件 listener；既有事件需显式全量重建。"""
         if not isinstance(event_log, MemoryEventLog):
@@ -143,6 +152,17 @@ class MemoryHypothesisAggregateIndex:
             raise TypeError("corroboration_policy 缺少 is_corroborated")
         self.event_log = event_log
         self.policy = policy
+        self.source_trust_records = (
+            source_trust_records
+            if source_trust_records is not None
+            else SourceTrustStorageRepository(
+                event_log.backend,
+                registry=event_log.scoped_identities.registry,
+            )
+        )
+        if not isinstance(
+                self.source_trust_records, SourceTrustStorageRepository):
+            raise TypeError("source_trust_records 类型错误")
         self.store = MemoryAggregateStore(
             event_log.backend, event_log.memory_space_id)
         event_log.attach_append_listener(self.mark_event_dirty)
@@ -523,6 +543,38 @@ class MemoryHypothesisAggregateIndex:
         return self.event_log.scoped_identities.registry.identity_hash(
             IDENTITY_SOURCE_RECORD, source.stable_key())
 
+    def source_trust_binding(
+            self,
+            source: SourceRef,
+            ) -> tuple[
+                tuple[int, ...], tuple[int, ...], int, int,
+            ]:
+        """恢复 SourceRef 的来源簇和 assessment；legacy 来源退回自身簇。"""
+        if not isinstance(source, SourceRef):
+            raise TypeError("source trust binding 需要 SourceRef")
+        record = self.source_trust_records.find(source.stable_key())
+        if record is None:
+            return source.stable_key(), (), 0, 0
+        try:
+            assessment = SourceTrustAssessment.from_stable_key(
+                record.assessment_key)
+            request_source = SourceTrustRequest.source_from_stable_key(
+                assessment.request_key)
+        except (TypeError, ValueError) as exc:
+            raise MemoryAggregateIntegrityError(
+                "来源准入 assessment 无法恢复") from exc
+        if (not assessment.accepted
+                or request_source != source
+                or assessment.source_cluster_key != record.cluster_key):
+            raise MemoryAggregateIntegrityError(
+                "来源准入 assessment、SourceRef 与来源簇不闭合")
+        return (
+            record.cluster_key,
+            record.assessment_key,
+            record.cluster_hash,
+            record.assessment_hash,
+        )
+
     def _rebuild_hypothesis(
             self,
             hypothesis_ref: MemoryObjectRef,
@@ -598,6 +650,10 @@ class MemoryHypothesisAggregateIndex:
             tuple[tuple[int, ...], int], list[int]
         ] = {}
         source_by_key: dict[tuple[int, ...], SourceRef] = {}
+        trust_by_source: dict[
+            tuple[int, ...],
+            tuple[tuple[int, ...], tuple[int, ...], int, int],
+        ] = {}
         support_seqs: list[int] = []
         refute_seqs: list[int] = []
         unknown_seqs: list[int] = []
@@ -606,6 +662,7 @@ class MemoryHypothesisAggregateIndex:
             source = self._evidence_source(evidence, access=access)
             source_key = source.stable_key()
             source_by_key[source_key] = source
+            trust_by_source[source_key] = self.source_trust_binding(source)
             source_buckets.setdefault(
                 (source_key, evidence.stance), []).append(
                     item.timeline.seq)
@@ -619,12 +676,16 @@ class MemoryHypothesisAggregateIndex:
                 raise MemoryAggregateIntegrityError("活动 Evidence stance 未注册")
 
         support_sources = {
-            source_key for source_key, stance in source_buckets
+            trust_by_source[source_key][0] for source_key, stance in source_buckets
             if stance == EVIDENCE_SUPPORT
         }
         refute_sources = {
-            source_key for source_key, stance in source_buckets
+            trust_by_source[source_key][0] for source_key, stance in source_buckets
             if stance == EVIDENCE_REFUTE
+        }
+        independent_sources = {
+            trust_by_source[source_key][0]
+            for source_key, _ in source_buckets
         }
         support_count = len(support_seqs)
         contradict_count = len(refute_seqs)
@@ -676,10 +737,13 @@ class MemoryHypothesisAggregateIndex:
         hypothesis = payload.hypothesis
         source_records: list[MemoryHypothesisSourceRecord] = []
         for (source_key, stance), seqs in sorted(source_buckets.items()):
+            _, _, cluster_hash, assessment_hash = trust_by_source[source_key]
             source_records.append(MemoryHypothesisSourceRecord(
                 self.event_log.memory_space_id,
                 hypothesis_hash,
                 self.source_hash(source_by_key[source_key]),
+                assessment_hash,
+                cluster_hash,
                 stance,
                 min(seqs),
                 max(seqs),
@@ -704,7 +768,7 @@ class MemoryHypothesisAggregateIndex:
             support_count,
             contradict_count,
             len(unknown_seqs),
-            len(source_by_key),
+            len(independent_sources),
             len(support_sources),
             len(refute_sources),
             len(use_seqs),

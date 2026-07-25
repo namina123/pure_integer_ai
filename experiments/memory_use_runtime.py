@@ -12,7 +12,6 @@ from pure_integer_ai.cognition.shared.memory_event import (
     MEMORY_EVENT_USE,
     MEMORY_EVENT_USE_OUTCOME,
     MEMORY_OBJECT_EPISODE,
-    MEMORY_OBJECT_HYPOTHESIS,
     MEMORY_OBJECT_USE,
     EpisodePayload,
     MemoryEvent,
@@ -143,11 +142,11 @@ class MemoryUseRuntime:
             raise ValueError("只有 consumed activation 可以形成 Use")
         activation = processing.activation
         candidate_ref = activation.candidate.memory_ref
-        if (candidate_ref is None
-                or candidate_ref.object_kind != MEMORY_OBJECT_HYPOTHESIS):
-            raise ValueError("M-08 只为实际使用的 Memory Hypothesis 写 Use")
+        if candidate_ref is None or candidate_ref.object_kind == MEMORY_OBJECT_USE:
+            raise ValueError("M-08 只为实际使用的非 Use Memory 对象写 Use")
         if candidate_ref.memory_space != self.event_log.memory_space_identity:
             raise ValueError("processing candidate 属于其他 Memory 空间")
+        self._memory_declaration(candidate_ref)
         if not isinstance(influence_kind, MemoryLinkedRef):
             raise TypeError("influence_kind 必须是一等引用")
         if not isinstance(used_at, LogicalTimestamp):
@@ -224,6 +223,7 @@ class MemoryUseRuntime:
             outcome_kind: MemoryLinkedRef,
             outcome_ref: MemoryLinkedRef | None,
             observed_at: LogicalTimestamp,
+            outcome_trace_key: tuple[int, ...] = (),
             ) -> MaterializedMemoryEvent:
         """把延迟结果追加到一个精确 Use，不向同 query 的其他候选扩散。"""
         use = self._use_payload(use_ref)
@@ -250,6 +250,7 @@ class MemoryUseRuntime:
             outcome_kind,
             outcome_ref,
             observed_at,
+            outcome_trace_key,
         )
         return self.event_log.append(MemoryEvent(
             MEMORY_EVENT_USE_OUTCOME, use_ref, scope, payload))
@@ -267,6 +268,18 @@ class MemoryUseRuntime:
                 events[0].event.payload, ObservationPayload):
             raise ValueError("input_observation_ref 没有唯一 Observation 声明")
         return events[0].event.payload
+
+    def _memory_declaration(self, ref: MemoryObjectRef) -> MemoryEvent:
+        """恢复目标对象的唯一可见声明，拒绝不存在或只有状态事件的引用。"""
+        events = self.event_log.query(
+            access=_access_for(ref),
+            object_ref=ref,
+        )
+        declarations = tuple(
+            item.event for item in events if item.event.is_declaration)
+        if len(declarations) != 1 or declarations[0].object_ref != ref:
+            raise ValueError("M-08 candidate 没有唯一可见 Memory 声明")
+        return declarations[0]
 
     def _use_payload(self, ref: MemoryObjectRef) -> UsePayload:
         """恢复一个带完整 M-08 trace 的唯一 Use 声明。"""

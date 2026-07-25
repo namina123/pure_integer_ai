@@ -9,6 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from pure_integer_ai.crosscut.determinism.fingerprint import (
+    integer_tuple_fingerprint,
+)
+
 from pure_integer_ai.cognition.shared.generation_plan import (
     GenerationPlan,
     GenerationPlanner,
@@ -88,12 +92,16 @@ class TypedGenerationExecution:
         return () if self.surface is None else self.surface.representations
 
     def stable_key(self) -> tuple[int, ...]:
-        """返回计划、surface preview/plan 与渲染结果的完整确定性键。"""
-        result = [*_packed(self.plan.stable_key())]
+        """返回计划、surface preview/plan 与渲染结果的内容引用键。"""
+        result = [*_packed(integer_tuple_fingerprint(
+            self.plan.stable_key(), domain="generation.execution.plan.v1"))]
         for artifact in (self.preview, self.surface, self.rendered):
             result.append(0 if artifact is None else 1)
             if artifact is not None:
-                result.extend(_packed(artifact.stable_key()))
+                result.extend(_packed(integer_tuple_fingerprint(
+                    artifact.stable_key(),
+                    domain="generation.execution.artifact.v1",
+                )))
         return tuple(result)
 
 

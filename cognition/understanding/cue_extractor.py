@@ -57,10 +57,15 @@ from pure_integer_ai.cognition.understanding.cue_words import (
     degree_intensity_of,
 )
 
+_InstructionBindings = tuple[tuple[tuple[int, ...], int], ...]
+
 
 def extract_cues(tokens: list[str], *, lang: int,
                  backend=None, edge_store=None,
-                 space_id: int | None = None, concept_index=None
+                 space_id: int | None = None, concept_index=None,
+                 language_signal_runtime=None,
+                 cue_instruction_bindings: _InstructionBindings = (),
+                 language_signal_compatibility_enabled: bool = True,
                  ) -> tuple[list[tuple[int, int]], list[tuple[int, int]], list[tuple[int, int]]]:
     """段 tokens → (cue_based_causal_pairs, is_a_pairs, precedes_pairs)（token index 对）。
 
@@ -80,7 +85,11 @@ def extract_cues(tokens: list[str], *, lang: int,
     n = len(tokens)
     for i, tok in enumerate(tokens):
         ct = cue_type_of(tok, lang, backend=backend, edge_store=edge_store,
-                         space_id=space_id, concept_index=concept_index)
+                         space_id=space_id, concept_index=concept_index,
+                         language_signal_runtime=language_signal_runtime,
+                         cue_instruction_bindings=cue_instruction_bindings,
+                         language_signal_compatibility_enabled=(
+                             language_signal_compatibility_enabled))
         if ct is None:
             continue
         left = i - 1
@@ -89,10 +98,18 @@ def extract_cues(tokens: list[str], *, lang: int,
         if left < 0 or right >= n:
             continue   # 边界 cue 无左/右·跳（守反统计·不凑配）
         if cue_type_of(tokens[left], lang, backend=backend, edge_store=edge_store,
-                       space_id=space_id, concept_index=concept_index) is not None:
+                       space_id=space_id, concept_index=concept_index,
+                       language_signal_runtime=language_signal_runtime,
+                       cue_instruction_bindings=cue_instruction_bindings,
+                       language_signal_compatibility_enabled=(
+                           language_signal_compatibility_enabled)) is not None:
             continue   # 左邻也是 cue·跳（连用指向词·锚定歧义·首版保守跳）
         if cue_type_of(tokens[right], lang, backend=backend, edge_store=edge_store,
-                       space_id=space_id, concept_index=concept_index) is not None:
+                       space_id=space_id, concept_index=concept_index,
+                       language_signal_runtime=language_signal_runtime,
+                       cue_instruction_bindings=cue_instruction_bindings,
+                       language_signal_compatibility_enabled=(
+                           language_signal_compatibility_enabled)) is not None:
             continue
         if ct == CAUSES_CUE_FORWARD:
             cue_pairs.append((left, right))            # 因(左) → 果(右)
@@ -107,7 +124,10 @@ def extract_cues(tokens: list[str], *, lang: int,
 
 def extract_cues_gated(tokens: list[str], *, lang: int,
                        backend=None, edge_store=None,
-                       space_id: int | None = None, concept_index=None
+                       space_id: int | None = None, concept_index=None,
+                       language_signal_runtime=None,
+                       cue_instruction_bindings: _InstructionBindings = (),
+                       language_signal_compatibility_enabled: bool = True,
                        ) -> tuple[list[tuple[int, int]], list[tuple[int, int]], list[tuple[int, int]]]:
     """gate 守门版（CUE_EXTRACTOR_MODE OFF → 返空·bit-identical 守回归）。
 
@@ -120,7 +140,11 @@ def extract_cues_gated(tokens: list[str], *, lang: int,
     if not getattr(gates, "CUE_EXTRACTOR_MODE", False):
         return [], [], []
     return extract_cues(tokens, lang=lang, backend=backend, edge_store=edge_store,
-                        space_id=space_id, concept_index=concept_index)
+                        space_id=space_id, concept_index=concept_index,
+                        language_signal_runtime=language_signal_runtime,
+                        cue_instruction_bindings=cue_instruction_bindings,
+                        language_signal_compatibility_enabled=(
+                            language_signal_compatibility_enabled))
 
 
 # ============ 刀 B：数值等式声明提取（NUM OP NUM 等于 NUM·独立函数·不改 extract_cues 签名） ============
@@ -147,7 +171,11 @@ def _parse_int_token(token: str) -> int | None:
 
 def extract_numeric_claims(tokens: list[str], *, lang: int,
                            backend=None, edge_store=None,
-                           space_id: int | None = None, concept_index=None
+                           space_id: int | None = None, concept_index=None,
+                           language_signal_runtime=None,
+                           cue_instruction_bindings: _InstructionBindings = (),
+                           arithmetic_instruction_bindings: _InstructionBindings = (),
+                           language_signal_compatibility_enabled: bool = True,
                            ) -> list[tuple[int, int, int, int]]:
     """刀 B：段 tokens → 数值等式声明列表 [(left_num, op_opcode, right_num, result_num), ...]。
 
@@ -175,7 +203,11 @@ def extract_numeric_claims(tokens: list[str], *, lang: int,
     n = len(tokens)
     for i, tok in enumerate(tokens):
         ct = cue_type_of(tok, lang, backend=backend, edge_store=edge_store,
-                         space_id=space_id, concept_index=concept_index)
+                         space_id=space_id, concept_index=concept_index,
+                         language_signal_runtime=language_signal_runtime,
+                         cue_instruction_bindings=cue_instruction_bindings,
+                         language_signal_compatibility_enabled=(
+                             language_signal_compatibility_enabled))
         if ct != ARITH_EQUALS_CUE:
             continue
         # 模式 NUM OP NUM 等于 NUM：cue 在 i·须 i-3..i-1（左式 3 token）+ i+1（右式 1 token）全在界
@@ -189,7 +221,12 @@ def extract_numeric_claims(tokens: list[str], *, lang: int,
         right_num = _parse_int_token(right_tok)
         result_num = _parse_int_token(result_tok)
         op = arith_op_of(op_tok, lang, backend=backend, edge_store=edge_store,
-                         space_id=space_id, concept_index=concept_index)
+                         space_id=space_id, concept_index=concept_index,
+                         language_signal_runtime=language_signal_runtime,
+                         arithmetic_instruction_bindings=(
+                             arithmetic_instruction_bindings),
+                         language_signal_compatibility_enabled=(
+                             language_signal_compatibility_enabled))
         if left_num is None or right_num is None or result_num is None or op is None:
             continue   # 不匹配模式（非数字 / 非算子词）·跳（守反统计契约·不凑配）
         claims.append((left_num, op, right_num, result_num))
@@ -198,7 +235,11 @@ def extract_numeric_claims(tokens: list[str], *, lang: int,
 
 def extract_numeric_claims_gated(tokens: list[str], *, lang: int,
                                  backend=None, edge_store=None,
-                                 space_id: int | None = None, concept_index=None
+                                 space_id: int | None = None, concept_index=None,
+                                 language_signal_runtime=None,
+                                 cue_instruction_bindings: _InstructionBindings = (),
+                                 arithmetic_instruction_bindings: _InstructionBindings = (),
+                                 language_signal_compatibility_enabled: bool = True,
                                  ) -> list[tuple[int, int, int, int]]:
     """gate 守门版（CUE_EXTRACTOR_MODE OFF → 返空·bit-identical 守回归·同 extract_cues_gated 范式）。
 
@@ -209,14 +250,23 @@ def extract_numeric_claims_gated(tokens: list[str], *, lang: int,
     if not getattr(gates, "CUE_EXTRACTOR_MODE", False):
         return []
     return extract_numeric_claims(tokens, lang=lang, backend=backend, edge_store=edge_store,
-                                  space_id=space_id, concept_index=concept_index)
+                                  space_id=space_id, concept_index=concept_index,
+                                  language_signal_runtime=language_signal_runtime,
+                                  cue_instruction_bindings=cue_instruction_bindings,
+                                  arithmetic_instruction_bindings=(
+                                      arithmetic_instruction_bindings),
+                                  language_signal_compatibility_enabled=(
+                                      language_signal_compatibility_enabled))
 
 
 # ============ 刀 C：全称量化声明提取（X 都是 Y·独立函数·不改 extract_cues 签名） ============
 
 def extract_universal_claims(tokens: list[str], *, lang: int,
                              backend=None, edge_store=None,
-                             space_id: int | None = None, concept_index=None
+                             space_id: int | None = None, concept_index=None,
+                             language_signal_runtime=None,
+                             cue_instruction_bindings: _InstructionBindings = (),
+                             language_signal_compatibility_enabled: bool = True,
                              ) -> list[tuple[int, int]]:
     """刀 C：段 tokens → 全称量化声明列表 [(child_idx, parent_idx), ...]（token index 对）。
 
@@ -240,7 +290,11 @@ def extract_universal_claims(tokens: list[str], *, lang: int,
     n = len(tokens)
     for i, tok in enumerate(tokens):
         ct = cue_type_of(tok, lang, backend=backend, edge_store=edge_store,
-                         space_id=space_id, concept_index=concept_index)
+                         space_id=space_id, concept_index=concept_index,
+                         language_signal_runtime=language_signal_runtime,
+                         cue_instruction_bindings=cue_instruction_bindings,
+                         language_signal_compatibility_enabled=(
+                             language_signal_compatibility_enabled))
         if ct != UNIVERSAL_CUE:
             continue
         left = i - 1
@@ -248,10 +302,18 @@ def extract_universal_claims(tokens: list[str], *, lang: int,
         if left < 0 or right >= n:
             continue   # 边界 cue 无左/右·跳（守反统计·不凑配·同 extract_cues:64）
         if cue_type_of(tokens[left], lang, backend=backend, edge_store=edge_store,
-                       space_id=space_id, concept_index=concept_index) is not None:
+                       space_id=space_id, concept_index=concept_index,
+                       language_signal_runtime=language_signal_runtime,
+                       cue_instruction_bindings=cue_instruction_bindings,
+                       language_signal_compatibility_enabled=(
+                           language_signal_compatibility_enabled)) is not None:
             continue   # 左邻也是 cue·跳（连用全称系词·锚定歧义·首版保守跳·同 extract_cues:66）
         if cue_type_of(tokens[right], lang, backend=backend, edge_store=edge_store,
-                       space_id=space_id, concept_index=concept_index) is not None:
+                       space_id=space_id, concept_index=concept_index,
+                       language_signal_runtime=language_signal_runtime,
+                       cue_instruction_bindings=cue_instruction_bindings,
+                       language_signal_compatibility_enabled=(
+                           language_signal_compatibility_enabled)) is not None:
             continue   # 右邻也是 cue·跳
         claims.append((left, right))   # (child_idx, parent_idx)·X 都是 Y·child⊆parent
     return claims
@@ -259,7 +321,10 @@ def extract_universal_claims(tokens: list[str], *, lang: int,
 
 def extract_universal_claims_gated(tokens: list[str], *, lang: int,
                                    backend=None, edge_store=None,
-                                   space_id: int | None = None, concept_index=None
+                                   space_id: int | None = None, concept_index=None,
+                                   language_signal_runtime=None,
+                                   cue_instruction_bindings: _InstructionBindings = (),
+                                   language_signal_compatibility_enabled: bool = True,
                                    ) -> list[tuple[int, int]]:
     """gate 守门版（CUE_EXTRACTOR_MODE OFF → 返空·bit-identical 守回归·同 extract_numeric_claims_gated 范式）。
 
@@ -270,14 +335,22 @@ def extract_universal_claims_gated(tokens: list[str], *, lang: int,
     if not getattr(gates, "CUE_EXTRACTOR_MODE", False):
         return []
     return extract_universal_claims(tokens, lang=lang, backend=backend, edge_store=edge_store,
-                                    space_id=space_id, concept_index=concept_index)
+                                    space_id=space_id, concept_index=concept_index,
+                                    language_signal_runtime=language_signal_runtime,
+                                    cue_instruction_bindings=cue_instruction_bindings,
+                                    language_signal_compatibility_enabled=(
+                                        language_signal_compatibility_enabled))
 
 
 # ============ A1·STEP6：存在量化声明提取（有的 X 是 Y·独立函数） ============
 
 def extract_existential_claims(tokens: list[str], *, lang: int,
                                backend=None, edge_store=None,
-                               space_id: int | None = None, concept_index=None
+                               space_id: int | None = None, concept_index=None,
+                               language_signal_runtime=None,
+                               cue_instruction_bindings: _InstructionBindings = (),
+                               property_value_instruction_key: tuple[int, ...] | None = None,
+                               language_signal_compatibility_enabled: bool = True,
                                ) -> list[tuple[int, int]]:
     """A1·STEP6：段 tokens → 存在量化声明列表 [(child_idx, parent_idx), ...]（token index 对）。
 
@@ -303,7 +376,11 @@ def extract_existential_claims(tokens: list[str], *, lang: int,
     n = len(tokens)
     for i, tok in enumerate(tokens):
         ct = cue_type_of(tok, lang, backend=backend, edge_store=edge_store,
-                         space_id=space_id, concept_index=concept_index)
+                         space_id=space_id, concept_index=concept_index,
+                         language_signal_runtime=language_signal_runtime,
+                         cue_instruction_bindings=cue_instruction_bindings,
+                         language_signal_compatibility_enabled=(
+                             language_signal_compatibility_enabled))
         if ct != EXISTENTIAL_CUE:
             continue
         # 模式 有的 X 是 Y：cue 在 i·须 i+1（child）+ i+2（是·value copula）+ i+3（parent）全在界
@@ -312,12 +389,25 @@ def extract_existential_claims(tokens: list[str], *, lang: int,
         child_idx = i + 1
         copula_idx = i + 2
         parent_idx = i + 3
-        if not is_property_value_copula(tokens[copula_idx], lang):
+        if not is_property_value_copula(
+                tokens[copula_idx], lang,
+                language_signal_runtime=language_signal_runtime,
+                property_value_instruction_key=property_value_instruction_key,
+                language_signal_compatibility_enabled=(
+                    language_signal_compatibility_enabled)):
             continue   # i+2 非 是·非存在量化窗口（"有的 X Y" 非法·跳·守 是 锚定·同 property 固定窗口范式）
         if (cue_type_of(tokens[child_idx], lang, backend=backend, edge_store=edge_store,
-                        space_id=space_id, concept_index=concept_index) is not None
+                        space_id=space_id, concept_index=concept_index,
+                        language_signal_runtime=language_signal_runtime,
+                        cue_instruction_bindings=cue_instruction_bindings,
+                        language_signal_compatibility_enabled=(
+                            language_signal_compatibility_enabled)) is not None
                 or cue_type_of(tokens[parent_idx], lang, backend=backend, edge_store=edge_store,
-                               space_id=space_id, concept_index=concept_index) is not None):
+                               space_id=space_id, concept_index=concept_index,
+                               language_signal_runtime=language_signal_runtime,
+                               cue_instruction_bindings=cue_instruction_bindings,
+                               language_signal_compatibility_enabled=(
+                                   language_signal_compatibility_enabled)) is not None):
             continue   # child/parent 自身是 cue·跳（连用 cue·锚定歧义·首版保守跳·同 extract_universal:250）
         claims.append((child_idx, parent_idx))   # (child_idx, parent_idx)·有的 X 是 Y·∃x∈X∧x∈Y
     return claims
@@ -325,7 +415,11 @@ def extract_existential_claims(tokens: list[str], *, lang: int,
 
 def extract_existential_claims_gated(tokens: list[str], *, lang: int,
                                      backend=None, edge_store=None,
-                                     space_id: int | None = None, concept_index=None
+                                     space_id: int | None = None, concept_index=None,
+                                     language_signal_runtime=None,
+                                     cue_instruction_bindings: _InstructionBindings = (),
+                                     property_value_instruction_key: tuple[int, ...] | None = None,
+                                     language_signal_compatibility_enabled: bool = True,
                                      ) -> list[tuple[int, int]]:
     """gate 守门版（CUE_EXTRACTOR_MODE OFF → 返空·bit-identical 守回归·同 extract_universal_claims_gated 范式）。
 
@@ -335,28 +429,66 @@ def extract_existential_claims_gated(tokens: list[str], *, lang: int,
     if not getattr(gates, "CUE_EXTRACTOR_MODE", False):
         return []
     return extract_existential_claims(tokens, lang=lang, backend=backend, edge_store=edge_store,
-                                      space_id=space_id, concept_index=concept_index)
+                                      space_id=space_id, concept_index=concept_index,
+                                      language_signal_runtime=language_signal_runtime,
+                                      cue_instruction_bindings=cue_instruction_bindings,
+                                      property_value_instruction_key=(
+                                          property_value_instruction_key),
+                                      language_signal_compatibility_enabled=(
+                                          language_signal_compatibility_enabled))
 
 
 # ============ G1+#774：属性命题声明提取（X 的 Y 是 Z / X 具有 Z·独立函数·入图非闭包传） ============
 
 def _is_property_cue_token(token: str, lang: int, *,
                            backend=None, edge_store=None,
-                           space_id: int | None = None, concept_index=None) -> bool:
+                           space_id: int | None = None, concept_index=None,
+                           language_signal_runtime=None,
+                           property_attr_instruction_key: tuple[int, ...] | None = None,
+                           property_value_instruction_key: tuple[int, ...] | None = None,
+                           property_possess_instruction_key: tuple[int, ...] | None = None,
+                           negation_instruction_key: tuple[int, ...] | None = None,
+                           modality_instruction_bindings: tuple[
+                               tuple[tuple[int, ...], int], ...] = (),
+                           language_signal_compatibility_enabled: bool = True) -> bool:
     """token 是否任一属性/否定/情态 cue（的/是/具有/有/has + 不/没/非/无/not/no + 必然/可能/必须/应该/可以·守反统计·配对两端不取 cue token）。
 
     B1 扩含否定词（防"不"作 subject/attr/value·守反统计·同 extract_cues:66 邻居判）。
     B2 扩含情态词（防"必然/可能"作 subject/attr/value·守反统计·同 B1 范式）。
-    STEP5 PR3：透传 4 参→is_property_possess_cue D:11 readback（gate ON 时非 frozenset 领属词亦判·与主调一致）。
-    默认 None→退化纯 frozenset（bit-identical）。"""
-    return (is_property_attr_marker(token, lang)
-            or is_property_value_copula(token, lang)
+    属性三作用、否定和情态均优先消费来源化图证据；只有图无证据且兼容开启时
+    才读取旧词表或 D:11，图冲突不能被旧源覆盖。"""
+    return (is_property_attr_marker(
+                token, lang,
+                language_signal_runtime=language_signal_runtime,
+                property_attr_instruction_key=property_attr_instruction_key,
+                language_signal_compatibility_enabled=(
+                    language_signal_compatibility_enabled))
+            or is_property_value_copula(
+                token, lang,
+                language_signal_runtime=language_signal_runtime,
+                property_value_instruction_key=property_value_instruction_key,
+                language_signal_compatibility_enabled=(
+                    language_signal_compatibility_enabled))
             or is_property_possess_cue(token, lang, backend=backend, edge_store=edge_store,
-                                       space_id=space_id, concept_index=concept_index)
+                                       space_id=space_id, concept_index=concept_index,
+                                       language_signal_runtime=language_signal_runtime,
+                                       property_possess_instruction_key=(
+                                           property_possess_instruction_key),
+                                       language_signal_compatibility_enabled=(
+                                           language_signal_compatibility_enabled))
             or is_negation_cue(token, lang, backend=backend, edge_store=edge_store,
-                                       space_id=space_id, concept_index=concept_index)
+                                       space_id=space_id, concept_index=concept_index,
+                                       language_signal_runtime=language_signal_runtime,
+                                       negation_instruction_key=negation_instruction_key,
+                                       language_signal_compatibility_enabled=(
+                                           language_signal_compatibility_enabled))
             or is_modal_cue(token, lang, backend=backend, edge_store=edge_store,
-                                       space_id=space_id, concept_index=concept_index))
+                                       space_id=space_id, concept_index=concept_index,
+                                       language_signal_runtime=language_signal_runtime,
+                                       modality_instruction_bindings=(
+                                           modality_instruction_bindings),
+                                       language_signal_compatibility_enabled=(
+                                           language_signal_compatibility_enabled)))
 
 
 def extract_property_claims(tokens: list[str], *, lang: int,
@@ -364,7 +496,15 @@ def extract_property_claims(tokens: list[str], *, lang: int,
                             modality_on: bool = False,
                             degree_on: bool = False,
                             backend=None, edge_store=None,
-                            space_id: int | None = None, concept_index=None
+                            space_id: int | None = None, concept_index=None,
+                            language_signal_runtime=None,
+                            property_attr_instruction_key: tuple[int, ...] | None = None,
+                            property_value_instruction_key: tuple[int, ...] | None = None,
+                            property_possess_instruction_key: tuple[int, ...] | None = None,
+                            negation_instruction_key: tuple[int, ...] | None = None,
+                            modality_instruction_bindings: tuple[
+                                tuple[tuple[int, ...], int], ...] = (),
+                            language_signal_compatibility_enabled: bool = True,
                             ) -> list[tuple[int, int, int, int, int, int, int, int]]:
     """G1+#774：段 tokens → 属性命题声明列表 [(subject_idx, attr_type_idx, value_idx, 0, polarity, modality, intensity_num, intensity_den), ...]（8-int tuple·P0.3 pol/mod + #1134 intensity·default 0/1·B1 否定/B2 情态/#1134 程度填值）。
 
@@ -389,30 +529,58 @@ def extract_property_claims(tokens: list[str], *, lang: int,
     n = len(tokens)
     for j, tok in enumerate(tokens):
         # 模式 的...是（X 的 Y 是 Z·肯定 pol=0/mod=0 / X 的 Y 不 是 Z·否定 pol=1·B1 / X 的 Y [必然] 是 Z·情态 mod>0·B2）
-        if is_property_value_copula(tok, lang):
+        if is_property_value_copula(
+                tok, lang,
+                language_signal_runtime=language_signal_runtime,
+                property_value_instruction_key=property_value_instruction_key,
+                language_signal_compatibility_enabled=(
+                    language_signal_compatibility_enabled)):
             # B2 情态检查：modality_on + tokens[j-1] 情态词 → "X 的 Y [必然] 是 Z"·modality 填值·窗口偏移 1（同否定几何）
             # modal 与 negation 同槽 j-1·互斥（情态词≠否定词·不同词集）·先查 modal（情态优先于否定·首版 modal-only 窗口·复合 defer）
-            is_modal = (modality_on and j - 1 >= 0
-                        and is_modal_cue(tokens[j - 1], lang, backend=backend, edge_store=edge_store,
-                                          space_id=space_id, concept_index=concept_index))
+            # 情态作用只解析一次，避免图 reader 在同一窗口重复查询。
+            modal_value = None
+            if modality_on and j - 1 >= 0:
+                modal_value = modal_op_of(
+                    tokens[j - 1], lang,
+                    backend=backend, edge_store=edge_store,
+                    space_id=space_id, concept_index=concept_index,
+                    language_signal_runtime=language_signal_runtime,
+                    modality_instruction_bindings=(
+                        modality_instruction_bindings),
+                    language_signal_compatibility_enabled=(
+                        language_signal_compatibility_enabled))
+            is_modal = modal_value is not None
             if is_modal:
                 # 情态窗口：modal at j-1·attr_type at j-2·的 at j-3·subject at j-4·value at j+1（同否定 offset+1 几何）
                 if j - 4 < 0 or j + 1 >= n:
                     continue   # 边界·subject/value 不足·跳（守反统计·不凑配）
-                if not is_property_attr_marker(tokens[j - 3], lang):
+                if not is_property_attr_marker(
+                        tokens[j - 3], lang,
+                        language_signal_runtime=language_signal_runtime,
+                        property_attr_instruction_key=property_attr_instruction_key,
+                        language_signal_compatibility_enabled=(
+                            language_signal_compatibility_enabled)):
                     continue   # j-3 非 的·非属性窗口·跳
                 subj_idx, attr_idx, val_idx = j - 4, j - 2, j + 1
                 polarity = 0
-                modality = modal_op_of(tokens[j - 1], lang, backend=backend, edge_store=edge_store,
-                                          space_id=space_id, concept_index=concept_index)
+                modality = modal_value
             elif (negation_on and j - 1 >= 0
                       and is_negation_cue(tokens[j - 1], lang,
                               backend=backend, edge_store=edge_store,
-                              space_id=space_id, concept_index=concept_index)):
+                              space_id=space_id, concept_index=concept_index,
+                              language_signal_runtime=language_signal_runtime,
+                              negation_instruction_key=negation_instruction_key,
+                              language_signal_compatibility_enabled=(
+                                  language_signal_compatibility_enabled))):
                 # B1 否定窗口：不 at j-1·attr_type at j-2·的 at j-3·subject at j-4·value at j+1·pol=1
                 if j - 4 < 0 or j + 1 >= n:
                     continue   # 边界·subject/value 不足·跳（守反统计·不凑配）
-                if not is_property_attr_marker(tokens[j - 3], lang):
+                if not is_property_attr_marker(
+                        tokens[j - 3], lang,
+                        language_signal_runtime=language_signal_runtime,
+                        property_attr_instruction_key=property_attr_instruction_key,
+                        language_signal_compatibility_enabled=(
+                            language_signal_compatibility_enabled)):
                     continue   # j-3 非 的·非属性窗口·跳
                 subj_idx, attr_idx, val_idx = j - 4, j - 2, j + 1
                 polarity = 1
@@ -421,7 +589,12 @@ def extract_property_claims(tokens: list[str], *, lang: int,
                 # 既有肯定窗口：的 at j-2·subject j-3·attr_type j-1·value j+1·pol=0/mod=0
                 if j - 3 < 0 or j + 1 >= n:
                     continue   # 边界·subject/value 不足·跳（守反统计·不凑配）
-                if not is_property_attr_marker(tokens[j - 2], lang):
+                if not is_property_attr_marker(
+                        tokens[j - 2], lang,
+                        language_signal_runtime=language_signal_runtime,
+                        property_attr_instruction_key=property_attr_instruction_key,
+                        language_signal_compatibility_enabled=(
+                            language_signal_compatibility_enabled)):
                     continue   # j-2 非 的·非属性窗口（是 可能是 IS_A/其他用法）·跳（守 的...是 固定窗口）
                 subj_idx, attr_idx, val_idx = j - 3, j - 1, j + 1
                 polarity = 0
@@ -436,17 +609,58 @@ def extract_property_claims(tokens: list[str], *, lang: int,
             else:
                 intensity_num, intensity_den = 1, 1
             if (_is_property_cue_token(tokens[subj_idx], lang, backend=backend, edge_store=edge_store,
-                                        space_id=space_id, concept_index=concept_index)
+                                        space_id=space_id, concept_index=concept_index,
+                                        language_signal_runtime=language_signal_runtime,
+                                        property_attr_instruction_key=(
+                                            property_attr_instruction_key),
+                                        property_value_instruction_key=(
+                                            property_value_instruction_key),
+                                        property_possess_instruction_key=(
+                                            property_possess_instruction_key),
+                                        negation_instruction_key=negation_instruction_key,
+                                        modality_instruction_bindings=(
+                                            modality_instruction_bindings),
+                                        language_signal_compatibility_enabled=(
+                                            language_signal_compatibility_enabled))
                     or _is_property_cue_token(tokens[attr_idx], lang, backend=backend, edge_store=edge_store,
-                                               space_id=space_id, concept_index=concept_index)
+                                               space_id=space_id, concept_index=concept_index,
+                                               language_signal_runtime=language_signal_runtime,
+                                               property_attr_instruction_key=(
+                                                   property_attr_instruction_key),
+                                               property_value_instruction_key=(
+                                                   property_value_instruction_key),
+                                               property_possess_instruction_key=(
+                                                   property_possess_instruction_key),
+                                               negation_instruction_key=negation_instruction_key,
+                                               modality_instruction_bindings=(
+                                                   modality_instruction_bindings),
+                                               language_signal_compatibility_enabled=(
+                                                   language_signal_compatibility_enabled))
                     or _is_property_cue_token(tokens[val_idx], lang, backend=backend, edge_store=edge_store,
-                                               space_id=space_id, concept_index=concept_index)):
+                                               space_id=space_id, concept_index=concept_index,
+                                               language_signal_runtime=language_signal_runtime,
+                                               property_attr_instruction_key=(
+                                                   property_attr_instruction_key),
+                                               property_value_instruction_key=(
+                                                   property_value_instruction_key),
+                                               property_possess_instruction_key=(
+                                                   property_possess_instruction_key),
+                                               negation_instruction_key=negation_instruction_key,
+                                               modality_instruction_bindings=(
+                                                   modality_instruction_bindings),
+                                               language_signal_compatibility_enabled=(
+                                                   language_signal_compatibility_enabled))):
                 continue   # subject/attr/value 自身是 cue·跳（守反统计·不配 cue token·同 extract_cues:66）
             claims.append((subj_idx, attr_idx, val_idx, 0, polarity, modality, intensity_num, intensity_den))
             continue
         # 模式 领属（X 具有 Z / X 有 Z / X has Z·attr_type 缺省·STEP5 PR3 possess un-defer·REL_PROPERTY 作默认 attr_type）
         if is_property_possess_cue(tok, lang, backend=backend, edge_store=edge_store,
-                                   space_id=space_id, concept_index=concept_index):
+                                   space_id=space_id, concept_index=concept_index,
+                                   language_signal_runtime=language_signal_runtime,
+                                   property_possess_instruction_key=(
+                                       property_possess_instruction_key),
+                                   language_signal_compatibility_enabled=(
+                                       language_signal_compatibility_enabled)):
             if j - 1 < 0 or j + 1 >= n:
                 continue   # 边界·subject/value 不足·跳
             subj_idx, val_idx = j - 1, j + 1
@@ -460,9 +674,33 @@ def extract_property_claims(tokens: list[str], *, lang: int,
             else:
                 p_num, p_den = 1, 1
             if (_is_property_cue_token(tokens[subj_idx], lang, backend=backend, edge_store=edge_store,
-                                        space_id=space_id, concept_index=concept_index)
+                                        space_id=space_id, concept_index=concept_index,
+                                        language_signal_runtime=language_signal_runtime,
+                                        property_attr_instruction_key=(
+                                            property_attr_instruction_key),
+                                        property_value_instruction_key=(
+                                            property_value_instruction_key),
+                                        property_possess_instruction_key=(
+                                            property_possess_instruction_key),
+                                        negation_instruction_key=negation_instruction_key,
+                                        modality_instruction_bindings=(
+                                            modality_instruction_bindings),
+                                        language_signal_compatibility_enabled=(
+                                            language_signal_compatibility_enabled))
                     or _is_property_cue_token(tokens[val_idx], lang, backend=backend, edge_store=edge_store,
-                                               space_id=space_id, concept_index=concept_index)):
+                                               space_id=space_id, concept_index=concept_index,
+                                               language_signal_runtime=language_signal_runtime,
+                                               property_attr_instruction_key=(
+                                                   property_attr_instruction_key),
+                                               property_value_instruction_key=(
+                                                   property_value_instruction_key),
+                                               property_possess_instruction_key=(
+                                                   property_possess_instruction_key),
+                                               negation_instruction_key=negation_instruction_key,
+                                               modality_instruction_bindings=(
+                                                   modality_instruction_bindings),
+                                               language_signal_compatibility_enabled=(
+                                                   language_signal_compatibility_enabled))):
                 continue   # subject/value 自身是 cue·跳（守反统计）
             claims.append((subj_idx, -1, val_idx, 0, 0, 0, p_num, p_den))   # attr_type=-1·STEP5 PR3 default_attr_ref=REL_PROPERTY 补身份·P0.3 pol/mod=0·#1134 intensity=p_num/p_den
     return claims
@@ -470,15 +708,22 @@ def extract_property_claims(tokens: list[str], *, lang: int,
 
 def extract_property_claims_gated(tokens: list[str], *, lang: int,
                                   backend=None, edge_store=None,
-                                  space_id: int | None = None, concept_index=None
+                                  space_id: int | None = None, concept_index=None,
+                                  language_signal_runtime=None,
+                                  property_attr_instruction_key: tuple[int, ...] | None = None,
+                                  property_value_instruction_key: tuple[int, ...] | None = None,
+                                  property_possess_instruction_key: tuple[int, ...] | None = None,
+                                  negation_instruction_key: tuple[int, ...] | None = None,
+                                  modality_instruction_bindings: tuple[
+                                      tuple[tuple[int, ...], int], ...] = (),
+                                  language_signal_compatibility_enabled: bool = True,
                                   ) -> list[tuple[int, int, int, int, int, int, int, int]]:
     """gate 守门版（PROPOSITION_MODE OFF → 返空·bit-identical 守回归）。
 
     language_observation._split_item_to_segments 调此版（gate OFF 时返空·现状零行为变）。
     **gate = PROPOSITION_MODE**（异刀B/刀C 用 CUE_EXTRACTOR_MODE·属性命题是独立 G1+#774 特性·单 gate
-    守 extraction→build→intent→G3b 全链·cleaner bit-identical·设计 §四）。STEP5 PR3：加 4 可选参
-    （is_property_possess_cue D:11 readback 第二源·'拥有'类词经 D:11→REL_PROPERTY→True·gate
-    EMERGENT_RELATION_CUE_READBACK_MODE OFF 退化纯 frozenset·bit-identical）。
+    守 extraction→build→intent→G3b 全链·cleaner bit-identical·设计 §四）。属性标记、值系词和
+    领属 cue 优先读取来源化图；图无证据且兼容开启时才读取 Python/D:11 旧源。
     **#1134**：传 degree_on=DEGREE_MODE（程度窗口·boot 先 populate_degree_cues 喂 cache·
     OFF→degree_intensity_of 返 None→intensity 恒 1/1→bit-identical）。
     """
@@ -489,14 +734,29 @@ def extract_property_claims_gated(tokens: list[str], *, lang: int,
                                    modality_on=getattr(gates, "MODALITY_MODE", False),
                                    degree_on=getattr(gates, "DEGREE_MODE", False),
                                    backend=backend, edge_store=edge_store,
-                                   space_id=space_id, concept_index=concept_index)
+                                   space_id=space_id, concept_index=concept_index,
+                                   language_signal_runtime=language_signal_runtime,
+                                   property_attr_instruction_key=(
+                                       property_attr_instruction_key),
+                                   property_value_instruction_key=(
+                                       property_value_instruction_key),
+                                   property_possess_instruction_key=(
+                                       property_possess_instruction_key),
+                                   negation_instruction_key=negation_instruction_key,
+                                   modality_instruction_bindings=(
+                                       modality_instruction_bindings),
+                                   language_signal_compatibility_enabled=(
+                                       language_signal_compatibility_enabled))
 
 
 # ============ 刀 D：比较声明提取（NUM 比较OP NUM·独立函数·不改 extract_cues 签名） ============
 
 def extract_comparison_claims(tokens: list[str], *, lang: int,
                               backend=None, edge_store=None,
-                              space_id: int | None = None, concept_index=None
+                              space_id: int | None = None, concept_index=None,
+                              language_signal_runtime=None,
+                              comparison_instruction_bindings: _InstructionBindings = (),
+                              language_signal_compatibility_enabled: bool = True,
                               ) -> list[tuple[int, int, int]]:
     """刀 D：段 tokens → 比较声明列表 [(left_num, cmp_opcode, right_num), ...]（纯整数 3-tuple）。
 
@@ -528,7 +788,12 @@ def extract_comparison_claims(tokens: list[str], *, lang: int,
     n = len(tokens)
     for i, tok in enumerate(tokens):
         cmp = comparison_op_of(tok, lang, backend=backend, edge_store=edge_store,
-                               space_id=space_id, concept_index=concept_index)
+                               space_id=space_id, concept_index=concept_index,
+                               language_signal_runtime=language_signal_runtime,
+                               comparison_instruction_bindings=(
+                                   comparison_instruction_bindings),
+                               language_signal_compatibility_enabled=(
+                                   language_signal_compatibility_enabled))
         if cmp is None:
             continue   # 非比较 OP 词·跳
         # 模式 NUM 比较OP NUM：OP 在 i·须 i-1（左式）+ i+1（右式）全在界
@@ -541,9 +806,19 @@ def extract_comparison_claims(tokens: list[str], *, lang: int,
         if left_num is None or right_num is None:
             continue   # 不匹配模式（非数字）·跳（守反统计契约·不凑配）
         if is_comparison_op_token(left_tok, lang, backend=backend, edge_store=edge_store,
-                                  space_id=space_id, concept_index=concept_index) \
+                                  space_id=space_id, concept_index=concept_index,
+                                  language_signal_runtime=language_signal_runtime,
+                                  comparison_instruction_bindings=(
+                                      comparison_instruction_bindings),
+                                  language_signal_compatibility_enabled=(
+                                      language_signal_compatibility_enabled)) \
            or is_comparison_op_token(right_tok, lang, backend=backend, edge_store=edge_store,
-                                     space_id=space_id, concept_index=concept_index):
+                                     space_id=space_id, concept_index=concept_index,
+                                     language_signal_runtime=language_signal_runtime,
+                                     comparison_instruction_bindings=(
+                                         comparison_instruction_bindings),
+                                     language_signal_compatibility_enabled=(
+                                         language_signal_compatibility_enabled)):
             continue   # 左/右邻也是比较 OP·跳（连用 OP·锚定歧义·首版保守跳·同 extract_cues:66）
         claims.append((left_num, cmp, right_num))
     return claims
@@ -551,7 +826,10 @@ def extract_comparison_claims(tokens: list[str], *, lang: int,
 
 def extract_comparison_claims_gated(tokens: list[str], *, lang: int,
                                     backend=None, edge_store=None,
-                                    space_id: int | None = None, concept_index=None
+                                    space_id: int | None = None, concept_index=None,
+                                    language_signal_runtime=None,
+                                    comparison_instruction_bindings: _InstructionBindings = (),
+                                    language_signal_compatibility_enabled: bool = True,
                                     ) -> list[tuple[int, int, int]]:
     """gate 守门版（CUE_EXTRACTOR_MODE OFF → 返空·bit-identical 守回归·同 extract_numeric/universal_claims_gated 范式）。
 
@@ -562,21 +840,28 @@ def extract_comparison_claims_gated(tokens: list[str], *, lang: int,
     if not getattr(gates, "CUE_EXTRACTOR_MODE", False):
         return []
     return extract_comparison_claims(tokens, lang=lang, backend=backend, edge_store=edge_store,
-                                     space_id=space_id, concept_index=concept_index)
+                                     space_id=space_id, concept_index=concept_index,
+                                     language_signal_runtime=language_signal_runtime,
+                                     comparison_instruction_bindings=(
+                                         comparison_instruction_bindings),
+                                     language_signal_compatibility_enabled=(
+                                         language_signal_compatibility_enabled))
 
 
 # ============ STEP5 PR4：相似声明提取（X 像 Y·EDGE_SIMILAR slot-filler·独立函数·D2 合规非向量） ============
 
 def extract_similar_claims(tokens: list[str], *, lang: int,
                            backend=None, edge_store=None,
-                           space_id: int | None = None, concept_index=None
+                           space_id: int | None = None, concept_index=None,
+                           language_signal_runtime=None,
+                           similar_instruction_key: tuple[int, ...] | None = None,
+                           language_signal_compatibility_enabled: bool = True,
                            ) -> list[tuple[int, int]]:
     """STEP5 PR4：段 tokens → 相似声明列表 [(left_idx, right_idx), ...]（2-int tuple·"X 像 Y" 提取）。
 
     模式：``X 像 Y``（相似 cue 在 index i·is_similar_cue(tok[i]) True·左式 tokens[i-1]=X·
     右式 tokens[i+1]=Y·紧邻 3-token 窗口·同 extract_comparison_claims 窗口范式）。
-    is_similar_cue **D:11-readback-only**（无 frozenset 第一源·gate EMERGENT_RELATION_CUE_READBACK_MODE）·
-    冷启动（D:11 REL_SIMILAR 无种子）→ False → 无 similar_claims。
+    is_similar_cue 优先读取来源化图和调用方作用键；旧 D:11 只作显式兼容。
 
     返纯整数 2-tuple list（left_idx, right_idx）·填 Segment.similar_claims·observe build_similar_edges
     建 EDGE_SIMILAR 边（X→Y·TIER_SHADOW·strength=1·不入 effective_weight·不接 reward·D2 合规非向量）。
@@ -591,7 +876,11 @@ def extract_similar_claims(tokens: list[str], *, lang: int,
     n = len(tokens)
     for i, tok in enumerate(tokens):
         if not is_similar_cue(tok, lang, backend=backend, edge_store=edge_store,
-                              space_id=space_id, concept_index=concept_index):
+                              space_id=space_id, concept_index=concept_index,
+                              language_signal_runtime=language_signal_runtime,
+                              similar_instruction_key=similar_instruction_key,
+                              language_signal_compatibility_enabled=(
+                                  language_signal_compatibility_enabled)):
             continue   # 非相似 cue·跳
         if i - 1 < 0 or i + 1 >= n:
             continue   # 边界·左/右式不足·跳（守反统计·不凑配）
@@ -599,9 +888,17 @@ def extract_similar_claims(tokens: list[str], *, lang: int,
         right_idx = i + 1
         # 左/右邻也是 cue token → 跳（连用 cue·锚定歧义·首版保守·同 extract_cues:66 邻居判）
         if (is_similar_cue(tokens[left_idx], lang, backend=backend, edge_store=edge_store,
-                            space_id=space_id, concept_index=concept_index)
+                            space_id=space_id, concept_index=concept_index,
+                            language_signal_runtime=language_signal_runtime,
+                            similar_instruction_key=similar_instruction_key,
+                            language_signal_compatibility_enabled=(
+                                language_signal_compatibility_enabled))
                 or is_similar_cue(tokens[right_idx], lang, backend=backend, edge_store=edge_store,
-                                   space_id=space_id, concept_index=concept_index)):
+                                   space_id=space_id, concept_index=concept_index,
+                                   language_signal_runtime=language_signal_runtime,
+                                   similar_instruction_key=similar_instruction_key,
+                                   language_signal_compatibility_enabled=(
+                                       language_signal_compatibility_enabled))):
             continue
         claims.append((left_idx, right_idx))
     return claims
@@ -609,7 +906,10 @@ def extract_similar_claims(tokens: list[str], *, lang: int,
 
 def extract_similar_claims_gated(tokens: list[str], *, lang: int,
                                  backend=None, edge_store=None,
-                                 space_id: int | None = None, concept_index=None
+                                 space_id: int | None = None, concept_index=None,
+                                 language_signal_runtime=None,
+                                 similar_instruction_key: tuple[int, ...] | None = None,
+                                 language_signal_compatibility_enabled: bool = True,
                                  ) -> list[tuple[int, int]]:
     """gate 守门版（CUE_EXTRACTOR_MODE OFF → 返空·bit-identical 守回归·同 extract_numeric/comparison_claims_gated 范式）。
 
@@ -619,4 +919,8 @@ def extract_similar_claims_gated(tokens: list[str], *, lang: int,
     if not getattr(gates, "CUE_EXTRACTOR_MODE", False):
         return []
     return extract_similar_claims(tokens, lang=lang, backend=backend, edge_store=edge_store,
-                                  space_id=space_id, concept_index=concept_index)
+                                  space_id=space_id, concept_index=concept_index,
+                                  language_signal_runtime=language_signal_runtime,
+                                  similar_instruction_key=similar_instruction_key,
+                                  language_signal_compatibility_enabled=(
+                                      language_signal_compatibility_enabled))

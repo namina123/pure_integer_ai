@@ -61,7 +61,9 @@ from pure_integer_ai.config import gates
 from pure_integer_ai.storage.sense_candidates import record_sense_token_seen, sense_surface_hash
 from pure_integer_ai.storage.pronoun_resolution_count import register_pronoun_resolution_count
 from pure_integer_ai.cognition.understanding.space_routing import target_space_id, route_to_space
-from pure_integer_ai.cognition.understanding.refers_to import is_pronoun
+from pure_integer_ai.cognition.understanding.refers_to import (
+    resolve_pronoun_signal,
+)
 from pure_integer_ai.cognition.understanding.cue_words import is_property_attr_marker
 from pure_integer_ai.cognition.understanding.modification_direction import (
     observe_modification, register_modification_hist,
@@ -96,6 +98,11 @@ class ObservePipeline:
                  occurrence_order_writer=None,
                  position_histogram_state=None,
                  hub_degree_state=None,
+                 language_signal_runtime=None,
+                 property_attr_instruction_key: tuple[int, ...] | None = None,
+                 pronoun_instruction_bindings: tuple[
+                     tuple[tuple[int, ...], tuple[int, ...]], ...] = (),
+                 language_signal_compatibility_enabled: bool = True,
                  write_legacy_language_sequences: bool = True) -> None:
         self.ctx = ctx
         self.backend = ctx.core.backend
@@ -121,6 +128,13 @@ class ObservePipeline:
         self.record_legacy_sense_counts = record_legacy_sense_counts
         self.pronoun_feature_lookup = pronoun_feature_lookup
         self.word_form_providers = word_form_providers
+        self.language_signal_runtime = language_signal_runtime
+        self.property_attr_instruction_key = property_attr_instruction_key
+        self.pronoun_instruction_bindings = pronoun_instruction_bindings
+        if type(language_signal_compatibility_enabled) is not bool:
+            raise TypeError("language_signal_compatibility_enabled 必须是 bool")
+        self.language_signal_compatibility_enabled = (
+            language_signal_compatibility_enabled)
         self.occurrence_index = occurrence_index
         if source_intake is None and occurrence_index is not None and ctx.companion is not None:
             from pure_integer_ai.cognition.understanding.source_intake import SourceIntake
@@ -280,6 +294,16 @@ class ObservePipeline:
             for ti, tok in enumerate(parsed.tokens):
                 if scoped:
                     self.work_memory.next_occurrence_ordinal()
+                pronoun_signal = resolve_pronoun_signal(
+                    tok,
+                    lang=raw.lang,
+                    language_signal_runtime=self.language_signal_runtime,
+                    pronoun_instruction_bindings=(
+                        self.pronoun_instruction_bindings),
+                    language_signal_compatibility_enabled=(
+                        self.language_signal_compatibility_enabled),
+                    pronoun_feature_lookup=self.pronoun_feature_lookup,
+                )
                 ref = normalize_to_concept(
                     tok, concept_index=self.concept_index, edge_store=self.edge_store,
                     space_id=space_id, source=raw.source,
@@ -288,6 +312,12 @@ class ObservePipeline:
                     lemmatizer=self.lemmatizer, sense_lookup=self.sense_lookup,
                     pronoun_feature_lookup=self.pronoun_feature_lookup,
                     backend=self.backend, lang=raw.lang,
+                    language_signal_runtime=self.language_signal_runtime,
+                    pronoun_instruction_bindings=(
+                        self.pronoun_instruction_bindings),
+                    language_signal_compatibility_enabled=(
+                        self.language_signal_compatibility_enabled),
+                    pronoun_signal=pronoun_signal,
                     hub_degree_state=self.hub_degree_state,
                 )
                 representation_candidate = None
@@ -359,12 +389,20 @@ class ObservePipeline:
                 # MultiRef 取 refs[0] 同 resolved）。pronoun normalize 时此列表含前序不含自身（append 在 normalize 返回后）。
                 # 对抗审 Bug#1：代词永不作先行词（它→他 pronoun→pronoun 污染 OCCURRENCE 边·未解析代词 SHADOW ref
                 # 入候选致后代词误解析到代词）。代词的先行词（若解析）已是段内内容词 token·自身入候选·跳过代词不丢 anaphora 链。
-                if not is_pronoun(tok):
+                if not pronoun_signal.is_pronoun:
                     self.work_memory._current_segment_refs.append(resolved[-1])
                 # G2 修饰方向A： 的-cue 2-token lookback（prev1=的 → cur=head·prev2=modifier·source write
                 # gate-independent·唯一读 head_pref_score gated·gate OFF 表 inert→bit-identical）。
-                if _md_prev1_tok is not None and is_property_attr_marker(_md_prev1_tok, raw.lang) \
-                        and _md_prev2_ref is not None:
+                if (_md_prev1_tok is not None
+                        and is_property_attr_marker(
+                            _md_prev1_tok,
+                            raw.lang,
+                            language_signal_runtime=self.language_signal_runtime,
+                            property_attr_instruction_key=(
+                                self.property_attr_instruction_key),
+                            language_signal_compatibility_enabled=(
+                                self.language_signal_compatibility_enabled))
+                        and _md_prev2_ref is not None):
                     observe_modification(self.backend, head_ref=resolved[-1],
                                          modifier_ref=_md_prev2_ref)
                 _md_prev2_ref = _md_prev1_ref

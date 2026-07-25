@@ -160,6 +160,24 @@ def _observe_eval_item(ctx: TrainContext, item: CollectedItem, *,
         edge_store=ctx.edge_store,
         space_id=ctx.space_id,
         concept_index=ctx.concept_index,
+        language_signal_runtime=ctx.language_signal_runtime,
+        property_attr_instruction_key=(
+            ctx.language_property_attr_instruction_key),
+        property_value_instruction_key=(
+            ctx.language_property_value_instruction_key),
+        property_possess_instruction_key=(
+            ctx.language_property_possess_instruction_key),
+        similar_instruction_key=ctx.language_similar_instruction_key,
+        negation_instruction_key=ctx.language_negation_instruction_key,
+        modality_instruction_bindings=(
+            ctx.language_modality_instruction_bindings),
+        arithmetic_instruction_bindings=(
+            ctx.language_arithmetic_instruction_bindings),
+        comparison_instruction_bindings=(
+            ctx.language_comparison_instruction_bindings),
+        cue_instruction_bindings=ctx.language_cue_instruction_bindings,
+        language_signal_compatibility_enabled=(
+            ctx.language_signal_compatibility_enabled),
     )
     if not segments:
         return None
@@ -209,6 +227,13 @@ def _observe_eval_item(ctx: TrainContext, item: CollectedItem, *,
             word_form_providers=ctx.word_form_providers,
             occurrence_index=ctx.occurrence_index,
             occurrence_order_writer=ctx.occurrence_order_writer,
+            language_signal_runtime=ctx.language_signal_runtime,
+            property_attr_instruction_key=(
+                ctx.language_property_attr_instruction_key),
+            pronoun_instruction_bindings=(
+                ctx.language_pronoun_instruction_bindings),
+            language_signal_compatibility_enabled=(
+                ctx.language_signal_compatibility_enabled),
         )
         _materialize_item_spans(ctx, item, observed)
         _run_item_predictions(ctx, item, observed)
@@ -855,11 +880,37 @@ def _h2_calibrate_impl(ctx: TrainContext, corpus: list[CollectedItem],
                 from pure_integer_ai.cognition.understanding.intent_classify import classify_intent
                 h2_segments = _split_item_to_segments(
                     item, backend=ctx.backend, edge_store=ctx.edge_store,
-                    space_id=ctx.space_id, concept_index=ctx.concept_index)
+                    space_id=ctx.space_id, concept_index=ctx.concept_index,
+                    language_signal_runtime=ctx.language_signal_runtime,
+                    property_attr_instruction_key=(
+                        ctx.language_property_attr_instruction_key),
+                    property_value_instruction_key=(
+                        ctx.language_property_value_instruction_key),
+                    property_possess_instruction_key=(
+                        ctx.language_property_possess_instruction_key),
+                    similar_instruction_key=(
+                        ctx.language_similar_instruction_key),
+                    negation_instruction_key=(
+                        ctx.language_negation_instruction_key),
+                    modality_instruction_bindings=(
+                        ctx.language_modality_instruction_bindings),
+                    arithmetic_instruction_bindings=(
+                        ctx.language_arithmetic_instruction_bindings),
+                    comparison_instruction_bindings=(
+                        ctx.language_comparison_instruction_bindings),
+                    cue_instruction_bindings=(
+                        ctx.language_cue_instruction_bindings),
+                    language_signal_compatibility_enabled=(
+                        ctx.language_signal_compatibility_enabled))
                 h2_intent = classify_intent(
                     res.dag_path.sink, h2_segments,
                     backend=ctx.backend, edge_store=ctx.edge_store,
-                    space_id=ctx.space_id, concept_index=ctx.concept_index)
+                    space_id=ctx.space_id, concept_index=ctx.concept_index,
+                    language_signal_runtime=ctx.language_signal_runtime,
+                    action_instruction_bindings=(
+                        ctx.language_action_instruction_bindings),
+                    language_signal_compatibility_enabled=(
+                        ctx.language_signal_compatibility_enabled))
             else:
                 h2_intent = IntentType(type=INTENT_QUESTION)
             samples.append(CalibrationSample(

@@ -414,6 +414,36 @@ class FormalTrainConfig:
     language_source_manifest_path: str | None = None
     language_course_runtime_language: int | None = None
     language_course_visible_splits: tuple[int, ...] = (SPLIT_TRAIN,)
+    # U-04 首个来源化 seed 入口；None 保留旧兼容词表路径，不能据此计 readiness。
+    language_signal_seed_path: str | None = None
+    # U-04 属性窗口三类作用使用独立键，不能从表层文字或指令编号推断。
+    language_property_attr_instruction_key: tuple[int, ...] | None = None
+    language_property_value_instruction_key: tuple[int, ...] | None = None
+    language_property_possess_instruction_key: tuple[int, ...] | None = None
+    # U-04 相似 cue 的作用键由调用方注入，不从 REL kind 或表层文字反推。
+    language_similar_instruction_key: tuple[int, ...] | None = None
+    # U-04 代词指令绑定完整 profile；一个 profile 可携带多个特征概念键。
+    language_pronoun_instruction_bindings: tuple[
+        tuple[tuple[int, ...], tuple[int, ...]], ...] = ()
+    # U-04 动作图指令只绑定到元定义 action kind，当前 context 再解析一等 ConceptRef。
+    language_action_instruction_bindings: tuple[
+        tuple[tuple[int, ...], int], ...] = ()
+    # U-04 否定语义目标由课程调用方注入；宿主不得把某个指令编号写死为否定。
+    language_negation_instruction_key: tuple[int, ...] | None = None
+    # U-04 情态指令到命题 modality 值的作用由调用方注入，不从词面或指令编号猜测。
+    language_modality_instruction_bindings: tuple[
+        tuple[tuple[int, ...], int], ...] = ()
+    # U-04 其余整数作用均按 consumer 独立注入，防止跨类别误消费同一指令。
+    language_arithmetic_instruction_bindings: tuple[
+        tuple[tuple[int, ...], int], ...] = ()
+    language_comparison_instruction_bindings: tuple[
+        tuple[tuple[int, ...], int], ...] = ()
+    language_condition_instruction_bindings: tuple[
+        tuple[tuple[int, ...], int], ...] = ()
+    language_cue_instruction_bindings: tuple[
+        tuple[tuple[int, ...], int], ...] = ()
+    # 迁移期默认保留旧词表/D:11；关闭后缺少图证据必须 fail closed。
+    language_signal_compatibility_enabled: bool = True
     # L-02 候选协议由调用方注入完整 MinimalInstruction 键和预算；None 保留 L-01 单 FMM 兼容路径。
     language_segmentation_protocol: Any = None
     # L-03 occurrence 图关系协议由调用方注入；None 保留旧共享概念位置兼容路径。
@@ -454,6 +484,9 @@ class FormalTrainConfig:
     # R-05 双对称关系 builder 与 course 必须成对注入；宿主不解释近义、反义或采用目的。
     language_semantic_pair_builder: Any = None
     language_semantic_pair_course: Any = None
+    # R-08 逻辑候选 owner 与课程必须成对注入；宿主不推断 operator、scope 或真值。
+    language_logic_closure_builder: Any = None
+    language_logic_closure_course: Any = None
     # L-05B2A typed formal generation owner factory；None 保留版本化 legacy 兼容链。
     # factory 必须从当前 TrainContext 的真实 S-02/S-07/R-01 owner 装配请求 mapper、planner 和 renderer。
     language_generation_runtime_factory: Any = None
@@ -469,6 +502,9 @@ class FormalTrainConfig:
     language_generation_h2_protocol: Any = None
     # L-05B2B typed floor 只使用 V-00 held-out split，并按注入阈值逐维验收。
     language_generation_floor_protocol: Any = None
+    # V-04 每次只测一个真实 checkpoint；runtime/request 必须成对注入且不推进课程终态。
+    pre_weaning_validation_runtime: Any = None
+    pre_weaning_validation_request: Any = None
 
     # W-00 版本化 hard gate；None 保持旧课程兼容路径。
     curriculum_mastery_protocol: CurriculumMasteryProtocol | None = None
@@ -550,6 +586,7 @@ class FormalTrainResult:
     typed_language_h2_report: Any = None
     typed_language_floor_report: Any = None
     typed_language_stage4_report: Any = None
+    pre_weaning_validation_report: Any = None
     occurrence_count: int = 0
     source_record_count: int = 0
     occurrence_order_fact_count: int = 0
@@ -562,6 +599,7 @@ class FormalTrainResult:
     property_relation_reports: tuple[Any, ...] = ()
     mereology_relation_reports: tuple[Any, ...] = ()
     semantic_pair_reports: tuple[Any, ...] = ()
+    logic_closure_reports: tuple[Any, ...] = ()
     span_count: int = 0
     span_candidate_fact_count: int = 0
     prediction_observation_count: int = 0
@@ -646,6 +684,32 @@ def _formal_train_impl(config: FormalTrainConfig,
         mastery_stage_keys = mastery_protocol.stage_keys_for(
             tuple(requested_stages))
     ctx = make_train_context(backend, teacher=teacher, weights=weights)
+    ctx.language_property_attr_instruction_key = (
+        config.language_property_attr_instruction_key)
+    ctx.language_property_value_instruction_key = (
+        config.language_property_value_instruction_key)
+    ctx.language_property_possess_instruction_key = (
+        config.language_property_possess_instruction_key)
+    ctx.language_similar_instruction_key = (
+        config.language_similar_instruction_key)
+    ctx.language_pronoun_instruction_bindings = (
+        config.language_pronoun_instruction_bindings)
+    ctx.language_action_instruction_bindings = (
+        config.language_action_instruction_bindings)
+    ctx.language_negation_instruction_key = (
+        config.language_negation_instruction_key)
+    ctx.language_modality_instruction_bindings = (
+        config.language_modality_instruction_bindings)
+    ctx.language_arithmetic_instruction_bindings = (
+        config.language_arithmetic_instruction_bindings)
+    ctx.language_comparison_instruction_bindings = (
+        config.language_comparison_instruction_bindings)
+    ctx.language_condition_instruction_bindings = (
+        config.language_condition_instruction_bindings)
+    ctx.language_cue_instruction_bindings = (
+        config.language_cue_instruction_bindings)
+    ctx.language_signal_compatibility_enabled = (
+        config.language_signal_compatibility_enabled)
     language_course_configured = (
         config.language_course_root is not None,
         config.language_source_manifest_path is not None,
@@ -716,6 +780,14 @@ def _formal_train_impl(config: FormalTrainConfig,
     if (config.language_generation_h2_protocol is not None
             and config.evaluation_plan is None):
         raise ValueError("typed language H2 必须配套 V-00 evaluation_plan")
+    validation_configured = (
+        config.pre_weaning_validation_runtime is not None,
+        config.pre_weaning_validation_request is not None,
+    )
+    if any(validation_configured) and not all(validation_configured):
+        raise ValueError("V-04 validation runtime 与 request 必须成对配置")
+    if all(validation_configured) and config.evaluation_plan is None:
+        raise ValueError("V-04 validation 必须配套 V-00 evaluation_plan")
     default_generation_configured = (
         config.language_generation_course_loader is not None,
         config.language_generation_component_factory is not None,
@@ -788,6 +860,17 @@ def _formal_train_impl(config: FormalTrainConfig,
             course_report,
             retokenized_items=retokenized_items,
         )
+    if config.language_signal_seed_path is not None:
+        from pure_integer_ai.experiments.language_signal_intake import (
+            build_language_signal_runtime,
+        )
+        ctx.language_signal_runtime = build_language_signal_runtime(
+            backend=ctx.backend,
+            concept_index=ctx.concept_index,
+            ontology=ctx.graph_ontology,
+            seed_path=config.language_signal_seed_path,
+        )
+        ctx.language_signal_runtime.install()
     install_language_graph_protocols(
         ctx,
         occurrence_protocol=config.language_occurrence_protocol,
@@ -924,6 +1007,21 @@ def _formal_train_impl(config: FormalTrainConfig,
             ctx,
             config.language_semantic_pair_builder,
             config.language_semantic_pair_course,
+        )
+    logic_closure_configured = (
+        config.language_logic_closure_builder is not None,
+        config.language_logic_closure_course is not None,
+    )
+    if any(logic_closure_configured) and not all(logic_closure_configured):
+        raise ValueError("R-08 logic closure builder 与 course 必须成对配置")
+    if all(logic_closure_configured):
+        from pure_integer_ai.experiments.logic_closure_runtime import (
+            install_logic_closure_runtime,
+        )
+        install_logic_closure_runtime(
+            ctx,
+            config.language_logic_closure_builder,
+            config.language_logic_closure_course,
         )
     generation_factory = config.language_generation_runtime_factory
     if all(default_generation_configured):
@@ -1279,48 +1377,40 @@ def _formal_train_impl(config: FormalTrainConfig,
         result.number_edges_seeded = bootstrap_number_grounding(
             ctx.concept_index, ctx.edge_store, ctx.backend,
             _number_facts, space_id=ctx.space_id)
-    # 刀3 件1 种概念（boot 时种 REL_* first-class NODE_CONCEPT + D:11 EDGE_RELATION_SIGNAL 词→关系概念边·
-    # 解锁件2/5/8 晋升目标框架·doc/重来_学习放开整合设计_纠偏纠偏.md §5 刀3）：
-    # 元定义层 frozenset 种子（word_concept_signal._REL_LEXICAL_CUE·同 cue_words 范式·非外部文件·
-    # Plan agent 路线决断 ii·doc §5 刀3"元定义层"忠实实现）。D:11 已注册零产消者（edge_types.py:74）·
-    # 本块激活产消者。D:11 不接 reward（effective_weight:82 assert 只认 {PRECEDES,CAUSES,REFERS_TO}·
-    # D:11 不内）·不进 PR/closure（PR 邻接只 {PRECEDES,CAUSES,REFERS_TO}·D:11 不内）·§8.1c-bis 合规。
-    # **bit-identical**：frozenset 内置·无条件种（有语言 corpus 才种）·CI===生产·870 测零翻
-    # （既有断言全 type-filtered 正交 D:11/REL_* 节点·grep 全 tests/ CONFIRMED 无 formal_train 总数断言）。
+    # 旧 Python 字面只在显式 compatibility 窗口写入 D:11；关闭后由来源化图承担语言信号。
     _langs_rel = {it.lang for it in corpus
                   if it.modality == MODALITY_LANGUAGE and it.tokens}
     if _langs_rel:   # 有语言 corpus 才种（arith-only run 不种·守最小副作用）
-        bootstrap_word_concept_signals(ctx.concept_index, ctx.edge_store, ctx.backend,
-                                       space_id=ctx.space_id, langs=_langs_rel)
-        # STEP5 PR2：operator-level D:11 种子（加/减/乘/大于/小于 closed-class 核心→OP_* concept D:11 边）。
-        # 镜像 bootstrap_word_concept_signals·D:11 共享边类型·OP_* target 挂 ATTR_OPERATOR_PRIMITIVE 与 REL_* 隔离。
-        # 加二源非替换（D6）：frozenset _ARITH_OP_WORDS/_COMPARISON_OP_WORDS 检测第一源保留不变·D:11 为 gate-ON 二源。
-        bootstrap_operator_signals(ctx.concept_index, ctx.edge_store, ctx.backend,
-                                   space_id=ctx.space_id, langs=_langs_rel)
-        # 审计根治 [严重-1]：modal-level D:11 种子（必然/可能/必须/应该/可以 closed-class 核心→MODAL_KIND concept D:11 边）。
-        # 镜像 bootstrap_operator_signals·D:11 共享边类型·MODAL_KIND target 挂 ATTR_MODAL_KIND=22 与 REL_*/OP_* 隔离。
-        # 加二源非替换（D6）：frozenset _MODAL_CUES 检测第一源保留不变·D:11 为 gate-ON 二源·解 _MODAL_CUES 换名字写死。
-        bootstrap_modal_signals(ctx.concept_index, ctx.edge_store, ctx.backend,
-                                space_id=ctx.space_id, langs=_langs_rel)
-        # #940 否定词 D:11 种子（不/没/非/无 closed-class 核心→TYPE_NEGATION concept D:11 边）。
-        # 镜像 bootstrap_modal_signals·D:11 共享边类型·TYPE_NEGATION target 挂 ATTR_SYMBOL_TYPE=17 与 REL_*/OP_*/MODAL 隔离。
-        # 加二源非替换（D6）：frozenset _NEGATION_CUES 检测第一源保留不变·D:11 为 gate-ON 二源·解否定词穷举不尽。
-        # 否定=符号域先天（同 operator·异 modal）·激活 ensure_symbol_types（shadow→活）。
-        bootstrap_negation_signals(ctx.concept_index, ctx.edge_store, ctx.backend,
-                                   space_id=ctx.space_id, langs=_langs_rel)
+        if ctx.language_signal_compatibility_enabled:
+            bootstrap_word_concept_signals(
+                ctx.concept_index, ctx.edge_store, ctx.backend,
+                space_id=ctx.space_id, langs=_langs_rel)
+            bootstrap_operator_signals(
+                ctx.concept_index, ctx.edge_store, ctx.backend,
+                space_id=ctx.space_id, langs=_langs_rel)
+            bootstrap_modal_signals(
+                ctx.concept_index, ctx.edge_store, ctx.backend,
+                space_id=ctx.space_id, langs=_langs_rel)
+            bootstrap_negation_signals(
+                ctx.concept_index, ctx.edge_store, ctx.backend,
+                space_id=ctx.space_id, langs=_langs_rel)
+            bootstrap_action_signals(
+                ctx.concept_index, ctx.edge_store, ctx.backend,
+                space_id=ctx.space_id, langs=_langs_rel)
         # #1134 程度→属性器 intensity：degree 副词→Rational intensity（很/非常=2/1·较=3/2·稍=2/5·file-driven·非 §九 frozenset）。
         # resolve_degree_facts 读 pure_integer_ai_LOCAL_DIR/degree_cues_{lang}.txt → populate_degree_cues 喂 cue_words module cache
         # （degree_intensity_of/is_degree_cue 读·gate DEGREE_MODE 守）。CI/生产 default 无文件 → {} → 不污染 cache
         # → is_degree_cue 恒 False → intensity 恒 1/1 → bit-identical（空 mapping no-op·populate_degree_cues 早返）。
         for _lang in _langs_rel:
             populate_degree_cues(_lang, resolve_degree_facts(_lang))
-        # B-PR1（doc §16）：action D:11 种子（帮我/请/生成/计算 closed-class 核心→INTENT_COMMAND_MOOD + ACTION_* concept D:11 边）。
-        # 镜像 bootstrap_negation_signals·D:11 共享边类型·动作意图 target 挂 ATTR_OPERATION_INTENT=23 与 REL_*/OP_*/MODAL/NEGATION 隔离。
-        # 加二源非替换（D6）：frozenset 命令词/动作词检测第一源（action_primitives._ACTION_LEXICAL_CUE + cue_words.is_action_intent_cue）保留·
-        # D:11 为 gate-ON 二源·解命令词/动作词穷举不尽。动作意图=符号域先天（镜像 operator·异 modal）·
-        # 命令词+动作词同基建（W7 命令判定 = 命令词 OR 动作词命中任一·doc §16.4）。
-        bootstrap_action_signals(ctx.concept_index, ctx.edge_store, ctx.backend,
-                                 space_id=ctx.space_id, langs=_langs_rel)
+        if ctx.language_action_instruction_bindings:
+            from pure_integer_ai.cognition.shared.action_primitives import (
+                ensure_action_primitives,
+            )
+            _action_refs = ensure_action_primitives(
+                ctx.concept_index, ctx.backend, space_id=ctx.space_id)
+            ctx.language_action_primitive_refs = tuple(sorted(
+                _action_refs.items(), key=lambda item: item[0]))
     # 序列6-min 生产触发（de-theater 序列1·§八.6）+ 序列3-min 生产 READ 识别（§八.3）+ 验证半闭环（§8.7）+
     # 序列7 跨 run READ（resume load_run 后识别**全新** held-out 命中载入算子·§八.7）：
     # 算术语料 → per-shape 留 held-out → auto_discover_operators（discover_skeleton 真生产 caller·WRITE）+
@@ -1496,7 +1586,7 @@ def _formal_train_impl(config: FormalTrainConfig,
     # HYPOTHESIS_MODE = 涌现假设生成 + D:11 SHADOW 落边（reward 阶段 observe 后 episode 前·_run_emergence_hook）。
     # FEED_MODE = reward_propagate concept_targets 扩展（D:11 SHADOW 候选进 experience_count feed·子环3 鸡生蛋破解）。
     # 刀5 件8：CUE_READBACK_MODE 在此翻（兑现刀4 defer 注释·cue_extractor 生产透传已落 :288/:496）。
-    # readback = cue_type_of 第二源读 D:11 PRIMARY 边（"引发"类涌现词经 promote 后第二轮返非 None·反 theater）。
+    # 该 D:11 readback 仅保留迁移兼容；正式 cue consumer 优先读取来源化语言信号图。
     # 对应泛化 v2（生产激活·三 gate 共翻·结构反推机制 live·doc/重来_对应泛化_结构反推_学全 §六 片2）：
     # REALIZES 标 skeleton→R（oracle grounded·内容对命中 ConceptNet）+ CUE_CLUSTER 拆 是/使 异名骨架（ATTR_CUE_SIG 落盘·
     # cue slot 可位）+ ORACLE_PROMOTE tally→promote 结构匹配轨（D:11 删∨·generator 关·tally 建 SHADOW）。
@@ -1529,10 +1619,8 @@ def _formal_train_impl(config: FormalTrainConfig,
     # 见设计档 §9·piece 3 商讨落地。
     # STEP5 PR2：operator D:11 readback 第二源（arith_op_of/comparison_op_of 读 D:11 PRIMARY→OP_*→opcode·
     # 镜像 EMERGENT_RELATION_CUE_READBACK_MODE 两源范式·gate OFF 退化纯 frozenset bit-identical）。
-    # 审计根治 [严重-1]：modal D:11 readback 第二源（modal_op_of/is_modal_cue 读 D:11 PRIMARY→MODAL_KIND→modality·
-    # 镜像 OPERATOR_D11_READBACK_MODE 两源范式·gate OFF 退化纯 frozenset _MODAL_CUES bit-identical）。
-    # #940 否定词 D:11 readback 第二源（is_negation_cue 读 D:11 PRIMARY→TYPE_NEGATION concept·
-    # 镜像 MODAL_D11_READBACK_MODE 两源范式·gate OFF 退化纯 frozenset _NEGATION_CUES bit-identical）。
+    # 情态 D:11/Python 仅为 U-04 迁移兼容；图有候选时旧源不得覆盖，兼容关闭后缺图证据 fail closed。
+    # 否定 D:11/Python 仅为 U-04 迁移兼容；图有候选时旧源不得覆盖，兼容关闭后缺图证据 fail closed。
     # 止血 #1146（methodology §五·reward 非 frame）：CAUSES edge reward 写按域过滤——语言/bare 域剔出
     # reward_propagate 落点① edge 写（reward 结构性 theater·dead-end/veto→tn++ 惩罚唯一 reward-active 边·有害）。
     # 生产翻 ON（语言域 reward 退场·CAUSES 掌握走刀 constructive-check 不接 strength）·CI default OFF 退化现状
@@ -2060,6 +2148,13 @@ def _formal_train_impl(config: FormalTrainConfig,
                 config.evaluation_probe_evaluator,
             )
 
+        if config.pre_weaning_validation_runtime is not None:
+            result.pre_weaning_validation_report = (
+                config.pre_weaning_validation_runtime.run(
+                    ctx,
+                    config.pre_weaning_validation_request,
+                ))
+
         # 终 dump（per-space·新 run_id·E1 权威 base）
         if config.persist_graph_dump:
             dump_scope_token = (
@@ -2146,6 +2241,8 @@ def _formal_train_impl(config: FormalTrainConfig,
             ctx.mereology_relation_reports)
     if ctx.semantic_pair_runtime is not None:
         result.semantic_pair_reports = tuple(ctx.semantic_pair_reports)
+    if ctx.logic_closure_runtime is not None:
+        result.logic_closure_reports = tuple(ctx.logic_closure_reports)
     if ctx.span_index is not None:
         result.span_count = ctx.span_index.span_count()
         result.span_candidate_fact_count = len(

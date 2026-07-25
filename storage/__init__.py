@@ -65,6 +65,7 @@ def bootstrap(backend: StorageBackend) -> None:
     from pure_integer_ai.storage.memory_batch import register_memory_batch_table
     from pure_integer_ai.storage.occurrence import register_occurrence_tables
     from pure_integer_ai.storage.source_record import register_source_record_table
+    from pure_integer_ai.storage.source_trust import register_source_trust_table
     from pure_integer_ai.storage.span import register_span_tables
     from pure_integer_ai.storage.training_candidate_event import (
         register_training_candidate_event_tables,
@@ -88,6 +89,7 @@ def bootstrap(backend: StorageBackend) -> None:
     register_memory_aggregate_tables(backend)
     register_memory_batch_table(backend)
     register_source_record_table(backend)
+    register_source_trust_table(backend)
     register_occurrence_tables(backend)
     register_span_tables(backend)
     register_training_candidate_event_tables(backend)

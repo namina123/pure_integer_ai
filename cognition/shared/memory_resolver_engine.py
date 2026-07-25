@@ -1,7 +1,10 @@
 """M-07 Core/Memory resolver 的只读索引执行和确定性仲裁引擎。"""
 from __future__ import annotations
 
-from pure_integer_ai.cognition.shared.hypothesis import HypothesisKey
+from pure_integer_ai.cognition.shared.hypothesis import (
+    LIFECYCLE_ACTIVE,
+    HypothesisKey,
+)
 from pure_integer_ai.cognition.shared.identity import SourceRef
 from pure_integer_ai.cognition.shared.memory_aggregate import (
     MemoryHypothesisAggregateIndex,
@@ -10,6 +13,7 @@ from pure_integer_ai.cognition.shared.memory_aggregate import (
 )
 from pure_integer_ai.cognition.shared.memory_event import (
     MEMORY_EVENT_HYPOTHESIS,
+    MEMORY_OBJECT_HYPOTHESIS,
     HypothesisPayload,
     MemoryObjectRef,
 )
@@ -152,6 +156,8 @@ class MemoryOverlayResolver:
         """执行单个 request 的 kind 预过滤、候选恢复和确定性 Top-K。"""
         if request.memory_space != self.aggregates.event_log.memory_space_identity:
             raise ValueError("activation request Memory 空间与 resolver 不一致")
+        if request.memory_object_kind != MEMORY_OBJECT_HYPOTHESIS:
+            raise ValueError("Hypothesis resolver 不得处理其他 Memory 对象种类")
         aggregate_rows = self._prefilter_aggregates(request)
         candidates: dict[tuple[int, tuple[int, ...]], ResolvedCandidate] = {}
         for candidate in self.core_candidates(request):
@@ -195,12 +201,15 @@ class MemoryOverlayResolver:
             raise ValueError("Memory index filter provider 不得返回重复分支")
         records: dict[int, MemoryHypothesisAggregateRecord] = {}
         for item in filters:
+            if item.lifecycle_state not in (None, LIFECYCLE_ACTIVE):
+                raise ValueError(
+                    "M-07 当前 resolver 不得请求 inactive lifecycle")
             rows = self.aggregates.query(
                 access=request.access,
                 hypothesis_kind=request.hypothesis_kind,
                 context=item.context,
                 evidence_state=item.evidence_state,
-                lifecycle_state=item.lifecycle_state,
+                lifecycle_state=LIFECYCLE_ACTIVE,
                 retention_state=item.retention_state,
                 source=item.source,
             )
@@ -338,6 +347,16 @@ class MemoryOverlayResolver:
         aggregate = bundle.aggregate
         sources = bundle.sources
         source_traces = bundle.source_traces
+        for trace in source_traces:
+            cluster_key, assessment_key, _, _ = (
+                self.aggregates.source_trust_binding(trace.source))
+            if (trace.source_cluster_key != cluster_key
+                    or trace.source_assessment_key != assessment_key):
+                raise RuntimeError(
+                    "Memory candidate 来源簇或 assessment 与持久化映射漂移")
+        if aggregate.lifecycle_state != LIFECYCLE_ACTIVE:
+            raise ValueError(
+                "M-07 当前 resolver 不得消费 inactive aggregate bundle")
         if hypothesis_ref.memory_space != request.memory_space:
             raise ValueError("Memory candidate bundle 属于其他空间")
         if hypothesis.hypothesis_kind != request.hypothesis_kind:
@@ -349,12 +368,13 @@ class MemoryOverlayResolver:
         score = self.score_provider.score(
             request, hypothesis, aggregate, sources)
         diversity = self.diversity_policy.assess(
-            request, hypothesis, aggregate, sources)
+            request, hypothesis, aggregate, sources, source_traces)
         if not isinstance(score, ActivationScore):
             raise TypeError("Memory score provider 返回了错误评分")
         if not isinstance(diversity, SourceDiversityAssessment):
             raise TypeError("来源多样性策略返回了错误评估")
-        expected_source_count = len(sources)
+        expected_source_count = len({
+            item.source_cluster_key for item in source_traces})
         if aggregate.independent_source_count != expected_source_count:
             raise RuntimeError(
                 "aggregate independent_source_count 与完整来源索引不一致")
@@ -417,8 +437,16 @@ class MemoryOverlayResolver:
             if not access.can_read(source.owner):
                 raise PermissionError("Memory 候选来源超出当前 ACL")
             by_key[source.stable_key()] = source
+            cluster_key, assessment_key, cluster_hash, assessment_hash = (
+                self.aggregates.source_trust_binding(source))
+            if (record.cluster_hash != cluster_hash
+                    or record.assessment_hash != assessment_hash):
+                raise RuntimeError(
+                    "source index 的来源簇或 assessment hash 漂移")
             traces.append(MemorySourceTrace(
                 source,
+                cluster_key,
+                assessment_key,
                 record.stance,
                 record.first_observed_seq,
                 record.last_observed_seq,

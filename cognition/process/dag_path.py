@@ -95,7 +95,7 @@ def _intent_override(c: NodeRef, intent: IntentType, workmem: Any,
     """操作意图覆写 hook（概念阻断三 gate 之 gate③·word_terminated 调·**B-PR3 接通**·doc §18）。
 
     **B-PR3 接通**（2026-07-12·doc §18·gate ACTION_INTENT_OVERRIDE_MODE）：命令态（intent.type==INTENT_COMMAND）
-    动作词（c 有 D:11 PRIMARY 边到 ACTION_*/COMMAND_MOOD concept）→ 返 1（不终止·留 path→dag_path 导向动作拓扑·§13.3）。
+    动作词由 WorkMemory 中的图裁决优先决定；图未裁决时兼容读取 D:11 PRIMARY。
     否则返 0（终止如常）。
 
     **B-PR1 ATTR_OPERATION_INTENT=23 落地推翻了原"defer S10"理由**——ATTR 旗标正是原 docstring 所待"操作 token 标记
@@ -111,13 +111,17 @@ def _intent_override(c: NodeRef, intent: IntentType, workmem: Any,
     ①语义（函数名/参数 intent/注释"操作意图覆写"全 intent 中心）②一致性（B-PR2 D3 要求 COMMAND §17.1·gate③ 同属
     动作链）③blast radius 仅 COMMAND（更安全）④§13.3 gate③ 导向动作执行·QUESTION 不执行动作·freq 终止合理。
 
-    gate OFF / backend|edge_store None（bare fixture）/ intent≠COMMAND / 无 D:11 PRIMARY 边 → 返 0（bit-identical）。
+    图中冲突或未绑定会在 WorkMemory 留下显式假值，D:11 不得覆盖。gate OFF、
+    intent 非 COMMAND 或图/兼容源均无动作证据时返回 0。
     **gate③ 只在 gate① freq 通过后触及**（word_terminated eff_freq≥θ_freq 才到 gate③）·fixture eff_freq≪1000→生产 dormant。
     """
     if not getattr(gates, "ACTION_INTENT_OVERRIDE_MODE", False):
         return 0   # gate OFF bit-identical
     if intent.type != INTENT_COMMAND:
         return 0   # 决断1 intent 闸：仅命令态 override（QUESTION 不路由动作执行·§18.1）
+    graph_decisions = getattr(workmem, "action_intent_word_decisions", {})
+    if c in graph_decisions:
+        return 1 if graph_decisions[c] else 0
     if backend is None or edge_store is None:
         return 0   # 无 backend/edge_store 退化（bare fixture·caller 未穿）
     from pure_integer_ai.cognition.shared.action_primitives import lookup_word_action

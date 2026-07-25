@@ -16,8 +16,8 @@ code_problem_value(tokens, ...) -> Rational | None
 
 **不写死 + 关联在图中**：数字词→整数经图边（resolve_number_word·PURE_ALIAS→CORR_NUMERIC·非旁侧表）·
 比较词→CMP_* 经 cue（元定义种子+D:11）·条件结构词（如果/那么/否则）= **closed-class 句法锚** →
-**元定义 dict 种子 cue_words._COND_KEYWORDS**（§九例外·元定义层·独立 _CUE_WORDS·bit-identical·镜像
-_COMPARISON_OP_WORDS 范式·cond_keyword_of 单源 D:11 readback defer·无 COND_* D:11 原语）·
+条件结构作用由来源化语言信号图和调用方绑定决定；``_COND_KEYWORDS`` 只保留为显式
+compatibility 回退，且本模块当前仍是 test-only consumer。
 代码只结构解析+源码模板（非硬编语义关联）。
 
 **CMP_*→源码符 而非 CMP_*→OPCODE_***：走 Python 源码模板（code_observe FunctionDef 入口）·
@@ -50,10 +50,7 @@ from pure_integer_ai.cognition.understanding.number_grounding import resolve_num
 from pure_integer_ai.vm.graph_compile import compile_graph
 from pure_integer_ai.vm.vm_core import execute
 
-# 条件结构 cue（如果/那么/否则·closed-class 句法锚·§九元定义种子）→ **移居元定义层 cue_words**
-# （_COND_KEYWORDS + cond_keyword_of·2 对抗审 A1 修：元定义 cue 归 cue_words.py·与 _COMPARISON_OP_WORDS/
-# _ARITH_OP_WORDS/_NEGATION_CUES/_MODAL_CUES 同层·非 consumer-local）。本模块经 import 复用（见 import 块）。
-# cond_keyword_of **单源**（元定义 frozenset 第一源·D:11 readback 第二源 defer·无 COND_* D:11 原语·异 comparison_op_of 两源）。
+# 条件结构 cue 统一经 cond_keyword_of 读取；调用方注入图作用绑定，旧表只作 compatibility。
 
 # CMP_*（crosscut/integer/compare·构造性检查通道）→ Python 源码比较符（code_observe 经 ast.parse 自动产
 # OPCODE_GT/LT/EQ·symbol_domain·vm 执行·**免手 CMP→OPCODE 映射**·避两常量族相异坑）。
@@ -69,11 +66,19 @@ _CP_EXEC_SEQ = count(1)
 
 def code_problem_value(tokens: list[str], *, concept_index: ConceptIndex,
                        edge_store: EdgeStore, backend, space_id: int,
-                       lang: int) -> Rational | None:
+                       lang: int, language_signal_runtime=None,
+                       condition_instruction_bindings: tuple[
+                           tuple[tuple[int, ...], int], ...] = (),
+                       comparison_instruction_bindings: tuple[
+                           tuple[tuple[int, ...], int], ...] = (),
+                       cue_instruction_bindings: tuple[
+                           tuple[tuple[int, ...], int], ...] = (),
+                       language_signal_compatibility_enabled: bool = True,
+                       ) -> Rational | None:
     """语言条件句 tokens → code 估值（vm_proof）·单层 if-else 立即数·返 Rational | None。
 
     tokens : 已切词的 token 列表·首版须恰好 8 个：[如果, n1, cmp, n2, 那么, a, 否则, b]。
-    lang   : 语言码（LANG_ZH/EN·_COND_KEYWORDS + comparison_op_of 按 lang 分）。
+    lang   : 语言码；图 reader 按语言分支查询，兼容模式才读取旧条件与比较表。
     返 Rational（vm_proof 真执行 if/Compare/Return 的 HALT 栈顶值）| None（非 8 元 / 结构 cue 缺 /
       数字词未接地 / 比较 cue 未识别 / DSL 不支持→诚实不伪造）。
 
@@ -88,17 +93,41 @@ def code_problem_value(tokens: list[str], *, concept_index: ConceptIndex,
     """
     if len(tokens) != 8:
         return None   # 首版只支持 8-token 单层 if-else（[如果,n1,cmp,n2,那么,a,否则,b]·多结构 piece 2.1+）
-    if cond_keyword_of(tokens[0], lang) != _COND_IF:
+    if cond_keyword_of(
+            tokens[0], lang,
+            language_signal_runtime=language_signal_runtime,
+            condition_instruction_bindings=condition_instruction_bindings,
+            language_signal_compatibility_enabled=(
+                language_signal_compatibility_enabled)) != _COND_IF:
         return None   # 结构 cue 缺（非如果起·守反统计契约·非凑配）
-    if cond_keyword_of(tokens[4], lang) != _COND_THEN:
+    if cond_keyword_of(
+            tokens[4], lang,
+            language_signal_runtime=language_signal_runtime,
+            condition_instruction_bindings=condition_instruction_bindings,
+            language_signal_compatibility_enabled=(
+                language_signal_compatibility_enabled)) != _COND_THEN:
         return None
-    if cond_keyword_of(tokens[6], lang) != _COND_ELSE:
+    if cond_keyword_of(
+            tokens[6], lang,
+            language_signal_runtime=language_signal_runtime,
+            condition_instruction_bindings=condition_instruction_bindings,
+            language_signal_compatibility_enabled=(
+                language_signal_compatibility_enabled)) != _COND_ELSE:
         return None
     n1 = resolve_number_word(concept_index, edge_store, backend, tokens[1], space_id=space_id)
     cmp = comparison_op_of(tokens[2], lang, backend=backend, edge_store=edge_store,
-                           space_id=space_id, concept_index=concept_index)
+                           space_id=space_id, concept_index=concept_index,
+                           language_signal_runtime=language_signal_runtime,
+                           comparison_instruction_bindings=(
+                               comparison_instruction_bindings),
+                           language_signal_compatibility_enabled=(
+                               language_signal_compatibility_enabled))
     if cmp is None and cue_type_of(tokens[2], lang, backend=backend, edge_store=edge_store,
-                                   space_id=space_id, concept_index=concept_index) == ARITH_EQUALS_CUE:
+                                   space_id=space_id, concept_index=concept_index,
+                                   language_signal_runtime=language_signal_runtime,
+                                   cue_instruction_bindings=cue_instruction_bindings,
+                                   language_signal_compatibility_enabled=(
+                                       language_signal_compatibility_enabled)) == ARITH_EQUALS_CUE:
         # 等于/equals → 等式 CMP_EQ（**单源**·复用刀B ARITH_EQUALS_CUE 注册·**非** _COMPARISON_OP_WORDS·
         # 避双注册冲突：否则 extract_comparison_claims 对"二加三等于五"误抽假比较声明 3==5·与 extract_numeric_claims 冲突）。
         cmp = CMP_EQ

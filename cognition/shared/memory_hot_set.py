@@ -34,7 +34,7 @@ from pure_integer_ai.storage.integer_codec import (
 from pure_integer_ai.storage.sealed_segment import SegmentRecord
 
 
-MEMORY_CANDIDATE_PROJECTION_FORMAT_VERSION = 1
+MEMORY_CANDIDATE_PROJECTION_FORMAT_VERSION = 2
 STABLE_TOP_K_POLICY_VERSION = 1
 
 
@@ -146,6 +146,8 @@ def encode_memory_candidate(
     ))
     for trace in bundle.source_traces:
         pack_key(payload, trace.source.stable_key())
+        pack_key(payload, trace.source_cluster_key)
+        pack_key(payload, trace.source_assessment_key)
         payload.extend((
             trace.stance,
             trace.first_observed_seq,
@@ -190,8 +192,16 @@ def decode_memory_candidate(
     for index in range(trace_count):
         source = SourceRef.from_stable_key(reader.read_key(
             label=f"memory candidate trace[{index}].source"))
+        source_cluster_key = reader.read_key(
+            label=f"memory candidate trace[{index}].source_cluster_key")
+        source_assessment_key = reader.read_key(
+            label=f"memory candidate trace[{index}].source_assessment_key",
+            empty=True,
+        )
         traces.append(MemorySourceTrace(
             source,
+            source_cluster_key,
+            source_assessment_key,
             reader.read_positive(label=f"memory candidate trace[{index}].stance"),
             reader.read_nonnegative(
                 label=f"memory candidate trace[{index}].first_observed_seq"),
@@ -371,10 +381,11 @@ class _StableTopKAccumulator:
 class StableTopKSourcePolicy:
     """不改分、只稳定取前 K 的可流式来源策略。"""
 
-    def assess(self, request, hypothesis, aggregate, sources):
+    def assess(self, request, hypothesis, aggregate, sources, source_traces):
         """保留真实独立来源数，不增加任何领域偏好分。"""
-        del request, hypothesis, aggregate
-        return SourceDiversityAssessment(len(sources), 0, ())
+        del request, hypothesis, aggregate, sources
+        count = len({item.source_cluster_key for item in source_traces})
+        return SourceDiversityAssessment(count, 0, ())
 
     def select(self, request, candidates, budget):
         """全热基线直接选择已按 M-07 顺序排列的前 K 项。"""

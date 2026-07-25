@@ -9,6 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
+from pure_integer_ai.crosscut.determinism.fingerprint import (
+    integer_tuple_fingerprint,
+)
+
+from pure_integer_ai.cognition.shared.evidence_candidate import (
+    EvidenceCandidateDefinition,
+)
 from pure_integer_ai.cognition.shared.hypothesis import (
     EVIDENCE_REFUTE,
     EVIDENCE_SUPPORT,
@@ -21,6 +28,9 @@ from pure_integer_ai.cognition.shared.identity import (
     SourceRef,
 )
 from pure_integer_ai.cognition.shared.logic_executor import LogicEvidenceState
+from pure_integer_ai.cognition.shared.memory_generation import (
+    MemoryGenerationEvidence,
+)
 from pure_integer_ai.cognition.shared.reasoning_planner import ReasoningPlanResult
 from pure_integer_ai.cognition.shared.scope_identity import ScopeIdentity
 from pure_integer_ai.cognition.shared.semantic_object import semantic_source
@@ -108,6 +118,7 @@ class GenerationCandidate:
     scope: ScopeIdentity
     evidence: tuple[EvidenceRecord, ...]
     reasoning: ReasoningPlanResult | None = None
+    memory_evidence: tuple[MemoryGenerationEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.proposition, BoundProposition):
@@ -120,10 +131,16 @@ class GenerationCandidate:
             raise TypeError("generation candidate scope 类型错误")
         if semantic_source(self.proposition.template) != self.source:
             raise ValueError("generation candidate Proposition 与 source 不一致")
-        if not isinstance(self.evidence, tuple) or not self.evidence:
-            raise ValueError("generation candidate 必须携带非空 Evidence tuple")
+        if not isinstance(self.evidence, tuple):
+            raise TypeError("generation candidate Evidence 必须是 tuple")
         if any(not isinstance(item, EvidenceRecord) for item in self.evidence):
             raise TypeError("generation candidate evidence 含非法项")
+        if (not isinstance(self.memory_evidence, tuple)
+                or any(not isinstance(item, MemoryGenerationEvidence)
+                       for item in self.memory_evidence)):
+            raise TypeError("generation candidate memory_evidence 类型错误")
+        if not self.evidence and not self.memory_evidence:
+            raise ValueError("generation candidate 必须携带 Core 或 Memory Evidence")
         evidence = tuple(sorted(self.evidence, key=lambda item: item.evidence_id))
         evidence_ids = tuple(item.evidence_id for item in evidence)
         if len(set(evidence_ids)) != len(evidence_ids):
@@ -137,12 +154,37 @@ class GenerationCandidate:
             raise ValueError("generation candidate 不得同时携带已被替代的 Evidence")
         for item in evidence:
             if item.hypothesis.observation != self.source:
-                raise ValueError(
-                    "generation candidate Evidence Hypothesis 与 Proposition 来源不一致")
+                try:
+                    aggregate = EvidenceCandidateDefinition.from_stable_key(
+                        item.hypothesis.candidate_key)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "generation candidate 跨来源 Evidence 缺少 aggregate 候选归因"
+                    ) from exc
+                if aggregate.candidate != self.proposition.template:
+                    raise ValueError(
+                        "generation candidate aggregate Evidence 指向其他 Proposition")
+        memory_evidence = tuple(sorted(
+            self.memory_evidence,
+            key=lambda item: item.stable_key(),
+        ))
+        memory_keys = tuple(item.stable_key() for item in memory_evidence)
+        if len(set(memory_keys)) != len(memory_keys):
+            raise ValueError("generation candidate Memory Evidence 不得重复")
+        for item in memory_evidence:
+            if item.target != self.proposition:
+                raise ValueError("generation candidate Memory Evidence 目标命题漂移")
+            if item.candidate.query_scope != self.scope:
+                raise ValueError("generation candidate Memory Evidence query scope 漂移")
         derived = LogicEvidenceState(
             any(item.stance == EVIDENCE_SUPPORT for item in evidence),
             any(item.stance == EVIDENCE_REFUTE for item in evidence),
         )
+        for item in memory_evidence:
+            derived = LogicEvidenceState(
+                derived.support or item.state.support,
+                derived.refute or item.state.refute,
+            )
         if derived != self.state:
             raise ValueError("generation candidate 四态与所携 Evidence 不一致")
         if self.reasoning is not None:
@@ -156,14 +198,28 @@ class GenerationCandidate:
             if not set(self.reasoning.evidence_ids).issubset(set(evidence_ids)):
                 raise ValueError("generation candidate 未携带 reasoning 引用的全部 Evidence")
         object.__setattr__(self, "evidence", evidence)
+        object.__setattr__(self, "memory_evidence", memory_evidence)
 
     @property
     def hypotheses(self) -> tuple:
         """返回 Evidence 中实际出现的完整 Hypothesis 集，按稳定键排序去重。"""
         return tuple(sorted(
-            {item.hypothesis for item in self.evidence},
+            {
+                *(item.hypothesis for item in self.evidence),
+                *(item.candidate.hypothesis for item in self.memory_evidence),
+            },
             key=lambda item: item.stable_key(),
         ))
+
+    @property
+    def citation_sources(self) -> tuple[SourceRef, ...]:
+        """返回实际支撑候选的 Core/Memory 来源，不混入命题归属来源。"""
+        sources = {
+            *(item.source for item in self.evidence),
+            *(source.trace.source
+              for item in self.memory_evidence for source in item.sources),
+        }
+        return tuple(sorted(sources, key=lambda item: item.stable_key()))
 
     def stable_key(self) -> tuple[int, ...]:
         """返回命题、状态、来源、scope、Evidence 和 reasoning 的完整候选键。"""
@@ -175,6 +231,9 @@ class GenerationCandidate:
             len(self.evidence),
         ]
         for item in self.evidence:
+            result.extend(_packed(item.stable_key()))
+        result.append(len(self.memory_evidence))
+        for item in self.memory_evidence:
             result.extend(_packed(item.stable_key()))
         reasoning_key = () if self.reasoning is None else self.reasoning.stable_key()
         result.extend(_packed(reasoning_key))
@@ -210,10 +269,13 @@ class GenerationPlanningRequest:
         return tuple(item.stable_key() for item in self.candidates)
 
     def stable_key(self) -> tuple[int, ...]:
-        """返回目标和全部候选的确定性请求键，不接受裸 PR 或路径输入。"""
-        result = [*_packed(self.goal.stable_key()), len(self.candidates)]
+        """以内容引用返回目标和全部 typed 候选的确定性请求键。"""
+        result = [*integer_tuple_fingerprint(
+            self.goal.stable_key(), domain="generation.request.goal.v1"),
+            len(self.candidates)]
         for item in self.candidates:
-            result.extend(_packed(item.stable_key()))
+            result.extend(_packed(integer_tuple_fingerprint(
+                item.stable_key(), domain="generation.request.candidate.v1")))
         return tuple(result)
 
 
@@ -378,19 +440,23 @@ class GenerationLayerResult:
             self.selected_candidate_keys)))
 
     def stable_key(self) -> tuple[int, ...]:
-        """返回层身份、结果、输入、采用候选、payload 和 trace 的完整键。"""
+        """返回层身份及输入、采用项、载荷和 trace 的内容引用。"""
         result = [
             *_packed(self.layer.stable_key()),
             *_packed(self.outcome.stable_key()),
             *_packed(self.reason.stable_key()),
             int(self.executed),
-            *_packed(self.input_key),
+            *_packed(integer_tuple_fingerprint(
+                self.input_key, domain="generation.layer.input.v1")),
             len(self.selected_candidate_keys),
         ]
         for key in self.selected_candidate_keys:
-            result.extend(_packed(key))
-        result.extend(_packed(self.payload))
-        result.extend(_packed(self.trace))
+            result.extend(_packed(integer_tuple_fingerprint(
+                key, domain="generation.layer.candidate.v1")))
+        result.extend(_packed(integer_tuple_fingerprint(
+            self.payload, domain="generation.layer.payload.v1")))
+        result.extend(_packed(integer_tuple_fingerprint(
+            self.trace, domain="generation.layer.trace.v1")))
         return tuple(result)
 
 
@@ -415,7 +481,9 @@ class GenerationPlan:
         if tuple(item.layer for item in self.layers) != expected:
             raise ValueError("generation plan 必须完整保持六层协议顺序")
         halted = False
-        for item in self.layers:
+        for index, item in enumerate(self.layers):
+            if item.input_key != _input_key(self.request, self.layers[:index]):
+                raise ValueError("generation layer input_key 未绑定同次请求和上游层")
             if halted:
                 if item.executed or item.outcome != self.protocol.blocked:
                     raise ValueError("失败后的 generation layer 必须显式 blocked 且不执行")
@@ -438,14 +506,17 @@ class GenerationPlan:
         )
 
     def stable_key(self) -> tuple[int, ...]:
-        """返回请求、协议和六层结果的完整确定性回放键。"""
+        """返回请求、协议和六层 typed 结果的 Merkle 式确定性键。"""
         result = [
-            *_packed(self.request.stable_key()),
-            *_packed(self.protocol.stable_key()),
+            *_packed(integer_tuple_fingerprint(
+                self.request.stable_key(), domain="generation.plan.request.v1")),
+            *_packed(integer_tuple_fingerprint(
+                self.protocol.stable_key(), domain="generation.plan.protocol.v1")),
             len(self.layers),
         ]
         for item in self.layers:
-            result.extend(_packed(item.stable_key()))
+            result.extend(_packed(integer_tuple_fingerprint(
+                item.stable_key(), domain="generation.plan.layer.v1")))
         return tuple(result)
 
 
@@ -453,10 +524,12 @@ def _input_key(
         request: GenerationPlanningRequest,
         prior: tuple[GenerationLayerResult, ...],
         ) -> tuple[int, ...]:
-    """冻结当前层可见的完整请求和全部已提交上游结果。"""
-    result = [*_packed(request.stable_key()), len(prior)]
+    """用固定长度内容引用冻结当前请求和全部已提交上游结果。"""
+    result = [1, *_packed(integer_tuple_fingerprint(
+        request.stable_key(), domain="generation.input.request.v1")), len(prior)]
     for item in prior:
-        result.extend(_packed(item.stable_key()))
+        result.extend(_packed(integer_tuple_fingerprint(
+            item.stable_key(), domain="generation.input.prior.v1")))
     return tuple(result)
 
 

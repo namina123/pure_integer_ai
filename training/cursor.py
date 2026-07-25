@@ -78,6 +78,7 @@ from pure_integer_ai.storage.occurrence import (
     OCCURRENCE_TABLE,
 )
 from pure_integer_ai.storage.source_record import SOURCE_RECORD_TABLE
+from pure_integer_ai.storage.source_trust import SOURCE_TRUST_ASSESSMENT_TABLE
 from pure_integer_ai.storage.span import SPAN_MEMBER_TABLE, SPAN_TABLE
 from pure_integer_ai.storage.spaces.companion import TEXT_ASSOC_TABLE
 from pure_integer_ai.storage.training_candidate_event import (
@@ -106,6 +107,7 @@ DUMP_TABLES: tuple[str, ...] = (
     TRAINING_CANDIDATE_EVENT_TABLE,
     TRAINING_CANDIDATE_EVENT_PART_TABLE,
     OCCURRENCE_TABLE, OCCURRENCE_CANDIDATE_TABLE, SOURCE_RECORD_TABLE,
+    SOURCE_TRUST_ASSESSMENT_TABLE,
     SPAN_TABLE, SPAN_MEMBER_TABLE,
     TEXT_ASSOC_TABLE,
     IDENTITY_HEADER_TABLE, IDENTITY_PART_TABLE, ASSERTION_SUPERSEDE_TABLE,
@@ -119,6 +121,7 @@ GLOBAL_DUMP_TABLES: frozenset[str] = frozenset({
     ASSERTION_RECORD_TABLE,
     ASSERTION_QUALIFIER_TABLE,
     SOURCE_RECORD_TABLE,
+    SOURCE_TRUST_ASSESSMENT_TABLE,
     GRAPH_OBJECT_COMPONENT_TABLE,
     GRAPH_HYPOTHESIS_GROUP_TABLE,
     GRAPH_HYPOTHESIS_GROUP_COMPONENT_TABLE,

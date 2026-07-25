@@ -1033,6 +1033,14 @@ class MemoryHotSetRuntime:
             return self._hot_set.metrics()
         return self._last_metrics
 
+    def query_resources_closed(self) -> bool:
+        """返回当前 query 的 reader、热集和缓存结果是否已经全部释放。"""
+        return (
+            self._hot_set is None
+            and self._compilation_key is None
+            and self._resolution is None
+        )
+
     def replace_projection(
             self,
             projection: MemoryCandidateProjectionManifest,
