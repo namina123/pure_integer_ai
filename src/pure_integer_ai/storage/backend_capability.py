@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from inspect import getattr_static
 from typing import Protocol, runtime_checkable
 
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
@@ -268,9 +269,14 @@ class BackendCapabilityError(RuntimeError):
 
 def capability_profile(backend: object) -> BackendCapabilityProfile:
     """从后端或代理读取显式 profile，缺少协议时 fail closed。"""
-    if not isinstance(backend, CapabilityAwareBackend):
+    try:
+        getattr_static(backend, "storage_capabilities")
+    except AttributeError:
         raise BackendCapabilityError("后端没有声明 storage_capabilities")
-    profile = backend.storage_capabilities()
+    provider = getattr(backend, "storage_capabilities")
+    if not callable(provider):
+        raise BackendCapabilityError("后端没有声明 storage_capabilities")
+    profile = provider()
     if not isinstance(profile, BackendCapabilityProfile):
         raise BackendCapabilityError("后端返回了非法 capability profile")
     return profile
