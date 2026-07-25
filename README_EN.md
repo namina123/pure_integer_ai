@@ -4,48 +4,56 @@
 
 PIDSLCA is an open exploratory research project. It asks a specific question: can a cognitive system be built without floating-point computation while remaining runnable on an ordinary personal computer, reproducible bit for bit, auditable, and able to update from experience?
 
-This repository publishes the reference implementation, current tests, continuous-integration configuration, format samples, essential development scripts, and paper materials. “Self-learning” describes the research objective and implemented mechanisms; it does not mean that the system has achieved general intelligence, autonomous understanding, or mature conversational ability.
+This repository publishes the reference implementation, current tests, continuous integration, format samples, development scripts, and paper materials. “Self-learning” describes the research objective and mechanisms; it does not mean that the system has achieved general intelligence, autonomous understanding, mature conversation, or is ready for production.
 
-## Design focus
+## Research theme
 
-- **Pure-integer core**: core state, counters, strengths, and protocol keys are represented with integers.
+- Represent cognitive state, relation strength, counts, evidence, and protocol data with integers.
+- Make fixed inputs and fixed state produce reproducible execution for audits and controlled comparisons.
+- Use graph structures to represent concepts, relations, memory, order, causality, and executable structures.
+- Study how relation reinforcement, structure induction, memory updates, constructive verification, and recovery can work together.
+- Validate these mechanisms on ordinary hardware and standard Python environments instead of specialized large-scale infrastructure.
+
+## What it is for
+
+PIDSLCA currently serves as a research and engineering foundation for:
+
+- reproducible experiments in deterministic cognitive architectures, graph reasoning, structure learning, and integer representations;
+- auditable implementations where state changes can be traced to inputs, rules, and evidence;
+- prototypes for memory, relation learning, generation, program execution, recovery, and evaluation;
+- teaching and technical discussion supported by runnable code, public tests, and paper materials.
+
+It is not currently a chat product, a general intelligence system, or a deployable decision service. Passing controlled engineering tests shows that implementations satisfy those test conditions; it does not replace real-world evaluation of semantics, generalization, or reliability.
+
+## Distinctive features
+
+- **Pure-integer core**: core computation paths avoid floating-point state, reducing cross-platform numeric variation.
 - **Deterministic execution**: fixed inputs and protocol state should produce bit-identical results.
-- **Edge-count reinforcement**: relations accumulate through traceable integer counts and are promoted under explicit conditions.
-- **Structure induction**: shared skeletons are extracted from alignable structures across samples.
-- **Constructive verification**: executable results, inverse transformations, and recovery paths are checked independently.
-- **Auditable status**: production-live, opt-in, test-only, and incomplete mechanisms are distinguished so that code presence is not presented as achieved capability.
+- **Count-based relation reinforcement**: relations accumulate through traceable integer counts and are promoted under explicit conditions.
+- **Structure induction**: shared structures are extracted from alignable samples instead of storing only surface text.
+- **Constructive verification**: executable results, inverse transformations, migrations, and recovery paths are checked independently.
+- **Auditable boundaries**: implemented mechanisms, experimental abilities, and open research questions are stated separately.
+- **Lightweight runtime**: the main package uses only the Python standard library; test dependencies are installed separately.
 
-## Current status
+## Public progress
 
-Status snapshot: July 25, 2026.
+As of July 26, 2026:
 
-| Scope | Status | Meaning |
-|---|---|---|
-| `PH1-CORE` | Complete | The first-phase core facilities have been assembled, forming `J-F1`. |
-| `F-01` | Passed controlled assembly verification | Coverage includes source admission, Memory queries, question answering and generation, Use/outcome attribution, rollback, reparsing, migration, recovery, cloning, and parallel determinism. |
-| `PH1-EXT` | Incomplete | `A-00` efficiency and surface work, `A-04` user familiarity/preferences, and `A-07` long-text and long-term context remain open. |
-| `PH2` | Not entered | Formal curricula, production training data, and second-phase capability work have not begun. |
+- the code uses a standard `src/pure_integer_ai/` package layout and supports editable installation;
+- current tests, samples, cross-platform CI, source guards, and credential scanning are public;
+- pure-integer foundations, deterministic utilities, graph storage, memory and recovery, relation mechanisms, cognitive processes, training orchestration, and evaluation facilities are implemented;
+- the complete local regression on CPython 3.14.3 reports `3708 passed`;
+- active research remains on efficiency, long text and long-term context, formal training data, user interaction, and real semantic generalization.
 
-`J-F1` means only that the first-phase facilities can carry later data and training. It does not mean formal post-weaning operation, `readiness=true`, language mastery, a usable chat assistant, or production readiness. The current result is primarily controlled-fixture and deterministic engineering evidence, not empirical proof of general capability or semantic correctness.
+## Support the project
 
-## Verification record
+This is independent research without institutional funding or commercial sponsorship. Donations primarily support public testing and CI, experimental compute and storage, code and paper archiving, and long-term maintenance.
 
-The PH1 closure record from the engineering workspace is:
+**[Support through WeChat, Alipay, or Ko-fi](DONATE_EN.md)**
 
-- T0 focused and inventory tests: `75 passed`
-- T1 direct dependencies: `523 passed`
-- T2 integration regression: `600 passed`
-- T3 full regression, run twice: `3706 passed` each time
-- Identical F-01 report SHA-256 under `PYTHONHASHSEED=0/1`: `ed7f35522053e3dcb257ee48f49f06ec742d98b5df64a7e8c465e532ca1d0905`
-- Guards, source compilation, and `git diff --check` passed
-
-These numbers are historical engineering records from PH1 closure. The current effective test suite is now published in this repository and uses the same entry points locally and in public CI. Archived implementations, obsolete tests, private design records, local corpora, and experiment outputs do not participate in the build or verification.
-
-After the public-repository migration, an independent CPython 3.14.3 verification on July 26, 2026 passed editable installation, source compilation, all four built-in guards, and the complete suite: `3708 passed`.
+Support is entirely optional. It does not change the MIT terms or purchase roadmap priority, private builds, or exclusive access; public code, tests, and papers remain available on the same basis to everyone.
 
 ## Quick start
-
-The runtime uses only the Python standard library. The current engineering verification environment is CPython 3.14.3.
 
 ```bash
 git clone https://github.com/namina123/pure_integer_ai.git pure_integer_ai
@@ -55,30 +63,26 @@ python -m pure_integer_ai.crosscut.guards.lint
 python -m pytest -q
 ```
 
-Run all commands from the repository root. Runtime code uses only the Python standard library; `.[test]` installs pytest for verification. CPython 3.11 and later are supported, with public CI coverage on Linux and Windows.
+Run all commands from the repository root. CPython 3.11 and later are supported, with public CI coverage on Linux and Windows.
 
 Files under `data/*.sample` are format examples only. Full corpora, credentials, local configuration, logs, databases, and experiment outputs are not stored in Git and are not read by the checks above. Builds, guards, and tests do not depend on unpublished documents or archived projects.
 
 ## Repository map
 
 - `src/pure_integer_ai/`: installable source package
-- `src/pure_integer_ai/cognition/`: cognitive objects, understanding, generation, and process mechanisms
-- `src/pure_integer_ai/storage/`: events, Memory, recovery, and persistence
-- `src/pure_integer_ai/numeric/`, `src/pure_integer_ai/vm/`: pure-integer numeric objects and graph-program execution
-- `src/pure_integer_ai/experiments/`: training orchestration, runtime assembly, and evaluation protocols
-- `src/pure_integer_ai/crosscut/`: determinism, integer constraints, and source guards
 - `tests/`: current public regression suite
+- `data/*.sample`: publicly distributable format samples
 - `.github/workflows/ci.yml`: cross-platform tests and credential scanning
 - `scripts/`: reusable public development helpers
-- `paper/`: the paper PDF and LaTeX sources
+- `paper/`: paper PDF, LaTeX sources, and references
 
 ## Paper
+
+This repository publicly preserves and acknowledges the paper completed by the project author. The paper remains in its published form; later code status is documented by this README and the implementation.
 
 - [Paper PDF](paper/main.pdf)
 - [LaTeX sources](paper/)
 - [Zenodo archive and DOI: 10.5281/zenodo.21431532](https://doi.org/10.5281/zenodo.21431532)
-
-The paper records the architecture and capability boundaries at publication time. For later code status, refer to this README and the implementation itself.
 
 ## Contributing
 
@@ -88,7 +92,6 @@ Reproducible bug reports, design discussions, and pull requests are welcome thro
 
 Original code and documentation in this repository are released under the [MIT License](LICENSE). Any person or organization may use, copy, modify, merge, publish, distribute, sublicense, or sell copies under its terms. The project has no separate commercial license, revenue threshold, field-of-use restriction, registration process, prior approval, rights assignment, or additional agreement. `LICENSE` is the sole licensing text.
 
-## Support and contact
+## Contact
 
-- [Support the research](DONATE_EN.md)
-- Email: 2698801855@qq.com
+Email: 2698801855@qq.com

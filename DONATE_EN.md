@@ -8,6 +8,8 @@ This research explores "an intelligent system built on a pure-integer substrate"
 
 All code and the paper are released under permissive licenses; anyone may read, use, and verify them free of charge. The research itself will not stop for lack of funding.
 
+Support primarily funds public testing and CI, experimental compute and storage, code and paper archiving, and long-term maintenance. Donations do not change the project's MIT terms or purchase roadmap priority, private builds, or exclusive access.
+
 If any of the following resonates with you, you might consider supporting:
 
 - the exploration makes you think "this is interesting; I'd like it to continue";

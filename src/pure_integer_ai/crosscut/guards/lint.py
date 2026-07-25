@@ -347,6 +347,10 @@ def run_lint(root: str, whitelist: tuple[str, ...] = ()) -> int:
 
 def _default_main() -> int:
     """默认扫描 pure_integer_ai 包核心，测试目录由 pytest 独立覆盖。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
     import pure_integer_ai
     pkg = os.path.dirname(pure_integer_ai.__file__)
     return run_lint(pkg, whitelist=())

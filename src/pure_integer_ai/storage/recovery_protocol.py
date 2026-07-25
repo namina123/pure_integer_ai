@@ -32,7 +32,8 @@ def strict_key(
         ) -> tuple[int, ...]:
     """核验恢复协议中的完整稳定整数键。"""
     if not isinstance(value, tuple) or (not empty and not value):
-        raise ValueError(f"{label} 必须是{'\u53ef\u7a7a' if empty else '\u975e\u7a7a'}整数 tuple")
+        emptiness = "可空" if empty else "非空"
+        raise ValueError(f"{label} 必须是{emptiness}整数 tuple")
     if value:
         assert_int(*value, _where=label)
         if any(type(item) is not int for item in value):
