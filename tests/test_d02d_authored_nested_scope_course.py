@@ -521,10 +521,10 @@ def test_modal_and_forall_manifests_do_not_drift(tmp_path):
         MODAL_SAMPLE_PATH, tmp_path / "modal")
     forall = compile_authored_forall_course(
         FORALL_SAMPLE_PATH, tmp_path / "forall")
-    assert modal.manifest.sha256() == (
-        "950f57d61ddb8ca04912f94b2e00def553c88d14c8dda0bf58a8bb04a3675f2a")
-    assert forall.manifest.sha256() == (
-        "598cbd1cac8dde4ae194a1e378ed8534f72ef713d14064c2f3d17c37bb06c4b8")
+    assert modal.manifest.content_sha256() == (
+        "0eac669c3767b1d3b3501d549cabaca2a5d1bc76ab51be63d4418d08f1a2747a")
+    assert forall.manifest.content_sha256() == (
+        "db37efe6192806c9186bedcd96229dc13933f3892aede721957d16087e378015")
 
 
 def test_float_noncanonical_existing_pack_and_legacy_are_fail_closed(tmp_path):

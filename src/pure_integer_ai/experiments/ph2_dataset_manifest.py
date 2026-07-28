@@ -111,6 +111,13 @@ class ArtifactFileIdentity:
             "transport_size_bytes": self.transport_size_bytes,
         }
 
+    def content_identity_dict(self) -> dict[str, Any]:
+        """导出不受 gzip backend 字节差异影响的内容身份。"""
+        value = self.to_dict()
+        del value["transport_sha256"]
+        del value["transport_size_bytes"]
+        return value
+
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ArtifactFileIdentity":
         """从 manifest JSON object 恢复文件身份。"""
@@ -270,8 +277,19 @@ class ArtifactManifest:
         """返回以单个换行结束的 manifest 规范 UTF-8 字节。"""
         return canonical_json_line(self.to_dict())
 
+    def content_identity_bytes(self) -> bytes:
+        """返回排除 gzip transport 字段的规范内容身份字节。"""
+        value = self.to_dict()
+        value["files"] = [
+            item.content_identity_dict() for item in self.files]
+        return canonical_json_line(value)
+
+    def content_sha256(self) -> str:
+        """返回跨压缩 backend 稳定的完整内容身份 SHA-256。"""
+        return hashlib.sha256(self.content_identity_bytes()).hexdigest()
+
     def sha256(self) -> str:
-        """返回完整 manifest 规范字节 SHA-256。"""
+        """返回包含当前 transport 身份的 manifest 文件 SHA-256。"""
         return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
     @classmethod

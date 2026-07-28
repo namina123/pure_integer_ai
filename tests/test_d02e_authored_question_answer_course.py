@@ -162,8 +162,8 @@ def test_compiler_is_bit_identical_partitioned_and_expected_private(tmp_path):
     second = compile_authored_qa_course(SAMPLE_PATH, tmp_path / "second")
     assert first.pack_root.name == PACK_NAME
     assert first.manifest == second.manifest
-    assert first.manifest.sha256() == (
-        "daa2e11ab119deb5403e52a2322a9ad60e2b2209a6fda78ce892cdb068fb6c0e")
+    assert first.manifest.content_sha256() == (
+        "2785a4e55474ae90ba20828410fde4dc69faca1e861c78c77aff8cf6de55ad62")
     assert first.manifest.w_stages == ("W-09",)
     assert first.validation.source_ref_count == 12
     assert first.validation.observation_count == 12
@@ -447,8 +447,8 @@ def test_discourse_manifest_does_not_drift(tmp_path):
     """新增 QA 合同不得改变已关闭 discourse artifact 身份。"""
     discourse = compile_authored_discourse_course(
         DISCOURSE_SAMPLE_PATH, tmp_path / "discourse")
-    assert discourse.manifest.sha256() == (
-        "b5efb5b90b5c6ab45ff0f7a14b730b984cd7fe4ca05e37c2ff35f553a61a9870")
+    assert discourse.manifest.content_sha256() == (
+        "420a98334a9fb9ce91e116bc991daaa544316cfbd19cf23fa3da942a35703c95")
 
 
 def test_sample_hash_float_noncanonical_existing_pack_and_shortcuts_fail_closed(

@@ -436,10 +436,10 @@ def test_exists_and_forall_manifests_do_not_drift(tmp_path):
         EXISTS_SAMPLE_PATH, tmp_path / "exists")
     forall = compile_authored_forall_course(
         FORALL_SAMPLE_PATH, tmp_path / "forall")
-    assert exists.manifest.sha256() == (
-        "82f5d8f1b8efe5b14719cce4e83b3997b164fca52c8a3a1f121e2887bd70c9e0")
-    assert forall.manifest.sha256() == (
-        "598cbd1cac8dde4ae194a1e378ed8534f72ef713d14064c2f3d17c37bb06c4b8")
+    assert exists.manifest.content_sha256() == (
+        "d8910e29a82f7c6fc6df6c1c03c1ef5e19a56c411e2b690dc7124fbc69155964")
+    assert forall.manifest.content_sha256() == (
+        "db37efe6192806c9186bedcd96229dc13933f3892aede721957d16087e378015")
 
 
 def test_float_noncanonical_existing_pack_and_legacy_are_fail_closed(tmp_path):

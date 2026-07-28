@@ -186,8 +186,8 @@ def test_compiler_is_bit_identical_partitioned_and_expected_private(tmp_path):
     second = compile_authored_generation_course(SAMPLE_PATH, tmp_path / "second")
     assert first.pack_root.name == PACK_NAME
     assert first.manifest == second.manifest
-    assert first.manifest.sha256() == (
-        "6c8f445a6b204dfca21ac28948b4806c4934079a03ea297627fcf73fbe63c4af")
+    assert first.manifest.content_sha256() == (
+        "15fe0e47834cf23c27076f7b18dd74199e0a90f584213614eb0f201ee69adc2a")
     assert first.manifest.w_stages == ("W-09",)
     assert first.validation.source_ref_count == 12
     assert first.validation.observation_count == 12
@@ -475,8 +475,8 @@ def test_bad_owner_adoption_requirement_observation_budget_and_chain_fail_closed
 def test_qa_manifest_does_not_drift(tmp_path):
     """新增 generation 合同不得改变已关闭 QA artifact 身份。"""
     qa = compile_authored_qa_course(QA_SAMPLE_PATH, tmp_path / "qa")
-    assert qa.manifest.sha256() == (
-        "daa2e11ab119deb5403e52a2322a9ad60e2b2209a6fda78ce892cdb068fb6c0e")
+    assert qa.manifest.content_sha256() == (
+        "2785a4e55474ae90ba20828410fde4dc69faca1e861c78c77aff8cf6de55ad62")
 
 
 def test_sample_hash_float_noncanonical_existing_pack_and_shortcuts_fail_closed(

@@ -439,8 +439,8 @@ def test_exists_manifest_does_not_drift_when_forall_semantics_are_added(
         tmp_path):
     """FORALL 专属字段不得改变已关闭 EXISTS artifact 身份。"""
     build = compile_authored_exists_course(EXISTS_SAMPLE_PATH, tmp_path)
-    assert build.manifest.sha256() == (
-        "82f5d8f1b8efe5b14719cce4e83b3997b164fca52c8a3a1f121e2887bd70c9e0")
+    assert build.manifest.content_sha256() == (
+        "d8910e29a82f7c6fc6df6c1c03c1ef5e19a56c411e2b690dc7124fbc69155964")
 
 
 def test_float_noncanonical_existing_pack_and_legacy_are_fail_closed(tmp_path):

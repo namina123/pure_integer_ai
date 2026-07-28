@@ -36,7 +36,7 @@ from pure_integer_ai.storage.backend import DictBackend, SQLiteBackend
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 ATOMIC_PACK_NAME = "AUTHORED_CC0_V1--CC0-1.0--atomic-v1"
 EXPECTED_NORMATIVE_SHA256 = (
-    "5864003d99518a78d80c1a486db9813196931600c96076df92b1e4c89f0da9aa")
+    "5415c3be6d1ab9ce4a47517b2913e9993b058aba04cdcb2845bd980dd7b8672d")
 
 
 @dataclass(frozen=True)

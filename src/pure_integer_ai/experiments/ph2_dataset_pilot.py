@@ -419,13 +419,12 @@ def _pass_result(bundle: _PackBundle) -> dict[str, Any]:
                 "source_cluster_keys": [
                     key.to_list() for key in item.source_cluster_keys],
                 "split": item.split,
-                "transport_sha256": item.transport_sha256,
             }
             for item in manifest.files
         ],
         "license_partition": manifest.license_partition,
         "manifest_key": manifest.stable_key.to_list(),
-        "manifest_sha256": manifest.sha256(),
+        "manifest_sha256": manifest.content_sha256(),
         "pack_id": bundle.spec.pack_id,
         "pack_name": bundle.spec.pack_name,
         "record_aggregate_sha256": _record_digest(bundle),

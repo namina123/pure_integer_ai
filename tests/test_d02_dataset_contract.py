@@ -557,6 +557,24 @@ def test_jsonl_gzip_and_manifest_are_bit_identical_and_fully_readable(tmp_path):
     assert source_file.content_sha256 != source_file.transport_sha256
 
 
+def test_manifest_content_identity_excludes_only_gzip_transport(tmp_path):
+    """压缩 backend 可改变 transport，但不得改变规范内容身份。"""
+    *_, manifest = _write_minimal_pack(tmp_path)
+    first = manifest.files[0]
+    changed = replace(
+        first,
+        transport_sha256="f" * 64,
+        transport_size_bytes=first.transport_size_bytes + 1,
+    )
+    variant = replace(
+        manifest,
+        files=(changed, *manifest.files[1:]),
+    )
+    assert variant.sha256() != manifest.sha256()
+    assert variant.content_identity_bytes() == manifest.content_identity_bytes()
+    assert variant.content_sha256() == manifest.content_sha256()
+
+
 def test_writer_rejects_duplicate_key_and_wrong_owner_path(tmp_path):
     """重复键以及 teacher/evaluator 写进 Observation 路径均在发布前失败。"""
     sources, observations, teachers, _ = _bundle()

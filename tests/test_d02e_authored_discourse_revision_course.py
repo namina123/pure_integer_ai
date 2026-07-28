@@ -141,8 +141,8 @@ def test_compiler_is_bit_identical_partitioned_and_expected_private(tmp_path):
     second = compile_authored_discourse_course(SAMPLE_PATH, tmp_path / "second")
     assert first.pack_root.name == PACK_NAME
     assert first.manifest == second.manifest
-    assert first.manifest.sha256() == (
-        "b5efb5b90b5c6ab45ff0f7a14b730b984cd7fe4ca05e37c2ff35f553a61a9870")
+    assert first.manifest.content_sha256() == (
+        "420a98334a9fb9ce91e116bc991daaa544316cfbd19cf23fa3da942a35703c95")
     assert first.manifest.w_stages == ("W-08",)
     assert first.validation.source_ref_count == 12
     assert first.validation.observation_count == 12
@@ -362,8 +362,8 @@ def test_nested_manifest_does_not_drift(tmp_path):
     """新增 discourse 合同不得改变已关闭 nested artifact 身份。"""
     nested = compile_authored_nested_course(
         NESTED_SAMPLE_PATH, tmp_path / "nested")
-    assert nested.manifest.sha256() == (
-        "9ac80d9b182db9274b5a19aa9403180297e683d2cf43fb0948b56f83a23cd408")
+    assert nested.manifest.content_sha256() == (
+        "1908cacff3ad11398598dfa2248f99b8ac01d312d6737ed6a4a9f46aa6b7d0f7")
 
 
 def test_sample_hash_float_noncanonical_existing_pack_and_cues_fail_closed(
