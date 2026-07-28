@@ -1,0 +1,22 @@
+title = "Pure Integer AI secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Deterministic PH2 domain identities misclassified as generic API keys"
+regexTarget = "secret"
+regexes = [
+  '''^D02_(EVALUATOR_LABEL_INTEGRITY|PILOT_ISOLATION)_V1$''',
+  '''^(DEICTIC|NARRATIVE)_POINT_[ET]_[0-9]{2}_[0-9]+_V1$''',
+  '''^[ET]_[0-9]{2}_QUANTIFIED_PROPOSITION_[0-9]+$''',
+  '''^[ET]_LC(05|06|07|08|14)_[A-Z][A-Z0-9_]+$''',
+  '''^(teacher|evaluator)-([1-9]|1[0-2])(-[ab])?-(construction|scope|key)-v1$''',
+  '''^GG01_V2_GENERATION_CHOICE_CONTRACT$''',
+  '''^(GG03|LC(0[1-9]|1[0-5])|MD05_PROBE|NL00|RI00)_EVALUATOR_OWNER$''',
+  '''^LC13_(DIRECTIONAL_EVALUATOR_OWNER|DIRECTIONAL_CONSUMER_VERIFIER_V1)$''',
+  '''^J-LG-D03-(06-SECRET-CLEAR|08-CAPABILITY-LEDGERS-FROZEN|11-DIRECTIONAL-CONSUMERS-FROZEN|V4-10-P3IB-NE-PH3|V4-15-V3-PRESERVED)$''',
+  '''^(lexical-exception(-construction)?-v[12]|modifier-head-construction-v1|redup-aa-construction-v1|segmentation-(compound|lattice)-v1|zh-han-morphology-v1)$''',
+  '''^MD04_ABLATION_KEYS$''',
+  '''^(UD_ZH_GSDSIMP_R2_18|ZHWIKTIONARY_20260701)$''',
+]

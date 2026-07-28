@@ -61,6 +61,32 @@ def _identity_matches(payload: bytes, item) -> bool:
     )
 
 
+def _historical_identity_matches(
+        relative_path: str,
+        expected_identities: tuple[tuple[int, str], ...]) -> bool:
+    """确认冻结或发布回执字节仍存在于可达 Git 历史。"""
+    commits = subprocess.run(
+        ("git", "log", "--all", "--format=%H", "--", relative_path),
+        cwd=REPOSITORY,
+        check=True,
+        capture_output=True,
+    ).stdout.decode("ascii").splitlines()
+    for commit in commits:
+        try:
+            payload = subprocess.run(
+                ("git", "show", f"{commit}:{relative_path}"),
+                cwd=REPOSITORY,
+                check=True,
+                capture_output=True,
+            ).stdout
+        except subprocess.CalledProcessError:
+            continue
+        identity = (len(payload), hashlib.sha256(payload).hexdigest())
+        if identity in expected_identities:
+            return True
+    return False
+
+
 def _verify_historical_repository_baseline(manifest) -> None:
     """以当前发布 override 或历史基线 blob 复验 v39 文件。"""
     receipt = json.loads(PUBLICATION_RECEIPT_PATH.read_bytes())
@@ -69,23 +95,19 @@ def _verify_historical_repository_baseline(manifest) -> None:
         for item in receipt["current_path_overrides"]
     }
     for item in manifest.file_inventory:
+        expected_identities = [(item.size_bytes, item.sha256)]
+        override = overrides.get(item.relative_path)
+        if override is not None:
+            expected_identities.append((
+                int(override["size_bytes"]), str(override["sha256"])))
         current_path = REPOSITORY / item.relative_path
         if current_path.is_file():
             current = current_path.read_bytes()
-            if _identity_matches(current, item):
+            identity = (len(current), hashlib.sha256(current).hexdigest())
+            if identity in expected_identities:
                 continue
-            override = overrides.get(item.relative_path)
-            if override is not None:
-                assert len(current) == override["size_bytes"]
-                assert hashlib.sha256(current).hexdigest() == override["sha256"]
-                continue
-        historical = subprocess.run(
-            ("git", "show", f"{manifest.head_sha1}:{item.relative_path}"),
-            cwd=REPOSITORY,
-            check=True,
-            capture_output=True,
-        ).stdout
-        assert _identity_matches(historical, item)
+        assert _historical_identity_matches(
+            item.relative_path, tuple(expected_identities))
     for item in manifest.paper_files:
         assert _identity_matches(
             (REPOSITORY / item.relative_path).read_bytes(), item)

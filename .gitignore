@@ -33,6 +33,7 @@ data/*.tsv
 *.sqlite
 *.sqlite3
 *.db
+!r02_storage_profile_artifacts/run_v1/profile.sqlite3
 experiments/_out/
 experiments/out/
 

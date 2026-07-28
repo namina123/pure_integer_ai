@@ -1,0 +1,6 @@
+* text=auto eol=lf
+
+paper/** -text -diff
+*.gz -text
+*.pdf -text
+*.sqlite3 -text

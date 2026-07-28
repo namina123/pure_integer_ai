@@ -40,7 +40,7 @@ from the teacher split even when both individual axes occur there. A
 dictionary-replay-only candidate is an explicit negative baseline and cannot
 pass productive morphology merely because the whole surface is present.
 
-The emitted pack remains outside Git under
+The emitted reproducibility pack is published under
 `ph2_dataset_artifacts/d02_language_courses_v1`. Course and manifest
 publication do not assert runtime learning, held-out generalization, mastery,
 readiness, or teacher-free execution.
@@ -148,8 +148,10 @@ to the conservative CC-BY-SA-4.0 partition and page-level attribution rules.
 
 `manifests/zhwiktionary_20260701.multistream_snapshot.json` is
 project-authored acquisition metadata. The referenced compressed XML/index,
-official dump status, project checksum list, HTTP header captures, and two
-full-EOF parser reports remain outside Git under the local raw root.
+official dump status, project checksum list, and HTTP header captures remain
+outside Git under the local raw root. The two full-EOF parser reports are
+published under `ph2_dataset_raw/ZHWIKTIONARY_20260701` as reproducibility
+evidence; they contain aggregate scan results rather than dictionary pages.
 
 Wiktionary text is available under Creative Commons
 Attribution-ShareAlike 4.0 International, subject to page/revision contributor
@@ -198,7 +200,8 @@ external observations, not definitive project truth.
 ledger. It binds six physically separate, single-license source packs under the
 relative artifact root `ph2_dataset_artifacts/d02_source_pack_v1`: UD Chinese
 GSDSimp, Wikidata, the two ConceptNet license partitions, Wiktionary, and
-Wikipedia. Bulk raw files and the emitted packs remain outside Git.
+Wikipedia. The small formal reproducibility packs are published in Git; bulk
+raw files remain outside Git.
 
 Each frozen entry binds its raw snapshot manifest hash, pack manifest hash,
 record count, split set, source-cluster count, and full-combination-cluster

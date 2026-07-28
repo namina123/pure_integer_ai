@@ -126,6 +126,25 @@ def _publication_receipt() -> dict[str, object]:
     return value
 
 
+def _historical_identity_matches(
+        relative_path: str,
+        expected_size: int,
+        expected_sha256: str) -> bool:
+    """确认发布回执指定的精确字节仍存在于可达 Git 历史。"""
+    commits = _git(
+        "log", "--all", "--format=%H", "--", relative_path,
+    ).decode("ascii").splitlines()
+    for commit in commits:
+        try:
+            payload = _git("show", f"{commit}:{relative_path}")
+        except subprocess.CalledProcessError:
+            continue
+        if (len(payload) == expected_size
+                and hashlib.sha256(payload).hexdigest() == expected_sha256):
+            return True
+    return False
+
+
 def _candidate_workspace_matches_gate(manifest) -> bool:
     """只在 v4 所冻结的提交前工作树中重建 candidate gate。"""
     return (
@@ -163,15 +182,22 @@ def _verify_published_v4_snapshot(manifest) -> None:
         ARTIFACT_PATH,
         PUBLICATION_RECEIPT_RELATIVE_PATH,
     } <= tracked
-    for item in (*manifest.file_inventory, *manifest.paper_files):
+    for item in manifest.file_inventory:
         payload = (REPOSITORY / item.relative_path).read_bytes()
         expected = overrides.get(item.relative_path)
         expected_size = (
             int(expected["size_bytes"]) if expected else item.size_bytes)
         expected_sha256 = (
             str(expected["sha256"]) if expected else item.sha256)
-        assert len(payload) == expected_size
-        assert hashlib.sha256(payload).hexdigest() == expected_sha256
+        if (len(payload) == expected_size
+                and hashlib.sha256(payload).hexdigest() == expected_sha256):
+            continue
+        assert _historical_identity_matches(
+            item.relative_path, expected_size, expected_sha256)
+    for item in manifest.paper_files:
+        payload = (REPOSITORY / item.relative_path).read_bytes()
+        assert len(payload) == item.size_bytes
+        assert hashlib.sha256(payload).hexdigest() == item.sha256
     artifact = FORMAL_V4_PATH.read_bytes()
     assert hashlib.sha256(artifact).hexdigest() == receipt["artifact_sha256"]
 

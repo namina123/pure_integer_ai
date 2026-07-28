@@ -19,11 +19,25 @@ os.environ 对当前进程无效（CPython 启动时一次性读）。**os.execv
 exit code·不做实工作·开销≈一次进程启动（~1s）·CI/本地均接受。
 """
 import os
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 _HASH_SEED = "0"
 _REEXEC_MARKER = "_PURE_INTEGER_AI_HASH_REEXEC"
+
+_PUBLIC_EVIDENCE_DIRECTORIES = (
+    "ph2_dataset_artifacts",
+    "ph2_p3ia_dataset_artifacts",
+    "r02_storage_profile_artifacts",
+)
+_PUBLIC_EVIDENCE_FILES = (
+    "ph2_dataset_raw/ZHWIKTIONARY_20260701/"
+    "zhwiktionary-20260701.final-adapter-v1.pass-1.report.json",
+    "ph2_dataset_raw/ZHWIKTIONARY_20260701/"
+    "zhwiktionary-20260701.final-adapter-v1.pass-2.report.json",
+)
 
 
 def _ensure_hash_seed() -> None:
@@ -52,3 +66,28 @@ def _ensure_hash_seed() -> None:
 
 
 _ensure_hash_seed()
+
+
+def _materialize_public_evidence_view() -> None:
+    """把仓库内公开证据映射到不可改名的历史 WORKSPACE 相对路径。"""
+    repository = Path(__file__).resolve().parent
+    workspace = repository.parent
+    for relative_path in _PUBLIC_EVIDENCE_DIRECTORIES:
+        source = repository / relative_path
+        target = workspace / relative_path
+        if target.exists() or not source.is_dir():
+            continue
+        shutil.copytree(source, target)
+    for relative_path in _PUBLIC_EVIDENCE_FILES:
+        source = repository / Path(*relative_path.split("/"))
+        target = workspace / Path(*relative_path.split("/"))
+        if target.exists() or not source.is_file():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
+def pytest_sessionstart(session: object) -> None:
+    """在收集测试前生成公开 clone 可复现的历史证据布局。"""
+    del session
+    _materialize_public_evidence_view()
