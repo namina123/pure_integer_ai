@@ -1,6 +1,7 @@
 """M-11 全对象隔离、逻辑导出、遗忘事务和恢复对抗。"""
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,11 @@ from pure_integer_ai.cognition.shared.memory_batch import (
     MemoryBatchRuntimeConfig,
     install_memory_batch_runtimes,
 )
-from pure_integer_ai.cognition.shared.memory_event import MemoryLinkedRef
+from pure_integer_ai.cognition.shared.memory_event import (
+    MEMORY_EVENT_OBSERVATION,
+    MemoryEvent,
+    MemoryLinkedRef,
+)
 from pure_integer_ai.cognition.shared.memory_overlay import (
     MemoryAccessContext,
     MemoryOverlayRelation,
@@ -42,7 +47,10 @@ from pure_integer_ai.cognition.shared.memory_owner import (
     MemoryOwnerSelector,
     select_memory_layers,
 )
-from pure_integer_ai.cognition.shared.scope_identity import session_scope
+from pure_integer_ai.cognition.shared.scope_identity import (
+    LogicalTimestamp,
+    session_scope,
+)
 from pure_integer_ai.cognition.understanding.memory_intake import (
     HypothesisIntakeDraft,
     ObservationIntakeDraft,
@@ -63,6 +71,7 @@ from pure_integer_ai.storage.backend import DictBackend, SQLiteBackend
 from pure_integer_ai.storage.edge_store import EPI_STRUCTURED, SOURCE_BARE_TEXT
 from pure_integer_ai.storage.memory_batch import MEMORY_BATCH_CORE_DEPENDENCY_KEY
 from pure_integer_ai.storage.memory_event import MEMORY_EVENT_TABLE
+from pure_integer_ai.storage.memory_forget import MemoryForgetIntegrityError
 from pure_integer_ai.storage.memory_overlay import MEMORY_OVERLAY_TABLE
 from pure_integer_ai.storage.placement import TemperatureProfile, TemperatureTier
 from pure_integer_ai.storage.sealed_segment import SegmentBudget
@@ -564,3 +573,159 @@ def test_v06_clone_owns_independent_forget_visibility():
         assert len(ctx.memory_isolation_runtime.export(access).events) == 4
     finally:
         backend.close()
+
+
+def test_exact_source_forget_is_narrow_idempotent_and_reason_bound():
+    """同 owner 只撤回精确来源；同 reason 重放稳定，其他 reason 拒绝。"""
+    backend = DictBackend()
+    try:
+        ctx = _context(backend)
+        session = OwnerScope(10, 11, 12, VISIBILITY_SESSION)
+        revoked = _source(61, session)
+        retained = _source(62, session)
+        _ingest(ctx, revoked, 61)
+        _ingest(ctx, retained, 62)
+        access = MemoryAccessContext(10, 11, 12)
+        before_rows = backend.count(MEMORY_EVENT_TABLE)
+
+        first = ctx.memory_isolation_runtime.forget_source(
+            _management(session, OWNER_SELECTION_EXACT),
+            revoked,
+            reason_key=(61, 1),
+        )
+        exported = ctx.memory_isolation_runtime.export(access)
+        assert first.event_count > 0
+        assert first.overlay_count == 0
+        assert first.source_count == 1
+        assert first.companion_count == 1
+        assert tuple(item.source_key for item in exported.sources) == (
+            retained.stable_key(),)
+        assert backend.count(MEMORY_EVENT_TABLE) == before_rows
+
+        replay = ctx.memory_isolation_runtime.forget_source(
+            _management(session, OWNER_SELECTION_EXACT),
+            revoked,
+            reason_key=(61, 1),
+        )
+        assert replay == first
+        with pytest.raises(
+                MemoryForgetIntegrityError,
+                match="不同范围或 reason"):
+            ctx.memory_isolation_runtime.forget_source(
+                _management(session, OWNER_SELECTION_EXACT),
+                revoked,
+                reason_key=(61, 2),
+            )
+    finally:
+        backend.close()
+
+
+def test_exact_source_replay_rejects_unsealed_same_identity_event():
+    """撤回后同 SourceRef 的新事件未进入原 set 时必须失败关闭。"""
+    backend = DictBackend()
+    try:
+        ctx = _context(backend)
+        session = OwnerScope(10, 11, 13, VISIBILITY_SESSION)
+        source = _source(63, session)
+        _ingest(ctx, source, 63)
+        access = MemoryAccessContext(10, 11, 13)
+        observation = next(
+            item.event for item in ctx.memory_interact_events.query(
+                access=access)
+            if item.event.event_kind == MEMORY_EVENT_OBSERVATION
+        )
+        ctx.memory_isolation_runtime.forget_source(
+            _management(session, OWNER_SELECTION_EXACT),
+            source,
+            reason_key=(63, 1),
+        )
+
+        payload = replace(
+            observation.payload,
+            observed_at=LogicalTimestamp(
+                observation.timestamp.clock,
+                observation.timestamp.seq + 100,
+            ),
+        )
+        object_ref = replace(
+            observation.object_ref,
+            object_key=payload.stable_key(),
+        )
+        ctx.memory_interact_events.append(MemoryEvent(
+            observation.event_kind,
+            object_ref,
+            observation.scope,
+            payload,
+        ))
+        with pytest.raises(
+                MemoryForgetIntegrityError,
+                match="重新出现未封存事件"):
+            ctx.memory_isolation_runtime.forget_source(
+                _management(session, OWNER_SELECTION_EXACT),
+                source,
+                reason_key=(63, 1),
+            )
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("point", (
+    None,
+    FAULT_MEMORY_FORGET_AFTER_STAGE,
+    FAULT_MEMORY_FORGET_AFTER_PROJECTION,
+    FAULT_MEMORY_FORGET_AFTER_COMMIT,
+))
+def test_sqlite_exact_source_forget_owns_cross_process_commit(
+        tmp_path: Path,
+        point: int | None):
+    """正常和三故障路径都由 runtime 显式提交并在重启后收敛。"""
+    path = str(tmp_path / f"source-forget-{point}.sqlite3")
+    session = OwnerScope(12, 13, 14, VISIBILITY_SESSION)
+    revoked = _source(71, session)
+    retained = _source(72, session)
+    access = MemoryAccessContext(12, 13, 14)
+
+    backend = SQLiteBackend(path)
+    ctx = _context(backend)
+    revoked_result = _ingest(ctx, revoked, 71)
+    retained_result = _ingest(ctx, retained, 72)
+    if point is None:
+        result = ctx.memory_isolation_runtime.forget_source(
+            _management(session, OWNER_SELECTION_EXACT),
+            revoked,
+            reason_key=(71, 1),
+        )
+        operation_hash = result.operation_hash
+    else:
+        with pytest.raises(RuntimeError, match="M-11 fault"):
+            ctx.memory_isolation_runtime.forget_source(
+                _management(session, OWNER_SELECTION_EXACT),
+                revoked,
+                reason_key=(71, 1),
+                fault_injector=_FailOnce(point),
+            )
+        operations = ctx.memory_isolation_runtime.forget_store.staged_operations()
+        assert len(operations) == 1
+        operation_hash = operations[0].operation_hash
+    backend.close()
+
+    restored_backend = SQLiteBackend(path)
+    try:
+        restored = _context(restored_backend)
+        exported = restored.memory_isolation_runtime.export(access)
+        assert tuple(item.source_key for item in exported.sources) == (
+            retained.stable_key(),)
+        assert restored.memory_isolation_runtime.forget_store.is_committed(
+            operation_hash)
+        assert restored.memory_interact_aggregates.read(
+            revoked_result.hypothesis_refs[0], access=access) is None
+        assert restored.memory_interact_aggregates.read(
+            retained_result.hypothesis_refs[0], access=access) is not None
+        replay = restored.memory_isolation_runtime.forget_source(
+            _management(session, OWNER_SELECTION_EXACT),
+            revoked,
+            reason_key=(71, 1),
+        )
+        assert replay.operation_hash == operation_hash
+    finally:
+        restored_backend.close()

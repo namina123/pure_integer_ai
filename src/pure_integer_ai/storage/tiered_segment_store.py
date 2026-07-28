@@ -41,6 +41,7 @@ from pure_integer_ai.storage.segment_repository import (
     OBJECT_KIND_MIGRATION_COMMIT,
     OBJECT_KIND_SEGMENT,
     OBJECT_KIND_SEGMENT_RELEASE,
+    OBJECT_KIND_SEGMENT_WRITE_INTENT,
     SegmentRepositoryError,
     SegmentRepositoryFaultInjector,
     hit_repository_fault,
@@ -49,6 +50,10 @@ from pure_integer_ai.storage.segment_release import (
     SegmentReleaseCommitRecord,
     SegmentReleaseIntegrityError,
     validate_release_chain,
+)
+from pure_integer_ai.storage.segment_write_intent import (
+    SegmentWriteIntent,
+    SegmentWriteIntentIntegrityError,
 )
 from pure_integer_ai.storage.storage_role import (
     STORAGE_ROLE_REBUILDABLE,
@@ -246,6 +251,8 @@ class BoundedSegmentReader:
         self.descriptor_key = strict_integer_tuple(
             descriptor_key, label="bounded reader descriptor_key")
         self._closed = False
+        self._cached_copy_key: tuple[int, ...] | None = None
+        self._cached_segment: SealedSegment | None = None
 
     def page(
             self,
@@ -273,7 +280,7 @@ class BoundedSegmentReader:
         selected_bytes = 0
         seen: set[tuple[int, ...]] = set()
         for entry in self._matching_entries(lower, upper, after):
-            segment = self._store._load_segment(entry)
+            segment = self._load_segment(entry)
             for record in segment.records:
                 if lower is not None and record.record_key < lower:
                     continue
@@ -327,8 +334,22 @@ class BoundedSegmentReader:
         """释放 reader epoch，并触发已满足屏障的旧位置回收。"""
         if self._closed:
             return
+        self._cached_copy_key = None
+        self._cached_segment = None
         self._store._close_reader(self.lease)
         self._closed = True
+
+    def _load_segment(self, entry: LocationManifestEntry) -> SealedSegment:
+        """在当前 reader 内最多缓存一个不可变 segment，跨段立即替换。"""
+        copy_key = segment_copy_identity(entry.tier_key, entry.segment_key)
+        if self._cached_copy_key == copy_key:
+            if self._cached_segment is None:
+                raise AssertionError("reader segment cache 状态不完整")
+            return self._cached_segment
+        segment = self._store._load_segment(entry)
+        self._cached_copy_key = copy_key
+        self._cached_segment = segment
+        return segment
 
     def _matching_entries(
             self,
@@ -417,12 +438,14 @@ class TieredSegmentStore:
         self._releases: dict[
             tuple[int, ...], tuple[SegmentReleaseCommitRecord, ...]
         ] = {}
+        self._write_intents: dict[tuple[int, ...], SegmentWriteIntent] = {}
         self._load_manifests()
+        self._load_write_intents()
         self._load_commits()
         self._load_releases()
         self._recover_commits()
         self._recover_releases()
-        self._reclaim_unreferenced_segments()
+        self._recover_write_intents()
 
     def current_manifest(self) -> LocationManifest | None:
         """返回当前完整 location epoch；尚未发布时返回 None。"""
@@ -431,11 +454,20 @@ class TieredSegmentStore:
     def recover_pending_operations(self) -> None:
         """重载持久化阶段记录，推进未完成迁移/释放并回收未引用段。"""
         self._load_manifests()
+        self._load_write_intents()
         self._load_commits()
         self._load_releases()
         self._recover_commits()
         self._recover_releases()
-        self._reclaim_unreferenced_segments()
+        self._recover_write_intents()
+
+    def active_write_intent_count(self) -> int:
+        """返回当前尚未进入已知终态的轻量 target 写 intent 数。"""
+        return len(self._write_intents)
+
+    def audit_and_reclaim_legacy_orphans(self) -> int:
+        """显式全介质审计旧格式未知 orphan，不进入普通启动路径。"""
+        return self._reclaim_unreferenced_segments()
 
     def descriptor_state_key(
             self,
@@ -941,6 +973,7 @@ class TieredSegmentStore:
         """执行写目标、核验、prepared、发布、切换和有屏障回收。"""
         target_identity = segment_copy_identity(
             prepared.target_tier_key, prepared.segment_key)
+        self._append_write_intent(prepared)
         self.repository.put(
             OBJECT_KIND_SEGMENT,
             target_identity,
@@ -981,6 +1014,7 @@ class TieredSegmentStore:
             {"migration_key": prepared.migration_key},
         )
         self._complete_reclaim(prepared, fault_injector=fault_injector)
+        self._complete_write_intent(prepared)
         return manifest
 
     def _recover_commits(self) -> None:
@@ -1025,6 +1059,32 @@ class TieredSegmentStore:
                 self._append_commit(
                     prepared.with_phase(MIGRATION_PHASE_PUBLISHED))
             self._complete_reclaim(prepared)
+
+    def _recover_write_intents(self) -> None:
+        """只枚举轻量 intent，回收未形成 PREPARED 的已知 target orphan。"""
+        for migration_key in sorted(tuple(self._write_intents)):
+            intent = self._write_intents[migration_key]
+            chain = self._commits.get(migration_key)
+            if chain is None:
+                self.repository.reclaim(
+                    OBJECT_KIND_SEGMENT,
+                    segment_copy_identity(
+                        intent.target_tier_key, intent.segment_key),
+                )
+            else:
+                records = validate_commit_chain(chain)
+                prepared = records[0]
+                if intent != SegmentWriteIntent.from_prepared(prepared):
+                    raise SegmentWriteIntentIntegrityError(
+                        "write intent 与 PREPARED commit 漂移")
+                phases = {item.phase for item in records}
+                if not phases & {
+                        MIGRATION_PHASE_ABORTED,
+                        MIGRATION_PHASE_PUBLISHED,
+                        MIGRATION_PHASE_RECLAIMED}:
+                    raise SegmentCommitIntegrityError(
+                        "write intent recovery 后 commit 未进入终态")
+            self._complete_write_intent(intent)
 
     def _complete_reclaim(
             self,
@@ -1177,6 +1237,40 @@ class TieredSegmentStore:
         updated = validate_commit_chain((*previous, record))
         self._commits[record.migration_key] = updated
 
+    def _append_write_intent(self, record: MigrationCommitRecord) -> None:
+        """在 target 写入前发布最小 intent，使故障 orphan 可被定点回收。"""
+        intent = SegmentWriteIntent.from_prepared(record)
+        self.repository.put(
+            OBJECT_KIND_SEGMENT_WRITE_INTENT,
+            intent.identity_key(),
+            intent.to_bytes(),
+        )
+        previous = self._write_intents.get(intent.migration_key)
+        if previous is not None and previous != intent:
+            raise SegmentWriteIntentIntegrityError(
+                "同一 migration write intent 漂移")
+        self._write_intents[intent.migration_key] = intent
+
+    def _complete_write_intent(
+            self,
+            value: MigrationCommitRecord | SegmentWriteIntent,
+            ) -> None:
+        """事务进入已知终态后回收 intent，避免稳定启动累积扫描。"""
+        intent = (
+            value if isinstance(value, SegmentWriteIntent)
+            else SegmentWriteIntent.from_prepared(value))
+        previous = self._write_intents.get(intent.migration_key)
+        if previous is None:
+            return
+        if previous != intent:
+            raise SegmentWriteIntentIntegrityError(
+                "完成 write intent 时内容漂移")
+        self.repository.reclaim(
+            OBJECT_KIND_SEGMENT_WRITE_INTENT,
+            intent.identity_key(),
+        )
+        del self._write_intents[intent.migration_key]
+
     def _append_release(self, record: SegmentReleaseCommitRecord) -> None:
         """幂等持久化一个释放阶段，并更新内存阶段链。"""
         self.repository.put(
@@ -1210,6 +1304,26 @@ class TieredSegmentStore:
             manifests.append(manifest)
         for manifest in sorted(manifests, key=lambda item: item.publish_epoch):
             self.ledger.append(manifest)
+
+    def _load_write_intents(self) -> None:
+        """恢复尚未完成的轻量 write intent，不接触 target segment payload。"""
+        intents: dict[tuple[int, ...], SegmentWriteIntent] = {}
+        for descriptor in self.repository.list_kind(
+                OBJECT_KIND_SEGMENT_WRITE_INTENT):
+            payload = self.repository.get(
+                OBJECT_KIND_SEGMENT_WRITE_INTENT,
+                descriptor.identity_key,
+            )
+            intent = SegmentWriteIntent.from_bytes(payload)
+            if intent.identity_key() != descriptor.identity_key:
+                raise SegmentWriteIntentIntegrityError(
+                    "segment write intent identity 漂移")
+            previous = intents.get(intent.migration_key)
+            if previous is not None and previous != intent:
+                raise SegmentWriteIntentIntegrityError(
+                    "同一 migration 存在冲突 write intent")
+            intents[intent.migration_key] = intent
+        self._write_intents = intents
 
     def _load_commits(self) -> None:
         """从对象仓库恢复全部迁移阶段并按 migration 分组核验。"""
@@ -1363,7 +1477,7 @@ class TieredSegmentStore:
         self.reader_epochs.release(lease)
         self.reclaim_ready()
 
-    def _reclaim_unreferenced_segments(self) -> None:
+    def _reclaim_unreferenced_segments(self) -> int:
         """回收不属于当前 epoch 或任何活动 reader 固定 epoch 的孤儿副本。"""
         current = self.ledger.current()
         referenced = set()
@@ -1377,11 +1491,14 @@ class TieredSegmentStore:
                     segment_copy_identity(entry.tier_key, entry.segment_key)
                     for entry in manifest.entries
                 )
+        reclaimed = 0
         for descriptor in self.repository.list_kind(OBJECT_KIND_SEGMENT):
             parse_segment_copy_identity(descriptor.identity_key)
             if descriptor.identity_key not in referenced:
-                self.repository.reclaim(
-                    OBJECT_KIND_SEGMENT, descriptor.identity_key)
+                if self.repository.reclaim(
+                        OBJECT_KIND_SEGMENT, descriptor.identity_key):
+                    reclaimed += 1
+        return reclaimed
 
 
 __all__ = [

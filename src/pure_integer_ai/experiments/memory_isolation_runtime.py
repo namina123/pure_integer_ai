@@ -13,11 +13,13 @@ from pure_integer_ai.cognition.shared.memory_overlay import (
     MemoryOverlayRelation,
 )
 from pure_integer_ai.cognition.shared.memory_owner import (
+    OWNER_SELECTION_EXACT,
     MemoryManagementContext,
     MemoryOwnerAuthorizer,
     MemoryOwnerSelector,
 )
 from pure_integer_ai.storage.memory_forget import (
+    FORGET_SELECTION_SOURCE_EXACT,
     FORGET_TARGET_COMPANION,
     FORGET_TARGET_EVENT,
     FORGET_TARGET_OVERLAY,
@@ -198,6 +200,7 @@ class MemoryIsolationRuntime:
         backends.add(id(source_repository.backend))
         if len(backends) != 1:
             raise MemoryIsolationError("M-11 facade 未绑定同一 backend")
+        self.backend = event_logs[0].backend
 
     def state_key(self) -> tuple[int, ...]:
         """返回授权配置和遗忘物理策略的稳定 runtime 键。"""
@@ -295,69 +298,119 @@ class MemoryIsolationRuntime:
             reason_key,
             targets,
         )
-        affected_owners = self._owners_for_operation(operation, selector)
-        previous = self.forget_store.staged(operation_hash)
-        if previous is not None and previous != operation:
-            raise MemoryForgetIntegrityError("同一遗忘操作 staged 内容漂移")
-        self.forget_store.stage(operation)
-        _hit(fault_injector, FAULT_MEMORY_FORGET_AFTER_STAGE, {
-            "operation_hash": operation_hash,
-            "target_count": len(targets),
-        })
-        try:
-            with self.forget_visibility.preview(operation_hash):
-                self._rebuild_owners(affected_owners)
-            _hit(fault_injector, FAULT_MEMORY_FORGET_AFTER_PROJECTION, {
-                "operation_hash": operation_hash,
-                "target_count": len(targets),
-            })
-            if not self.forget_store.is_committed(operation_hash):
-                self.forget_store.commit(operation)
-            _hit(fault_injector, FAULT_MEMORY_FORGET_AFTER_COMMIT, {
-                "operation_hash": operation_hash,
-                "target_count": len(targets),
-            })
-        except BaseException:
-            self._rebuild_owners(affected_owners)
-            raise
-        return MemoryForgetResult(
-            operation_hash,
-            len(export.events),
-            len(export.overlays),
-            len(tuple(
-                item for item in export.sources
-                if selector.matches(SourceRef.from_stable_key(
-                    item.source_key).owner))),
-            len(tuple(
-                item for item in export.companions
-                if MemoryForgetTarget(
-                    FORGET_TARGET_COMPANION,
-                    item.stable_assoc_key()) in targets)),
+        self._apply_forget_operation(
+            operation,
+            selector,
+            fault_injector=fault_injector,
         )
+        return self._forget_result(operation)
+
+    def forget_source(
+            self,
+            context: MemoryManagementContext,
+            source: SourceRef,
+            *,
+            reason_key: tuple[int, ...],
+            fault_injector: MemoryForgetFaultInjector | None = None,
+            ) -> MemoryForgetResult:
+        """撤回授权范围内精确 SourceRef，不扩大到同 owner 的其他来源。"""
+        authorized = self._authorize(context)
+        if not isinstance(source, SourceRef):
+            raise TypeError("source 必须是 SourceRef")
+        if not authorized.matches(source.owner):
+            raise MemoryIsolationError("source owner 超出已授权管理范围")
+        source_target = MemoryForgetTarget(
+            FORGET_TARGET_SOURCE, source.stable_key())
+        operations = self.forget_store.staged_operations()
+        linked = tuple(
+            operation for operation in operations
+            if source_target in operation.targets
+        )
+        matching = tuple(
+            operation for operation in linked
+            if (operation.owner_key == source.owner.stable_key()
+                and operation.selection_kind == FORGET_SELECTION_SOURCE_EXACT
+                and operation.reason_key == reason_key)
+        )
+        if len(linked) > 1 or len(matching) > 1:
+            raise MemoryForgetIntegrityError(
+                "同一 SourceRef 对应多个 staged 遗忘操作")
+        if linked and not matching:
+            raise MemoryForgetIntegrityError(
+                "SourceRef 已由不同范围或 reason 撤回")
+
+        event_targets = self._source_event_targets(source)
+        operation_selector = MemoryOwnerSelector(
+            source.owner, OWNER_SELECTION_EXACT)
+        if matching:
+            operation = matching[0]
+            sealed_events = frozenset(
+                target for target in operation.targets
+                if target.target_kind == FORGET_TARGET_EVENT)
+            if set(event_targets) - sealed_events:
+                raise MemoryForgetIntegrityError(
+                    "已撤回 SourceRef 重新出现未封存事件")
+            self._apply_forget_operation(
+                operation,
+                operation_selector,
+                fault_injector=fault_injector,
+            )
+            return self._forget_result(operation)
+
+        if self.forget_visibility.source_is_forgotten(source.stable_key()):
+            raise MemoryForgetIntegrityError("SourceRef 已被其他遗忘操作撤回")
+        source_record = self.source_repository.find(source.stable_key())
+        if not event_targets and source_record is None:
+            raise MemoryIsolationError("SourceRef 当前没有可撤回的逻辑闭包")
+        targets = [*event_targets, source_target]
+        if source_record is not None and source_record.metadata_complete:
+            targets.append(MemoryForgetTarget(
+                FORGET_TARGET_COMPANION,
+                (
+                    source_record.companion_type_hash,
+                    source_record.companion_name_hash,
+                    source_record.companion_assoc_id,
+                ),
+            ))
+        normalized = tuple(sorted(set(targets)))
+        operation_hash = memory_forget_hash(
+            source.owner.stable_key(),
+            FORGET_SELECTION_SOURCE_EXACT,
+            reason_key,
+            normalized,
+        )
+        operation = StagedMemoryForget(
+            operation_hash,
+            source.owner.stable_key(),
+            FORGET_SELECTION_SOURCE_EXACT,
+            reason_key,
+            normalized,
+        )
+        self._apply_forget_operation(
+            operation,
+            operation_selector,
+            fault_injector=fault_injector,
+        )
+        return self._forget_result(operation)
 
     def recover_pending(self) -> tuple[int, ...]:
         """启动时从完整 staged set 重建投影并 roll-forward commit。"""
         operations = self.forget_store.staged_operations()
-        pending = tuple(
-            operation for operation in operations
-            if not self.forget_store.is_committed(operation.operation_hash)
-        )
         recovered = []
         final_owners = set()
-        for operation in pending:
-            selector = MemoryOwnerSelector(
-                OwnerScope(*operation.owner_key),
-                operation.selection_kind,
-            )
+        for operation in operations:
+            selector = self._selector_for_operation(operation)
             affected_owners = self._owners_for_operation(operation, selector)
-            with self.forget_visibility.preview(operation.operation_hash):
-                self._rebuild_owners(affected_owners)
-            self.forget_store.commit(operation)
-            recovered.append(operation.operation_hash)
             final_owners.update(affected_owners)
+            if not self.forget_store.is_committed(operation.operation_hash):
+                with self.forget_visibility.preview(operation.operation_hash):
+                    self._rebuild_owners(affected_owners)
+                self.forget_store.commit(operation)
+                recovered.append(operation.operation_hash)
         if final_owners:
             self._rebuild_owners(tuple(sorted(
                 final_owners, key=lambda item: item.stable_key())))
+            self.backend.commit()
         return tuple(sorted(recovered))
 
     def clone_for_context(self, ctx) -> "MemoryIsolationRuntime":
@@ -380,6 +433,98 @@ class MemoryIsolationRuntime:
         if not self.authorizer.authorize(context.actor, context.selector):
             raise MemoryIsolationError("管理请求未获授权")
         return context.selector
+
+    def _apply_forget_operation(
+            self,
+            operation: StagedMemoryForget,
+            selector: MemoryOwnerSelector,
+            *,
+            fault_injector: MemoryForgetFaultInjector | None,
+            ) -> None:
+        """以同一 staged/preview/rebuild/commit 序列执行两类遗忘。"""
+        affected_owners = self._owners_for_operation(operation, selector)
+        previous = self.forget_store.staged(operation.operation_hash)
+        if previous is not None and previous != operation:
+            raise MemoryForgetIntegrityError("同一遗忘操作 staged 内容漂移")
+        self.forget_store.stage(operation)
+        try:
+            _hit(fault_injector, FAULT_MEMORY_FORGET_AFTER_STAGE, {
+                "operation_hash": operation.operation_hash,
+                "target_count": len(operation.targets),
+            })
+            with self.forget_visibility.preview(operation.operation_hash):
+                self._rebuild_owners(affected_owners)
+            _hit(fault_injector, FAULT_MEMORY_FORGET_AFTER_PROJECTION, {
+                "operation_hash": operation.operation_hash,
+                "target_count": len(operation.targets),
+            })
+            if not self.forget_store.is_committed(operation.operation_hash):
+                self.forget_store.commit(operation)
+            _hit(fault_injector, FAULT_MEMORY_FORGET_AFTER_COMMIT, {
+                "operation_hash": operation.operation_hash,
+                "target_count": len(operation.targets),
+            })
+            self._rebuild_owners(affected_owners)
+            self.backend.commit()
+        except BaseException:
+            self._rebuild_owners(affected_owners)
+            self.backend.commit()
+            raise
+
+    def _source_event_targets(
+            self,
+            source: SourceRef,
+            ) -> tuple[MemoryForgetTarget, ...]:
+        """返回同 owner 内当前可见且精确携带 source 的事件目标。"""
+        selector = MemoryOwnerSelector(source.owner, OWNER_SELECTION_EXACT)
+        targets = []
+        for event_log in self.event_logs:
+            for item in event_log.query_owned(selector):
+                sources: set[SourceRef] = set()
+                self._collect_sources(item.event, sources, set())
+                if source not in sources:
+                    continue
+                targets.append(MemoryForgetTarget(
+                    FORGET_TARGET_EVENT,
+                    (
+                        event_log.memory_space_id,
+                        item.event_hash,
+                        *item.event.object_ref.owner.stable_key(),
+                    ),
+                ))
+        return tuple(sorted(set(targets)))
+
+    @staticmethod
+    def _selector_for_operation(
+            operation: StagedMemoryForget,
+            ) -> MemoryOwnerSelector:
+        """从 owner 或 source staged metadata 恢复投影管理范围。"""
+        selection_kind = operation.selection_kind
+        if selection_kind == FORGET_SELECTION_SOURCE_EXACT:
+            selection_kind = OWNER_SELECTION_EXACT
+        return MemoryOwnerSelector(
+            OwnerScope(*operation.owner_key),
+            selection_kind,
+        )
+
+    @staticmethod
+    def _forget_result(operation: StagedMemoryForget) -> MemoryForgetResult:
+        """从封存目标计数，保证 source 精确重放返回同一回执。"""
+        counts = {
+            FORGET_TARGET_EVENT: 0,
+            FORGET_TARGET_OVERLAY: 0,
+            FORGET_TARGET_SOURCE: 0,
+            FORGET_TARGET_COMPANION: 0,
+        }
+        for target in operation.targets:
+            counts[target.target_kind] += 1
+        return MemoryForgetResult(
+            operation.operation_hash,
+            counts[FORGET_TARGET_EVENT],
+            counts[FORGET_TARGET_OVERLAY],
+            counts[FORGET_TARGET_SOURCE],
+            counts[FORGET_TARGET_COMPANION],
+        )
 
     def _export_closure(
             self,

@@ -59,6 +59,10 @@ _OWNER_KEY_SIZE = 4
 _OWNED_OBJECT_PREFIX_SIZE = 2
 _SOURCE_OWNER_START = 3
 
+# Owner exact/subtree 沿用既有 1/2；3 只追加给精确 SourceRef 操作。
+FORGET_SELECTION_SOURCE_EXACT = 3
+_FORGET_SELECTION_KINDS = frozenset({1, 2, FORGET_SELECTION_SOURCE_EXACT})
+
 _SET_SEGMENT_TAG = 2026072341
 _COMMIT_SEGMENT_TAG = 2026072342
 _SET_MANIFEST_TAG = 2026072351
@@ -133,8 +137,8 @@ class StagedMemoryForget:
             raise ValueError("memory forget owner_key 长度非法")
         object.__setattr__(self, "owner_key", owner_key)
         assert_int(self.selection_kind, _where="memory forget selection_kind")
-        if type(self.selection_kind) is not int or self.selection_kind <= 0:
-            raise ValueError("selection_kind 必须是正严格整数")
+        if self.selection_kind not in _FORGET_SELECTION_KINDS:
+            raise ValueError("selection_kind 未注册")
         object.__setattr__(
             self,
             "reason_key",
@@ -237,8 +241,8 @@ def memory_forget_hash(
     owner = strict_integer_tuple(owner_key, label="forget hash owner")
     reason = strict_integer_tuple(reason_key, label="forget hash reason")
     assert_int(selection_kind, _where="forget hash selection")
-    if type(selection_kind) is not int or selection_kind <= 0:
-        raise ValueError("forget hash selection 必须是正严格整数")
+    if selection_kind not in _FORGET_SELECTION_KINDS:
+        raise ValueError("forget hash selection 未注册")
     if (not isinstance(targets, tuple)
             or not targets
             or any(not isinstance(item, MemoryForgetTarget)
@@ -563,6 +567,7 @@ __all__ = [
     "FORGET_TARGET_EVENT",
     "FORGET_TARGET_OVERLAY",
     "FORGET_TARGET_SOURCE",
+    "FORGET_SELECTION_SOURCE_EXACT",
     "MEMORY_FORGET_COMMIT_DESCRIPTOR",
     "MEMORY_FORGET_COMMIT_DESCRIPTOR_KEY",
     "MEMORY_FORGET_SET_DESCRIPTOR",

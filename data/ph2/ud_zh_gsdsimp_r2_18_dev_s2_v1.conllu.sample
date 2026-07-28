@@ -1,0 +1,16 @@
+# sent_id = dev-s2
+# parallel_id = zhgsd/dev2
+# text = 大多数的加长型礼车则是租车公司的财产。
+# translit = dàduōshùdejiāzhǎngxínglǐchēzéshìzūchēgōngsīdecáichǎn.
+1	大	大	ADV	RB	_	2	advmod	_	SpaceAfter=No|Translit=dà|LTranslit=dà
+2	多数	多数	ADJ	JJ	_	6	amod	_	SpaceAfter=No|Translit=duōshù|LTranslit=duōshù
+3	的	的	PART	DEC	Case=Gen	2	case	_	SpaceAfter=No|Translit=de|LTranslit=de
+4	加长	加长	VERB	VV	_	5	compound	_	SpaceAfter=No|Translit=jiāzhǎng|LTranslit=jiāzhǎng
+5	型	型	PART	SFN	_	6	nmod	_	SpaceAfter=No|Translit=xíng|LTranslit=xíng
+6	礼车	礼车	NOUN	NN	_	11	nsubj	_	SpaceAfter=No|Translit=lǐchē|LTranslit=lǐchē
+7	则是	是	AUX	VC	_	11	cop	_	SpaceAfter=No|Translit=zéshì|LTranslit=shì
+8	租车	租车	NOUN	NN	_	9	nmod	_	SpaceAfter=No|Translit=zūchē|LTranslit=zūchē
+9	公司	公司	NOUN	NN	_	11	nmod	_	SpaceAfter=No|Translit=gōngsī|LTranslit=gōngsī
+10	的	的	PART	DEC	Case=Gen	9	case	_	SpaceAfter=No|Translit=de|LTranslit=de
+11	财产	财产	NOUN	NN	_	0	root	_	SpaceAfter=No|Translit=cáichǎn|LTranslit=cáichǎn
+12	。	。	PUNCT	.	_	11	punct	_	SpaceAfter=No|Translit=.|LTranslit=.

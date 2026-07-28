@@ -15,6 +15,7 @@ from pure_integer_ai.cognition.shared.hypothesis import (
     EPISTEMIC_UNKNOWN,
     EVIDENCE_REFUTE,
     EVIDENCE_SUPPORT,
+    EVIDENCE_UNKNOWN,
     EvidenceRecord,
     HypothesisKey,
     HypothesisLedger,
@@ -835,8 +836,26 @@ class HypothesisResolver:
                     raise ValueError("H-04 决策逻辑序倒退")
             latest = ordered[-1]
             for trace in latest.candidates:
-                if ledger.snapshot(trace.hypothesis) != trace.after:
-                    raise ValueError("H-04 最新 decision 与 H-00 当前快照不一致")
+                current = ledger.snapshot(trace.hypothesis)
+                if current.lifecycle != trace.after.lifecycle:
+                    raise ValueError(
+                        "H-04 最新 decision 与 H-00 当前生命周期不一致")
+                history = {
+                    item.evidence_id: item
+                    for item in ledger.evidence_history(trace.hypothesis)
+                }
+                expected_stances = (
+                    (trace.after.support_evidence_ids, EVIDENCE_SUPPORT),
+                    (trace.after.refute_evidence_ids, EVIDENCE_REFUTE),
+                    (trace.after.unknown_evidence_ids, EVIDENCE_UNKNOWN),
+                )
+                if any(
+                        evidence_id not in history
+                        or history[evidence_id].stance != stance
+                        for evidence_ids, stance in expected_stances
+                        for evidence_id in evidence_ids):
+                    raise ValueError(
+                        "H-04 最新 decision 的历史 Evidence 不可审计")
             resolver._latest_by_competition[competition] = latest.decision_id
             for decision in ordered:
                 resolver._decisions[decision.decision_id] = decision

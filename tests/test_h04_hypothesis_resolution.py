@@ -657,3 +657,58 @@ def test_preview_and_clone_keep_host_ledger_and_decision_history_isolated():
     assert (ledger.state_key(), resolver.state_key()) == host_state
     assert cloned_ledger.state_key() != ledger.state_key()
     assert cloned.state_key() != resolver.state_key()
+
+
+def test_recovery_accepts_append_supersede_and_new_candidate_visibility():
+    """旧 decision 后 Evidence 前进和新候选可见不应阻断决策链恢复。"""
+    source = _source(81)
+    old = _hypothesis(source, 1)
+    added = _hypothesis(source, 2)
+    ledger = _ledger(old)
+    ledger.append_evidence(_evidence(
+        81, old, EVIDENCE_SUPPORT, timestamp_seq=1))
+    original = HypothesisResolver(ledger).resolve(old, timestamp_seq=2)
+
+    ledger.append_evidence(_evidence(
+        82, old, EVIDENCE_SUPPORT, timestamp_seq=3))
+    ledger.append_evidence(EvidenceRecord(
+        83,
+        old,
+        EVIDENCE_REFUTE,
+        (15100, EVIDENCE_REFUTE),
+        source,
+        4,
+        payload=(15101, 83),
+        supersedes_evidence_id=81,
+    ))
+    ledger.register(added)
+    ledger.append_evidence(_evidence(
+        84, added, EVIDENCE_SUPPORT, timestamp_seq=5))
+
+    recovered = HypothesisResolver.from_history(ledger, (original,))
+    assert recovered.decision_history(old) == (original,)
+    advanced = recovered.resolve(old, timestamp_seq=6)
+    assert advanced.previous_decision_id == original.decision_id
+    assert {item.hypothesis for item in advanced.candidates} == {old, added}
+    assert advanced.adopted_hypotheses == (added,)
+
+
+def test_recovery_still_rejects_lifecycle_drift_after_latest_decision():
+    """Evidence 可前进不等于外部可以绕过 H-04 改写 lifecycle。"""
+    source = _source(82)
+    hypothesis = _hypothesis(source, 1)
+    ledger = _ledger(hypothesis)
+    ledger.append_evidence(_evidence(
+        91, hypothesis, EVIDENCE_SUPPORT, timestamp_seq=1))
+    original = HypothesisResolver(ledger).resolve(
+        hypothesis, timestamp_seq=2)
+    ledger.append_evidence(_evidence(
+        92, hypothesis, EVIDENCE_REFUTE, timestamp_seq=3))
+    HypothesisResolver(ledger).resolve(
+        hypothesis,
+        timestamp_seq=4,
+        archives=(ArchiveDirective(hypothesis, 92),),
+    )
+
+    with pytest.raises(ValueError, match="当前生命周期不一致"):
+        HypothesisResolver.from_history(ledger, (original,))

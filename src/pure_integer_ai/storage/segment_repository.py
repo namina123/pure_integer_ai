@@ -36,6 +36,7 @@ OBJECT_KIND_SEGMENT = 1
 OBJECT_KIND_LOCATION_MANIFEST = 2
 OBJECT_KIND_MIGRATION_COMMIT = 3
 OBJECT_KIND_SEGMENT_RELEASE = 4
+OBJECT_KIND_SEGMENT_WRITE_INTENT = 5
 
 FAULT_OBJECT_AFTER_RESERVE = 1
 FAULT_OBJECT_AFTER_PART = 2
@@ -452,11 +453,11 @@ class BackendObjectRepository:
             ) -> StoredObjectDescriptor:
         """以预留、word 追加和 seal-last 顺序幂等发布一个对象。"""
         _validate_object_request(object_kind, identity_key, payload)
-        previous = self._find(object_kind, identity_key)
+        previous = self._find_with_payload(object_kind, identity_key)
         if previous is not None:
-            if self.get(object_kind, identity_key) != payload:
+            if previous[1] != payload:
                 raise SegmentRepositoryError("同一对象完整身份载荷漂移")
-            return previous
+            return previous[0]
         if self._writing:
             raise SegmentRepositoryError("当前 adapter 不允许重入并发 writer")
         self._writing = True
@@ -473,12 +474,11 @@ class BackendObjectRepository:
     def get(self, object_kind: int, identity_key: tuple[int, ...]) -> bytes:
         """按完整身份读取唯一可见对象并核验全部 word、seal 和校验和。"""
         _validate_object_request(object_kind, identity_key)
-        descriptor = self._find(object_kind, identity_key)
-        if descriptor is None:
+        matched = self._find_with_payload(object_kind, identity_key)
+        if matched is None:
             raise KeyError(
                 f"sealed object 不存在: {(object_kind, identity_key)}")
-        _, payload = self._read_object_id(descriptor.object_id)
-        return payload
+        return matched[1]
 
     def list_kind(self, object_kind: int) -> tuple[StoredObjectDescriptor, ...]:
         """扫描一种 seal 对象，过滤墓碑并按物理发布序完整核验。"""
@@ -742,17 +742,26 @@ class BackendObjectRepository:
             identity_key: tuple[int, ...],
             ) -> StoredObjectDescriptor | None:
         """用可碰撞索引缩小候选，再按完整身份决定唯一对象。"""
+        matched = self._find_with_payload(object_kind, identity_key)
+        return None if matched is None else matched[0]
+
+    def _find_with_payload(
+            self,
+            object_kind: int,
+            identity_key: tuple[int, ...],
+            ) -> tuple[StoredObjectDescriptor, bytes] | None:
+        """一次完整核验同时返回 descriptor 与 payload，避免命中后二次解码。"""
         index_key = self._index_key(object_kind, identity_key)
-        matches = []
+        matches: list[tuple[StoredObjectDescriptor, bytes]] = []
         for row in self.backend.select(
                 SEGMENT_OBJECT_SEAL_TABLE,
                 where={"object_kind": object_kind, "index_key": index_key},
                 order_by="object_id"):
             if self._is_reclaimed(row["object_id"]):
                 continue
-            descriptor, _ = self._read_object_id(row["object_id"])
+            descriptor, payload = self._read_object_id(row["object_id"])
             if descriptor.identity_key == identity_key:
-                matches.append(descriptor)
+                matches.append((descriptor, payload))
         if len(matches) > 1:
             raise SegmentRepositoryError("同一完整对象身份存在多个可见 seal")
         return None if not matches else matches[0]
@@ -828,6 +837,7 @@ __all__ = [
     "OBJECT_KIND_LOCATION_MANIFEST",
     "OBJECT_KIND_MIGRATION_COMMIT",
     "OBJECT_KIND_SEGMENT_RELEASE",
+    "OBJECT_KIND_SEGMENT_WRITE_INTENT",
     "OBJECT_KIND_SEGMENT",
     "SEGMENT_OBJECT_RESERVATION_TABLE",
     "SEGMENT_OBJECT_SEAL_TABLE",
