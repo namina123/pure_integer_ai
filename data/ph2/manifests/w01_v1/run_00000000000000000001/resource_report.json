@@ -1,0 +1,1 @@
+{"artifact_version":"PH2-W01-stage0-run-v1","in_flight_shard_limit":1,"logical_shards":16,"produced_shards":16,"requested_workers":1,"restored_shards":0,"run_id":1,"sealed_cold_bytes":26255,"worker_byte_limit":67108864,"worker_object_limit":16}

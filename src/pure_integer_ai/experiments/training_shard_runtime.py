@@ -96,6 +96,33 @@ class TrainingArtifactRepositoryProvider(Protocol):
         ...
 
 
+FAULT_TRAINING_RUNTIME_BEFORE_FIRST_SHARD = 1
+FAULT_TRAINING_RUNTIME_AFTER_PARTIAL_ARTIFACT = 2
+FAULT_TRAINING_RUNTIME_BEFORE_MERGE = 3
+
+
+@runtime_checkable
+class TrainingShardRuntimeFaultInjector(Protocol):
+    """在 K-03 调度而非 artifact/barrier 内部边界注入故障。"""
+
+    def hit(self, point: int, context: dict[str, int]) -> None:
+        """观察首 shard、部分 artifact 和 merge 前边界。"""
+        ...
+
+
+def _hit_runtime_fault(
+        injector: TrainingShardRuntimeFaultInjector | None,
+        point: int,
+        context: dict[str, int],
+        ) -> None:
+    """调用可选 K-03 生命周期故障注入器并隔离上下文。"""
+    if injector is None:
+        return
+    if not isinstance(injector, TrainingShardRuntimeFaultInjector):
+        raise TypeError("training shard runtime fault injector 协议错误")
+    injector.hit(point, dict(context))
+
+
 @dataclass(frozen=True)
 class SharedTrainingArtifactRepository:
     """让多个逻辑 shard 共用一个已注入的窄对象仓库。"""
@@ -423,6 +450,7 @@ class TrainingShardRuntime:
             artifact_fault_injector: SegmentRepositoryFaultInjector | None = None,
             barrier_fault_injector: TrainingBarrierFaultInjector | None = None,
             repository_fault_injector: SegmentRepositoryFaultInjector | None = None,
+            runtime_fault_injector: TrainingShardRuntimeFaultInjector | None = None,
             ) -> TrainingShardRunResult:
         """完成全部 shard 后单点 merge/publish；任一失败都不形成 receipt。"""
         if type(worker_count) is not int or worker_count <= 0:
@@ -456,6 +484,15 @@ class TrainingShardRuntime:
             sample_peak()
         restored_count = len(references)
         if missing:
+            _hit_runtime_fault(
+                runtime_fault_injector,
+                FAULT_TRAINING_RUNTIME_BEFORE_FIRST_SHARD,
+                {
+                    "logical_shards": len(self.coordinator.shard_plan.shards),
+                    "missing_shards": len(missing),
+                    "restored_shards": restored_count,
+                },
+            )
             executor = self.executor_factory(worker_count)
             if not isinstance(executor, Executor):
                 raise TypeError("executor_factory 必须返回 Executor")
@@ -473,6 +510,16 @@ class TrainingShardRuntime:
                     artifact = future.result()
                     references[shard.shard_key] = (
                         TrainingArtifactReference.from_artifact(artifact))
+                    _hit_runtime_fault(
+                        runtime_fault_injector,
+                        FAULT_TRAINING_RUNTIME_AFTER_PARTIAL_ARTIFACT,
+                        {
+                            "completed_shards": len(references),
+                            "logical_shards": len(
+                                self.coordinator.shard_plan.shards),
+                            "restored_shards": restored_count,
+                        },
+                    )
                     sample_peak()
             finally:
                 executor.shutdown(wait=True, cancel_futures=True)
@@ -497,6 +544,15 @@ class TrainingShardRuntime:
                     "barrier merge 前 worker artifact 内容漂移")
             return artifact
 
+        _hit_runtime_fault(
+            runtime_fault_injector,
+            FAULT_TRAINING_RUNTIME_BEFORE_MERGE,
+            {
+                "artifact_count": len(ordered_references),
+                "logical_shards": len(self.coordinator.shard_plan.shards),
+                "restored_shards": restored_count,
+            },
+        )
         barrier_result = self.coordinator.merge_stream(load_artifact)
         sample_peak()
         receipt = self.coordinator.publish(
@@ -542,6 +598,9 @@ class TrainingShardRuntime:
 
 __all__ = [
     "ExecutorFactory",
+    "FAULT_TRAINING_RUNTIME_AFTER_PARTIAL_ARTIFACT",
+    "FAULT_TRAINING_RUNTIME_BEFORE_FIRST_SHARD",
+    "FAULT_TRAINING_RUNTIME_BEFORE_MERGE",
     "SharedTrainingArtifactRepository",
     "TrainingArtifactReference",
     "TrainingArtifactRepositoryProvider",
@@ -551,6 +610,7 @@ __all__ = [
     "TrainingShardResourceBudgetExceeded",
     "TrainingShardRunResult",
     "TrainingShardRuntime",
+    "TrainingShardRuntimeFaultInjector",
     "TrainingShardRuntimeMetrics",
     "TrainingShardWorkRequest",
 ]
