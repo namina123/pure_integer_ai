@@ -23,4 +23,6 @@ regexes = [
   '''^PH2-W-0[1-9]-PRIVATE-EVALUATOR$''',
   '''^(UD_ZH_GSDSIMP_R2_18|ZHWIKTIONARY_20260701)$''',
   '''^W-0[1-9]-[A-Z][A-Z0-9_]+$''',
+  '''^W-03-POLYSEMY-COMPETITION$''',
+  '''^W-03-POLYSEMY-COMPETITION-ABLATION$''',
 ]
