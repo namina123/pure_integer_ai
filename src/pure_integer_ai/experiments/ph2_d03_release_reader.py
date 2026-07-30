@@ -25,6 +25,7 @@ from pure_integer_ai.experiments.ph2_d03_stage_contract import (
     validate_stage_manifest_set,
 )
 from pure_integer_ai.experiments.ph2_dataset_io import read_artifact_manifest
+from pure_integer_ai.experiments.ph2_dataset_manifest import ArtifactFileIdentity
 
 
 VIEW_KINDS = ("candidate", "teacher", "evaluator")
@@ -40,6 +41,16 @@ class StageVisibilityView:
     rejected_paths: tuple[str, ...]
     payload_reads: int
     payload_bytes: int
+
+
+@dataclass(frozen=True)
+class VisibleArtifactFile:
+    """绑定一个可见路径到唯一 pack manifest 和正式文件身份。"""
+
+    pack_key: str
+    manifest_identity: D03FileIdentity
+    relative_path: str
+    file_identity: ArtifactFileIdentity
 
 
 def _resolve(root: Path, relative: str) -> Path:
@@ -92,6 +103,7 @@ class D03ReleaseReader:
         self.invalidation_graph = invalidation_graph
         self._packs = {
             item.pack_key: item for item in global_manifest.pack_bindings}
+        self._pack_files: dict[str, tuple[VisibleArtifactFile, ...]] = {}
 
     @classmethod
     def open(
@@ -237,6 +249,79 @@ class D03ReleaseReader:
         return read_artifact_manifest(
             self._overlay.path(pack.manifest_identity.relative_path))
 
+    def _pack_file_identities(
+            self,
+            pack: D03PackBinding,
+            ) -> tuple[VisibleArtifactFile, ...]:
+        """从正式 manifest 恢复 pack 全路径，并核对全局 binding 未漏文件。"""
+        self._overlay.verify(pack.manifest_identity)
+        cached = self._pack_files.get(pack.pack_key)
+        if cached is not None:
+            return cached
+        manifest = self._pack_manifest(pack)
+        prefix = PurePosixPath(pack.manifest_identity.relative_path).parent
+        files = tuple(
+            VisibleArtifactFile(
+                pack.pack_key,
+                pack.manifest_identity,
+                PurePosixPath(prefix, item.relative_path).as_posix(),
+                item,
+            )
+            for item in manifest.files
+        )
+        paths = tuple(item.relative_path for item in files)
+        if len(set(paths)) != len(paths) or set(paths) != set(pack.payload_paths):
+            raise D03ContractError("pack binding 未覆盖全部 owner 文件")
+        self._pack_files[pack.pack_key] = files
+        return files
+
+    @staticmethod
+    def _file_visible_in_view(
+            identity: ArtifactFileIdentity,
+            view_kind: str,
+            ) -> bool:
+        """按正式 owner_kind 和 split 判断单个文件能否进入指定视图。"""
+        if identity.owner_kind == "source":
+            return True
+        if view_kind == "candidate":
+            return identity.owner_kind == "observation" and identity.split == "train"
+        if view_kind == "teacher":
+            return (
+                (identity.owner_kind == "observation" and identity.split == "train")
+                or (identity.owner_kind == "teacher" and identity.split == "train")
+            )
+        return (
+            (identity.owner_kind == "observation"
+             and identity.split in {"dev", "held_out"})
+            or (identity.owner_kind == "evaluator"
+                and identity.split in {"dev", "held_out"})
+        )
+
+    def visible_file_identities(
+            self,
+            stage_key: str,
+            view_kind: str,
+            ) -> tuple[VisibleArtifactFile, ...]:
+        """返回由正式 pack 文件身份直接授权的唯一可见路径清单。"""
+        if stage_key not in STAGE_KEYS or view_kind not in VIEW_KINDS:
+            raise D03ContractError("未知 stage/view kind")
+        stage = self.stages[STAGE_KEYS.index(stage_key)]
+        visible_keys = (
+            stage.data_visibility.train_pack_keys
+            if view_kind in {"candidate", "teacher"}
+            else stage.data_visibility.evaluator_pack_keys
+        )
+        visible = tuple(
+            item
+            for key in visible_keys
+            for item in self._pack_file_identities(self._packs[key])
+            if self._file_visible_in_view(item.file_identity, view_kind)
+        )
+        paths = tuple(item.relative_path for item in visible)
+        if len(set(paths)) != len(paths):
+            raise D03ContractError("stage/view 可见路径映射不唯一")
+        return tuple(sorted(visible, key=lambda item: item.relative_path))
+
     def verify_pack_files(self, pack_key: str) -> None:
         """按 pack manifest 的 transport hash 回验全部物理 owner 文件。"""
         pack = self._packs.get(pack_key)
@@ -258,27 +343,10 @@ class D03ReleaseReader:
 
     def visibility(self, stage_key: str, view_kind: str) -> StageVisibilityView:
         """在不读取 payload 的前提下返回阶段视图的允许和拒绝路径。"""
-        if stage_key not in STAGE_KEYS or view_kind not in VIEW_KINDS:
-            raise D03ContractError("未知 stage/view kind")
-        stage = self.stages[STAGE_KEYS.index(stage_key)]
-        visible_keys: tuple[str, ...]
-        if view_kind in {"candidate", "teacher"}:
-            visible_keys = stage.data_visibility.train_pack_keys
-        else:
-            visible_keys = stage.data_visibility.evaluator_pack_keys
-        allowed: set[str] = set()
-        for key in visible_keys:
-            pack = self._packs[key]
-            allowed.update(pack.source_ref_paths)
-            if view_kind == "candidate":
-                allowed.update(pack.train_observation_paths)
-            elif view_kind == "teacher":
-                allowed.update(pack.train_observation_paths)
-                allowed.update(pack.teacher_evidence_paths)
-            else:
-                allowed.update(pack.dev_observation_paths)
-                allowed.update(pack.held_out_observation_paths)
-                allowed.update(pack.evaluator_label_paths)
+        allowed = {
+            item.relative_path
+            for item in self.visible_file_identities(stage_key, view_kind)
+        }
         all_payloads = {
             path for pack in self.global_manifest.pack_bindings
             for path in pack.payload_paths
@@ -321,5 +389,6 @@ class D03ReleaseReader:
 __all__ = [
     "D03ReleaseReader",
     "StageVisibilityView",
+    "VisibleArtifactFile",
     "VIEW_KINDS",
 ]
