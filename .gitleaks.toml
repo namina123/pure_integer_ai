@@ -19,6 +19,7 @@ regexes = [
   '''^(lexical-exception(-construction)?-v[12]|modifier-head-construction-v1|redup-aa-construction-v1|segmentation-(compound|lattice)-v1|zh-han-morphology-v1)$''',
   '''^MD04_ABLATION_KEYS$''',
   '''^PH2_PRIVATE_EVALUATOR$''',
+  '''^PH2_W03_PRIVATE_EVALUATOR_OWNER$''',
   '''^PH2-W-0[1-9]-PRIVATE-EVALUATOR$''',
   '''^(UD_ZH_GSDSIMP_R2_18|ZHWIKTIONARY_20260701)$''',
   '''^W-0[1-9]-[A-Z][A-Z0-9_]+$''',
