@@ -418,6 +418,71 @@ def _validate_terms(value: Any, *, aliases: bool) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
+class WikidataEntityTerms:
+    """严格回读的 fixed-revision label、description 与 alias。"""
+
+    qid: str
+    revision: int
+    labels: CanonicalJsonObject
+    descriptions: CanonicalJsonObject
+    aliases: CanonicalJsonObject
+
+
+def _parse_wikidata_entity(
+        payload: bytes,
+        *,
+        expected_qid: str,
+        expected_revision: int,
+        ) -> tuple[dict[str, Any], WikidataEntityTerms]:
+    """一次解析并闭合 entity identity，供 terms 与 statement 扫描共用。"""
+    if (not isinstance(payload, bytes) or not payload
+            or not _QID_RE.fullmatch(expected_qid)
+            or type(expected_revision) is not int or expected_revision <= 0):
+        raise WikidataAdapterError("Wikidata entity 输入非法")
+    root = _parse_json(payload)
+    if set(root) != {"entities"} or not isinstance(root["entities"], dict):
+        raise WikidataAdapterError("Wikidata EntityData 根字段非法")
+    if set(root["entities"]) != {expected_qid}:
+        raise WikidataAdapterError("Wikidata EntityData QID 集不匹配")
+    entity = root["entities"][expected_qid]
+    required_entity = {
+        "aliases", "claims", "descriptions", "id", "labels", "lastrevid",
+        "modified", "ns", "pageid", "sitelinks", "title", "type",
+    }
+    if not isinstance(entity, dict) or not required_entity.issubset(entity):
+        raise WikidataAdapterError("Wikidata entity 字段缺失")
+    if (entity["id"] != expected_qid or entity["title"] != expected_qid
+            or entity["type"] != "item"
+            or entity["lastrevid"] != expected_revision):
+        raise WikidataAdapterError("Wikidata entity 身份或 revision 不匹配")
+    labels = _validate_terms(entity["labels"], aliases=False)
+    descriptions = _validate_terms(entity["descriptions"], aliases=False)
+    aliases = _validate_terms(entity["aliases"], aliases=True)
+    return entity, WikidataEntityTerms(
+        expected_qid,
+        expected_revision,
+        CanonicalJsonObject.from_value(labels),
+        CanonicalJsonObject.from_value(descriptions),
+        CanonicalJsonObject.from_value(aliases),
+    )
+
+
+def parse_wikidata_entity_terms_bytes(
+        payload: bytes,
+        *,
+        expected_qid: str,
+        expected_revision: int,
+        ) -> WikidataEntityTerms:
+    """公开回读完整 terms，不经浮点且不丢 language/value 身份。"""
+    _, terms = _parse_wikidata_entity(
+        payload,
+        expected_qid=expected_qid,
+        expected_revision=expected_revision,
+    )
+    return terms
+
+
+@dataclass(frozen=True)
 class WikidataEntityScanReport:
     """一个 fixed-revision entity 的身份、statement 与异常摘要。"""
 
@@ -522,32 +587,17 @@ def scan_wikidata_entity_bytes(
         property_rules: tuple[WikidataPropertyRule, ...],
         ) -> WikidataEntityScanReport:
     """扫描 fixed-revision EntityData，坏 statement 原子隔离且身份错误停线。"""
-    if (not isinstance(payload, bytes) or not payload
-            or not _QID_RE.fullmatch(expected_qid)
-            or type(expected_revision) is not int or expected_revision <= 0):
-        raise WikidataAdapterError("Wikidata scan 输入非法")
     rule_by_property = {rule.property_id: rule for rule in property_rules}
     if len(rule_by_property) != len(property_rules) or not rule_by_property:
         raise WikidataAdapterError("Wikidata property rules 非法")
-    root = _parse_json(payload)
-    if set(root) != {"entities"} or not isinstance(root["entities"], dict):
-        raise WikidataAdapterError("Wikidata EntityData 根字段非法")
-    if set(root["entities"]) != {expected_qid}:
-        raise WikidataAdapterError("Wikidata EntityData QID 集不匹配")
-    entity = root["entities"][expected_qid]
-    required_entity = {
-        "aliases", "claims", "descriptions", "id", "labels", "lastrevid",
-        "modified", "ns", "pageid", "sitelinks", "title", "type",
-    }
-    if not isinstance(entity, dict) or not required_entity.issubset(entity):
-        raise WikidataAdapterError("Wikidata entity 字段缺失")
-    if (entity["id"] != expected_qid or entity["title"] != expected_qid
-            or entity["type"] != "item"
-            or entity["lastrevid"] != expected_revision):
-        raise WikidataAdapterError("Wikidata entity 身份或 revision 不匹配")
-    labels = _validate_terms(entity["labels"], aliases=False)
-    descriptions = _validate_terms(entity["descriptions"], aliases=False)
-    aliases = _validate_terms(entity["aliases"], aliases=True)
+    entity, terms = _parse_wikidata_entity(
+        payload,
+        expected_qid=expected_qid,
+        expected_revision=expected_revision,
+    )
+    labels = terms.labels.to_value()
+    descriptions = terms.descriptions.to_value()
+    aliases = terms.aliases.to_value()
     claims = entity["claims"]
     if not isinstance(claims, dict):
         raise WikidataAdapterError("Wikidata claims 非法")
@@ -677,8 +727,10 @@ __all__ = [
     "SNAKTYPES",
     "WikidataAdapterError",
     "WikidataEntityScanReport",
+    "WikidataEntityTerms",
     "WikidataStatementError",
     "WikidataValidatedStatement",
+    "parse_wikidata_entity_terms_bytes",
     "parse_wikidata_statement",
     "scan_wikidata_entity_bytes",
     "scan_wikidata_entity_file",
