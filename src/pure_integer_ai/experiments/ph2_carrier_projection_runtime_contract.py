@@ -1,0 +1,311 @@
+"""LC-16 carrier-neutral projection runtime 的追加式冻结合同。"""
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from pure_integer_ai.experiments.ph2_dataset_contract import (
+    CanonicalJsonObject,
+    canonical_json_bytes,
+    parse_canonical_json_bytes,
+)
+
+
+FORMAT_VERSION = 1
+ARTIFACT_KIND = "PH2_LC16_CARRIER_PROJECTION_RUNTIME"
+ARTIFACT_VERSION = "LC16-CARRIER-PROJECTION-RUNTIME-20260731-A"
+ARTIFACT_STATUS = "RUNTIME_CHAIN_FROZEN_NO_DIRECTIONAL_CAPABILITY_PASS"
+DEPENDENCY_ROLES = (
+    "ARTIFACT_PROJECTION",
+    "CANDIDATE_RUNTIME",
+    "EVIDENCE_ENGINE",
+    "INDEPENDENT_VERIFIER",
+    "PROJECTION_GRAPH",
+    "RESOLVER",
+)
+EVIDENCE_ROLES = ("CATALOG", "CONTRACT", "RUNTIME", "TEST")
+EXECUTION_STATE = {
+    "LANGUAGE_CAPABILITY_MASTERED": 0,
+    "LANGUAGE_READINESS": 0,
+    "W04_STARTED": 0,
+    "directional_consumer_evaluated": 0,
+    "formal_training_runs": 0,
+    "llm_calls": 0,
+    "memory_learning_writes": 0,
+    "teacher_calls": 0,
+}
+RUNTIME_SCOPE = {
+    "candidate_feature_binding_exact": 1,
+    "carrier_count": 9,
+    "correction_supersede_retention": 1,
+    "directional_consumer_implemented": 0,
+    "mapper_input_direct": 1,
+    "prediction_local_and_feature_visible": 1,
+    "projection_cumulative_evidence": 1,
+    "shared_candidate_runtime_reused": 1,
+}
+
+
+class CarrierProjectionRuntimeContractError(RuntimeError):
+    """runtime manifest、依赖或证据身份未闭合。"""
+
+
+def _exact(value: Any, expected: set[str], *, where: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != expected:
+        raise CarrierProjectionRuntimeContractError(f"{where} 字段不精确")
+    return value
+
+
+def _text(value: Any, *, where: str) -> str:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise CarrierProjectionRuntimeContractError(
+            f"{where} 必须是无首尾空白的非空文本")
+    return value
+
+
+def _positive(value: Any, *, where: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise CarrierProjectionRuntimeContractError(f"{where} 必须是正严格整数")
+    return value
+
+
+def _sha256(value: Any, *, where: str) -> str:
+    text = _text(value, where=where).lower()
+    if len(text) != 64 or any(item not in "0123456789abcdef" for item in text):
+        raise CarrierProjectionRuntimeContractError(f"{where} 必须是小写 SHA-256")
+    return text
+
+
+def _relative_path(value: Any, *, where: str) -> str:
+    text = _text(value, where=where)
+    path = PurePosixPath(text)
+    if (not path.parts or path.is_absolute() or ".." in path.parts
+            or "\\" in text or path.as_posix() != text
+            or ":" in path.parts[0]):
+        raise CarrierProjectionRuntimeContractError(
+            f"{where} 必须是安全 POSIX 相对路径")
+    return text
+
+
+@dataclass(frozen=True, order=True)
+class CarrierProjectionRuntimeFile:
+    relative_path: str
+    role: str
+    byte_count: int
+    sha256: str
+
+    def __post_init__(self) -> None:
+        _relative_path(self.relative_path, where="runtime file relative_path")
+        if self.role not in set(DEPENDENCY_ROLES) | set(EVIDENCE_ROLES):
+            raise CarrierProjectionRuntimeContractError("runtime file role 未登记")
+        _positive(self.byte_count, where="runtime file byte_count")
+        _sha256(self.sha256, where="runtime file sha256")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "byte_count": self.byte_count,
+            "relative_path": self.relative_path,
+            "role": self.role,
+            "sha256": self.sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "CarrierProjectionRuntimeFile":
+        raw = _exact(
+            value,
+            {"byte_count", "relative_path", "role", "sha256"},
+            where="CarrierProjectionRuntimeFile",
+        )
+        return cls(
+            str(raw["relative_path"]),
+            str(raw["role"]),
+            raw["byte_count"],
+            str(raw["sha256"]),
+        )
+
+
+@dataclass(frozen=True, order=True)
+class CarrierProjectionRuntimeManifest:
+    format_version: int
+    artifact_version: str
+    artifact_status: str
+    parent_mapper_relative_path: str
+    parent_mapper_sha256: str
+    dependencies: tuple[CarrierProjectionRuntimeFile, ...]
+    runtime_scope: CanonicalJsonObject
+    execution_state: CanonicalJsonObject
+    evidence_files: tuple[CarrierProjectionRuntimeFile, ...]
+
+    def __post_init__(self) -> None:
+        if (self.format_version != FORMAT_VERSION
+                or self.artifact_version != ARTIFACT_VERSION
+                or self.artifact_status != ARTIFACT_STATUS):
+            raise CarrierProjectionRuntimeContractError(
+                "runtime manifest artifact identity 漂移")
+        _relative_path(
+            self.parent_mapper_relative_path,
+            where="parent_mapper_relative_path",
+        )
+        _sha256(self.parent_mapper_sha256, where="parent_mapper_sha256")
+        if (not isinstance(self.dependencies, tuple)
+                or self.dependencies != tuple(sorted(
+                    self.dependencies, key=lambda item: item.role))
+                or tuple(item.role for item in self.dependencies)
+                != DEPENDENCY_ROLES
+                or len({item.relative_path for item in self.dependencies})
+                != len(self.dependencies)):
+            raise CarrierProjectionRuntimeContractError(
+                "runtime dependencies 未精确闭合")
+        if (not isinstance(self.evidence_files, tuple)
+                or self.evidence_files != tuple(sorted(
+                    self.evidence_files, key=lambda item: item.role))
+                or tuple(item.role for item in self.evidence_files)
+                != EVIDENCE_ROLES
+                or len({item.relative_path for item in self.evidence_files})
+                != len(self.evidence_files)):
+            raise CarrierProjectionRuntimeContractError(
+                "runtime evidence_files 未精确闭合")
+        if (not isinstance(self.runtime_scope, CanonicalJsonObject)
+                or self.runtime_scope.to_value() != RUNTIME_SCOPE):
+            raise CarrierProjectionRuntimeContractError("runtime_scope 漂移")
+        if (not isinstance(self.execution_state, CanonicalJsonObject)
+                or self.execution_state.to_value() != EXECUTION_STATE):
+            raise CarrierProjectionRuntimeContractError("execution_state 漂移")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "artifact_kind": ARTIFACT_KIND,
+            "artifact_status": self.artifact_status,
+            "artifact_version": self.artifact_version,
+            "dependencies": [item.to_dict() for item in self.dependencies],
+            "evidence_files": [item.to_dict() for item in self.evidence_files],
+            "execution_state": self.execution_state.to_value(),
+            "format_version": self.format_version,
+            "parent_mapper_relative_path": self.parent_mapper_relative_path,
+            "parent_mapper_sha256": self.parent_mapper_sha256,
+            "runtime_scope": self.runtime_scope.to_value(),
+        }
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_json_bytes(self.to_dict()) + b"\n"
+
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+    @classmethod
+    def from_dict(
+            cls, value: dict[str, Any],
+            ) -> "CarrierProjectionRuntimeManifest":
+        raw = _exact(value, {
+            "artifact_kind", "artifact_status", "artifact_version",
+            "dependencies", "evidence_files", "execution_state",
+            "format_version", "parent_mapper_relative_path",
+            "parent_mapper_sha256", "runtime_scope",
+        }, where="CarrierProjectionRuntimeManifest")
+        if raw["artifact_kind"] != ARTIFACT_KIND:
+            raise CarrierProjectionRuntimeContractError(
+                "runtime manifest artifact_kind 非法")
+        try:
+            return cls(
+                raw["format_version"],
+                str(raw["artifact_version"]),
+                str(raw["artifact_status"]),
+                str(raw["parent_mapper_relative_path"]),
+                str(raw["parent_mapper_sha256"]),
+                tuple(CarrierProjectionRuntimeFile.from_dict(item)
+                      for item in raw["dependencies"]),
+                CanonicalJsonObject.from_value(raw["runtime_scope"]),
+                CanonicalJsonObject.from_value(raw["execution_state"]),
+                tuple(CarrierProjectionRuntimeFile.from_dict(item)
+                      for item in raw["evidence_files"]),
+            )
+        except CarrierProjectionRuntimeContractError:
+            raise
+        except Exception as error:
+            raise CarrierProjectionRuntimeContractError(
+                "runtime manifest nested field 损坏") from error
+
+
+def read_carrier_projection_runtime_manifest(
+        path: str | Path,
+        ) -> CarrierProjectionRuntimeManifest:
+    try:
+        payload = Path(path).read_bytes()
+        if not payload.endswith(b"\n") or payload.endswith(b"\n\n"):
+            raise CarrierProjectionRuntimeContractError("runtime manifest newline 非法")
+        manifest = CarrierProjectionRuntimeManifest.from_dict(
+            parse_canonical_json_bytes(payload[:-1], require_object=True))
+    except CarrierProjectionRuntimeContractError:
+        raise
+    except Exception as error:
+        raise CarrierProjectionRuntimeContractError("runtime manifest 损坏") from error
+    if manifest.canonical_bytes() != payload:
+        raise CarrierProjectionRuntimeContractError(
+            "runtime manifest 不是 canonical 字节")
+    return manifest
+
+
+def write_carrier_projection_runtime_manifest(
+        manifest: CarrierProjectionRuntimeManifest,
+        path: str | Path,
+        ) -> Path:
+    if not isinstance(manifest, CarrierProjectionRuntimeManifest):
+        raise CarrierProjectionRuntimeContractError("runtime manifest 类型非法")
+    target = Path(path)
+    payload = manifest.canonical_bytes()
+    if target.exists():
+        if target.read_bytes() != payload:
+            raise CarrierProjectionRuntimeContractError(
+                "runtime manifest 已存在且内容不同")
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with target.open("xb") as handle:
+            handle.write(payload)
+    except OSError as error:
+        raise CarrierProjectionRuntimeContractError(
+            "runtime manifest 无法写入") from error
+    return target
+
+
+def verify_carrier_projection_runtime_files(
+        manifest: CarrierProjectionRuntimeManifest,
+        *, repository_root: str | Path,
+        ) -> None:
+    root = Path(repository_root).resolve()
+    files = [
+        (item.relative_path, item.byte_count, item.sha256)
+        for item in (*manifest.dependencies, *manifest.evidence_files)
+    ]
+    files.append((
+        manifest.parent_mapper_relative_path,
+        None,
+        manifest.parent_mapper_sha256,
+    ))
+    for relative_path, byte_count, sha256 in files:
+        target = (root / Path(*relative_path.split("/"))).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError as error:
+            raise CarrierProjectionRuntimeContractError(
+                "runtime evidence 路径逃逸") from error
+        if not target.is_file():
+            raise CarrierProjectionRuntimeContractError("runtime evidence 文件缺失")
+        payload = target.read_bytes()
+        if ((byte_count is not None and len(payload) != byte_count)
+                or hashlib.sha256(payload).hexdigest() != sha256):
+            raise CarrierProjectionRuntimeContractError(
+                "runtime evidence 文件身份漂移")
+
+
+__all__ = [
+    "ARTIFACT_KIND", "ARTIFACT_STATUS", "ARTIFACT_VERSION",
+    "DEPENDENCY_ROLES", "EVIDENCE_ROLES", "EXECUTION_STATE",
+    "FORMAT_VERSION", "RUNTIME_SCOPE", "CarrierProjectionRuntimeContractError",
+    "CarrierProjectionRuntimeFile", "CarrierProjectionRuntimeManifest",
+    "read_carrier_projection_runtime_manifest",
+    "verify_carrier_projection_runtime_files",
+    "write_carrier_projection_runtime_manifest",
+]
