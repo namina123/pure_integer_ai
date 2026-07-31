@@ -37,7 +37,7 @@ from pure_integer_ai.experiments.ph2_typed_carrier_pack_contract import (
 
 
 SOURCE_CODE_CARRIER_MANIFEST_PATH = (
-    "data/ph2/manifests/lc16_source_code_carrier_v1.json")
+    "data/ph2/manifests/lc16_source_code_carrier_v2.json")
 SOURCE_CODE_CARRIER_SAMPLE_PATH = (
     "data/ph2/lc16_source_code_carrier_v1.jsonl.sample")
 PARENT_PACK_PATH = "data/ph2/manifests/lc16_typed_carrier_pack_v1.json"
@@ -82,8 +82,8 @@ def _evidence_files(root: Path) -> tuple[SourceCodeCarrierEvidenceFile, ...]:
 
 
 def _parser_version() -> str:
-    # The parser is the standard-library tokenize+ast adapter contract.  Its
-    # stable identity is this schema version, not the host Python patch level.
+    # parser 身份属于标准库 tokenize+ast 适配合同，稳定版本取 schema
+    # 版本，而不是宿主 Python 的补丁版本。
     return PARSER_VERSION
 
 

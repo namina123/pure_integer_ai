@@ -167,8 +167,8 @@ def _json_scalar(value: Any) -> Any:
         return {"bytes": list(value)}
     if isinstance(value, (list, tuple)):
         return [_json_scalar(item) for item in value]
-    # Float/complex and future scalar AST fields stay structural strings.  The
-    # authoritative lexical spelling remains in the raw envelope and tokens.
+    # 浮点、复数和未来新增的 AST 标量字段只保存结构字符串；权威词形仍由
+    # raw envelope 与 token 完整保留。
     return {"repr": repr(value), "value_type": type(value).__name__}
 
 
