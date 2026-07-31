@@ -38,7 +38,7 @@ from pure_integer_ai.experiments.ph2_typed_carrier_pack_contract import (
 
 
 MARKDOWN_CARRIER_MANIFEST_PATH = (
-    "data/ph2/manifests/lc16_markdown_carrier_v1.json")
+    "data/ph2/manifests/lc16_markdown_carrier_v2.json")
 MARKDOWN_CARRIER_SAMPLE_PATH = (
     "data/ph2/lc16_markdown_carrier_v1.jsonl.sample")
 PARENT_PACK_PATH = "data/ph2/manifests/lc16_typed_carrier_pack_v1.json"
