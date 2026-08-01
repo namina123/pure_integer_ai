@@ -373,6 +373,12 @@ class W02Lc16SupplementalReport:
                 "private_path_reads", "private_payload_bytes",
                 "private_payload_reads", "evaluator_label_reads"):
             _nonnegative(getattr(self, name), where=name)
+        if (self.runtime_observed == 1
+                and (self.private_path_reads == 0
+                     or self.private_payload_reads == 0
+                     or self.evaluator_label_reads == 0)):
+            raise W02Lc16SupplementalError(
+                "已观察 supplemental runtime 必须有 private read evidence")
         if self.private_payload_bytes > MAX_PAYLOAD_BYTES or self.private_payload_reads > MAX_PAYLOAD_READS:
             raise W02Lc16SupplementalError("supplemental payload budget 超限")
         if self.evaluator_label_writes != 0 or self.host_write_count != 0:
@@ -556,6 +562,7 @@ class W02Lc16SupplementalManifest:
             raise W02Lc16SupplementalError("supplemental execution state 漂移")
         if (self.dependencies != tuple(sorted(self.dependencies, key=lambda item: item.role))
                 or tuple(item.role for item in self.dependencies) != ("D03_LC16_OVERLAY", "W02_PARENT_RECEIPT_COMMITMENT")
+                or len({item.relative_path for item in self.dependencies}) != len(self.dependencies)
                 or self.evidence_files != tuple(sorted(self.evidence_files, key=lambda item: item.role))
                 or tuple(item.role for item in self.evidence_files) != ("CATALOG", "CONTRACT", "EVALUATOR", "PUBLICATION", "TEST")):
             raise W02Lc16SupplementalError("supplemental 文件证据未闭合")

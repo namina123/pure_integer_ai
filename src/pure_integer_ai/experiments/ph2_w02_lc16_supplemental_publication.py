@@ -13,6 +13,7 @@ from pure_integer_ai.experiments.ph2_dataset_contract import (
 )
 from pure_integer_ai.experiments.ph2_w02_lc16_supplemental_contract import (
     ARTIFACT_KIND,
+    W02Lc16SupplementalError,
     W02Lc16SupplementalReport,
 )
 
@@ -112,6 +113,11 @@ def read_w02_lc16_supplemental_report(
     _reject_private(value)
     if value.get("artifact_kind") != ARTIFACT_KIND:
         raise W02Lc16SupplementalPublicationError("supplemental receipt kind 非法")
+    try:
+        W02Lc16SupplementalReport.from_public_dict(value)
+    except (TypeError, ValueError, W02Lc16SupplementalError) as error:
+        raise W02Lc16SupplementalPublicationError(
+            "supplemental receipt 合同回读失败") from error
     return value, _publication(target, payload, value)
 
 

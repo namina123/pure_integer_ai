@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ from pure_integer_ai.experiments.ph2_w02_lc16_supplemental_publication import (
     publish_w02_lc16_supplemental_report,
     read_w02_lc16_supplemental_report,
 )
+from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_bytes
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -217,6 +219,16 @@ def test_runtime_zero_is_blocked_and_host_or_builder_write_is_rejected(overlay):
             evaluator_label_reads=1, consumer_result_builder_reused=1)
 
 
+def test_observed_runtime_requires_private_read_evidence(overlay):
+    """已观察的 private family 不得用零读取摘要伪造资格。"""
+    with pytest.raises(W02Lc16SupplementalError, match="private read"):
+        aggregate_w02_lc16_supplemental(
+            overlay, _results(overlay), host_digests_before=_DIGESTS,
+            host_digests_after=dict(_DIGESTS), private_path_reads=0,
+            private_payload_bytes=1, private_payload_reads=0,
+            evaluator_label_reads=0)
+
+
 def test_report_publication_is_append_only_and_private_free(tmp_path, report):
     """receipt 只含摘要且既存目标拒绝覆盖。"""
     target = tmp_path / "supplemental.json"
@@ -230,6 +242,17 @@ def test_report_publication_is_append_only_and_private_free(tmp_path, report):
     with pytest.raises(W02Lc16SupplementalPublicationError, match="禁止覆盖"):
         publish_w02_lc16_supplemental_report(target, report)
     assert target.read_bytes() == original
+
+
+def test_receipt_readback_revalidates_the_full_public_contract(tmp_path, report):
+    """canonical bytes 通过后仍必须满足摘要合同，不能只过字段扫描。"""
+    target = tmp_path / "receipt.json"
+    publish_w02_lc16_supplemental_report(target, report)
+    value = json.loads(target.read_text("utf-8"))
+    value["private_reads"]["private_payload_reads"] = 0
+    target.write_bytes(canonical_json_bytes(value) + b"\n")
+    with pytest.raises(W02Lc16SupplementalPublicationError, match="合同"):
+        read_w02_lc16_supplemental_report(target)
 
 
 def test_manifest_writer_is_idempotent_but_rejects_different_bytes(tmp_path):
