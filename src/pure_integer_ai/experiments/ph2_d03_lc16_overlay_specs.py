@@ -1,0 +1,229 @@
+"""D-03 LC-16 后继 overlay 的冻结身份、scope、评测与失效规格。"""
+from __future__ import annotations
+
+
+FORMAT_VERSION = 1
+ARTIFACT_KIND = "PH2_D03_LC16_SUCCESSOR_OVERLAY"
+ARTIFACT_VERSION = "PH2-D03-LC16-SUCCESSOR-OVERLAY-20260801-A"
+ARTIFACT_STATUS = "OVERLAY_FROZEN_W02_W03_SUPPLEMENTAL_REQUIRED"
+RENDERER_KEY = "PH2_LC16_CANONICAL_RAW_UNIT_REPLAY"
+RENDERER_VERSION = "PH2-LC16-CANONICAL-RAW-UNIT-REPLAY-V1"
+RENDERER_MODE = "SOURCE_GROUNDED_LOSSLESS_REPLAY"
+COURSE_STATE = "PAYLOAD_FROZEN_NOT_QUALIFIED"
+PARSER_IDENTITIES = {
+    "DOCUMENT_CONTAINER": ("python-stdlib", "json-document-container-v1"),
+    "HTML": ("lxml", "6.1.1"),
+    "MARKDOWN": ("markdown-it-py", "4.2.0"),
+    "MATH_NOTATION": ("python-stdlib", "latex-notation-v1"),
+    "PLAIN_TEXT": ("pure_integer_ai", "direct-raw-unit-v1"),
+    "REFERENCE_LINK_EMBED": ("python-stdlib", "json-reference-slot-v1"),
+    "SOURCE_CODE": ("python-stdlib", "tokenize-ast-v1"),
+    "TABLE_GRID": ("python-stdlib", "csv-grid-v1"),
+    "TRANSCRIBED_OCR_ASR": ("python-stdlib", "transcript-alignment-v1"),
+}
+COVERAGE_STATES = (
+    "SUPPLEMENTAL_QUALIFICATION_REQUIRED",
+    "LOCKED_NOT_STARTED",
+)
+EVIDENCE_ROLES = ("CATALOG", "CONTRACT", "RECORDS", "SPECS", "TEST")
+
+EXECUTION_STATE = {
+    "LANGUAGE_CAPABILITY_MASTERED": 0,
+    "LANGUAGE_READINESS": 0,
+    "W04_STARTED": 0,
+    "d03_v1_preserved": 1,
+    "formal_training_runs": 0,
+    "llm_calls": 0,
+    "memory_learning_writes": 0,
+    "open_generation_pass": 0,
+    "overlay_frozen": 1,
+    "teacher_calls": 0,
+    "w02_lc16_supplemental_qualified": 0,
+    "w03_lc16_supplemental_qualified": 0,
+}
+
+SCOPE_SPECS = (
+    (
+        "BOUNDARY_OOV", "W-02",
+        "PH2-W02-LC16-SUPPLEMENTAL-PRIVATE-EVALUATOR-V1",
+        "SUPPLEMENTAL_QUALIFICATION_REQUIRED",
+        (
+            "W-02-LC16-SUPPLEMENTAL", "W-03-LC16-SUPPLEMENTAL",
+            "W-04", "W-05", "W-06", "W-07", "W-08", "W-09",
+            "J-LC-W09", "J-F2",
+        ),
+    ),
+    (
+        "SENSE_CONCEPT", "W-03",
+        "PH2-W03-LC16-SUPPLEMENTAL-PRIVATE-EVALUATOR-V1",
+        "SUPPLEMENTAL_QUALIFICATION_REQUIRED",
+        (
+            "W-03-LC16-SUPPLEMENTAL", "W-04", "W-05", "W-06",
+            "W-07", "W-08", "W-09", "J-LC-W09", "J-F2",
+        ),
+    ),
+    (
+        "PRIMITIVE_STRUCTURE", "W-04",
+        "PH2-W04-LC16-INDEPENDENT-EVALUATOR-V1", "LOCKED_NOT_STARTED",
+        ("W-04", "W-05", "W-06", "W-07", "W-08", "W-09",
+         "J-LC-W09", "J-F2"),
+    ),
+    (
+        "ROLE_PROPOSITION_SCOPE", "W-05",
+        "PH2-W05-LC16-INDEPENDENT-EVALUATOR-V1", "LOCKED_NOT_STARTED",
+        ("W-05", "W-06", "W-07", "W-08", "W-09",
+         "J-LC-W09", "J-F2"),
+    ),
+    (
+        "RELATION_FAMILIES", "W-06",
+        "PH2-W06-LC16-INDEPENDENT-EVALUATOR-V1", "LOCKED_NOT_STARTED",
+        ("W-06", "W-07", "W-08", "W-09", "J-LC-W09", "J-F2"),
+    ),
+    (
+        "LOGIC_MODAL_NESTED_SCOPE", "W-07",
+        "PH2-W07-LC16-INDEPENDENT-EVALUATOR-V1", "LOCKED_NOT_STARTED",
+        ("W-07", "W-08", "W-09", "J-LC-W09", "J-F2"),
+    ),
+    (
+        "DISCOURSE_REFERENCE_GENERATION", "W-08",
+        "PH2-W08-LC16-INDEPENDENT-EVALUATOR-V1", "LOCKED_NOT_STARTED",
+        ("W-08", "W-09", "J-LC-W09", "J-F2"),
+    ),
+    (
+        "RETENTION_CONTINUAL_LEARNING", "W-09",
+        "PH2-W09-LC16-INDEPENDENT-EVALUATOR-V1", "LOCKED_NOT_STARTED",
+        ("W-09", "J-LC-W09", "J-F2"),
+    ),
+)
+SCOPE_KEYS = tuple(item[0] for item in SCOPE_SPECS)
+
+EVALUATOR_SPECS = (
+    (
+        "LC16-DIRECTIONAL-UNDERSTANDING-PUBLIC-V1",
+        "PH2-LC16-DIRECTIONAL-UNDERSTANDING-EVALUATOR-V1",
+        "PUBLIC_READ_ONLY", "UNDERSTANDING", "RUNTIME_EVIDENCED_BOUNDED",
+        (
+            "ADOPTED_PROJECTION_FRAME", "CARRIER_LOCAL_SUBJECTS",
+            "CURRENT_EVIDENCE_IDENTITY", "CURRENT_SUPERSEDE_REFUTE",
+            "SOURCE_SCOPE_ENVELOPE_ROUTE",
+        ),
+        (
+            "OPEN_SEMANTIC_OBJECT_DISCOVERY", "PERCEPTUAL_GROUNDING_TRUTH",
+            "REPORTED_CONTENT_DEFINITIVE_TRUTH",
+        ),
+        "RETAIN_NE_OUTSIDE_BOUNDARY",
+    ),
+    (
+        "LC16-DIRECTIONAL-REASONING-PUBLIC-V1",
+        "PH2-LC16-DIRECTIONAL-REASONING-EVALUATOR-V1",
+        "PUBLIC_READ_ONLY", "REASONING", "RUNTIME_EVIDENCED_BOUNDED",
+        (
+            "CARRIER_GROUNDED_PREMISE_ADJUDICATION",
+            "CURRENT_EVIDENCE_SUPPORT_REFUTE", "CURRENT_LIFECYCLE_CLAIM",
+            "SOURCE_SCOPE_ENVELOPE_ROUTE",
+        ),
+        (
+            "DEFINITIVE_EXTERNAL_TRUTH", "OPEN_MULTI_HOP_PROOF",
+            "UNOBSERVED_CAUSAL_INTENT",
+        ),
+        "RETAIN_NE_OUTSIDE_BOUNDARY",
+    ),
+    (
+        "LC16-DIRECTIONAL-GENERATION-REPLAY-PUBLIC-V1",
+        "PH2-LC16-DIRECTIONAL-GENERATION-REPLAY-EVALUATOR-V1",
+        "PUBLIC_READ_ONLY", "GENERATION", "RUNTIME_EVIDENCED_BOUNDED",
+        (
+            "AUTHORIZED_RAW_UNIT_KIND", "AUTHORIZED_SOURCE_SURFACE_REPLAY",
+            "GENERATION_INPUT_LEAKAGE", "INTEGER_SURFACE_BUDGET",
+            "SOURCE_SCOPE_ENVELOPE_ROUTE",
+        ),
+        (
+            "ADDRESSEE_TASK_SUCCESS", "DEFINITIVE_EXTERNAL_TRUTH",
+            "OPEN_NOVEL_SURFACE_SYNTHESIS", "SURFACE_NATURALNESS",
+        ),
+        "RETAIN_NE_OUTSIDE_BOUNDARY",
+    ),
+    (
+        "W02-LC16-SUPPLEMENTAL-PRIVATE-V1",
+        "PH2-W02-LC16-SUPPLEMENTAL-PRIVATE-EVALUATOR-V1",
+        "PH2_PRIVATE_EVALUATOR", "CROSS_DIRECTION", "FROZEN_NOT_RUN",
+        (
+            "BOUNDARY_WITHDRAWAL_BY_CARRIER",
+            "MULTI_CANDIDATE_BOUNDARY_BY_CARRIER",
+            "NEW_CONTENT_MORPHOLOGY_BY_CARRIER", "OOV_BY_CARRIER",
+        ),
+        (
+            "MISSING_INDEPENDENT_REVEAL", "SCHEMA_REQUIRED",
+            "UNREPRESENTABLE", "W1_PERCEPTUAL_INPUT_REQUIRED",
+        ),
+        "BLOCK_QUALIFICATION_ON_NE",
+    ),
+    (
+        "W03-LC16-SUPPLEMENTAL-PRIVATE-V1",
+        "PH2-W03-LC16-SUPPLEMENTAL-PRIVATE-EVALUATOR-V1",
+        "PH2_PRIVATE_EVALUATOR", "CROSS_DIRECTION", "FROZEN_NOT_RUN",
+        (
+            "CONCEPT_SPLIT_BY_CARRIER", "POLYSEMY_COMPETITION_BY_CARRIER",
+            "SOURCE_CONFLICT_BY_CARRIER", "SUPERSEDE_BY_CARRIER",
+        ),
+        (
+            "DEFINITIVE_EXTERNAL_TRUTH_REQUIRED", "MISSING_INDEPENDENT_REVEAL",
+            "SCHEMA_REQUIRED", "UNREPRESENTABLE",
+        ),
+        "BLOCK_QUALIFICATION_ON_NE",
+    ),
+)
+
+RESOURCE_BUDGET_SPECS = (
+    ("W-02-LC16-SUPPLEMENTAL", 63, 189, 134217728, 131072, 2000000, 4, 0),
+    ("W-03-LC16-SUPPLEMENTAL", 63, 189, 201326592, 196608, 3000000, 4, 0),
+)
+
+FAILURE_DEPENDENCY_SPECS = (
+    (
+        "PARENT_DIRECTIONAL_IDENTITY_DRIFT",
+        ("D-03-LC16-OVERLAY", "W-02-LC16-SUPPLEMENTAL",
+         "W-03-LC16-SUPPLEMENTAL", "W-04", "W-05", "W-06", "W-07",
+         "W-08", "W-09", "J-LC-W09", "J-F2"),
+    ),
+    (
+        "TYPED_COURSE_OR_ADAPTER_IDENTITY_DRIFT",
+        ("D-03-LC16-OVERLAY", "W-02-LC16-SUPPLEMENTAL",
+         "W-03-LC16-SUPPLEMENTAL", "W-04", "W-05", "W-06", "W-07",
+         "W-08", "W-09", "J-LC-W09", "J-F2"),
+    ),
+    (
+        "W02_SUPPLEMENTAL_FAIL_OR_NE",
+        ("W-02-LC16-SUPPLEMENTAL", "W-03-LC16-SUPPLEMENTAL",
+         "W-04", "W-05", "W-06", "W-07", "W-08", "W-09",
+         "J-LC-W09", "J-F2"),
+    ),
+    (
+        "W03_SUPPLEMENTAL_FAIL_OR_NE",
+        ("W-03-LC16-SUPPLEMENTAL", "W-04", "W-05", "W-06", "W-07",
+         "W-08", "W-09", "J-LC-W09", "J-F2"),
+    ),
+    ("OPEN_GENERATION_FAIL_OR_NE", ("W-08", "W-09", "J-LC-W09", "J-F2")),
+)
+
+GENERATION_ACCOUNT_SPECS = (
+    (
+        "SOURCE_GROUNDED_SURFACE_REPLAY", "BOUNDED_RUNTIME_EVIDENCED",
+        "LC16-DIRECTIONAL-GENERATION-REPLAY-PUBLIC-V1", 1, 1, 1,
+        ("W-08", "W-09", "J-LC-W09", "J-F2"),
+    ),
+    (
+        "OPEN_GENERATION", "NE_NOT_YET_EVALUABLE", "", 0, 0, 1,
+        ("W-08", "W-09", "J-LC-W09", "J-F2"),
+    ),
+)
+
+
+__all__ = [
+    "ARTIFACT_KIND", "ARTIFACT_STATUS", "ARTIFACT_VERSION", "COURSE_STATE",
+    "COVERAGE_STATES", "EVALUATOR_SPECS", "EVIDENCE_ROLES",
+    "EXECUTION_STATE", "FAILURE_DEPENDENCY_SPECS", "FORMAT_VERSION",
+    "GENERATION_ACCOUNT_SPECS", "PARSER_IDENTITIES", "RENDERER_KEY",
+    "RENDERER_MODE", "RENDERER_VERSION", "RESOURCE_BUDGET_SPECS",
+    "SCOPE_KEYS", "SCOPE_SPECS",
+]
