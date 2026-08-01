@@ -41,6 +41,7 @@ _EVIDENCE_PATHS = (
     ("src/pure_integer_ai/experiments/ph2_w02_lc16_supplemental_contract.py", "CONTRACT"),
     ("src/pure_integer_ai/experiments/ph2_w02_lc16_supplemental_evaluator.py", "EVALUATOR"),
     ("src/pure_integer_ai/experiments/ph2_w02_lc16_supplemental_publication.py", "PUBLICATION"),
+    ("src/pure_integer_ai/experiments/ph2_w02_lc16_supplemental_runner.py", "RUNNER"),
     ("tests/test_w02_lc16_supplemental.py", "TEST"),
 )
 

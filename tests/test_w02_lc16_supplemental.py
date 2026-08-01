@@ -41,6 +41,12 @@ from pure_integer_ai.experiments.ph2_w02_lc16_supplemental_publication import (
     publish_w02_lc16_supplemental_report,
     read_w02_lc16_supplemental_report,
 )
+from pure_integer_ai.experiments.ph2_w02_lc16_supplemental_runner import (
+    W02Lc16SupplementalRunnerError,
+    W02Lc16SupplementalSafeResultPack,
+    read_w02_lc16_supplemental_safe_result_pack,
+    run_w02_lc16_supplemental_safe_pack,
+)
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_bytes
 
 
@@ -52,6 +58,10 @@ _DIGESTS = {
     "logical": "3" * 64,
     "memory": "4" * 64,
     "use": "5" * 64,
+}
+_PACK_BINDINGS = {
+    "private_bundle_commitment_sha256": "9" * 64,
+    "safe_result_pack_sha256": "8" * 64,
 }
 
 
@@ -111,6 +121,22 @@ def _results(overlay):
     return tuple(result)
 
 
+def _safe_pack(overlay):
+    """构造不含 private payload 的新 family 测试 pack。"""
+    return W02Lc16SupplementalSafeResultPack(
+        "9" * 64,
+        _results(overlay),
+        _DIGESTS,
+        dict(_DIGESTS),
+        14,
+        14,
+        100000,
+        189,
+        189,
+        1000,
+    )
+
+
 @pytest.fixture(scope="module")
 def overlay():
     """读取并严格回验当前冻结 overlay。"""
@@ -123,6 +149,7 @@ def report(overlay):
     return aggregate_w02_lc16_supplemental(
         overlay,
         _results(overlay),
+        **_PACK_BINDINGS,
         host_digests_before=_DIGESTS,
         host_digests_after=dict(_DIGESTS),
         private_path_reads=14,
@@ -159,14 +186,16 @@ def test_aggregate_requires_exact_carrier_case_owner_direction_coverage(overlay)
     values = list(_results(overlay))
     with pytest.raises(W02Lc16SupplementalError, match="189"):
         aggregate_w02_lc16_supplemental(
-            overlay, tuple(values[:-1]), host_digests_before=_DIGESTS,
+            overlay, tuple(values[:-1]), **_PACK_BINDINGS,
+            host_digests_before=_DIGESTS,
             host_digests_after=dict(_DIGESTS), private_path_reads=0,
             private_payload_bytes=1, private_payload_reads=1,
             evaluator_label_reads=1)
     values[-1] = values[0]
     with pytest.raises(W02Lc16SupplementalError, match="漂移"):
         aggregate_w02_lc16_supplemental(
-            overlay, tuple(values), host_digests_before=_DIGESTS,
+            overlay, tuple(values), **_PACK_BINDINGS,
+            host_digests_before=_DIGESTS,
             host_digests_after=dict(_DIGESTS), private_path_reads=0,
             private_payload_bytes=1, private_payload_reads=1,
             evaluator_label_reads=1)
@@ -191,7 +220,8 @@ def test_ablation_must_hit_target_and_leave_other_dimensions_unchanged(overlay):
     )
     with pytest.raises(W02Lc16SupplementalError, match="消融"):
         aggregate_w02_lc16_supplemental(
-            overlay, tuple(values), host_digests_before=_DIGESTS,
+            overlay, tuple(values), **_PACK_BINDINGS,
+            host_digests_before=_DIGESTS,
             host_digests_after=dict(_DIGESTS), private_path_reads=1,
             private_payload_bytes=1, private_payload_reads=1,
             evaluator_label_reads=1)
@@ -200,20 +230,23 @@ def test_ablation_must_hit_target_and_leave_other_dimensions_unchanged(overlay):
 def test_runtime_zero_is_blocked_and_host_or_builder_write_is_rejected(overlay):
     """未运行只能 BLOCKED，host 写或复用 consumer builder 不能发布。"""
     blocked = aggregate_w02_lc16_supplemental(
-        overlay, _results(overlay), host_digests_before=_DIGESTS,
+        overlay, _results(overlay), **_PACK_BINDINGS,
+        host_digests_before=_DIGESTS,
         host_digests_after=dict(_DIGESTS), private_path_reads=0,
         private_payload_bytes=1, private_payload_reads=1,
         evaluator_label_reads=1, runtime_observed=0)
     assert blocked.status == "BLOCKED"
     with pytest.raises(W02Lc16SupplementalError):
         aggregate_w02_lc16_supplemental(
-            overlay, _results(overlay), host_digests_before=_DIGESTS,
+            overlay, _results(overlay), **_PACK_BINDINGS,
+            host_digests_before=_DIGESTS,
             host_digests_after=dict(_DIGESTS), private_path_reads=0,
             private_payload_bytes=1, private_payload_reads=1,
             evaluator_label_reads=1, host_write_count=1)
     with pytest.raises(W02Lc16SupplementalError):
         aggregate_w02_lc16_supplemental(
-            overlay, _results(overlay), host_digests_before=_DIGESTS,
+            overlay, _results(overlay), **_PACK_BINDINGS,
+            host_digests_before=_DIGESTS,
             host_digests_after=dict(_DIGESTS), private_path_reads=0,
             private_payload_bytes=1, private_payload_reads=1,
             evaluator_label_reads=1, consumer_result_builder_reused=1)
@@ -223,7 +256,8 @@ def test_observed_runtime_requires_private_read_evidence(overlay):
     """已观察的 private family 不得用零读取摘要伪造资格。"""
     with pytest.raises(W02Lc16SupplementalError, match="private read"):
         aggregate_w02_lc16_supplemental(
-            overlay, _results(overlay), host_digests_before=_DIGESTS,
+            overlay, _results(overlay), **_PACK_BINDINGS,
+            host_digests_before=_DIGESTS,
             host_digests_after=dict(_DIGESTS), private_path_reads=0,
             private_payload_bytes=1, private_payload_reads=0,
             evaluator_label_reads=0)
@@ -278,3 +312,65 @@ def test_manifest_mutation_is_fail_closed():
         mutate(value)
         with pytest.raises(W02Lc16SupplementalError):
             type(manifest).from_dict(value)
+
+
+def test_safe_result_pack_round_trip_and_runner_are_read_only(tmp_path, overlay):
+    """新 producer pack 可规范回读并形成 PASS，runner 不负责发布。"""
+    target = tmp_path / "safe-result-pack.json"
+    original = _safe_pack(overlay).canonical_bytes()
+    target.write_bytes(original)
+    pack, sha256 = read_w02_lc16_supplemental_safe_result_pack(target)
+    assert pack.canonical_bytes() == original
+    outcome = run_w02_lc16_supplemental_safe_pack(
+        target, repository_root=ROOT)
+    assert outcome.status == "PASS"
+    assert outcome.safe_pack_sha256 == sha256
+    assert outcome.report is not None
+    assert outcome.report.safe_result_pack_sha256 == sha256
+    assert outcome.report.private_bundle_commitment_sha256 == "9" * 64
+    assert target.read_bytes() == original
+
+
+def test_missing_safe_pack_is_explicitly_blocked(tmp_path):
+    """缺少新 family 安全 pack 时不得借旧结果继续。"""
+    outcome = run_w02_lc16_supplemental_safe_pack(
+        tmp_path / "missing.json", repository_root=ROOT)
+    assert outcome.status == "BLOCKED"
+    assert outcome.blocker_code == "SAFE_RESULT_PACK_MISSING"
+    assert outcome.report is None
+
+
+def test_old_v3_ten_case_and_private_payload_are_rejected(tmp_path):
+    """旧 v3/10-case 结构及递归 private 字段都不能进入新 runner。"""
+    old = tmp_path / "old-v3.json"
+    old.write_bytes(canonical_json_bytes({
+        "artifact_version": "W02-V3", "case_count": 10}) + b"\n")
+    with pytest.raises(W02Lc16SupplementalRunnerError, match="v3/10-case"):
+        read_w02_lc16_supplemental_safe_result_pack(old)
+    private = tmp_path / "private.json"
+    private.write_bytes(canonical_json_bytes({
+        "nested": [{"raw_observation": "secret"}]}) + b"\n")
+    with pytest.raises(W02Lc16SupplementalRunnerError, match="private"):
+        read_w02_lc16_supplemental_safe_result_pack(private)
+
+
+def test_safe_pack_rejects_parent_and_coverage_drift(tmp_path, overlay):
+    """producer、parent SHA 或 189 覆盖漂移必须在聚合前失败。"""
+    value = _safe_pack(overlay).to_public_dict()
+    value["producer_revision"] = "unexpected"
+    target = tmp_path / "producer-drift.json"
+    target.write_bytes(canonical_json_bytes(value) + b"\n")
+    with pytest.raises(W02Lc16SupplementalRunnerError, match="producer"):
+        read_w02_lc16_supplemental_safe_result_pack(target)
+    value = _safe_pack(overlay).to_public_dict()
+    value["parent_overlay_sha256"] = "0" * 64
+    target = tmp_path / "parent-drift.json"
+    target.write_bytes(canonical_json_bytes(value) + b"\n")
+    with pytest.raises(W02Lc16SupplementalRunnerError, match="parent"):
+        read_w02_lc16_supplemental_safe_result_pack(target)
+    value = _safe_pack(overlay).to_public_dict()
+    value["direction_results"] = value["direction_results"][:-1]
+    target = tmp_path / "coverage-drift.json"
+    target.write_bytes(canonical_json_bytes(value) + b"\n")
+    with pytest.raises(W02Lc16SupplementalRunnerError, match="189"):
+        read_w02_lc16_supplemental_safe_result_pack(target)

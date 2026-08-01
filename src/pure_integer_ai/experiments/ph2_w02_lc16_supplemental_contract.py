@@ -293,6 +293,32 @@ class SupplementalDirectionResult:
             "owner_key": list(self.owner_key),
         }
 
+    @classmethod
+    def from_public_dict(cls, value: Any) -> "SupplementalDirectionResult":
+        """从安全方向结果 object 恢复 supplemental 输入。"""
+        raw = _exact(value, {
+            "ablations", "carrier_key", "case_key", "dimensions", "direction",
+            "evidence_sha256", "generation", "independent_reveal_status",
+            "owner_key",
+        }, where="SupplementalDirectionResult")
+        case_key = StableRecordKey.from_value(
+            raw["case_key"], where="supplemental case_key")
+        owner_key = StableRecordKey.from_value(
+            raw["owner_key"], where="supplemental owner_key")
+        return cls(
+            str(raw["carrier_key"]),
+            case_key.stable_key(),
+            owner_key.stable_key(),
+            str(raw["direction"]),
+            tuple(SupplementalDimensionResult.from_dict(item)
+                  for item in raw["dimensions"]),
+            SupplementalDimensionResult.from_dict(raw["generation"]),
+            tuple(SupplementalAblationResult.from_dict(item)
+                  for item in raw["ablations"]),
+            str(raw["independent_reveal_status"]),
+            str(raw["evidence_sha256"]),
+        )
+
 
 @dataclass(frozen=True, order=True)
 class SupplementalCarrierSummary:
@@ -333,6 +359,8 @@ class W02Lc16SupplementalReport:
     status: str
     parent_overlay_sha256: str
     w02_parent_receipt_sha256: str
+    safe_result_pack_sha256: str
+    private_bundle_commitment_sha256: str
     case_count: int
     direction_evaluations: int
     dimensions: tuple[SupplementalDimensionResult, ...]
@@ -358,6 +386,11 @@ class W02Lc16SupplementalReport:
             raise W02Lc16SupplementalError("parent overlay SHA 漂移")
         if self.w02_parent_receipt_sha256 != W02_PARENT_RECEIPT_SHA256:
             raise W02Lc16SupplementalError("W-02 parent receipt SHA 漂移")
+        _sha256(self.safe_result_pack_sha256, where="safe result pack SHA")
+        _sha256(
+            self.private_bundle_commitment_sha256,
+            where="private bundle commitment",
+        )
         if self.case_count != CASE_COUNT or self.direction_evaluations != DIRECTION_EVALUATION_COUNT:
             raise W02Lc16SupplementalError("supplemental case/direction 数量错误")
         if tuple(item.dimension_key for item in self.dimensions) != BEARING_DIMENSIONS:
@@ -419,6 +452,7 @@ class W02Lc16SupplementalReport:
             "host_write_count": self.host_write_count,
             "independent_evaluator_module_separate": self.independent_evaluator_module_separate,
             "parent_overlay_sha256": self.parent_overlay_sha256,
+            "private_bundle_commitment_sha256": self.private_bundle_commitment_sha256,
             "private_reads": {
                 "evaluator_label_reads": self.evaluator_label_reads,
                 "private_path_reads": self.private_path_reads,
@@ -426,6 +460,7 @@ class W02Lc16SupplementalReport:
                 "private_payload_reads": self.private_payload_reads,
             },
             "runtime_observed": self.runtime_observed,
+            "safe_result_pack_sha256": self.safe_result_pack_sha256,
             "status": self.status,
             "w02_parent_receipt_sha256": self.w02_parent_receipt_sha256,
         }
@@ -443,7 +478,8 @@ class W02Lc16SupplementalReport:
             "direction_evaluations", "evidence_sha256", "generation",
             "host_digests_after", "host_digests_before", "host_write_count",
             "independent_evaluator_module_separate", "parent_overlay_sha256",
-            "private_reads", "runtime_observed", "status",
+            "private_bundle_commitment_sha256", "private_reads",
+            "runtime_observed", "safe_result_pack_sha256", "status",
             "w02_parent_receipt_sha256",
         }, where="W02Lc16SupplementalReport")
         if raw["artifact_kind"] != ARTIFACT_KIND or raw["artifact_version"] != ARTIFACT_VERSION:
@@ -454,7 +490,9 @@ class W02Lc16SupplementalReport:
         }, where="supplemental private_reads")
         return cls(
             str(raw["status"]), str(raw["parent_overlay_sha256"]),
-            str(raw["w02_parent_receipt_sha256"]), raw["case_count"],
+            str(raw["w02_parent_receipt_sha256"]),
+            str(raw["safe_result_pack_sha256"]),
+            str(raw["private_bundle_commitment_sha256"]), raw["case_count"],
             raw["direction_evaluations"],
             tuple(SupplementalDimensionResult.from_dict(item) for item in raw["dimensions"]),
             SupplementalDimensionResult.from_dict(raw["generation"]),
@@ -564,7 +602,7 @@ class W02Lc16SupplementalManifest:
                 or tuple(item.role for item in self.dependencies) != ("D03_LC16_OVERLAY", "W02_PARENT_RECEIPT_COMMITMENT")
                 or len({item.relative_path for item in self.dependencies}) != len(self.dependencies)
                 or self.evidence_files != tuple(sorted(self.evidence_files, key=lambda item: item.role))
-                or tuple(item.role for item in self.evidence_files) != ("CATALOG", "CONTRACT", "EVALUATOR", "PUBLICATION", "TEST")):
+                or tuple(item.role for item in self.evidence_files) != ("CATALOG", "CONTRACT", "EVALUATOR", "PUBLICATION", "RUNNER", "TEST")):
             raise W02Lc16SupplementalError("supplemental 文件证据未闭合")
 
     def to_dict(self) -> dict[str, Any]:
