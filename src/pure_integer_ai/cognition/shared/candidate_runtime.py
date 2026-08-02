@@ -91,6 +91,16 @@ class CandidateLearningOutcome:
 
 
 @dataclass(frozen=True)
+class CandidateEvidenceRevisionOutcome:
+    """一次 append-only Evidence revision、H-04 决策和竞争组投影结果。"""
+
+    evidence: EvidenceRecord
+    decision: ResolverDecision
+    projections: tuple[
+        tuple[HypothesisKey, CandidateGraphProjection | None], ...]
+
+
+@dataclass(frozen=True)
 class CandidateRecognitionRequest:
     """一次可整批预检的 prediction、独立 reveal、H-04 和投影请求。"""
 
@@ -578,6 +588,74 @@ class CandidateLearningRuntime:
             ))
         return tuple(outcomes)
 
+    def revise_evidence(
+            self,
+            evidence: EvidenceRecord,
+            *,
+            resolve_timestamp_seq: int,
+            projection_timestamp_seq: int,
+            scorers=(),
+            archive_refuted: bool = False,
+            replacement: HypothesisKey | None = None,
+            ) -> CandidateEvidenceRevisionOutcome:
+        """预检并追加 superseding Evidence，再重算 H-04 和同组投影。"""
+        if not isinstance(evidence, EvidenceRecord):
+            raise TypeError("revision evidence 必须是 EvidenceRecord")
+        self.engine.definition(evidence.hypothesis)
+        if evidence.supersedes_evidence_id == 0:
+            raise ValueError("Evidence revision 必须声明 supersedes_evidence_id")
+        if not isinstance(scorers, tuple):
+            scorers = tuple(scorers)
+        if type(archive_refuted) is not bool:
+            raise TypeError("revision archive_refuted 必须是 bool")
+        if replacement is not None and not isinstance(replacement, HypothesisKey):
+            raise TypeError("revision replacement 必须是 HypothesisKey 或 None")
+        assert_int(
+            resolve_timestamp_seq,
+            projection_timestamp_seq,
+            _where="CandidateLearningRuntime.revise_evidence",
+        )
+        if (type(resolve_timestamp_seq) is not int
+                or type(projection_timestamp_seq) is not int
+                or resolve_timestamp_seq <= evidence.timestamp_seq
+                or projection_timestamp_seq <= resolve_timestamp_seq):
+            raise ValueError("Evidence revision 三段逻辑序必须严格递增")
+
+        probe = self.engine.clone()
+        probe.ledger.append_evidence(evidence)
+        probe.resolve(
+            evidence.hypothesis,
+            timestamp_seq=resolve_timestamp_seq,
+            scorers=scorers,
+            archive_refuted=archive_refuted,
+            replacement=replacement,
+        )
+
+        committed = self.engine.ledger.append_evidence(evidence)
+        decision = self.engine.resolve(
+            evidence.hypothesis,
+            timestamp_seq=resolve_timestamp_seq,
+            scorers=scorers,
+            archive_refuted=archive_refuted,
+            replacement=replacement,
+        )
+        projections = self.sync_competition(
+            evidence.hypothesis,
+            timestamp_seq=projection_timestamp_seq,
+        )
+        self._hypotheses.update(item[0] for item in projections)
+        self._logical_clock = max(
+            self._logical_clock,
+            evidence.timestamp_seq,
+            resolve_timestamp_seq,
+            projection_timestamp_seq,
+        )
+        return CandidateEvidenceRevisionOutcome(
+            committed,
+            decision,
+            projections,
+        )
+
     def sync_competition(
             self, hypothesis: HypothesisKey, *, timestamp_seq: int,
             ) -> tuple[tuple[HypothesisKey, CandidateGraphProjection | None], ...]:
@@ -770,6 +848,7 @@ class CandidateLearningRuntime:
 
 __all__ = [
     "CandidateHistoryUnavailableError",
+    "CandidateEvidenceRevisionOutcome",
     "CandidateLearningOutcome",
     "CandidateLearningReport",
     "CandidateLearningRuntime",
