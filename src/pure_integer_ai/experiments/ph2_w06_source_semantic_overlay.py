@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from tempfile import TemporaryDirectory
+import shutil
 from typing import Any
 
 from pure_integer_ai.experiments.ph2_authored_alias_refers_course import (
@@ -79,6 +79,30 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _overlay_temp_parent(root: Path) -> Path:
+    """返回 repo 内可写 scratch 目录，避免系统 Temp 沙箱权限污染语义校验。"""
+    target = root / ".tmp_w06_overlay"
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise W06SourceOverlayError("无法创建 W-06 overlay 临时目录") from error
+    return target
+
+
+def _make_overlay_temp_dir(parent: Path) -> Path:
+    """用普通目录创建可写临时根，避开 Windows tempfile ACL 收窄。"""
+    for ordinal in range(1, 4096):
+        target = parent / f"ph2-w06-source-overlay-{ordinal:04d}"
+        try:
+            target.mkdir()
+        except FileExistsError:
+            continue
+        except OSError as error:
+            raise W06SourceOverlayError("无法创建 W-06 overlay 临时子目录") from error
+        return target
+    raise W06SourceOverlayError("W-06 overlay 临时目录槽位耗尽")
+
+
 def _profile_value() -> list[dict[str, Any]]:
     """输出无 surface 的冻结 relation profile 注册表。"""
     result = []
@@ -123,12 +147,20 @@ def build_w06_source_semantic_overlay(repo_root: str | Path) -> dict[str, Any]:
     if legacy_occurrence_refers <= 0:
         raise W06SourceOverlayError("旧 alias/refers 没有可证明的篇章指代拒绝样本")
 
-    with TemporaryDirectory(prefix="ph2-w06-source-overlay-") as temp:
+    temp_parent = _overlay_temp_parent(root)
+    temp = _make_overlay_temp_dir(temp_parent)
+    try:
         build = compile_authored_alias_refers_w06_course(v2_path, temp)
         report = audit_w06_authored_source_isolation(build.pack_root, stable)
         pack_manifest_sha = hashlib.sha256(
             canonical_json_bytes(build.manifest.to_dict())
         ).hexdigest()
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
+        try:
+            temp_parent.rmdir()
+        except OSError:
+            pass
 
     return {
         "artifact_kind": "PH2_W06_SOURCE_SEMANTIC_OVERLAY",
