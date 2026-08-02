@@ -231,6 +231,38 @@ class LegacySetRelationMapper(Protocol):
         ...
 
 
+@runtime_checkable
+class SetRelationEndpointResolver(Protocol):
+    """把来源局部集合端点显式投影为可跨命题比较的一等身份。"""
+
+    def resolve(self, endpoint: ObjectIdentity) -> ObjectIdentity:
+        """返回调用方授权的 endpoint identity；不得按 surface 猜测。"""
+        ...
+
+    def clone_for_evaluation(self) -> "SetRelationEndpointResolver":
+        """返回不共享可变状态的评测 resolver。"""
+        ...
+
+    def state_key(self) -> tuple[int, ...]:
+        """返回 resolver 版本与全部映射的稳定整数键。"""
+        ...
+
+
+class IdentitySetRelationEndpointResolver:
+    """默认保持端点完整身份不变。"""
+
+    def resolve(self, endpoint: ObjectIdentity) -> ObjectIdentity:
+        if not isinstance(endpoint, ObjectIdentity):
+            raise TypeError("set relation endpoint 必须是 ObjectIdentity")
+        return endpoint
+
+    def clone_for_evaluation(self) -> "IdentitySetRelationEndpointResolver":
+        return IdentitySetRelationEndpointResolver()
+
+    def state_key(self) -> tuple[int, ...]:
+        return (202, 0)
+
+
 class SetRelationRuntime:
     """把 R-00 当前关系快照适配为有界集合闭包和来源化 Use。"""
 
@@ -240,8 +272,9 @@ class SetRelationRuntime:
             protocol: SetRelationProtocol,
             budget: SetRelationBudget,
             member_type_resolver: MemberTypeResolver,
+            endpoint_resolver: SetRelationEndpointResolver | None = None,
             ) -> None:
-        """绑定同一 R-00 owner，并核验五类 schema 均由 consumer 注册。"""
+        """绑定 R-00 owner，并核验 schema、类型和显式 endpoint resolver。"""
         if not isinstance(relation_runtime, RelationClosureRuntime):
             raise TypeError("set relation closure runtime 类型错误")
         if not isinstance(protocol, SetRelationProtocol):
@@ -250,11 +283,19 @@ class SetRelationRuntime:
             raise TypeError("set relation budget 类型错误")
         if not isinstance(member_type_resolver, MemberTypeResolver):
             raise TypeError("member type resolver 协议不完整")
+        if endpoint_resolver is None:
+            endpoint_resolver = IdentitySetRelationEndpointResolver()
+        if not isinstance(endpoint_resolver, SetRelationEndpointResolver):
+            raise TypeError("set relation endpoint resolver 协议不完整")
         resolver_key = member_type_resolver.state_key()
         _strict_key(
             resolver_key,
             label="MemberTypeResolver.state_key",
             allow_empty=True,
+        )
+        _strict_key(
+            endpoint_resolver.state_key(),
+            label="SetRelationEndpointResolver.state_key",
         )
         registered = {item.schema for item in relation_runtime.consumer.schemas}
         required = {
@@ -270,6 +311,7 @@ class SetRelationRuntime:
         self.protocol = protocol
         self.budget = budget
         self.member_type_resolver = member_type_resolver
+        self.endpoint_resolver = endpoint_resolver
 
     @property
     def semantic_graph(self):
@@ -436,6 +478,7 @@ class SetRelationRuntime:
             self.protocol.stable_key(),
             self.budget.stable_key(),
             self.member_type_resolver.state_key(),
+            self.endpoint_resolver.state_key(),
         )
 
     def clone_for_context(self, ctx: TrainContext) -> "SetRelationRuntime":
@@ -462,6 +505,11 @@ class SetRelationRuntime:
             raise TypeError("member type resolver clone 协议不完整")
         if resolver.state_key() != self.member_type_resolver.state_key():
             raise ValueError("member type resolver clone 改变了映射状态")
+        endpoint_resolver = self.endpoint_resolver.clone_for_evaluation()
+        if not isinstance(endpoint_resolver, SetRelationEndpointResolver):
+            raise TypeError("endpoint resolver clone 协议不完整")
+        if endpoint_resolver.state_key() != self.endpoint_resolver.state_key():
+            raise ValueError("endpoint resolver clone 改变了映射状态")
         return SetRelationRuntime(
             self.relation_runtime.clone_for_evaluation(
                 semantic_graph,
@@ -470,6 +518,7 @@ class SetRelationRuntime:
             self.protocol,
             self.budget,
             resolver,
+            endpoint_resolver,
         )
 
     def _statement_from_definition(
@@ -479,16 +528,23 @@ class SetRelationRuntime:
                 SetBinaryRelationProtocol | SetUnaryRelationProtocol),
             ) -> SetRelationStatement:
         """按注入 Role 从 S-00 定义恢复集合关系内容，不依赖 binding 顺序。"""
+        def resolved(role: ObjectIdentity) -> ObjectIdentity:
+            endpoint = self.endpoint_resolver.resolve(
+                _single_filler(definition, role))
+            if not isinstance(endpoint, ObjectIdentity):
+                raise TypeError("endpoint resolver 返回类型错误")
+            return endpoint
+
         if isinstance(relation_protocol, SetUnaryRelationProtocol):
             statement = SetRelationStatement(
                 relation_protocol.relation,
-                _single_filler(definition, relation_protocol.value_role),
+                resolved(relation_protocol.value_role),
             )
         else:
             statement = SetRelationStatement(
                 relation_protocol.relation,
-                _single_filler(definition, relation_protocol.left_role),
-                _single_filler(definition, relation_protocol.right_role),
+                resolved(relation_protocol.left_role),
+                resolved(relation_protocol.right_role),
             )
         return self.protocol.validate_statement(statement)
 
@@ -910,6 +966,7 @@ def install_set_relation_runtime(
 
 
 __all__ = [
+    "IdentitySetRelationEndpointResolver",
     "LegacySetRelationMapper",
     "LegacySetRelationRecord",
     "MappedLegacySetRelation",
@@ -917,6 +974,7 @@ __all__ = [
     "SetRelationCourseRuntime",
     "SetRelationDomainQuery",
     "SetRelationDomainRuntimeResult",
+    "SetRelationEndpointResolver",
     "SetRelationFormationRequest",
     "SetRelationQuery",
     "SetRelationRoundReport",
