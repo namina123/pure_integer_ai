@@ -37,7 +37,7 @@ from pure_integer_ai.storage.backend import DictBackend
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HEAD = "307bf185698551434107ae95169576d26d61762f"
+HEAD = "2ceb8f955c81204bdc194b962911053de0133bbb"
 RETENTION_SHA256 = {
     "data/ph2/manifests/w02_lc16_supplemental_runtime_receipt_v1.json": (
         "141a6c2341671d4d92d9974a355b8081fd12dff17315f5d1f60913a45c31c8f1"
