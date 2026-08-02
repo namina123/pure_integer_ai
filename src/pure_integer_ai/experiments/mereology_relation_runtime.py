@@ -234,6 +234,41 @@ class LegacyMereologyMapper(Protocol):
         ...
 
 
+@runtime_checkable
+class MereologyEndpointResolver(Protocol):
+    """把来源局部部分整体端点显式投影为可跨命题比较的一等身份。"""
+
+    def resolve(self, endpoint: ObjectIdentity) -> ObjectIdentity:
+        """返回调用方授权的 endpoint identity；不得按 surface 猜测。"""
+        ...
+
+    def clone_for_evaluation(self) -> "MereologyEndpointResolver":
+        """返回不共享可变状态的评测 resolver。"""
+        ...
+
+    def state_key(self) -> tuple[int, ...]:
+        """返回 resolver 版本与全部映射的稳定整数键。"""
+        ...
+
+
+class IdentityMereologyEndpointResolver:
+    """默认保持部分整体端点完整身份不变。"""
+
+    def resolve(self, endpoint: ObjectIdentity) -> ObjectIdentity:
+        """返回未投影的原始 endpoint identity。"""
+        if not isinstance(endpoint, ObjectIdentity):
+            raise TypeError("mereology endpoint 必须是 ObjectIdentity")
+        return endpoint
+
+    def clone_for_evaluation(self) -> "IdentityMereologyEndpointResolver":
+        """返回无状态恒等 resolver。"""
+        return IdentityMereologyEndpointResolver()
+
+    def state_key(self) -> tuple[int, ...]:
+        """返回恒等 resolver 的固定协议键。"""
+        return (204, 0)
+
+
 class MereologyRelationRuntime:
     """把 R-00 当前关系快照适配为有界部分整体闭包和 Use。"""
 
@@ -242,14 +277,22 @@ class MereologyRelationRuntime:
             relation_runtime: RelationClosureRuntime,
             protocol: MereologyProtocol,
             budget: MereologyBudget,
+            endpoint_resolver: MereologyEndpointResolver | None = None,
+            include_archived_refutes: bool = True,
             ) -> None:
-        """绑定同一 R-00 owner，并核验关系族全部 schema 已注册。"""
+        """绑定同一 R-00 owner，并核验 schema 与显式 endpoint resolver。"""
         if not isinstance(relation_runtime, RelationClosureRuntime):
             raise TypeError("mereology relation closure runtime 类型错误")
         if not isinstance(protocol, MereologyProtocol):
             raise TypeError("mereology protocol 类型错误")
         if not isinstance(budget, MereologyBudget):
             raise TypeError("mereology budget 类型错误")
+        if endpoint_resolver is None:
+            endpoint_resolver = IdentityMereologyEndpointResolver()
+        if not isinstance(endpoint_resolver, MereologyEndpointResolver):
+            raise TypeError("mereology endpoint resolver 协议不完整")
+        if type(include_archived_refutes) is not bool:
+            raise TypeError("mereology archived refute 开关必须是严格 bool")
         registered = {item.schema for item in relation_runtime.consumer.schemas}
         required = {item.schema.schema for item in protocol.relations}
         if not required.issubset(registered):
@@ -257,6 +300,8 @@ class MereologyRelationRuntime:
         self.relation_runtime = relation_runtime
         self.protocol = protocol
         self.budget = budget
+        self.endpoint_resolver = endpoint_resolver
+        self.include_archived_refutes = include_archived_refutes
 
     @property
     def semantic_graph(self) -> SemanticGraph:
@@ -271,8 +316,10 @@ class MereologyRelationRuntime:
         relation.schema.validate_definition(definition)
         return MereologyStatement(
             relation.relation,
-            _single_filler(definition, relation.part_role),
-            _single_filler(definition, relation.whole_role),
+            self.endpoint_resolver.resolve(
+                _single_filler(definition, relation.part_role)),
+            self.endpoint_resolver.resolve(
+                _single_filler(definition, relation.whole_role)),
         )
 
     def knowledge(self) -> MereologyKnowledge:
@@ -293,7 +340,8 @@ class MereologyRelationRuntime:
                 state = LogicEvidenceState.from_status(
                     snapshot.snapshot.epistemic_status)
                 current_evidence = snapshot.evidence
-            elif (snapshot.snapshot.lifecycle == LIFECYCLE_ARCHIVED
+            elif (self.include_archived_refutes
+                    and snapshot.snapshot.lifecycle == LIFECYCLE_ARCHIVED
                     and snapshot.snapshot.refute_evidence_ids):
                 refute_ids = frozenset(snapshot.snapshot.refute_evidence_ids)
                 state = LogicEvidenceState(False, True)
@@ -400,6 +448,8 @@ class MereologyRelationRuntime:
             self.relation_runtime.state_key(),
             self.protocol.stable_key(),
             self.budget.stable_key(),
+            self.endpoint_resolver.state_key(),
+            int(self.include_archived_refutes),
         )
 
     def clone_for_context(self, ctx: TrainContext) -> "MereologyRelationRuntime":
@@ -428,6 +478,8 @@ class MereologyRelationRuntime:
             ),
             self.protocol,
             self.budget,
+            self.endpoint_resolver.clone_for_evaluation(),
+            self.include_archived_refutes,
         )
 
     def _consume_groups(self, groups: tuple[tuple, ...]) -> tuple[tuple, ...]:
@@ -784,11 +836,13 @@ def install_mereology_relation_runtime(
 
 
 __all__ = [
+    "IdentityMereologyEndpointResolver",
     "LegacyMereologyMapper",
     "LegacyMereologyRecord",
     "MappedLegacyMereology",
     "MereologyCourse",
     "MereologyCourseRuntime",
+    "MereologyEndpointResolver",
     "MereologyFormationRequest",
     "MereologyQuery",
     "MereologyRelationRuntime",
