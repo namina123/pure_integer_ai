@@ -68,6 +68,39 @@ def _result(
     )
 
 
+def evaluate_w07_case(
+        suite: W07EvaluatorConsumerSuite,
+        case: W07PrivateCase,
+        *,
+        disabled_dimension: str | None = None,
+        evaluation_ordinal: int = 0,
+        ) -> W07PrivateDimensionResult:
+    """执行一个公开维度，使 evaluator 能安全记录精确失败游标。"""
+    if not isinstance(suite, W07EvaluatorConsumerSuite):
+        raise TypeError("W-07 evaluator suite type drift")
+    if not isinstance(case, W07PrivateCase):
+        raise TypeError("W-07 evaluator case type drift")
+    if (disabled_dimension is not None
+            and disabled_dimension not in W07_PUBLIC_DIMENSION_KEYS):
+        raise W07PrivateEvaluationError("W-07 disabled dimension drift")
+    if type(evaluation_ordinal) is not int or evaluation_ordinal < 0:
+        raise ValueError("W-07 evaluation ordinal is invalid")
+    if case.dimension_key == W07_GENERATION_HARD_CONJUNCT:
+        passed, evidence = suite.evaluate_generation_hard_conjunct(
+            tuple(case.challenge_key),
+            generation_connected=case.dimension_key != disabled_dimension,
+            evaluation_ordinal=evaluation_ordinal,
+        )
+    else:
+        passed, evidence = suite.evaluate_logic_dimension(
+            _DIMENSION_TO_SUBSTAGE[case.dimension_key],
+            tuple(case.challenge_key),
+            target_connected=case.dimension_key != disabled_dimension,
+            evaluation_ordinal=evaluation_ordinal,
+        )
+    return _result(case, passed, evidence)
+
+
 def evaluate_w07_learning_runtime(
         suite: W07EvaluatorConsumerSuite,
         cases: tuple[W07PrivateCase, ...],
@@ -87,28 +120,16 @@ def evaluate_w07_learning_runtime(
     if ablation is not None and not isinstance(ablation, W07EvaluatorAblation):
         raise TypeError("W-07 evaluator ablation type drift")
     disabled = None if ablation is None else ablation.dimension_key
-    evaluations = []
-    for case in cases:
-        if case.dimension_key == W07_GENERATION_HARD_CONJUNCT:
-            evaluations.append(suite.evaluate_generation_hard_conjunct(
-                tuple(case.challenge_key),
-                generation_connected=case.dimension_key != disabled,
-                evaluation_ordinal=evaluation_ordinal,
-            ))
-        else:
-            evaluations.append(suite.evaluate_logic_dimension(
-                _DIMENSION_TO_SUBSTAGE[case.dimension_key],
-                tuple(case.challenge_key),
-                target_connected=case.dimension_key != disabled,
-                evaluation_ordinal=evaluation_ordinal,
-            ))
-    return tuple(
-        _result(case, passed, evidence)
-        for case, (passed, evidence) in zip(cases, evaluations, strict=True)
-    )
+    return tuple(evaluate_w07_case(
+        suite,
+        case,
+        disabled_dimension=disabled,
+        evaluation_ordinal=evaluation_ordinal,
+    ) for case in cases)
 
 
 __all__ = [
     "W07EvaluatorAblation",
+    "evaluate_w07_case",
     "evaluate_w07_learning_runtime",
 ]

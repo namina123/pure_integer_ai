@@ -135,6 +135,26 @@ class W07EvaluatorConsumerSuite:
         for bundle in self._bundles.values():
             bundle.backend.close()
 
+    def commit(self) -> None:
+        """在进入 held-out 评估前持久化七个只读 learning ledger。"""
+        for substage in W07_SUBSTAGE_ORDER:
+            self._bundles[substage].backend.commit()
+
+    def ledger_audit(self) -> tuple[dict[str, int | str], ...]:
+        """只导出表数与行数，不导出 learning payload。"""
+        rows = []
+        for substage in W07_SUBSTAGE_ORDER:
+            backend = self._bundles[substage].backend
+            tables = tuple(sorted(backend.schema_snapshot()))
+            counts = tuple(backend.count(table) for table in tables)
+            rows.append({
+                "nonempty_table_count": sum(value > 0 for value in counts),
+                "row_count": sum(counts),
+                "substage": substage,
+                "table_count": len(tables),
+            })
+        return tuple(rows)
+
     def audit(self) -> dict[str, int]:
         return dict(self._audit)
 
