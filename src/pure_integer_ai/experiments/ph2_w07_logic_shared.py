@@ -19,6 +19,7 @@ from pure_integer_ai.cognition.shared.logic_candidate import (
 )
 from pure_integer_ai.cognition.shared.logic_executor import (
     LogicAtomEvidence,
+    LogicEvaluation,
     LogicEvidenceState,
     LogicExecutor,
     LogicFailureProtocol,
@@ -488,6 +489,62 @@ class W07LogicView:
                 current, key=lambda item: item.spec.candidate.stable_key()))
         return tuple(definitions), tuple(adoptions)
 
+    def _evaluate_bound(
+            self,
+            proposal: W07LogicProposal,
+            request: W07LogicRequest,
+            root: BoundProposition,
+            *,
+            definitions: tuple[LogicOperatorDefinition, ...] | None = None,
+            ) -> LogicEvaluation:
+        if definitions is None:
+            definitions, _adoptions = self._registry_profiles()
+        graph = _template_graph(proposal.bound_root)
+        binding_failures = _binding_failures()
+        substitution = SubstitutionProtocol(root.instruction, binding_failures)
+        executor = LogicExecutor(
+            LogicOperatorRegistry(definitions),
+            _ProposalAtomResolver(proposal),
+            _logic_failures(),
+            substitution,
+            ExactTypeCompatibilityResolver(),
+            binding_failures,
+        )
+        return executor.evaluate(
+            root,
+            source=request.source,
+            scope=request.scope,
+            graph=graph,
+            environment=BindingEnvironment(),
+            quantifier_resolver=(
+                _ProposalQuantifierResolver(proposal.quantifiers)
+                if proposal.quantifiers else None),
+            modal_resolver=(
+                _ProposalModalResolver(proposal.modal_plans)
+                if proposal.modal_plans else None),
+        )
+
+    def evaluate_bound(
+            self,
+            request: W07LogicRequest,
+            root: BoundProposition,
+            ) -> LogicEvaluation | None:
+        """用同一 learned registry 重算 proposal 内一个来源化 bound 子树。"""
+        if not isinstance(request, W07LogicRequest):
+            raise TypeError("W-07 child evaluation request 类型非法")
+        if not isinstance(root, BoundProposition):
+            raise TypeError("W-07 child evaluation root 类型非法")
+        if (request.substage not in self.protocol.enabled_substages
+                or request.substage in self.protocol.disabled_substages):
+            return None
+        proposal = self.proposal_for(request)
+        if proposal is None or not self.active_adoptions(proposal):
+            return None
+        if root not in _walk_bound(proposal.bound_root):
+            raise W07LogicContractError("child evaluation root 不属于 proposal")
+        _verify_budget(proposal, request)
+        return self._evaluate_bound(proposal, request, root)
+
     def execute(self, request: W07LogicRequest) -> W07LogicExecution | None:
         if not isinstance(request, W07LogicRequest):
             raise TypeError("W-07 execute request 类型非法")
@@ -499,30 +556,11 @@ class W07LogicView:
             return None
         _verify_budget(proposal, request)
         definitions, all_adoptions = self._registry_profiles()
-        graph = _template_graph(proposal.bound_root)
-        binding_failures = _binding_failures()
-        substitution = SubstitutionProtocol(
-            proposal.bound_root.instruction, binding_failures)
-        executor = LogicExecutor(
-            LogicOperatorRegistry(definitions),
-            _ProposalAtomResolver(proposal),
-            _logic_failures(),
-            substitution,
-            ExactTypeCompatibilityResolver(),
-            binding_failures,
-        )
-        evaluation = executor.evaluate(
+        evaluation = self._evaluate_bound(
+            proposal,
+            request,
             proposal.bound_root,
-            source=request.source,
-            scope=request.scope,
-            graph=graph,
-            environment=BindingEnvironment(),
-            quantifier_resolver=(
-                _ProposalQuantifierResolver(proposal.quantifiers)
-                if proposal.quantifiers else None),
-            modal_resolver=(
-                _ProposalModalResolver(proposal.modal_plans)
-                if proposal.modal_plans else None),
+            definitions=definitions,
         )
         structures = tuple(sorted(
             {item.operator for item in evaluation.derivation},
