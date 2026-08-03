@@ -111,7 +111,11 @@ class W07LogicGenerationRuntime:
             proposal.bound_root.template,
             proposal.operator_families,
             structure_tree_key(proposal.bound_root),
-            role_tree_key(proposal.bound_root),
+            role_tree_key(
+                proposal.bound_root,
+                include_bound_provenance=(
+                    "AND_OR" in self.view.protocol.enabled_substages),
+            ),
             execution.evaluation.source,
             execution.evaluation.scope,
             execution.evaluation.state.stable_key(),
@@ -219,7 +223,11 @@ class W07LogicGenerationRuntime:
                 and proposal.operator_families == option.operator_families)
         role_order_preserved = bool(
             proposal is not None
-            and role_tree_key(proposal.bound_root) == option.role_tree_key)
+            and role_tree_key(
+                proposal.bound_root,
+                include_bound_provenance=(
+                    "AND_OR" in self.view.protocol.enabled_substages),
+            ) == option.role_tree_key)
         state_preserved = bool(
             current is not None
             and current.evaluation.state.stable_key() == option.state_key

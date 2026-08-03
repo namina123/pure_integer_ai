@@ -63,6 +63,7 @@ class W07LogicConsumerProtocol:
     reasoning_connected: bool = True
     generation_connected: bool = True
     postcheck_connected: bool = True
+    disabled_operator_families: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if (not isinstance(self.enabled_substages, tuple)
@@ -86,6 +87,12 @@ class W07LogicConsumerProtocol:
                 "generation_connected", "postcheck_connected"):
             if type(getattr(self, name)) is not bool:
                 raise W07LogicContractError(f"{name} 必须是严格 bool")
+        if (not isinstance(self.disabled_operator_families, tuple)
+                or any(not isinstance(item, str) or not item
+                       for item in self.disabled_operator_families)
+                or len(set(self.disabled_operator_families))
+                != len(self.disabled_operator_families)):
+            raise W07LogicContractError("disabled operator families 非法")
 
     def connected(self, consumer: str) -> bool:
         if consumer not in W07_LOGIC_CONSUMERS:
@@ -108,6 +115,8 @@ class W07LogicConsumerProtocol:
             int(self.reasoning_connected),
             int(self.generation_connected),
             int(self.postcheck_connected),
+            *(value for item in self.disabled_operator_families
+              for value in (len(item), *(ord(char) for char in item))),
         )
 
 

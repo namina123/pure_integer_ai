@@ -144,18 +144,50 @@ def structure_tree_key(root: BoundProposition) -> tuple[int, ...]:
     return tuple(values)
 
 
-def role_tree_key(root: BoundProposition) -> tuple[int, ...]:
-    """递归保存原始 Role/ordinal/source-bearing filler 顺序。"""
-    values = [len(root.bindings)]
+def role_tree_key(
+        root: BoundProposition,
+        *,
+        include_bound_provenance: bool = False,
+        ) -> tuple[int, ...]:
+    """递归保存 Role/ordinal；L02 起可冻结完整 bound provenance。"""
+    if type(include_bound_provenance) is not bool:
+        raise TypeError("include_bound_provenance 必须是严格 bool")
+    if not include_bound_provenance:
+        values = [len(root.bindings)]
+        for item in root.bindings:
+            role = item.role.stable_key()
+            values.extend((len(role), *role, item.ordinal))
+            filler = (
+                role_tree_key(item.filler)
+                if isinstance(item.filler, BoundProposition)
+                else item.filler.stable_key()
+            )
+            values.extend((len(filler), *filler))
+        return tuple(values)
+
+    values = [W07_LOGIC_RUNTIME_NAMESPACE, 2]
+    for identity in (root.template, root.source_anchor, root.context):
+        key = identity.stable_key()
+        values.extend((len(key), *key))
+    values.append(len(root.introduced_binders))
+    for binder in root.introduced_binders:
+        key = binder.stable_key()
+        values.extend((len(key), *key))
+    values.append(len(root.applied_variables))
+    for variable in root.applied_variables:
+        key = variable.stable_key()
+        values.extend((len(key), *key))
+    values.append(len(root.bindings))
     for item in root.bindings:
         role = item.role.stable_key()
         values.extend((len(role), *role, item.ordinal))
-        filler = (
-            role_tree_key(item.filler)
-            if isinstance(item.filler, BoundProposition)
-            else item.filler.stable_key()
-        )
-        values.extend((len(filler), *filler))
+        if isinstance(item.filler, BoundProposition):
+            filler = role_tree_key(
+                item.filler, include_bound_provenance=True)
+            values.extend((2, len(filler), *filler))
+        else:
+            filler = item.filler.stable_key()
+            values.extend((1, len(filler), *filler))
     return tuple(values)
 
 
@@ -399,6 +431,9 @@ class W07LogicView:
             self, proposal: W07LogicProposal,
             ) -> tuple[LogicOperatorAdoption, ...]:
         """用共享 learned profile 执行内容；reject/superseded proposal 不借用。"""
+        if set(proposal.operator_families).intersection(
+                self.protocol.disabled_operator_families):
+            return ()
         snapshots = tuple(
             self.learning.snapshot_for(item.candidate)
             for item in proposal.specs)
@@ -432,7 +467,10 @@ class W07LogicView:
         for proposal in self.proposals:
             if proposal.observation.substage in self.protocol.disabled_substages:
                 continue
-            for spec in proposal.specs:
+            for family, spec in zip(
+                    proposal.operator_families, proposal.specs, strict=True):
+                if family in self.protocol.disabled_operator_families:
+                    continue
                 adoption = self.learning.logic.adoption(spec)
                 if adoption is not None:
                     grouped.setdefault(
