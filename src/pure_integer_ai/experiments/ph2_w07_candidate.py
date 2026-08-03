@@ -578,7 +578,14 @@ def execute_w07_candidate_once(
         outcome=outcome,
         readback=readback,
     )
-    return outcome, readback, host_path, host_sha, guard_path, guard_sha
+    return (
+        formalize_w07_candidate_outcome(outcome),
+        formalize_w07_candidate_outcome(readback),
+        host_path,
+        host_sha,
+        guard_path,
+        guard_sha,
+    )
 
 
 __all__ = [name for name in globals() if name.startswith("W07_")] + [
