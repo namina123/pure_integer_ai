@@ -349,6 +349,25 @@ class W07LogicLearningRuntime:
         self._applications: dict[tuple[int, ...], W07EvidenceApplication] = {}
         self._withdrawals: dict[tuple[int, int], W07WithdrawalAccount] = {}
         self._archives: dict[int, W07ArchiveAccount] = {}
+        self._revision = 0
+        self._adoption_cache = {}
+        self._snapshot_cache = {}
+
+    @property
+    def revision(self) -> int:
+        """返回 learning state 的单调本地版本，用于纯读缓存失效。"""
+        return self._revision
+
+    def _touch_revision(self) -> None:
+        self._revision += 1
+        self._adoption_cache.clear()
+        self._snapshot_cache.clear()
+
+    def adoption(self, spec: LogicOperatorCandidateSpec):
+        """按当前 revision 缓存完整 H-05 adoption 回读。"""
+        if spec not in self._adoption_cache:
+            self._adoption_cache[spec] = self.logic.adoption(spec)
+        return self._adoption_cache[spec]
 
     def register_adapter_output(self, adapter: W07TypedAdapterOutput) -> None:
         """批量 form 全部合法 spec；schema rejection 永不进入 owner。"""
@@ -393,6 +412,7 @@ class W07LogicLearningRuntime:
         }
         self._adapter = adapter
         self._adapter_key = adapter_key
+        self._touch_revision()
 
     def _plan_recognition(
             self,
@@ -555,6 +575,7 @@ class W07LogicLearningRuntime:
             reparse,
         )
         self._applications[route] = application
+        self._touch_revision()
         return application
 
     def apply_all(
@@ -636,6 +657,7 @@ class W07LogicLearningRuntime:
                     superseded,
                     reparse,
                 )
+            self._touch_revision()
         else:
             for binding in ordered:
                 self.apply_evidence(binding)
@@ -697,6 +719,7 @@ class W07LogicLearningRuntime:
         result = W07WithdrawalAccount(
             account, withdrawal_level, evidence, outcome)
         self._withdrawals[(prior.evidence_id, withdrawal_level)] = result
+        self._touch_revision()
         return result
 
     def archive_refuted(
@@ -753,6 +776,7 @@ class W07LogicLearningRuntime:
             raise W07LearningError("refuted operator 未进入 archived lifecycle")
         result = W07ArchiveAccount(account, evidence, outcome, False)
         self._archives[prior.evidence_id] = result
+        self._touch_revision()
         return result
 
     def applications(self) -> tuple[W07EvidenceApplication, ...]:
@@ -768,15 +792,20 @@ class W07LogicLearningRuntime:
     def active_specs(self) -> tuple[LogicOperatorCandidateSpec, ...]:
         return tuple(
             item for item in self.logic.specs()
-            if self.logic.adoption(item) is not None
+            if self.adoption(item) is not None
         )
 
     def snapshot_for(self, candidate: ObjectIdentity):
+        cached = self._snapshot_cache.get(candidate)
+        if cached is not None:
+            return cached
         try:
             hypothesis = self.learning.hypothesis_for_candidate(candidate)
         except KeyError as error:
             raise W07LearningError("logic candidate 未登记") from error
-        return self.learning.engine.ledger.snapshot(hypothesis)
+        snapshot = self.learning.engine.ledger.snapshot(hypothesis)
+        self._snapshot_cache[candidate] = snapshot
+        return snapshot
 
     def report(self) -> W07LearningResult:
         if self._adapter is None:

@@ -416,6 +416,8 @@ class W07LogicView:
         self.adapter = adapter
         self.protocol = protocol
         self.proposals = adapter.proposals
+        self._execution_cache = {}
+        self._execution_cache_revision = learning.revision
 
     def proposal_for(self, request: W07LogicRequest) -> W07LogicProposal | None:
         matches = tuple(
@@ -472,7 +474,7 @@ class W07LogicView:
                     proposal.operator_families, proposal.specs, strict=True):
                 if family in self.protocol.disabled_operator_families:
                     continue
-                adoption = self.learning.logic.adoption(spec)
+                adoption = self.learning.adoption(spec)
                 if adoption is not None:
                     grouped.setdefault(
                         spec.definition.structure, []).append(adoption)
@@ -552,8 +554,15 @@ class W07LogicView:
         if (request.substage not in self.protocol.enabled_substages
                 or request.substage in self.protocol.disabled_substages):
             return None
+        if self._execution_cache_revision != self.learning.revision:
+            self._execution_cache.clear()
+            self._execution_cache_revision = self.learning.revision
+        cache_key = request.stable_key()
+        if cache_key in self._execution_cache:
+            return self._execution_cache[cache_key]
         proposal = self.proposal_for(request)
         if proposal is None or not self.active_adoptions(proposal):
+            self._execution_cache[cache_key] = None
             return None
         _verify_budget(proposal, request)
         definitions, all_adoptions = self._registry_profiles()
@@ -580,6 +589,7 @@ class W07LogicView:
             item for item in all_adoptions
             if item.spec.definition.structure in set(structures))
         if not adoptions:
+            self._execution_cache[cache_key] = None
             return None
         operator_keys = tuple(sorted({
             (1, *evidence.stable_key())
@@ -588,7 +598,7 @@ class W07LogicView:
         content_keys = tuple(sorted({
             (2, item) for item in evaluation.evidence_ids
         }))
-        return W07LogicExecution(
+        execution = W07LogicExecution(
             request,
             evaluation,
             adoptions,
@@ -596,6 +606,8 @@ class W07LogicView:
             content_keys,
             structures,
         )
+        self._execution_cache[cache_key] = execution
+        return execution
 
 
 __all__ = [
