@@ -521,7 +521,8 @@ class W07LogicView:
                 if proposal.quantifiers else None),
             modal_resolver=(
                 _ProposalModalResolver(proposal.modal_plans)
-                if proposal.modal_plans else None),
+                if any(item.status == "RESOLVED"
+                       for item in proposal.modal_plans) else None),
         )
 
     def evaluate_bound(
@@ -565,6 +566,16 @@ class W07LogicView:
         structures = tuple(sorted(
             {item.operator for item in evaluation.derivation},
             key=ObjectIdentity.stable_key))
+        # Resolver/绑定失败没有 derivation step，但 active 根 operator 仍应
+        # 归因到本次结构化 UNKNOWN execution。
+        if not structures and evaluation.failures:
+            root_definition = next(
+                (item for item in definitions
+                 if item.structure == proposal.bound_root.structure),
+                None,
+            )
+            if root_definition is not None:
+                structures = (root_definition.structure,)
         adoptions = tuple(
             item for item in all_adoptions
             if item.spec.definition.structure in set(structures))
