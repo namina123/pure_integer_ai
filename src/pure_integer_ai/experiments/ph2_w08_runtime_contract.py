@@ -21,6 +21,11 @@ W08_RUNTIME_HARD_CONJUNCT_KEYS = (
     "LC16_DISCOURSE_REFERENCE_GENERATION",
 )
 W08_RUNTIME_OWNED_TABLES = ("ph2_w08_transaction_event",)
+W08_FORMAL_EXECUTION_STATE = {
+    **W08_ZERO_EXECUTION_STATE,
+    "W08_STARTED": 1,
+    "formal_w08_training_runs": 1,
+}
 
 
 class W08RuntimeError(RuntimeError):
@@ -326,8 +331,11 @@ class W08RunOutcome:
             raise W08RuntimeError("W08 runtime hard conjunct inventory 漂移")
         if self.owned_tables != W08_RUNTIME_OWNED_TABLES:
             raise W08RuntimeError("W08 runtime owned table inventory 漂移")
-        if dict(self.execution_state) != W08_ZERO_EXECUTION_STATE:
-            raise W08RuntimeError("W08 runtime 提前改变 formal 状态")
+        if dict(self.execution_state) not in (
+            W08_ZERO_EXECUTION_STATE,
+            W08_FORMAL_EXECUTION_STATE,
+        ):
+            raise W08RuntimeError("W08 runtime formal 状态非法")
         if self.open_generation_state != W08_OPEN_GENERATION_PREFORMAL_STATE:
             raise W08RuntimeError("W08 runtime 提前改变 OPEN_GENERATION")
         if self.transaction_event_count != 5 or self.compiled_artifact_count != len(self.artifacts):
@@ -371,6 +379,7 @@ def build_semantic_state_key(
 
 __all__ = [
     "W08_FORMAL_RUN_ID",
+    "W08_FORMAL_EXECUTION_STATE",
     "W08_RUNTIME_HARD_CONJUNCT_KEYS",
     "W08_RUNTIME_OWNED_TABLES",
     "W08_OPEN_GENERATION_PREFORMAL_STATE",
