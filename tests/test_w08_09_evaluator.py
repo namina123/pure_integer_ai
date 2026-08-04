@@ -94,8 +94,18 @@ def evaluator_fixture():
         observation = replace(original, split="held_out")
         evidence = evidence_by_observation[original.stable_key]
         typed = evidence.typed_evidence.to_value()
-        expected_state = typed.get("expected_state", "TRUE")
-        expected_payload = typed.get("expected_payload", typed)
+        if observation.payload_kind == "RAW_SOURCE_OBSERVATION_V1":
+            expected_state = "TRUE"
+            expected_payload = {
+                "definitive_truth_authoritative": typed[
+                    "definitive_truth_authoritative"
+                ],
+                "raw_observation_sha256": typed["raw_observation_sha256"],
+                "source_binding_required": 1,
+            }
+        else:
+            expected_state = typed.get("expected_state", "TRUE")
+            expected_payload = typed.get("expected_payload", typed)
         label = EvaluatorLabelRecord(
             1,
             1,
@@ -238,6 +248,79 @@ def test_five_bearings_pass_only_actual_adapter_outcomes(evaluator_fixture):
     assert all(item.passed_count == len(pairs) for item in results)
     assert len(outcomes) == len(pairs) * len(W08_DIMENSION_KEYS)
     assert len({item.invocation_key for item in outcomes}) == len(outcomes)
+
+
+def test_non_course_matching_uses_typed_semantics_not_label_wording(
+    evaluator_fixture,
+):
+    _, snapshot, pairs, outcomes, _ = evaluator_fixture
+    revision_index = next(
+        index
+        for index, pair in enumerate(pairs)
+        if pair.observation.payload_kind == "DiscourseRevisionQuery"
+    )
+    revision = pairs[revision_index]
+    expected = revision.label.expected_payload.to_value()
+    expected["decision"] = "independent-evaluator-wording"
+    relabeled = replace(
+        revision,
+        label=replace(
+            revision.label,
+            expected_payload=CanonicalJsonObject.from_value(expected),
+        ),
+    )
+    revised_pairs = (
+        *pairs[:revision_index],
+        relabeled,
+        *pairs[revision_index + 1:],
+    )
+    assert all(
+        item.status == "PASS"
+        for item in evaluate_w08_private_pairs(
+            snapshot,
+            revised_pairs,
+            case_outcomes=outcomes,
+        )
+    )
+
+    expected["result_bits"] = [
+        1 - expected["result_bits"][0],
+        expected["result_bits"][1],
+    ]
+    wrong = replace(
+        relabeled,
+        label=replace(
+            relabeled.label,
+            expected_payload=CanonicalJsonObject.from_value(expected),
+        ),
+    )
+    wrong_pairs = (
+        *pairs[:revision_index],
+        wrong,
+        *pairs[revision_index + 1:],
+    )
+    assert all(
+        item.status == "FAIL"
+        for item in evaluate_w08_private_pairs(
+            snapshot,
+            wrong_pairs,
+            case_outcomes=outcomes,
+        )
+    )
+
+    source = next(
+        pair
+        for pair in pairs
+        if pair.observation.payload_kind == "RAW_SOURCE_OBSERVATION_V1"
+    )
+    source_outcome = next(
+        item
+        for item in outcomes
+        if item.observation_key == source.observation.stable_key.components
+    )
+    assert source_outcome.actual_payload.to_value()["result"] == (
+        source.label.expected_payload.to_value()
+    )
 
 
 def test_five_real_ablations_disable_only_the_target(evaluator_fixture):

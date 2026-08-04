@@ -349,15 +349,15 @@ def _result_payload(
         result = {
             "decision": rule.operation_key,
             "result_bits": [evidence["support"], evidence["refute"]],
+            "selector_key": rule.selector_key,
         }
     else:
         result = {
             "definitive_truth_authoritative": payload[
                 "definitive_truth_authoritative"
             ],
-            "parser_version": 1,
             "raw_observation_sha256": payload["raw_observation_sha256"],
-            "source_ref_key": list(observation.source_ref_key.components),
+            "source_binding_required": int(bool(observation.source_ref_key.components)),
         }
     return {
         "artifact_kind": W08_CANDIDATE_INFERENCE_OUTPUT_KIND,

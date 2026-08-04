@@ -190,6 +190,42 @@ def _course_payload_matches(
     )
 
 
+def _revision_payload_matches(
+    observation: ObservationRecord,
+    actual: dict[str, object],
+    expected: dict[str, object],
+) -> bool:
+    result = actual.get("result")
+    payload = observation.typed_payload.to_value()
+    if not isinstance(result, dict) or not isinstance(payload, dict):
+        return False
+    decision = result.get("decision")
+    return (
+        isinstance(decision, str)
+        and bool(decision)
+        and result.get("selector_key") == payload.get("variant_kind")
+        and result.get("result_bits") == expected.get("result_bits")
+    )
+
+
+def _source_payload_matches(
+    actual: dict[str, object],
+    expected: dict[str, object],
+) -> bool:
+    result = actual.get("result")
+    if not isinstance(result, dict):
+        return False
+    return (
+        result.get("definitive_truth_authoritative")
+        == expected.get("definitive_truth_authoritative")
+        and result.get("raw_observation_sha256")
+        == expected.get("raw_observation_sha256")
+        and result.get("source_binding_required")
+        == expected.get("source_binding_required")
+        == 1
+    )
+
+
 def _outcome_passes_pair(
     snapshot: W08EvaluatorSnapshot,
     pair: W08PrivateEvaluationPair,
@@ -209,6 +245,10 @@ def _outcome_passes_pair(
     expected = pair.label.expected_payload.to_value()
     if pair.observation.payload_kind in _COURSE_PAYLOAD_KINDS:
         return _course_payload_matches(actual, expected)
+    if pair.observation.payload_kind == "DiscourseRevisionQuery":
+        return _revision_payload_matches(pair.observation, actual, expected)
+    if pair.observation.payload_kind == "RAW_SOURCE_OBSERVATION_V1":
+        return _source_payload_matches(actual, expected)
     return actual.get("result") == expected
 
 
