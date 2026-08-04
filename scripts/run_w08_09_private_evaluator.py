@@ -41,8 +41,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _git(*args: str) -> str:
+    command = ["git"]
+    proxy = os.environ.get("W08_GIT_PROXY")
+    if proxy:
+        command.extend((
+            "-c", f"http.proxy={proxy}",
+            "-c", f"https.proxy={proxy}",
+        ))
     return subprocess.run(
-        ["git", *args],
+        [*command, *args],
         cwd=ROOT,
         check=True,
         capture_output=True,
