@@ -1,6 +1,7 @@
-"""W08-09 private family、五维消融与 fault-NE 协议专项。"""
+"""W08-09 private evaluator 的真实逐 case inference 与 fail-closed 协议。"""
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import subprocess
@@ -11,8 +12,8 @@ import pytest
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     CanonicalJsonObject,
     EvaluatorLabelRecord,
-    ObservationRecord,
     StableRecordKey,
+    canonical_json_bytes,
 )
 from pure_integer_ai.experiments.ph2_w08_authority import (
     W08_ABLATION_KEYS,
@@ -20,10 +21,11 @@ from pure_integer_ai.experiments.ph2_w08_authority import (
 )
 from pure_integer_ai.experiments.ph2_w08_contract import (
     W08_CONSUMER_KEYS,
+    make_w08_request,
+    open_w08_frozen_contract,
 )
 from pure_integer_ai.experiments.ph2_w08_evaluator import (
     W08EvaluatorSnapshot,
-    W08PrivateCaseOutcome,
     W08PrivateEvaluationPair,
     assess_w08_orthogonal_ablations,
     assess_w08_private_lc16,
@@ -31,7 +33,6 @@ from pure_integer_ai.experiments.ph2_w08_evaluator import (
     evaluate_w08_private_pairs,
 )
 from pure_integer_ai.experiments.ph2_w08_evaluator_contract import (
-    evidence_commitment,
     public_safe_w08_aggregate,
 )
 from pure_integer_ai.experiments.ph2_w08_evaluator_family import (
@@ -43,6 +44,16 @@ from pure_integer_ai.experiments.ph2_w08_evaluator_runtime import (
     W08PrivateEvaluatorRuntimeConfig,
     _candidate_inference_available,
     run_w08_private_evaluation_once,
+)
+from pure_integer_ai.experiments.ph2_w08_firewall import W08PayloadFirewall
+from pure_integer_ai.experiments.ph2_w08_inference import (
+    W08CandidateInferenceAdapter,
+)
+from pure_integer_ai.experiments.ph2_w08_inference_contract import (
+    W08_CANDIDATE_INFERENCE_INTERFACE_VERSION,
+)
+from pure_integer_ai.experiments.ph2_w08_inference_training import (
+    compile_w08_candidate_inference_state,
 )
 from pure_integer_ai.experiments.ph2_w08_runtime_contract import (
     W08_RUNTIME_HARD_CONJUNCT_KEYS,
@@ -66,6 +77,89 @@ def _head() -> str:
     ).stdout.strip()
 
 
+@pytest.fixture(scope="module")
+def evaluator_fixture():
+    contract = open_w08_frozen_contract(ROOT)
+    payload = W08PayloadFirewall.open(
+        ROOT, contract, make_w08_request(contract)
+    ).read_training_payload()
+    state = compile_w08_candidate_inference_state(payload)
+    evidence_by_observation = {
+        item.observation_key: item for item in payload.teacher_evidence
+    }
+    pairs = []
+    for ordinal, original in enumerate(payload.observations, start=1):
+        observation = replace(original, split="held_out")
+        evidence = evidence_by_observation[original.stable_key]
+        typed = evidence.typed_evidence.to_value()
+        expected_state = typed.get("expected_state", "TRUE")
+        expected_payload = typed.get("expected_payload", typed)
+        label = EvaluatorLabelRecord(
+            1,
+            1,
+            1,
+            observation.dataset_key,
+            _key(809, 1, ordinal),
+            _key(809, 2, ordinal),
+            observation.stable_key,
+            _key(809, 3, ordinal),
+            expected_state,
+            CanonicalJsonObject.from_value(expected_payload),
+            160,
+            1,
+            "W-08",
+            _key(809, 4),
+        )
+        pairs.append(W08PrivateEvaluationPair(
+            f"PUBLIC-SYNTHETIC-{ordinal:03d}", observation, label
+        ))
+    snapshot = W08EvaluatorSnapshot(
+        tuple((8, ordinal) for ordinal in range(1, 6)),
+        tuple(
+            (dimension, consumer, "RESOLVED")
+            for dimension in W08_DIMENSION_KEYS
+            for consumer in W08_CONSUMER_KEYS
+        ),
+        tuple(
+            (key, "PUBLIC_BOUNDED_PASS")
+            for key in W08_RUNTIME_HARD_CONJUNCT_KEYS
+        ),
+        (8, 9, 10),
+        "a" * 64,
+        state.state_key,
+        state.sha256(),
+        state.interface_version,
+        len(state.rules),
+        0,
+        0,
+        0,
+        0,
+    )
+    adapter = W08CandidateInferenceAdapter(state)
+    pair_tuple = tuple(pairs)
+    baseline = tuple(
+        adapter.infer(pair.observation, dimension_key=dimension)
+        for pair in pair_tuple
+        for dimension in W08_DIMENSION_KEYS
+    )
+    ablation_families = tuple(
+        (
+            ablation,
+            tuple(
+                adapter.infer(
+                    pair.observation,
+                    dimension_key=dimension,
+                    disabled_components=(W08_DIMENSION_KEYS[ordinal],),
+                )
+                for pair in pair_tuple
+                for dimension in W08_DIMENSION_KEYS
+            ),
+        )
+        for ordinal, ablation in enumerate(W08_ABLATION_KEYS)
+    )
+    return state, snapshot, pair_tuple, baseline, ablation_families
+
+
 @pytest.fixture
 def external_tmp_path():
     with tempfile.TemporaryDirectory(
@@ -83,99 +177,6 @@ def _documents():
         candidate_seal_sha256="4" * 64,
         evaluator_public_head_commit_sha1=_head(),
         nonce=(8, 29, 47),
-    )
-
-
-def _pair(index: int) -> W08PrivateEvaluationPair:
-    observation = ObservationRecord(
-        1,
-        1,
-        1,
-        _key(1),
-        _key(2),
-        _key(800, index),
-        "W-08",
-        "TEST",
-        "held_out",
-        "zh",
-        "typed-test",
-        _key(3, index),
-        "CC0-1.0",
-        _key(4, index),
-        _key(5, index),
-        _key(6, index),
-        _key(7, index),
-        "evaluator",
-        "read_only_probe",
-        "TypedPrivateProbeV1",
-        CanonicalJsonObject.from_value({"probe_key": [index]}),
-        "HELD_OUT_COMBINATION",
-        None,
-        (),
-        index,
-    )
-    label = EvaluatorLabelRecord(
-        1,
-        1,
-        1,
-        _key(1),
-        _key(2),
-        _key(900, index),
-        observation.stable_key,
-        _key(10, index),
-        "TRUE",
-        CanonicalJsonObject.from_value({"accepted": 1}),
-        100,
-        1,
-        "W-08",
-        _key(11),
-    )
-    return W08PrivateEvaluationPair(f"PACK-{index}", observation, label)
-
-
-def _snapshot() -> W08EvaluatorSnapshot:
-    return W08EvaluatorSnapshot(
-        tuple((8, index) for index in range(1, 6)),
-        tuple(
-            (dimension, consumer, "RESOLVED")
-            for dimension in W08_DIMENSION_KEYS
-            for consumer in W08_CONSUMER_KEYS
-        ),
-        tuple(
-            (key, "PUBLIC_BOUNDED_PASS")
-            for key in W08_RUNTIME_HARD_CONJUNCT_KEYS
-        ),
-        (8, 9, 10),
-        "a" * 64,
-        0,
-        0,
-        0,
-        0,
-    )
-
-
-def _case_outcomes(
-    pairs: tuple[W08PrivateEvaluationPair, ...],
-) -> tuple[W08PrivateCaseOutcome, ...]:
-    shortcuts = (
-        ("exact_surface_reads", 0),
-        ("fifo_or_recency_choices", 0),
-        ("full_recompute_runs", 0),
-        ("preloaded_hot_records", 0),
-        ("w09_future_reads", 0),
-    )
-    return tuple(
-        W08PrivateCaseOutcome(
-            dimension,
-            pair.observation.stable_key.components,
-            pair.label.expected_state,
-            evidence_commitment(pair.label.expected_payload.to_value()),
-            tuple((consumer, "RESOLVED") for consumer in W08_CONSUMER_KEYS),
-            shortcuts,
-            (80809, dimension_ordinal, pair_ordinal),
-        )
-        for dimension_ordinal, dimension in enumerate(W08_DIMENSION_KEYS, start=1)
-        for pair_ordinal, pair in enumerate(pairs, start=1)
     )
 
 
@@ -213,63 +214,108 @@ def test_private_family_freezes_metadata_before_any_payload_read(external_tmp_pa
         )
 
 
-def test_five_bearings_and_ablations_are_orthogonal():
-    pairs = tuple(_pair(index) for index in range(1, 4))
-    snapshot = _snapshot()
-    outcomes = _case_outcomes(pairs)
-    baseline = evaluate_w08_private_pairs(
+def test_five_bearings_pass_only_actual_adapter_outcomes(evaluator_fixture):
+    _, snapshot, pairs, outcomes, _ = evaluator_fixture
+    results = evaluate_w08_private_pairs(
+        snapshot, pairs, case_outcomes=outcomes
+    )
+    assert tuple(item.status for item in results) == ("PASS",) * 5
+    assert all(item.passed_count == len(pairs) for item in results)
+    assert len(outcomes) == len(pairs) * len(W08_DIMENSION_KEYS)
+    assert len({item.invocation_key for item in outcomes}) == len(outcomes)
+
+
+def test_five_real_ablations_disable_only_the_target(evaluator_fixture):
+    _, snapshot, pairs, baseline, outcome_families = evaluator_fixture
+    results = assess_w08_orthogonal_ablations(
         snapshot,
         pairs,
-        case_outcomes=outcomes,
+        outcome_families=outcome_families,
     )
-    assert tuple(item.status for item in baseline) == ("PASS",) * 5
-    ablations = assess_w08_orthogonal_ablations(
-        snapshot,
-        pairs,
-        case_outcomes=outcomes,
-    )
-    assert len(ablations) == 5
-    for ordinal, item in enumerate(ablations):
-        assert item["status"] == "PASS"
-        assert tuple(item["dimension_statuses"]) == tuple(
-            "FAIL" if index == ordinal else "PASS" for index in range(5)
+    assert len(results) == len(W08_DIMENSION_KEYS)
+    baseline_keys = {item.invocation_key for item in baseline}
+    for ordinal, (result, (_, outcomes)) in enumerate(zip(results, outcome_families)):
+        target = W08_DIMENSION_KEYS[ordinal]
+        assert result["status"] == "PASS"
+        assert result["real_component_disabled"] == 1
+        assert tuple(result["dimension_statuses"]) == tuple(
+            "FAIL" if dimension == target else "PASS"
+            for dimension in W08_DIMENSION_KEYS
         )
+        assert all(
+            item.component_state
+            == ("DISABLED" if item.dimension_key == target else "ACTIVE")
+            for item in outcomes
+        )
+        assert baseline_keys.isdisjoint(item.invocation_key for item in outcomes)
+
+
+def test_open_generation_and_lc16_consume_actual_outputs(evaluator_fixture):
+    _, snapshot, pairs, outcomes, _ = evaluator_fixture
     open_generation = assess_w08_private_open_generation(
-        snapshot,
-        pairs,
-        layer_states=tuple(
-            (key, "PASS")
-            for key in (
-                "CONTENT",
-                "STRUCTURE_LOGIC",
-                "DISCOURSE_REFERENCE",
-                "SURFACE_MORPHOLOGY",
-                "TASK_COMMUNICATIVE",
-            )
-        ),
+        snapshot, pairs, case_outcomes=outcomes
     )
     lc16 = assess_w08_private_lc16(
-        snapshot,
-        bearing_cell_states=("PASS",) * 27,
+        snapshot, pairs, case_outcomes=outcomes
     )
     assert open_generation["status"] == "PASS"
+    assert open_generation["output_invocation_count"] == len(outcomes)
     assert open_generation["exact_surface_read_count"] == 0
     assert open_generation["complete_template_replay_count"] == 0
     assert lc16["status"] == "PASS"
     assert lc16["bearing_cell_count"] == 27
-    assert lc16["wall_dimension_state"] == "NE"
+    assert lc16["output_invocation_count"] == len(outcomes)
+
+    wrong_source = replace(outcomes[0], source_key=(809, 99))
+    wrong_outputs = (wrong_source, *outcomes[1:])
+    assert evaluate_w08_private_pairs(
+        snapshot, pairs, case_outcomes=wrong_outputs
+    )[0].status == "FAIL"
+    assert assess_w08_private_open_generation(
+        snapshot, pairs, case_outcomes=wrong_outputs
+    )["status"] == "FAIL"
+
+    wrong_consumers = replace(
+        outcomes[0],
+        consumer_states=tuple(
+            (consumer, "FAIL_CLOSED" if consumer == "REASONING" else state)
+            for consumer, state in outcomes[0].consumer_states
+        ),
+    )
+    assert assess_w08_private_lc16(
+        snapshot,
+        pairs,
+        case_outcomes=(wrong_consumers, *outcomes[1:]),
+    )["status"] == "FAIL"
 
 
-def test_candidate_summary_without_private_case_execution_is_ne():
-    pairs = tuple(_pair(index) for index in range(1, 4))
-    snapshot = _snapshot()
-    baseline = evaluate_w08_private_pairs(snapshot, pairs)
-    assert tuple(item.status for item in baseline) == ("NE",) * 5
-    assert all(item.ne_count == len(pairs) for item in baseline)
+def test_missing_outcomes_are_ne_and_safe_aggregate_contains_no_labels(
+    evaluator_fixture,
+):
+    _, snapshot, pairs, outcomes, outcome_families = evaluator_fixture
+    results = evaluate_w08_private_pairs(snapshot, pairs)
+    assert tuple(item.status for item in results) == ("NE",) * 5
+    assert all(item.ne_count == len(pairs) for item in results)
     assert assess_w08_private_open_generation(snapshot, pairs)["status"] == "NE"
-    assert assess_w08_private_lc16(snapshot)["status"] == "NE"
+    assert assess_w08_private_lc16(snapshot, pairs)["status"] == "NE"
+    partial = outcomes[:-1]
+    assert assess_w08_private_open_generation(
+        snapshot, pairs, case_outcomes=partial
+    )["status"] == "NE"
+    assert assess_w08_private_lc16(
+        snapshot, pairs, case_outcomes=partial
+    )["status"] == "NE"
+    partial_ablation = tuple(
+        (key, values[:-1]) for key, values in outcome_families
+    )
+    assert all(
+        item["status"] == "NE"
+        for item in assess_w08_orthogonal_ablations(
+            snapshot, pairs, outcome_families=partial_ablation
+        )
+    )
     aggregate = public_safe_w08_aggregate(
-        baseline,
+        results,
         family_commitment="1" * 64,
         payload_commitment="2" * 64,
         case_commitment="3" * 64,
@@ -283,44 +329,43 @@ def test_candidate_summary_without_private_case_execution_is_ne():
             "public_writes": 0,
         },
     )
+    encoded = canonical_json_bytes(aggregate)
     assert aggregate["status"] == "NE"
     assert aggregate["fail_count"] == 0
-    assert not _candidate_inference_available({})
-    assert not _candidate_inference_available({
-        "private_inference_interface": {
-            "state_commitment": "not-a-sha",
-            "version": "PH2-W08-PRIVATE-INFERENCE-V1",
-        }
-    })
-    assert _candidate_inference_available({
-        "private_inference_interface": {
-            "state_commitment": "a" * 64,
-            "version": "PH2-W08-PRIVATE-INFERENCE-V1",
-        }
-    })
-
-    failed_layers = tuple(
-        (key, "FAIL" if index == 0 else "PASS")
-        for index, key in enumerate((
-            "CONTENT",
-            "STRUCTURE_LOGIC",
-            "DISCOURSE_REFERENCE",
-            "SURFACE_MORPHOLOGY",
-            "TASK_COMMUNICATIVE",
-        ))
-    )
-    assert assess_w08_private_open_generation(
-        snapshot,
-        pairs,
-        layer_states=failed_layers,
-    )["status"] == "FAIL"
-    assert assess_w08_private_lc16(
-        snapshot,
-        bearing_cell_states=("FAIL",) + ("PASS",) * 26,
-    )["status"] == "FAIL"
+    assert all(token not in encoded for token in (
+        b"expected_payload", b"expected_state", b"typed_payload", b"surface"
+    ))
 
 
-def test_fault_after_guard_seals_safe_ne_without_reading_private_payload(
+def test_candidate_inference_preflight_requires_complete_v2_interface(
+    evaluator_fixture,
+):
+    state, _, _, _, _ = evaluator_fixture
+    interface = {
+        "component_keys": list(W08_DIMENSION_KEYS),
+        "evaluator_label_inputs": 0,
+        "executable": 1,
+        "per_case_invocation_required": 1,
+        "rule_count": len(state.rules),
+        "state_commitment": state.sha256(),
+        "state_key": list(state.state_key),
+        "version": W08_CANDIDATE_INFERENCE_INTERFACE_VERSION,
+    }
+    assert _candidate_inference_available({"private_inference_interface": interface})
+    for key, bad_value in (
+        ("version", "PH2-W08-PRIVATE-INFERENCE-V1"),
+        ("executable", 0),
+        ("evaluator_label_inputs", 1),
+        ("per_case_invocation_required", 0),
+        ("state_commitment", "not-a-sha"),
+    ):
+        corrupted = {**interface, key: bad_value}
+        assert not _candidate_inference_available({
+            "private_inference_interface": corrupted
+        })
+
+
+def test_fault_before_candidate_verification_seals_ne_without_private_reads(
     external_tmp_path,
 ):
     documents = _documents()
@@ -346,8 +391,9 @@ def test_fault_after_guard_seals_safe_ne_without_reading_private_payload(
     assert result.status == "NE"
     assert aggregate["failure_phase"] == "CANDIDATE_VERIFY"
     assert aggregate["dimension_results"] == []
+    assert aggregate["infrastructure"]["fault_ne_protocol"] == 1
     assert result.recommendation_path is None
-    with pytest.raises(RuntimeError, match="不可重跑"):
+    with pytest.raises(RuntimeError, match="不可重跑|aggregate 已存在"):
         run_w08_private_evaluation_once(
             W08PrivateEvaluatorRuntimeConfig(
                 ROOT,

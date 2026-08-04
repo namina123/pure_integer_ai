@@ -11,6 +11,9 @@ from pure_integer_ai.experiments.ph2_w08_contract import (
     W08_RESOURCE_BUDGET,
     W08_ZERO_EXECUTION_STATE,
 )
+from pure_integer_ai.experiments.ph2_w08_inference_contract import (
+    W08_CANDIDATE_INFERENCE_INTERFACE_VERSION,
+)
 
 
 W08_FORMAL_RUN_ID = 9
@@ -287,6 +290,10 @@ class W08RunOutcome:
     transaction_commitment_key: tuple[int, ...]
     scheduling_key: tuple[int, ...]
     dump_manifest_sha256: str
+    inference_state_key: tuple[int, ...]
+    inference_state_sha256: str
+    inference_interface_version: str
+    inference_rule_count: int
     artifacts: tuple[W08TrainArtifact, ...]
     uses: tuple[W08RuntimeUse, ...]
     hard_conjuncts: tuple[W08HardConjunctEvidence, ...]
@@ -315,9 +322,15 @@ class W08RunOutcome:
             "retention_commitment_key",
             "transaction_commitment_key",
             "scheduling_key",
+            "inference_state_key",
         ):
             _key(getattr(self, name), where=f"runtime outcome {name}")
         _sha256(self.dump_manifest_sha256, where="runtime dump")
+        _sha256(self.inference_state_sha256, where="runtime inference state")
+        if self.inference_interface_version != W08_CANDIDATE_INFERENCE_INTERFACE_VERSION:
+            raise W08RuntimeError("W08 runtime inference interface version 漂移")
+        if type(self.inference_rule_count) is not int or self.inference_rule_count <= 0:
+            raise W08RuntimeError("W08 runtime inference rule count 非法")
         if tuple(item.dimension_key for item in self.artifacts) != W08_DIMENSION_KEYS:
             raise W08RuntimeError("W08 runtime artifact order 漂移")
         expected_uses = tuple(
@@ -366,11 +379,13 @@ def build_semantic_state_key(
     uses: tuple[W08RuntimeUse, ...],
     hard_conjuncts: tuple[W08HardConjunctEvidence, ...],
     retention: tuple[tuple[str, str], ...],
+    inference_state_key: tuple[int, ...],
 ) -> tuple[int, ...]:
     return digest_value(
         {
             "artifacts": [item.to_dict() for item in artifacts],
             "hard_conjuncts": [item.to_dict() for item in hard_conjuncts],
+            "inference_state_key": list(inference_state_key),
             "retention": [list(item) for item in retention],
             "uses": [item.to_dict() for item in uses],
         }

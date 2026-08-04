@@ -28,6 +28,10 @@ from pure_integer_ai.experiments.ph2_w08_candidate_contract import (
     W08_CANDIDATE_FORMAL_WORKER_COUNT,
 )
 from pure_integer_ai.experiments.ph2_w08_authority import W08_VISIBLE_PACK_KEYS
+from pure_integer_ai.experiments.ph2_w08_authority import (
+    W08_ABLATION_KEYS,
+    W08_DIMENSION_KEYS,
+)
 from pure_integer_ai.experiments.ph2_w08_contract import (
     W08_RESOURCE_BUDGET,
     W08FileBinding,
@@ -64,7 +68,16 @@ from pure_integer_ai.experiments.ph2_w08_evaluator_family import (
     consume_w08_private_first_run_guard,
 )
 from pure_integer_ai.experiments.ph2_w08_firewall import W08VisibilityFirewall
-from pure_integer_ai.experiments.ph2_w08_runtime import load_w08_public_dump
+from pure_integer_ai.experiments.ph2_w08_inference import (
+    W08CandidateInferenceAdapter,
+)
+from pure_integer_ai.experiments.ph2_w08_inference_contract import (
+    W08CandidateInferenceOutcome,
+)
+from pure_integer_ai.experiments.ph2_w08_runtime import (
+    load_w08_candidate_inference_state,
+    load_w08_public_dump,
+)
 from pure_integer_ai.experiments.ph2_w08_runtime_contract import W08RuntimeConfig
 
 
@@ -198,6 +211,14 @@ def _candidate_inference_available(host_evidence: object) -> bool:
     commitment = interface.get("state_commitment")
     return bool(
         interface.get("version") == W08_PRIVATE_INFERENCE_INTERFACE_VERSION
+        and interface.get("executable") == 1
+        and interface.get("evaluator_label_inputs") == 0
+        and interface.get("per_case_invocation_required") == 1
+        and tuple(interface.get("component_keys", ())) == W08_DIMENSION_KEYS
+        and type(interface.get("rule_count")) is int
+        and interface["rule_count"] > 0
+        and isinstance(interface.get("state_key"), list)
+        and bool(interface["state_key"])
         and isinstance(commitment, str)
         and len(commitment) == 64
         and all(char in "0123456789abcdef" for char in commitment)
@@ -230,6 +251,16 @@ def _candidate_documents(candidate: Path, family: dict[str, Any]) -> dict[str, A
         or values["seal"].get("terminal_state") != "PASS"
         or values["seal"].get("candidate_host_freeze_sha256") != expected["host"]
         or values["host"].get("candidate_contract_sha256") != expected["contract"]
+        or values["host"].get("private_inference_interface")
+        != values["host"].get("host_evidence", {}).get(
+            "private_inference_interface"
+        )
+        or values["seal"].get("candidate_inference_state_sha256")
+        != values["host"].get("private_inference_interface", {}).get(
+            "state_commitment"
+        )
+        or values["seal"].get("candidate_inference_state_key")
+        != values["host"].get("private_inference_interface", {}).get("state_key")
     ):
         raise W08EvaluatorInfrastructureError("W08 Candidate 未形成 sealed PASS")
     return values
@@ -286,37 +317,66 @@ def _read_binding(repository: Path, binding: W08FileBinding, audit: _ReadAudit) 
     return records
 
 
-def _read_private_pairs(
+def _read_private_observations(
     repository: Path,
     context,
     audit: _ReadAudit,
-) -> tuple[W08PrivateEvaluationPair, ...]:
+) -> tuple[tuple[str, ObservationRecord], ...]:
     visibility = W08VisibilityFirewall(context, audit)  # type: ignore[arg-type]
     observations: dict[object, tuple[str, ObservationRecord]] = {}
-    labels: dict[object, tuple[str, EvaluatorLabelRecord]] = {}
     for binding in _private_bindings(context):
+        if binding.identity.owner_kind != "observation":
+            continue
         visibility.authorize_evaluator(binding.relative_path, candidate_sealed=1)
         records = _read_binding(repository, binding, audit)
-        if binding.identity.owner_kind == "observation":
-            if any(not isinstance(item, ObservationRecord) for item in records):
-                raise W08EvaluatorInfrastructureError("W08 held-out artifact record kind 漂移")
-            for item in records:
-                if item.stable_key in observations:
-                    raise W08EvaluatorInfrastructureError("W08 held-out Observation 重复")
-                observations[item.stable_key] = (binding.pack_key, item)
-        else:
-            if any(not isinstance(item, EvaluatorLabelRecord) for item in records):
-                raise W08EvaluatorInfrastructureError("W08 label artifact record kind 漂移")
-            for item in records:
-                if item.observation_key in labels:
-                    raise W08EvaluatorInfrastructureError("W08 evaluator label 重复")
-                labels[item.observation_key] = (binding.pack_key, item)
-    if set(observations) != set(labels):
+        if any(not isinstance(item, ObservationRecord) for item in records):
+            raise W08EvaluatorInfrastructureError("W08 held-out artifact record kind 漂移")
+        for item in records:
+            if item.stable_key in observations:
+                raise W08EvaluatorInfrastructureError("W08 held-out Observation 重复")
+            observations[item.stable_key] = (binding.pack_key, item)
+    if not observations:
+        raise W08EvaluatorInfrastructureError("W08 private Observation family 为空")
+    return tuple(
+        observations[key] for key in sorted(observations, key=lambda item: item.components)
+    )
+
+
+def _read_private_labels(
+    repository: Path,
+    context,
+    audit: _ReadAudit,
+) -> tuple[tuple[object, EvaluatorLabelRecord], ...]:
+    visibility = W08VisibilityFirewall(context, audit)  # type: ignore[arg-type]
+    labels: dict[object, tuple[str, EvaluatorLabelRecord]] = {}
+    for binding in _private_bindings(context):
+        if binding.identity.owner_kind != "evaluator":
+            continue
+        visibility.authorize_evaluator(binding.relative_path, candidate_sealed=1)
+        records = _read_binding(repository, binding, audit)
+        if any(not isinstance(item, EvaluatorLabelRecord) for item in records):
+            raise W08EvaluatorInfrastructureError("W08 label artifact record kind 漂移")
+        for item in records:
+            if item.observation_key in labels:
+                raise W08EvaluatorInfrastructureError("W08 evaluator label 重复")
+            labels[item.observation_key] = (binding.pack_key, item)
+    if not labels:
+        raise W08EvaluatorInfrastructureError("W08 private label family 为空")
+    return tuple(labels.items())
+
+
+def _pair_private_records(
+    observations: tuple[tuple[str, ObservationRecord], ...],
+    labels: tuple[tuple[object, EvaluatorLabelRecord], ...],
+) -> tuple[W08PrivateEvaluationPair, ...]:
+    observation_by_key = {item.stable_key: (pack, item) for pack, item in observations}
+    label_by_key = {key: value for key, value in labels}
+    if set(observation_by_key) != set(label_by_key):
         raise W08EvaluatorInfrastructureError("W08 held-out/label reference 不闭合")
     pairs = []
-    for key in sorted(observations, key=lambda item: item.components):
-        pack, observation = observations[key]
-        label_pack, label = labels[key]
+    for key in sorted(observation_by_key, key=lambda item: item.components):
+        pack, observation = observation_by_key[key]
+        label_pack, label = label_by_key[key]
         if pack != label_pack:
             raise W08EvaluatorInfrastructureError("W08 held-out/label pack 漂移")
         pairs.append(W08PrivateEvaluationPair(pack, observation, label))
@@ -451,6 +511,19 @@ def run_w08_private_evaluation_once(
                     "private_read_path_count": 0,
                 },
             )
+        host_interface = candidate_docs["host"].get("private_inference_interface")
+        host_evidence = candidate_docs["host"].get("host_evidence", {})
+        if host_interface != host_evidence.get("private_inference_interface"):
+            raise W08EvaluatorInfrastructureError("W08 Candidate inference interface cross-reference 漂移")
+        inference_state = load_w08_candidate_inference_state(candidate_config)
+        if (
+            not _candidate_inference_available(host_evidence)
+            or inference_state.sha256() != host_interface.get("state_commitment")
+            or list(inference_state.state_key) != host_interface.get("state_key")
+            or len(inference_state.rules) != host_interface.get("rule_count")
+        ):
+            raise W08EvaluatorInfrastructureError("W08 Candidate inference state preflight 失败")
+        adapter = W08CandidateInferenceAdapter(inference_state)
         context = open_w08_frozen_contract(repository)
         private_bindings = _private_bindings(context)
         current_phase = "PAYLOAD_READ"
@@ -464,9 +537,43 @@ def run_w08_private_evaluation_once(
             for item in private_bindings
             if item.identity.owner_kind == "evaluator"
         }
-        pairs = _read_private_pairs(repository, context, audit)
+        observations = _read_private_observations(repository, context, audit)
+        if (
+            audit.future_payload_reads
+            or audit.observation_records > W08_RESOURCE_BUDGET["max_records"]
+            or audit.payload_gets > W08_RESOURCE_BUDGET["max_payload_gets"]
+            or audit.payload_bytes > W08_RESOURCE_BUDGET["max_payload_bytes"]
+        ):
+            raise W08EvaluatorInfrastructureError("W08 private Observation audit/resource 漂移")
         current_phase = "PAYLOAD_PAIR"
         _enter_phase(config, current_phase)
+        if audit.label_records:
+            raise W08EvaluatorInfrastructureError("W08 private label 在 inference 前已读取")
+        current_phase = "BASELINE"
+        _enter_phase(config, current_phase)
+        baseline_outcomes = tuple(
+            adapter.infer(observation, dimension_key=dimension)
+            for _, observation in observations
+            for dimension in W08_DIMENSION_KEYS
+        )
+        outcome_families = []
+        for index, ablation in enumerate(W08_ABLATION_KEYS):
+            current_phase = W08_EVALUATOR_PHASES[5 + index]
+            _enter_phase(config, current_phase)
+            rerun = tuple(
+                adapter.infer(
+                    observation,
+                    dimension_key=dimension,
+                    disabled_components=(W08_DIMENSION_KEYS[index],),
+                )
+                for _, observation in observations
+                for dimension in W08_DIMENSION_KEYS
+            )
+            outcome_families.append((ablation, rerun))
+        label_read_before_inference = int(audit.label_records == 0)
+        current_phase = "PAYLOAD_PAIR"
+        labels = _read_private_labels(repository, context, audit)
+        pairs = _pair_private_records(observations, labels)
         if (
             audit.future_payload_reads
             or audit.payload_gets != len(private_bindings)
@@ -476,26 +583,53 @@ def run_w08_private_evaluation_once(
             or len(pairs) > W08_RESOURCE_BUDGET["max_records"]
         ):
             raise W08EvaluatorInfrastructureError("W08 private payload audit/resource 漂移")
-        current_phase = "BASELINE"
-        _enter_phase(config, current_phase)
-        results = evaluate_w08_private_pairs(snapshot, pairs)
-        ablations = []
-        computed_ablations = assess_w08_orthogonal_ablations(snapshot, pairs)
-        for index, item in enumerate(computed_ablations):
-            current_phase = W08_EVALUATOR_PHASES[5 + index]
-            _enter_phase(config, current_phase)
-            ablations.append(item)
+        results = evaluate_w08_private_pairs(
+            snapshot,
+            pairs,
+            case_outcomes=baseline_outcomes,
+        )
+        ablations = assess_w08_orthogonal_ablations(
+            snapshot,
+            pairs,
+            outcome_families=tuple(outcome_families),
+        )
         current_phase = "OPEN_GENERATION"
         _enter_phase(config, current_phase)
-        open_generation = assess_w08_private_open_generation(snapshot, pairs)
+        open_generation = assess_w08_private_open_generation(
+            snapshot,
+            pairs,
+            case_outcomes=baseline_outcomes,
+        )
         current_phase = "LC16"
         _enter_phase(config, current_phase)
-        lc16 = assess_w08_private_lc16(snapshot)
+        lc16 = assess_w08_private_lc16(
+            snapshot,
+            pairs,
+            case_outcomes=baseline_outcomes,
+        )
         dump_value = {
             "artifact_kind": "PH2_W08_PRIVATE_EVALUATION_DUMP",
+            "ablation_invocation_commitments": [
+                {
+                    "ablation_key": key,
+                    "outcome_commitment": evidence_commitment([
+                        item.safe_commitment_dict() for item in outcomes
+                    ]),
+                }
+                for key, outcomes in outcome_families
+            ],
+            "baseline_invocation_commitment": evidence_commitment([
+                item.safe_commitment_dict() for item in baseline_outcomes
+            ]),
             "dimension_results": [item.to_safe_dict() for item in results],
             "family_commitment": family["family_key"],
             "format_version": 1,
+            "inference_before_label_reads": label_read_before_inference,
+            "inference_invocation_count": len(baseline_outcomes) + sum(
+                len(outcomes) for _, outcomes in outcome_families
+            ),
+            "lc16": lc16,
+            "open_generation": open_generation,
             "private_read_commitment": evidence_commitment([
                 [path, count, size]
                 for path, (count, size) in sorted(audit.reads_by_path.items())
@@ -543,6 +677,10 @@ def run_w08_private_evaluation_once(
             "private_payload_bytes": audit.payload_bytes,
             "private_payload_gets": audit.payload_gets,
             "private_read_path_count": len(audit.reads_by_path),
+            "inference_before_label_reads": label_read_before_inference,
+            "inference_invocation_count": len(baseline_outcomes) + sum(
+                len(outcomes) for _, outcomes in outcome_families
+            ),
             "public_repo_writes": writes["public_writes"],
         }
         current_phase = "REPORT_SAFETY"

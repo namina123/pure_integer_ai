@@ -35,6 +35,12 @@ from pure_integer_ai.experiments.ph2_w08_firewall import W08PayloadFirewall
 from pure_integer_ai.experiments.ph2_w08_long_context_training import (
     compile_w08_long_context_training,
 )
+from pure_integer_ai.experiments.ph2_w08_inference_contract import (
+    W08CandidateInferenceState,
+)
+from pure_integer_ai.experiments.ph2_w08_inference_training import (
+    compile_w08_candidate_inference_state,
+)
 from pure_integer_ai.experiments.ph2_w08_p3ia_training import (
     compile_w08_p3ia_training,
 )
@@ -416,11 +422,23 @@ def _commit_digests(commit: dict[str, Any]) -> dict[str, list[int]]:
     uses = tuple(W08RuntimeUse.from_dict(item) for item in commit["uses"])
     hard = tuple(W08HardConjunctEvidence.from_dict(item) for item in commit["hard_conjuncts"])
     retention = tuple(tuple(item) for item in commit["retention_sha256"])
+    inference_state = W08CandidateInferenceState.from_dict(
+        commit["candidate_inference_state"]
+    )
+    if commit.get("candidate_inference_state_sha256") != inference_state.sha256():
+        raise W08RuntimeError("W08 dump inference state SHA 漂移")
     return {
         "artifacts": list(_digest([item.to_dict() for item in artifacts])),
         "hard_conjuncts": list(_digest([item.to_dict() for item in hard])),
+        "inference_state": list(inference_state.state_key),
         "retention": list(_digest([list(item) for item in retention])),
-        "semantic_state": list(build_semantic_state_key(artifacts, uses, hard, retention)),
+        "semantic_state": list(build_semantic_state_key(
+            artifacts,
+            uses,
+            hard,
+            retention,
+            inference_state.state_key,
+        )),
         "uses": list(_digest([item.to_dict() for item in uses])),
     }
 
@@ -494,6 +512,9 @@ def _outcome_from_dump(
     hard = tuple(W08HardConjunctEvidence.from_dict(item) for item in commit["hard_conjuncts"])
     retention = tuple((str(item[0]), str(item[1])) for item in commit["retention_sha256"])
     resource = W08RuntimeResourceReceipt.from_dict(commit["resource_report"])
+    inference_state = W08CandidateInferenceState.from_dict(
+        commit["candidate_inference_state"]
+    )
     published = {"dump_manifest_sha256": dump_sha}
     transaction = [*payload["transaction"], published]
     digests = payload["digests"]
@@ -507,6 +528,10 @@ def _outcome_from_dump(
         _digest(transaction),
         request.scheduling_key(),
         dump_sha,
+        inference_state.state_key,
+        inference_state.sha256(),
+        inference_state.interface_version,
+        len(inference_state.rules),
         artifacts,
         uses,
         hard,
@@ -596,6 +621,7 @@ def run_language_stage8_public(config: W08RuntimeConfig) -> W08RunOutcome:
         firewall = W08PayloadFirewall.open(repository, context, request)
         payload = firewall.read_training_payload()
         artifacts = _training_artifacts(payload)
+        inference_state = compile_w08_candidate_inference_state(payload)
         uses = _uses(request.execution_identity_key(), artifacts)
         validation, validation_sha = _read_stage6_validation(repository)
         hard = _hard_conjuncts(validation, validation_sha)
@@ -620,6 +646,8 @@ def run_language_stage8_public(config: W08RuntimeConfig) -> W08RunOutcome:
         resource = _resource_report(config, payload, firewall, artifacts, uses, shards)
         commit_payload = {
             "artifacts": [item.to_dict() for item in artifacts],
+            "candidate_inference_state": inference_state.to_dict(),
+            "candidate_inference_state_sha256": inference_state.sha256(),
             "hard_conjuncts": [item.to_dict() for item in hard],
             "payload_audit": {
                 "evaluator_label_reads": firewall.audit.evaluator_label_reads,
@@ -666,10 +694,25 @@ def load_w08_public_dump(config: W08RuntimeConfig) -> W08RunOutcome:
     )
 
 
+def load_w08_candidate_inference_state(
+    config: W08RuntimeConfig,
+) -> W08CandidateInferenceState:
+    """从 canonical dump 只读恢复可执行 state，不读取 train transport。"""
+    _validate_config(config)
+    payload, _ = _parse_dump(config)
+    state = W08CandidateInferenceState.from_dict(
+        payload["commit"]["candidate_inference_state"]
+    )
+    if payload["commit"].get("candidate_inference_state_sha256") != state.sha256():
+        raise W08RuntimeError("W08 Candidate inference state readback 漂移")
+    return state
+
+
 __all__ = [
     "W08_PUBLIC_DUMP_NAME",
     "W08_STAGE6_VALIDATION_PATH",
     "W08_STAGE6_VALIDATION_SHA256",
+    "load_w08_candidate_inference_state",
     "load_w08_public_dump",
     "run_language_stage8_public",
 ]

@@ -29,6 +29,11 @@ from pure_integer_ai.experiments.ph2_w08_runtime import (
     load_w08_public_dump,
     run_language_stage8_public,
 )
+from pure_integer_ai.experiments.ph2_w08_inference_contract import (
+    W08_CANDIDATE_INFERENCE_INPUT_KIND,
+    W08_CANDIDATE_INFERENCE_INTERFACE_VERSION,
+    W08_CANDIDATE_INFERENCE_OUTPUT_KIND,
+)
 from pure_integer_ai.experiments.ph2_w08_runtime_contract import (
     W08_FORMAL_EXECUTION_STATE,
     W08_OPEN_GENERATION_PREFORMAL_STATE,
@@ -76,6 +81,7 @@ def _outcome_evidence(outcome: W08RunOutcome) -> dict[str, object]:
             outcome.hard_conjunct_commitment_key
         ),
         "host_learning_writes": outcome.host_learning_writes,
+        "private_inference_interface": _inference_interface(outcome),
         "memory_learning_writes": outcome.memory_learning_writes,
         "open_generation_state": outcome.open_generation_state,
         "owned_tables": list(outcome.owned_tables),
@@ -91,6 +97,21 @@ def _outcome_evidence(outcome: W08RunOutcome) -> dict[str, object]:
     }
 
 
+def _inference_interface(outcome: W08RunOutcome) -> dict[str, object]:
+    return {
+        "component_keys": list(W08_DIMENSION_KEYS),
+        "evaluator_label_inputs": 0,
+        "executable": 1,
+        "input_kind": W08_CANDIDATE_INFERENCE_INPUT_KIND,
+        "output_kind": W08_CANDIDATE_INFERENCE_OUTPUT_KIND,
+        "per_case_invocation_required": 1,
+        "rule_count": outcome.inference_rule_count,
+        "state_commitment": outcome.inference_state_sha256,
+        "state_key": list(outcome.inference_state_key),
+        "version": outcome.inference_interface_version,
+    }
+
+
 def _validate_formal_outcome(
     outcome: W08RunOutcome,
     readback: W08RunOutcome,
@@ -98,6 +119,7 @@ def _validate_formal_outcome(
     expected_commitments = {
         "artifacts": outcome.artifact_commitment_key,
         "hard_conjuncts": outcome.hard_conjunct_commitment_key,
+        "inference_state": outcome.inference_state_key,
         "retention": outcome.retention_commitment_key,
         "semantic_state": outcome.semantic_state_key,
         "uses": outcome.use_commitment_key,
@@ -109,6 +131,15 @@ def _validate_formal_outcome(
         or not readback.dump_readback
         or outcome.canonical_key() != readback.canonical_key()
         or outcome.dump_manifest_sha256 != readback.dump_manifest_sha256
+        or outcome.inference_state_key != readback.inference_state_key
+        or outcome.inference_state_sha256 != readback.inference_state_sha256
+        or outcome.inference_interface_version
+        != W08_CANDIDATE_INFERENCE_INTERFACE_VERSION
+        or readback.inference_interface_version
+        != W08_CANDIDATE_INFERENCE_INTERFACE_VERSION
+        or outcome.inference_rule_count
+        != W08_EXPECTED_COUNTS["inference_rule_count"]
+        or readback.inference_rule_count != outcome.inference_rule_count
         or tuple(item.dimension_key for item in outcome.artifacts)
         != W08_DIMENSION_KEYS
         or tuple(item.record_count for item in outcome.artifacts)
@@ -245,9 +276,11 @@ def publish_w08_candidate_host_freeze(
         "formal_run_count": 1,
         "format_version": 1,
         "host_evidence": _outcome_evidence(outcome),
+        "private_inference_interface": _inference_interface(outcome),
         "open_generation_state": W08_OPEN_GENERATION_PREFORMAL_STATE,
         "owner_write_counts": {
             "candidate_artifact_writes": len(outcome.artifacts),
+            "candidate_inference_state_writes": 1,
             "companion_writes": 0,
             "evaluator_label_writes": 0,
             "formal_training_runs": 1,
@@ -270,6 +303,8 @@ def _publish_terminal_seal(
     candidate_guard_sha256: str,
     terminal_state: str,
     host_freeze_sha256: str | None = None,
+    inference_state_sha256: str | None = None,
+    inference_state_key: tuple[int, ...] | None = None,
     failure_phase: str | None = None,
 ) -> tuple[Path, str]:
     if terminal_state not in {"PASS", "FAIL", "NE", "PROCESS_EXCEPTION"}:
@@ -291,6 +326,14 @@ def _publish_terminal_seal(
         value["candidate_host_freeze_sha256"] = _strict_sha256(
             host_freeze_sha256, label="Candidate host freeze"
         )
+    if inference_state_sha256 is not None:
+        value["candidate_inference_state_sha256"] = _strict_sha256(
+            inference_state_sha256, label="Candidate inference state"
+        )
+    if inference_state_key is not None:
+        if not inference_state_key or any(type(item) is not int for item in inference_state_key):
+            raise RuntimeError("W08 Candidate inference state key 非法")
+        value["candidate_inference_state_key"] = list(inference_state_key)
     if failure_phase is not None:
         value["failure_phase"] = failure_phase
     target = root / W08_CANDIDATE_TERMINAL_SEAL_NAME
@@ -360,6 +403,8 @@ def execute_w08_candidate_once(
             candidate_guard_sha256=guard_sha,
             terminal_state="PASS",
             host_freeze_sha256=host_sha,
+            inference_state_sha256=outcome.inference_state_sha256,
+            inference_state_key=outcome.inference_state_key,
         )
     except Exception:
         seal_path = root / W08_CANDIDATE_TERMINAL_SEAL_NAME

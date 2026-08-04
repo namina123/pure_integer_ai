@@ -27,6 +27,9 @@ from pure_integer_ai.experiments.ph2_w08_candidate_contract import (
     consume_w08_candidate_first_run_guard,
     publish_w08_candidate_contract_freeze,
 )
+from pure_integer_ai.experiments.ph2_w08_inference_contract import (
+    W08_CANDIDATE_INFERENCE_INTERFACE_VERSION,
+)
 from pure_integer_ai.experiments.ph2_w08_runtime_contract import (
     W08_FORMAL_EXECUTION_STATE,
     W08_OPEN_GENERATION_PREFORMAL_STATE,
@@ -68,6 +71,11 @@ def test_candidate_contract_freezes_all_axes_before_guard(external_tmp_path):
     evaluation = contract["evaluation_contract"]
     assert tuple(evaluation["dimension_order"]) == W08_DIMENSION_KEYS
     assert tuple(evaluation["ablation_order"]) == W08_ABLATION_KEYS
+    assert evaluation["candidate_inference_interface"]["version"] == (
+        W08_CANDIDATE_INFERENCE_INTERFACE_VERSION
+    )
+    assert evaluation["candidate_inference_interface"]["executable"] == 1
+    assert evaluation["candidate_inference_interface"]["evaluator_label_inputs"] == 0
     assert tuple(contract["cluster_contract"]["axis_keys"]) == W08_CANDIDATE_CLUSTER_AXES
     assert contract["expected_counts"] == W08_EXPECTED_COUNTS
     assert contract["execution_state"]["W08_STARTED"] == 0
@@ -152,13 +160,23 @@ def test_unique_formal_candidate_closes_host_readback_and_seal(external_tmp_path
     assert outcome.teacher_calls == outcome.memory_learning_writes == 0
     host_value = json.loads(host.read_bytes())
     seal_value = json.loads(seal.read_bytes())
+    interface = host_value["private_inference_interface"]
     assert host_value["formal_run_count"] == 1
     assert host_value["candidate_sealed"] == 1
     assert host_value["owner_write_counts"]["evaluator_label_writes"] == 0
+    assert interface == host_value["host_evidence"]["private_inference_interface"]
+    assert interface["version"] == W08_CANDIDATE_INFERENCE_INTERFACE_VERSION
+    assert interface["state_commitment"] == outcome.inference_state_sha256
+    assert interface["state_key"] == list(outcome.inference_state_key)
+    assert interface["rule_count"] == outcome.inference_rule_count == 60
     assert seal_value["terminal_state"] == "PASS"
     assert seal_value["candidate_host_freeze_sha256"] == hashlib.sha256(
         host.read_bytes()
     ).hexdigest()
+    assert seal_value["candidate_inference_state_sha256"] == interface[
+        "state_commitment"
+    ]
+    assert seal_value["candidate_inference_state_key"] == interface["state_key"]
     with pytest.raises(RuntimeError, match="不可重跑"):
         execute_w08_candidate_once(
             ROOT,

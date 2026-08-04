@@ -34,6 +34,12 @@ from pure_integer_ai.experiments.ph2_w08_lc16 import (
     W08_LC16_EVALUATOR_KEY,
     W08_LC16_SCOPE_KEY,
 )
+from pure_integer_ai.experiments.ph2_w08_inference_contract import (
+    W08_CANDIDATE_INFERENCE_INPUT_KIND,
+    W08_CANDIDATE_INFERENCE_INTERFACE_VERSION,
+    W08_CANDIDATE_INFERENCE_OUTPUT_KIND,
+    W08_INFERENCE_SHORTCUT_KEYS,
+)
 from pure_integer_ai.experiments.ph2_w08_open_generation_contract import (
     W08_OPEN_GENERATION_COVERAGE_KEYS,
     W08_OPEN_GENERATION_LAYER_KEYS,
@@ -74,6 +80,7 @@ W08_CANDIDATE_CLUSTER_AXES = (
 W08_EXPECTED_COUNTS = {
     "compiled_artifact_count": 5,
     "hard_conjunct_count": 2,
+    "inference_rule_count": 60,
     "logical_shard_count": 16,
     "retention_count": 6,
     "transaction_event_count": 5,
@@ -92,15 +99,20 @@ W08_EXPECTED_COMMITMENTS = {
         52, 242, 86, 68, 2, 110, 33, 148, 35, 31, 183, 72, 230, 203,
         223, 199, 225, 255,
     ),
+    "inference_state": (
+        193, 124, 211, 52, 26, 32, 18, 26, 20, 94, 142, 153, 140,
+        167, 205, 190, 49, 191, 239, 226, 222, 180, 184, 89, 219, 106,
+        193, 114, 81, 15, 168, 51,
+    ),
     "retention": (
         253, 237, 112, 184, 25, 152, 93, 141, 148, 37, 208, 187, 167,
         192, 220, 149, 169, 56, 200, 93, 160, 227, 6, 157, 128, 203, 14,
         230, 173, 115, 55, 178,
     ),
     "semantic_state": (
-        244, 224, 220, 133, 117, 150, 228, 64, 156, 25, 85, 190, 134,
-        4, 69, 123, 48, 36, 29, 214, 47, 201, 194, 114, 133, 227, 175,
-        136, 44, 95, 125, 204,
+        78, 136, 85, 252, 212, 62, 233, 180, 78, 38, 210, 177, 171,
+        144, 104, 83, 142, 97, 171, 243, 135, 165, 197, 36, 201, 236,
+        79, 219, 83, 160, 106, 154,
     ),
     "uses": (
         143, 60, 157, 166, 27, 125, 142, 242, 4, 171, 254, 88, 31, 227,
@@ -120,6 +132,9 @@ W08_CANDIDATE_CODE_PATHS = (
     "src/pure_integer_ai/experiments/ph2_w08_discourse_training.py",
     "src/pure_integer_ai/experiments/ph2_w08_faults.py",
     "src/pure_integer_ai/experiments/ph2_w08_firewall.py",
+    "src/pure_integer_ai/experiments/ph2_w08_inference.py",
+    "src/pure_integer_ai/experiments/ph2_w08_inference_contract.py",
+    "src/pure_integer_ai/experiments/ph2_w08_inference_training.py",
     "src/pure_integer_ai/experiments/ph2_w08_lc16.py",
     "src/pure_integer_ai/experiments/ph2_w08_long_context.py",
     "src/pure_integer_ai/experiments/ph2_w08_long_context_adapters.py",
@@ -154,6 +169,7 @@ W08_CANDIDATE_TEST_PATHS = (
     "tests/test_w08_06_stage6.py",
     "tests/test_w08_07_runtime.py",
     "tests/test_w08_08_candidate.py",
+    "tests/test_w08_09_ne_recovery.py",
 )
 W08_CANDIDATE_PUBLIC_ARTIFACT_PATHS = tuple(dict.fromkeys((
     W08_AUTHORITY_RELATIVE_PATH,
@@ -347,6 +363,17 @@ def build_w08_candidate_contract(
         "evaluation_contract": {
             "ablation_order": list(W08_ABLATION_KEYS),
             "aggregation_policy": "ALL_BEARING_DIMENSIONS_MUST_PASS",
+            "candidate_inference_interface": {
+                "component_keys": list(W08_DIMENSION_KEYS),
+                "evaluator_label_inputs": 0,
+                "executable": 1,
+                "input_kind": W08_CANDIDATE_INFERENCE_INPUT_KIND,
+                "output_kind": W08_CANDIDATE_INFERENCE_OUTPUT_KIND,
+                "per_case_invocation_required": 1,
+                "shortcut_account_keys": list(W08_INFERENCE_SHORTCUT_KEYS),
+                "state_policy": "TRAIN_ONLY_TYPED_RULES",
+                "version": W08_CANDIDATE_INFERENCE_INTERFACE_VERSION,
+            },
             "dimension_order": list(W08_DIMENSION_KEYS),
             "lc16": {
                 "carrier_keys": list(W08_CARRIER_KEYS),
@@ -488,6 +515,11 @@ def _validate_contract(value: object) -> dict[str, object]:
     ):
         raise RuntimeError("W08 Candidate recovery 合同漂移")
     evaluation = value.get("evaluation_contract")
+    inference = (
+        evaluation.get("candidate_inference_interface")
+        if isinstance(evaluation, dict)
+        else None
+    )
     open_generation = (
         evaluation.get("open_generation") if isinstance(evaluation, dict) else None
     )
@@ -500,6 +532,17 @@ def _validate_contract(value: object) -> dict[str, object]:
         != W08_RUNTIME_HARD_CONJUNCT_KEYS
         or evaluation.get("aggregation_policy")
         != "ALL_BEARING_DIMENSIONS_MUST_PASS"
+        or inference != {
+            "component_keys": list(W08_DIMENSION_KEYS),
+            "evaluator_label_inputs": 0,
+            "executable": 1,
+            "input_kind": W08_CANDIDATE_INFERENCE_INPUT_KIND,
+            "output_kind": W08_CANDIDATE_INFERENCE_OUTPUT_KIND,
+            "per_case_invocation_required": 1,
+            "shortcut_account_keys": list(W08_INFERENCE_SHORTCUT_KEYS),
+            "state_policy": "TRAIN_ONLY_TYPED_RULES",
+            "version": W08_CANDIDATE_INFERENCE_INTERFACE_VERSION,
+        }
         or not isinstance(open_generation, dict)
         or tuple(open_generation.get("layer_keys", ()))
         != W08_OPEN_GENERATION_LAYER_KEYS
