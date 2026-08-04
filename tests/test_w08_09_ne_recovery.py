@@ -70,6 +70,15 @@ def _course_observation(payload, *, kind: str):
     )
 
 
+def _typed_course_observation(payload, *, payload_kind: str, candidate_kind: str):
+    return next(
+        item
+        for item in payload.observations
+        if item.payload_kind == payload_kind
+        and item.typed_payload.to_value()["candidate_kind"] == candidate_kind
+    )
+
+
 def test_train_state_is_versioned_executable_and_contains_no_answer_or_text(
     training_fixture,
 ):
@@ -201,6 +210,57 @@ def test_source_raw_carrier_schema_is_opaque_but_content_remains_sha_bound(
             dimension_key=W08_DIMENSION_KEYS[0],
         )
     assert captured.value.reason_code == "STATE_INPUT_REJECTED"
+
+
+def test_schema_family_generalizes_independently_from_selector(training_fixture):
+    payload, state = training_fixture
+    payload_kind = "DiscourseInformationCandidateV1"
+    generation = _typed_course_observation(
+        payload,
+        payload_kind=payload_kind,
+        candidate_kind="GENERATION",
+    )
+    cause = _typed_course_observation(
+        payload,
+        payload_kind=payload_kind,
+        candidate_kind="CAUSE",
+    )
+    generation_value = generation.typed_payload.to_value()
+    cause_value = cause.typed_payload.to_value()
+    crossed_value = dict(generation_value)
+    for key in (
+        "candidate_kind",
+        "observed_surface",
+        "sample_family",
+    ):
+        crossed_value[key] = cause_value[key]
+    crossed_schema = w08_inference_schema_sha256(crossed_value)
+    cause_rule = next(
+        item
+        for item in state.rules
+        if item.payload_kind == payload_kind and item.selector_key == "CAUSE"
+    )
+    assert crossed_schema != cause_rule.schema_sha256
+    assert crossed_schema in {
+        item.schema_sha256
+        for item in state.rules
+        if item.payload_kind == payload_kind
+    }
+
+    crossed = replace(
+        cause,
+        split="held_out",
+        typed_payload=CanonicalJsonObject.from_value(crossed_value),
+    )
+    outcomes = tuple(
+        W08CandidateInferenceAdapter(state).infer(
+            crossed,
+            dimension_key=dimension,
+        )
+        for dimension in W08_DIMENSION_KEYS
+    )
+    assert all(item.component_state == "ACTIVE" for item in outcomes)
+    assert all(item.actual_state == "TRUE" for item in outcomes)
 
 
 def test_inference_failure_telemetry_contains_only_sanitized_schema_metadata(

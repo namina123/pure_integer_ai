@@ -481,6 +481,15 @@ class W08CandidateInferenceAdapter:
         self._rules = {
             (item.payload_kind, item.selector_key): item for item in state.rules
         }
+        schemas_by_payload_kind: dict[str, set[str]] = {}
+        for item in state.rules:
+            schemas_by_payload_kind.setdefault(item.payload_kind, set()).add(
+                item.schema_sha256
+            )
+        self._schemas_by_payload_kind = {
+            key: frozenset(values)
+            for key, values in schemas_by_payload_kind.items()
+        }
 
     def infer(
         self,
@@ -517,9 +526,11 @@ class W08CandidateInferenceAdapter:
                 reason_code="SELECTOR_UNSEEN",
             )
         typed_payload = observation.typed_payload.to_value()
-        if w08_inference_schema_sha256(typed_payload) != rule.schema_sha256:
+        if w08_inference_schema_sha256(typed_payload) not in (
+            self._schemas_by_payload_kind.get(observation.payload_kind, ())
+        ):
             raise W08CandidateInferenceError(
-                "Candidate inference held-out schema 漂移",
+                "Candidate inference held-out schema 漂移：未由同类 train family 学得",
                 reason_code="SCHEMA_UNSEEN",
             )
         state = _state(rule, typed_payload)
