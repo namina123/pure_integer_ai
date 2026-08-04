@@ -13,7 +13,10 @@ from pure_integer_ai.experiments.ph2_w08_authority import (
     W08_DIMENSION_KEYS,
     W08_VISIBLE_PACK_KEYS,
 )
-from pure_integer_ai.experiments.ph2_w08_contract import open_w08_frozen_contract
+from pure_integer_ai.experiments.ph2_w08_contract import (
+    W08_RESOURCE_BUDGET,
+    open_w08_frozen_contract,
+)
 from pure_integer_ai.experiments.ph2_w08_evaluator_contract import (
     W08_EVALUATOR_FAILURE_PHASES,
     W08_EVALUATOR_PHASES,
@@ -30,6 +33,9 @@ from pure_integer_ai.experiments.ph2_w08_evaluator_contract import (
     W08PrivateEvaluationError,
     evidence_commitment,
     strict_sha256,
+)
+from pure_integer_ai.experiments.ph2_w08_external_package import (
+    W08ExternalPrivatePackageManifest,
 )
 from pure_integer_ai.experiments.ph2_w08_lc16 import (
     W08_LC16_CELL_STATES,
@@ -61,6 +67,8 @@ class W08PrivateFamilyDocuments:
     candidate_host_sha256: str
     candidate_seal_sha256: str
     evaluator_public_head_commit_sha1: str
+    external_package_manifest_sha256: str | None = None
+    external_package_commitment: str | None = None
 
     def files(self) -> tuple[tuple[str, bytes], ...]:
         return (
@@ -129,6 +137,7 @@ def build_w08_private_family_documents(
     candidate_seal_sha256: str,
     evaluator_public_head_commit_sha1: str | None = None,
     nonce: tuple[int, ...] = (8, 19, 37, 61),
+    external_package_manifest: W08ExternalPrivatePackageManifest | None = None,
 ) -> W08PrivateFamilyDocuments:
     """只从 public manifest identity 预注册 family，不读取 held-out/label。"""
     repository = Path(repository_root).resolve()
@@ -142,27 +151,43 @@ def build_w08_private_family_documents(
     candidate_guard = strict_sha256(candidate_guard_sha256, label="Candidate guard")
     candidate_host = strict_sha256(candidate_host_sha256, label="Candidate host")
     candidate_seal = strict_sha256(candidate_seal_sha256, label="Candidate seal")
-    context = open_w08_frozen_contract(repository)
-    observations = tuple(
-        item
-        for item in context.evaluator_bindings
-        if (
-            item.pack_key in W08_VISIBLE_PACK_KEYS
-            and item.identity.owner_kind == "observation"
+    if external_package_manifest is None:
+        context = open_w08_frozen_contract(repository)
+        observations = tuple(
+            item
+            for item in context.evaluator_bindings
+            if (
+                item.pack_key in W08_VISIBLE_PACK_KEYS
+                and item.identity.owner_kind == "observation"
+            )
         )
-    )
-    labels = tuple(
-        item
-        for item in context.evaluator_bindings
-        if (
-            item.pack_key in W08_VISIBLE_PACK_KEYS
-            and item.identity.owner_kind == "evaluator"
+        labels = tuple(
+            item
+            for item in context.evaluator_bindings
+            if (
+                item.pack_key in W08_VISIBLE_PACK_KEYS
+                and item.identity.owner_kind == "evaluator"
+            )
         )
-    )
+    else:
+        if not isinstance(
+            external_package_manifest, W08ExternalPrivatePackageManifest
+        ):
+            raise W08PrivateEvaluationError("W08 external package manifest 类型非法")
+        observations = tuple(
+            item
+            for item in external_package_manifest.bindings
+            if item.identity.owner_kind == "observation"
+        )
+        labels = tuple(
+            item
+            for item in external_package_manifest.bindings
+            if item.identity.owner_kind == "evaluator"
+        )
     if not observations or len(observations) != len(labels):
         raise W08PrivateEvaluationError("W08 evaluator observation/label inventory 不闭合")
     nonce_key = _nonce_commitment(nonce)
-    family_key = evidence_commitment({
+    family_identity = {
         "candidate_contract": candidate_contract,
         "candidate_guard": candidate_guard,
         "candidate_host": candidate_host,
@@ -170,7 +195,15 @@ def build_w08_private_family_documents(
         "evaluator_head": supplied_head,
         "nonce": nonce_key,
         "owner": W08_PRIVATE_OWNER_KEY,
-    })
+    }
+    if external_package_manifest is not None:
+        family_identity["external_package_commitment"] = (
+            external_package_manifest.package_commitment
+        )
+        family_identity["external_package_manifest_sha256"] = (
+            external_package_manifest.sha256()
+        )
+    family_key = evidence_commitment(family_identity)
     source = {
         "artifact_kind": "PH2_W08_PRIVATE_SOURCE",
         "candidate_contract_sha256": candidate_contract,
@@ -183,6 +216,19 @@ def build_w08_private_family_documents(
         "nonce_commitment": nonce_key,
         "owner_key": W08_PRIVATE_OWNER_KEY,
     }
+    if external_package_manifest is not None:
+        source["external_private_package"] = {
+            "case_commitment": external_package_manifest.case_commitment,
+            "cluster_commitment": external_package_manifest.cluster_commitment,
+            "label_commitment": external_package_manifest.label_commitment,
+            "manifest_sha256": external_package_manifest.sha256(),
+            "package_commitment": external_package_manifest.package_commitment,
+            "package_version": external_package_manifest.package_version,
+            "payload_commitment": external_package_manifest.payload_commitment,
+            "payload_kind_inventory": list(
+                external_package_manifest.payload_kind_inventory
+            ),
+        }
     schema = {
         "ablation_order": list(W08_ABLATION_KEYS),
         "artifact_kind": "PH2_W08_PRIVATE_SCHEMA",
@@ -203,6 +249,7 @@ def build_w08_private_family_documents(
             "coverage_keys": list(W08_OPEN_GENERATION_COVERAGE_KEYS),
             "layer_keys": list(W08_OPEN_GENERATION_LAYER_KEYS),
         },
+        "resource_limits": dict(sorted(W08_RESOURCE_BUDGET.items())),
         "schema_key": evidence_commitment({
             "ablations": list(W08_ABLATION_KEYS),
             "dimensions": list(W08_DIMENSION_KEYS),
@@ -257,11 +304,24 @@ def build_w08_private_family_documents(
         "clusters": [by_pack[key] for key in sorted(by_pack)],
         "format_version": 1,
     }
-    source_bytes = canonical_json_bytes(source)
-    schema_bytes = canonical_json_bytes(schema)
     case_bytes = canonical_json_bytes(cases)
     label_bytes = canonical_json_bytes(label_doc)
     cluster_bytes = canonical_json_bytes(clusters)
+    if external_package_manifest is not None:
+        external_source = source["external_private_package"]
+        assert isinstance(external_source, dict)
+        external_source["case_inventory_sha256"] = _sha256(case_bytes)
+        external_source["cluster_inventory_sha256"] = _sha256(cluster_bytes)
+        external_source["label_inventory_sha256"] = _sha256(label_bytes)
+    source_bytes = canonical_json_bytes(source)
+    schema_bytes = canonical_json_bytes(schema)
+    document_payload_commitment = evidence_commitment({
+        "source": _sha256(source_bytes),
+        "schema": _sha256(schema_bytes),
+        "cases": _sha256(case_bytes),
+        "labels": _sha256(label_bytes),
+        "clusters": _sha256(cluster_bytes),
+    })
     return W08PrivateFamilyDocuments(
         source_bytes,
         schema_bytes,
@@ -269,21 +329,41 @@ def build_w08_private_family_documents(
         label_bytes,
         cluster_bytes,
         family_key,
-        evidence_commitment({
-            "source": _sha256(source_bytes),
-            "schema": _sha256(schema_bytes),
-            "cases": _sha256(case_bytes),
-            "labels": _sha256(label_bytes),
-            "clusters": _sha256(cluster_bytes),
-        }),
-        _sha256(case_bytes),
-        _sha256(label_bytes),
-        _sha256(cluster_bytes),
+        (
+            external_package_manifest.payload_commitment
+            if external_package_manifest is not None
+            else document_payload_commitment
+        ),
+        (
+            external_package_manifest.case_commitment
+            if external_package_manifest is not None
+            else _sha256(case_bytes)
+        ),
+        (
+            external_package_manifest.label_commitment
+            if external_package_manifest is not None
+            else _sha256(label_bytes)
+        ),
+        (
+            external_package_manifest.cluster_commitment
+            if external_package_manifest is not None
+            else _sha256(cluster_bytes)
+        ),
         candidate_contract,
         candidate_guard,
         candidate_host,
         candidate_seal,
         supplied_head,
+        (
+            external_package_manifest.sha256()
+            if external_package_manifest is not None
+            else None
+        ),
+        (
+            external_package_manifest.package_commitment
+            if external_package_manifest is not None
+            else None
+        ),
     )
 
 
@@ -318,6 +398,40 @@ def validate_w08_private_family_documents(
     _decode_document(
         documents.cluster_bytes, kind="PH2_W08_PRIVATE_CLUSTER_INVENTORY"
     )
+    external = source.get("external_private_package")
+    if documents.external_package_manifest_sha256 is None:
+        commitment_drift = (
+            external is not None
+            or documents.external_package_commitment is not None
+            or documents.case_commitment != _sha256(documents.case_bytes)
+            or documents.label_commitment != _sha256(documents.label_bytes)
+            or documents.cluster_commitment != _sha256(documents.cluster_bytes)
+            or documents.payload_commitment != evidence_commitment({
+                "source": _sha256(documents.source_bytes),
+                "schema": _sha256(documents.schema_bytes),
+                "cases": _sha256(documents.case_bytes),
+                "labels": _sha256(documents.label_bytes),
+                "clusters": _sha256(documents.cluster_bytes),
+            })
+        )
+    else:
+        commitment_drift = (
+            not isinstance(external, dict)
+            or external.get("manifest_sha256")
+            != documents.external_package_manifest_sha256
+            or external.get("package_commitment")
+            != documents.external_package_commitment
+            or external.get("case_commitment") != documents.case_commitment
+            or external.get("label_commitment") != documents.label_commitment
+            or external.get("cluster_commitment") != documents.cluster_commitment
+            or external.get("payload_commitment") != documents.payload_commitment
+            or external.get("case_inventory_sha256")
+            != _sha256(documents.case_bytes)
+            or external.get("label_inventory_sha256")
+            != _sha256(documents.label_bytes)
+            or external.get("cluster_inventory_sha256")
+            != _sha256(documents.cluster_bytes)
+        )
     if (
         source.get("family_key") != documents.family_key
         or source.get("candidate_contract_sha256")
@@ -336,12 +450,12 @@ def validate_w08_private_family_documents(
             "required": 1,
             "version": W08_PRIVATE_INFERENCE_INTERFACE_VERSION,
         }
+        or schema.get("resource_limits")
+        != dict(sorted(W08_RESOURCE_BUDGET.items()))
         or cases.get("formal_run_count") != 0
         or labels.get("formal_run_count") != 0
         or cases.get("binding_count") != labels.get("binding_count")
-        or documents.case_commitment != _sha256(documents.case_bytes)
-        or documents.label_commitment != _sha256(documents.label_bytes)
-        or documents.cluster_commitment != _sha256(documents.cluster_bytes)
+        or commitment_drift
     ):
         raise W08PrivateEvaluationError("W08 private family cross-reference 漂移")
 
@@ -378,7 +492,7 @@ def publish_w08_private_family(
             "sha256": _sha256(payload),
             "size_bytes": len(payload),
         })
-    freeze = canonical_json_bytes({
+    freeze_value = {
         "ablation_order": list(W08_ABLATION_KEYS),
         "artifact_kind": "PH2_W08_PRIVATE_FAMILY_FREEZE",
         "case_commitment": documents.case_commitment,
@@ -397,7 +511,14 @@ def publish_w08_private_family(
         "label_commitment": documents.label_commitment,
         "payload_commitment": documents.payload_commitment,
         "private_payload_reads": 0,
-    })
+        "resource_limits": dict(sorted(W08_RESOURCE_BUDGET.items())),
+    }
+    if documents.external_package_manifest_sha256 is not None:
+        freeze_value["external_private_package"] = {
+            "manifest_sha256": documents.external_package_manifest_sha256,
+            "package_commitment": documents.external_package_commitment,
+        }
+    freeze = canonical_json_bytes(freeze_value)
     target = root / W08_PRIVATE_FAMILY_FREEZE_NAME
     with target.open("xb") as handle:
         handle.write(freeze)

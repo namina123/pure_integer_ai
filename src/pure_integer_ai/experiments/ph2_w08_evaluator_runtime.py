@@ -68,6 +68,13 @@ from pure_integer_ai.experiments.ph2_w08_evaluator_family import (
     consume_w08_private_first_run_guard,
 )
 from pure_integer_ai.experiments.ph2_w08_firewall import W08VisibilityFirewall
+from pure_integer_ai.experiments.ph2_w08_external_package import (
+    W08_EXTERNAL_PRIVATE_PACKAGE_MANIFEST_NAME,
+    W08ExternalPrivatePackageManifest,
+    read_w08_external_private_binding,
+    read_w08_external_private_manifest,
+    validate_w08_external_private_package_metadata,
+)
 from pure_integer_ai.experiments.ph2_w08_inference import (
     W08CandidateInferenceAdapter,
 )
@@ -99,6 +106,8 @@ class W08PrivateEvaluatorRuntimeConfig:
     family_root: str | Path
     execution_root: str | Path
     fault_phase: str | None = None
+    private_payload_root: str | Path | None = None
+    package_manifest: str | Path | None = None
 
 
 @dataclass(frozen=True)
@@ -257,14 +266,33 @@ def _git_state(repository: Path) -> tuple[str, str]:
     return head, status
 
 
-def _validate_roots(config: W08PrivateEvaluatorRuntimeConfig) -> tuple[Path, Path, Path, Path]:
+def _validate_roots(
+    config: W08PrivateEvaluatorRuntimeConfig,
+) -> tuple[Path, Path, Path, Path, Path | None, Path | None]:
     if not isinstance(config, W08PrivateEvaluatorRuntimeConfig):
         raise TypeError("W08 evaluator config 类型非法")
     repository = Path(config.repository_root).resolve()
     candidate = Path(config.candidate_root).resolve()
     family = Path(config.family_root).resolve()
     execution = Path(config.execution_root).resolve()
-    roots = (repository, candidate, family)
+    if (config.private_payload_root is None) != (config.package_manifest is None):
+        raise W08EvaluatorInfrastructureError("W08 external payload root/manifest 必须同时提供")
+    payload_input = (
+        Path(config.private_payload_root)
+        if config.private_payload_root is not None
+        else None
+    )
+    payload_root = payload_input.resolve() if payload_input is not None else None
+    package_manifest = (
+        Path(config.package_manifest)
+        if config.package_manifest is not None
+        else None
+    )
+    roots = (
+        (repository, candidate, family, payload_root)
+        if payload_root is not None
+        else (repository, candidate, family)
+    )
     if any(
         left == right or left.is_relative_to(right) or right.is_relative_to(left)
         for index, left in enumerate(roots)
@@ -275,7 +303,14 @@ def _validate_roots(config: W08PrivateEvaluatorRuntimeConfig) -> tuple[Path, Pat
         raise W08EvaluatorInfrastructureError("W08 evaluator execution root 越界")
     if config.fault_phase is not None and config.fault_phase not in W08_EVALUATOR_PHASES:
         raise W08EvaluatorInfrastructureError("W08 evaluator fault phase 未注册")
-    return repository, candidate, family, execution
+    payload_raw = None
+    if payload_input is not None:
+        payload_raw = (
+            payload_input
+            if payload_input.is_absolute()
+            else Path.cwd() / payload_input
+        )
+    return repository, candidate, family, execution, payload_raw, package_manifest
 
 
 def _enter_phase(config: W08PrivateEvaluatorRuntimeConfig, phase: str) -> None:
@@ -475,6 +510,91 @@ def _private_bindings(context) -> tuple[W08FileBinding, ...]:
     )
 
 
+def _external_metadata_snapshot(
+    root: Path,
+    manifest: W08ExternalPrivatePackageManifest,
+) -> tuple[tuple[str, int, int], ...]:
+    """只取 stat metadata，避免在 inference 前读取 label bytes。"""
+    names = [
+        W08_EXTERNAL_PRIVATE_PACKAGE_MANIFEST_NAME,
+        *(item.identity.relative_path for item in manifest.bindings),
+    ]
+    values = []
+    for relative in sorted(names):
+        target = root / Path(*relative.split("/"))
+        try:
+            stat = target.stat()
+        except OSError as error:
+            raise W08EvaluatorInfrastructureError(
+                "W08 external package metadata 无法读取"
+            ) from error
+        values.append((relative, stat.st_size, stat.st_mtime_ns))
+    return tuple(values)
+
+
+def _read_external_observations(
+    root: Path,
+    manifest: W08ExternalPrivatePackageManifest,
+    audit: _ReadAudit,
+) -> tuple[tuple[str, ObservationRecord], ...]:
+    observations: dict[object, tuple[str, ObservationRecord]] = {}
+    for binding in manifest.bindings:
+        if binding.identity.owner_kind != "observation":
+            continue
+        records = read_w08_external_private_binding(root, binding)
+        audit.record(
+            binding.identity.relative_path,
+            binding.identity.transport_size_bytes,
+            len(records),
+            binding.identity.owner_kind,
+        )
+        for item in records:
+            if not isinstance(item, ObservationRecord):
+                raise W08EvaluatorInfrastructureError(
+                    "W08 external Observation record kind 漂移"
+                )
+            if item.stable_key in observations:
+                raise W08EvaluatorInfrastructureError(
+                    "W08 external Observation 重复"
+                )
+            observations[item.stable_key] = (binding.pack_key, item)
+    if not observations:
+        raise W08EvaluatorInfrastructureError("W08 external Observation family 为空")
+    return tuple(
+        observations[key]
+        for key in sorted(observations, key=lambda item: item.components)
+    )
+
+
+def _read_external_labels(
+    root: Path,
+    manifest: W08ExternalPrivatePackageManifest,
+    audit: _ReadAudit,
+) -> tuple[tuple[object, EvaluatorLabelRecord], ...]:
+    labels: dict[object, tuple[str, EvaluatorLabelRecord]] = {}
+    for binding in manifest.bindings:
+        if binding.identity.owner_kind != "evaluator":
+            continue
+        records = read_w08_external_private_binding(root, binding)
+        audit.record(
+            binding.identity.relative_path,
+            binding.identity.transport_size_bytes,
+            len(records),
+            binding.identity.owner_kind,
+        )
+        for item in records:
+            if not isinstance(item, EvaluatorLabelRecord):
+                raise W08EvaluatorInfrastructureError(
+                    "W08 external label record kind 漂移"
+                )
+            if item.observation_key in labels:
+                raise W08EvaluatorInfrastructureError("W08 external label 重复")
+            labels[item.observation_key] = (binding.pack_key, item)
+    if not labels:
+        raise W08EvaluatorInfrastructureError("W08 external label family 为空")
+    return tuple(labels.items())
+
+
 def _write_exclusive(path: Path, payload: bytes) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -526,10 +646,62 @@ def run_w08_private_evaluation_once(
     family_freeze_sha256: str,
 ) -> W08PrivateEvaluatorRunResult:
     """guard 后先验 Candidate inference；可判时才读取 private payload。"""
-    repository, candidate, family_root, execution = _validate_roots(config)
+    (
+        repository,
+        candidate,
+        family_root,
+        execution,
+        private_payload_root,
+        package_manifest_path,
+    ) = _validate_roots(config)
     if (family_root / "publication" / W08_PRIVATE_AGGREGATE_NAME).exists():
         raise W08EvaluatorInfrastructureError("W08 private aggregate 已存在，不可重跑")
-    family, _documents = _family_documents(family_root, family_freeze_sha256)
+    family, documents = _family_documents(family_root, family_freeze_sha256)
+    if family.get("resource_limits") != dict(sorted(W08_RESOURCE_BUDGET.items())):
+        raise W08EvaluatorInfrastructureError("W08 private family resource limits 漂移")
+    external_spec = family.get("external_private_package")
+    external_manifest: W08ExternalPrivatePackageManifest | None = None
+    if external_spec is not None:
+        if (
+            not isinstance(external_spec, dict)
+            or private_payload_root is None
+            or package_manifest_path is None
+        ):
+            raise W08EvaluatorInfrastructureError(
+                "W08 external family 缺少 payload root/manifest"
+            )
+        external_manifest = read_w08_external_private_manifest(
+            private_payload_root,
+            package_manifest_path,
+            expected_sha256=str(external_spec.get("manifest_sha256")),
+        )
+        validate_w08_external_private_package_metadata(
+            private_payload_root, external_manifest
+        )
+        source = json.loads(documents[W08_PRIVATE_SOURCE_NAME])
+        source_external = source.get("external_private_package")
+        if (
+            not isinstance(source_external, dict)
+            or external_manifest.package_commitment
+            != external_spec.get("package_commitment")
+            or source_external.get("manifest_sha256")
+            != external_spec.get("manifest_sha256")
+            or source_external.get("package_commitment")
+            != external_manifest.package_commitment
+            or external_manifest.case_commitment != family.get("case_commitment")
+            or external_manifest.label_commitment != family.get("label_commitment")
+            or external_manifest.cluster_commitment
+            != family.get("cluster_commitment")
+            or external_manifest.payload_commitment
+            != family.get("payload_commitment")
+        ):
+            raise W08EvaluatorInfrastructureError(
+                "W08 external package/family commitment 漂移"
+            )
+    elif private_payload_root is not None or package_manifest_path is not None:
+        raise W08EvaluatorInfrastructureError(
+            "W08 legacy family 不接受 external payload 配置"
+        )
     guard_path, guard_sha = consume_w08_private_first_run_guard(
         family_root,
         family_freeze_sha256=family_freeze_sha256,
@@ -605,20 +777,33 @@ def run_w08_private_evaluation_once(
         ):
             raise W08EvaluatorInfrastructureError("W08 Candidate inference state preflight 失败")
         adapter = W08CandidateInferenceAdapter(inference_state)
-        context = open_w08_frozen_contract(repository)
-        private_bindings = _private_bindings(context)
         current_phase = "PAYLOAD_READ"
         _enter_phase(config, current_phase)
         audit = _ReadAudit({})
-        label_metadata_before = {
-            item.relative_path: (
-                _payload_file(repository, item).stat().st_size,
-                _payload_file(repository, item).stat().st_mtime_ns,
+        if external_manifest is not None:
+            assert private_payload_root is not None
+            package_metadata_before = _external_metadata_snapshot(
+                private_payload_root, external_manifest
             )
-            for item in private_bindings
-            if item.identity.owner_kind == "evaluator"
-        }
-        observations = _read_private_observations(repository, context, audit)
+            private_binding_count = len(external_manifest.bindings)
+            observations = _read_external_observations(
+                private_payload_root, external_manifest, audit
+            )
+            label_metadata_before: object = None
+        else:
+            context = open_w08_frozen_contract(repository)
+            private_bindings = _private_bindings(context)
+            private_binding_count = len(private_bindings)
+            package_metadata_before = None
+            label_metadata_before = {
+                item.relative_path: (
+                    _payload_file(repository, item).stat().st_size,
+                    _payload_file(repository, item).stat().st_mtime_ns,
+                )
+                for item in private_bindings
+                if item.identity.owner_kind == "evaluator"
+            }
+            observations = _read_private_observations(repository, context, audit)
         if (
             audit.future_payload_reads
             or audit.observation_records > W08_RESOURCE_BUDGET["max_records"]
@@ -645,11 +830,17 @@ def run_w08_private_evaluation_once(
             outcome_families.append((ablation, rerun))
         label_read_before_inference = int(audit.label_records == 0)
         current_phase = "PAYLOAD_PAIR"
-        labels = _read_private_labels(repository, context, audit)
+        if external_manifest is not None:
+            assert private_payload_root is not None
+            labels = _read_external_labels(
+                private_payload_root, external_manifest, audit
+            )
+        else:
+            labels = _read_private_labels(repository, context, audit)
         pairs = _pair_private_records(observations, labels)
         if (
             audit.future_payload_reads
-            or audit.payload_gets != len(private_bindings)
+            or audit.payload_gets != private_binding_count
             or audit.observation_records != audit.label_records
             or audit.payload_gets > W08_RESOURCE_BUDGET["max_payload_gets"]
             or audit.payload_bytes > W08_RESOURCE_BUDGET["max_payload_bytes"]
@@ -720,27 +911,50 @@ def run_w08_private_evaluation_once(
         _enter_phase(config, current_phase)
         candidate_after = _tree_digest(candidate)
         public_after = _git_state(repository)
-        label_metadata_after = {
-            item.relative_path: (
-                _payload_file(repository, item).stat().st_size,
-                _payload_file(repository, item).stat().st_mtime_ns,
+        if external_manifest is not None:
+            assert private_payload_root is not None
+            package_metadata_after = _external_metadata_snapshot(
+                private_payload_root, external_manifest
             )
-            for item in private_bindings
-            if item.identity.owner_kind == "evaluator"
-        }
+            private_payload_writes = int(
+                package_metadata_after != package_metadata_before
+            )
+            label_writes = private_payload_writes
+        else:
+            label_metadata_after = {
+                item.relative_path: (
+                    _payload_file(repository, item).stat().st_size,
+                    _payload_file(repository, item).stat().st_mtime_ns,
+                )
+                for item in private_bindings
+                if item.identity.owner_kind == "evaluator"
+            }
+            label_writes = int(label_metadata_after != label_metadata_before)
+            private_payload_writes = 0
         writes = {
             "candidate_writes": int(candidate_after != candidate_before),
-            "label_writes": int(label_metadata_after != label_metadata_before),
+            "label_writes": label_writes,
             "public_writes": int(public_after != public_before),
         }
         if any(writes.values()):
-            raise W08EvaluatorInfrastructureError("W08 private evaluator owner isolation 失败")
+            return _safe_failure(
+                family_root,
+                family=family,
+                phase=current_phase,
+                family_freeze_sha256=family_freeze_sha256,
+                guard_sha256=guard_sha,
+                write_counts=writes,
+                infrastructure={
+                    "private_payload_writes": private_payload_writes,
+                },
+            )
         infrastructure = {
             "candidate_dump_readback": int(candidate_dump.dump_readback),
             "candidate_inventory_match": 1,
             "candidate_writes": writes["candidate_writes"],
             "dump_readback": 1,
             "evaluator_label_writes": writes["label_writes"],
+            "external_private_package": int(external_manifest is not None),
             "fault_ne_protocol": 1,
             "future_payload_reads": audit.future_payload_reads,
             "host_learning_writes": 0,
@@ -749,11 +963,14 @@ def run_w08_private_evaluation_once(
             "private_observation_record_count": audit.observation_records,
             "private_payload_bytes": audit.payload_bytes,
             "private_payload_gets": audit.payload_gets,
+            "private_payload_writes": private_payload_writes,
             "private_read_path_count": len(audit.reads_by_path),
             "inference_before_label_reads": label_read_before_inference,
             "inference_invocation_count": len(baseline_outcomes) + sum(
                 len(outcomes) for _, outcomes in outcome_families
             ),
+            "label_after_all_inference": label_read_before_inference,
+            "metadata_before_payload_freeze": 1,
             "public_repo_writes": writes["public_writes"],
         }
         current_phase = "REPORT_SAFETY"
