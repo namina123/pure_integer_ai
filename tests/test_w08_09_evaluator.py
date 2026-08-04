@@ -44,6 +44,7 @@ from pure_integer_ai.experiments.ph2_w08_evaluator_runtime import (
     W08PrivateEvaluatorRuntimeConfig,
     _ReadAudit,
     _candidate_inference_available,
+    _validate_public_safe_aggregate,
     run_w08_private_evaluation_once,
 )
 from pure_integer_ai.experiments.ph2_w08_firewall import W08PayloadFirewall
@@ -349,6 +350,48 @@ def test_missing_outcomes_are_ne_and_safe_aggregate_contains_no_labels(
     assert all(token not in encoded for token in (
         b"expected_payload", b"expected_state", b"typed_payload", b"surface"
     ))
+
+
+def test_report_safety_allows_surface_counters_but_rejects_private_fields(
+    evaluator_fixture,
+):
+    _, snapshot, pairs, outcomes, outcome_families = evaluator_fixture
+    aggregate = public_safe_w08_aggregate(
+        evaluate_w08_private_pairs(snapshot, pairs, case_outcomes=outcomes),
+        family_commitment="1" * 64,
+        payload_commitment="2" * 64,
+        case_commitment="3" * 64,
+        label_commitment="4" * 64,
+        cluster_commitment="5" * 64,
+        failure_phase="NONE",
+        formal_run_count=1,
+        write_counts={
+            "candidate_writes": 0,
+            "label_writes": 0,
+            "public_writes": 0,
+        },
+        ablation_results=assess_w08_orthogonal_ablations(
+            snapshot,
+            pairs,
+            outcome_families=outcome_families,
+        ),
+        open_generation=assess_w08_private_open_generation(
+            snapshot,
+            pairs,
+            case_outcomes=outcomes,
+        ),
+        lc16=assess_w08_private_lc16(
+            snapshot,
+            pairs,
+            case_outcomes=outcomes,
+        ),
+    )
+    assert aggregate["open_generation"]["exact_surface_read_count"] == 0
+    _validate_public_safe_aggregate(aggregate)
+
+    aggregate["open_generation"]["surface"] = "forbidden"
+    with pytest.raises(RuntimeError, match="泄漏 private 字段"):
+        _validate_public_safe_aggregate(aggregate)
 
 
 def test_candidate_inference_preflight_requires_complete_v2_interface(

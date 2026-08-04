@@ -141,6 +141,33 @@ class _W08SanitizedInferenceFailure(RuntimeError):
         self.infrastructure = infrastructure
 
 
+_W08_FORBIDDEN_REPORT_KEYS = frozenset({
+    "accepted_surfaces",
+    "expected_payload",
+    "expected_state",
+    "message",
+    "observed_surface",
+    "raw_observation",
+    "relative_path",
+    "surface",
+    "text",
+    "typed_payload",
+})
+
+
+def _validate_public_safe_aggregate(value: object) -> None:
+    """递归拒绝 private 字段；不误杀仅含安全计数的键名。"""
+    if isinstance(value, dict):
+        if any(key in _W08_FORBIDDEN_REPORT_KEYS for key in value):
+            raise W08EvaluatorInfrastructureError("W08 safe aggregate 泄漏 private 字段")
+        for item in value.values():
+            _validate_public_safe_aggregate(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _validate_public_safe_aggregate(item)
+
+
 def _infer_observation_family(
     adapter: W08CandidateInferenceAdapter,
     observations: tuple[tuple[str, ObservationRecord], ...],
@@ -746,17 +773,8 @@ def run_w08_private_evaluation_once(
             lc16=lc16,
             infrastructure=infrastructure,
         )
+        _validate_public_safe_aggregate(aggregate)
         encoded = canonical_json_bytes(aggregate)
-        forbidden_tokens = (
-            b"relative_path",
-            b"expected_payload",
-            b"expected_state",
-            b"typed_payload",
-            b"surface",
-            b"message",
-        )
-        if any(token in encoded for token in forbidden_tokens):
-            raise W08EvaluatorInfrastructureError("W08 safe aggregate 泄漏 private 字段")
         aggregate_path = family_root / "publication" / W08_PRIVATE_AGGREGATE_NAME
         aggregate_sha = _write_exclusive(aggregate_path, encoded)
         recommendation_path = None
