@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import inspect
 from pathlib import Path
 import tempfile
@@ -18,6 +19,10 @@ from pure_integer_ai.experiments.ph2_w08_contract import (
     open_w08_frozen_contract,
 )
 from pure_integer_ai.experiments.ph2_w08_firewall import W08PayloadFirewall
+from pure_integer_ai.experiments.ph2_w08_evaluator_runtime import (
+    _W08SanitizedInferenceFailure,
+    _infer_observation_family,
+)
 from pure_integer_ai.experiments.ph2_w08_inference import (
     W08CandidateInferenceAdapter,
     validate_w08_inference_outcome,
@@ -26,6 +31,7 @@ from pure_integer_ai.experiments.ph2_w08_inference_contract import (
     W08_CANDIDATE_INFERENCE_INTERFACE_VERSION,
     W08CandidateInferenceError,
     W08CandidateInferenceState,
+    w08_inference_schema_sha256,
 )
 from pure_integer_ai.experiments.ph2_w08_inference_training import (
     compile_w08_candidate_inference_state,
@@ -143,6 +149,97 @@ def test_unknown_clarify_budget_and_schema_failure_remain_explicit(training_fixt
             replace(unknown, typed_payload=CanonicalJsonObject.from_value(drift)),
             dimension_key=W08_DIMENSION_KEYS[0],
         )
+
+
+def test_source_raw_carrier_schema_is_opaque_but_content_remains_sha_bound(
+    training_fixture,
+):
+    payload, state = training_fixture
+    source = next(
+        item
+        for item in payload.observations
+        if item.payload_kind == "RAW_SOURCE_OBSERVATION_V1"
+    )
+    train_payload = source.typed_payload.to_value()
+    synthetic_raw = {
+        "conllu_text": "synthetic public shape",
+        "sent_id": "synthetic-public",
+    }
+    held_out_payload = source.typed_payload.to_value()
+    held_out_payload["raw_observation"] = synthetic_raw
+    held_out_payload["raw_observation_sha256"] = hashlib.sha256(
+        canonical_json_bytes(synthetic_raw)
+    ).hexdigest()
+    held_out = replace(
+        source,
+        split="held_out",
+        typed_payload=CanonicalJsonObject.from_value(held_out_payload),
+    )
+    assert w08_inference_schema_sha256(
+        train_payload
+    ) == w08_inference_schema_sha256(held_out_payload)
+
+    outcomes = tuple(
+        W08CandidateInferenceAdapter(state).infer(
+            held_out,
+            dimension_key=dimension,
+        )
+        for dimension in W08_DIMENSION_KEYS
+    )
+    assert len(outcomes) == len(W08_DIMENSION_KEYS)
+    assert all(item.component_state == "ACTIVE" for item in outcomes)
+
+    corrupt_payload = dict(held_out_payload)
+    corrupt_payload["raw_observation_sha256"] = "0" * 64
+    corrupt = replace(
+        held_out,
+        typed_payload=CanonicalJsonObject.from_value(corrupt_payload),
+    )
+    with pytest.raises(W08CandidateInferenceError) as captured:
+        W08CandidateInferenceAdapter(state).infer(
+            corrupt,
+            dimension_key=W08_DIMENSION_KEYS[0],
+        )
+    assert captured.value.reason_code == "STATE_INPUT_REJECTED"
+
+
+def test_inference_failure_telemetry_contains_only_sanitized_schema_metadata(
+    training_fixture,
+):
+    payload, state = training_fixture
+    source = next(
+        item
+        for item in payload.observations
+        if item.payload_kind == "RAW_SOURCE_OBSERVATION_V1"
+    )
+    raw = source.typed_payload.to_value()
+    raw["raw_observation_sha256"] = "0" * 64
+    corrupt = replace(
+        source,
+        split="held_out",
+        typed_payload=CanonicalJsonObject.from_value(raw),
+    )
+    with pytest.raises(_W08SanitizedInferenceFailure) as captured:
+        _infer_observation_family(
+            W08CandidateInferenceAdapter(state),
+            (("PUBLIC-SYNTHETIC", corrupt),),
+        )
+    assert captured.value.infrastructure == {
+        "inference_failure_dimension_key": W08_DIMENSION_KEYS[0],
+        "inference_failure_invocation_ordinal": 1,
+        "inference_failure_kind": "STATE_INPUT_REJECTED",
+        "inference_failure_payload_kind": "RAW_SOURCE_OBSERVATION_V1",
+        "inference_failure_schema_sha256": w08_inference_schema_sha256(raw),
+    }
+    encoded = canonical_json_bytes(captured.value.infrastructure)
+    assert all(token not in encoded for token in (
+        b"expected",
+        b"label",
+        b"message",
+        b"path",
+        b"surface",
+        b"typed_payload",
+    ))
 
 
 def test_each_ablation_disables_a_real_component_and_reinvokes(training_fixture):

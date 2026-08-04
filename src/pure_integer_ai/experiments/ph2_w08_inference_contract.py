@@ -60,10 +60,33 @@ W08_INFERENCE_RENDER_POLICIES = (
     "STRUCTURAL_GENERATOR",
     "STRUCTURED_PAYLOAD",
 )
+W08_INFERENCE_FAILURE_KINDS = (
+    "INPUT_CONTRACT_REJECTED",
+    "OUTPUT_CONTRACT_REJECTED",
+    "PAYLOAD_KIND_UNSUPPORTED",
+    "RENDER_INPUT_REJECTED",
+    "RENDER_POLICY_UNSUPPORTED",
+    "SCHEMA_UNSEEN",
+    "SELECTOR_MISSING",
+    "SELECTOR_UNSEEN",
+    "STATE_INPUT_REJECTED",
+    "STATE_POLICY_UNSUPPORTED",
+)
 
 
 class W08CandidateInferenceError(RuntimeError):
     """Candidate state、调用或输出违反冻结 inference 合同。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str = "OUTPUT_CONTRACT_REJECTED",
+    ) -> None:
+        if reason_code not in W08_INFERENCE_FAILURE_KINDS:
+            raise ValueError("Candidate inference failure kind 未注册")
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 def _sha256(value: bytes) -> str:
@@ -94,12 +117,22 @@ def _schema_shape(value: object) -> object:
     if isinstance(value, dict):
         return {
             "object": [
-                [str(key), _schema_shape(item)]
+                [
+                    str(key),
+                    (
+                        {"opaque_canonical_json": 1}
+                        if key == "raw_observation"
+                        else _schema_shape(item)
+                    ),
+                ]
                 for key, item in sorted(value.items())
             ]
         }
     if isinstance(value, list):
-        shapes = {_sha256(canonical_json_bytes(_schema_shape(item))) for item in value}
+        shapes = {
+            _sha256(canonical_json_bytes(_schema_shape(item)))
+            for item in value
+        }
         return {"array": sorted(shapes), "count_class": int(bool(value))}
     if value is None:
         return "null"
@@ -113,7 +146,7 @@ def _schema_shape(value: object) -> object:
 
 
 def w08_inference_schema_sha256(value: object) -> str:
-    """只承诺字段与容器形状，不持久化任何 Observation 值。"""
+    """承诺 inference envelope；来源专属 raw carrier 由其 SHA 承诺。"""
     return _sha256(canonical_json_bytes(_schema_shape(value)))
 
 
@@ -450,6 +483,7 @@ __all__ = [
     "W08_CANDIDATE_INFERENCE_OUTPUT_KIND",
     "W08_CANDIDATE_INFERENCE_STATE_KIND",
     "W08_INFERENCE_OWNER_COUNT_KEYS",
+    "W08_INFERENCE_FAILURE_KINDS",
     "W08_INFERENCE_PAYLOAD_KINDS",
     "W08_INFERENCE_SHORTCUT_KEYS",
     "W08CandidateInferenceError",

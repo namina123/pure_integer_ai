@@ -42,6 +42,7 @@ from pure_integer_ai.experiments.ph2_w08_evaluator_family import (
 )
 from pure_integer_ai.experiments.ph2_w08_evaluator_runtime import (
     W08PrivateEvaluatorRuntimeConfig,
+    _ReadAudit,
     _candidate_inference_available,
     run_w08_private_evaluation_once,
 )
@@ -212,6 +213,19 @@ def test_private_family_freezes_metadata_before_any_payload_read(external_tmp_pa
             root,
             family_freeze_sha256=freeze_sha,
         )
+
+
+def test_private_read_audit_keeps_observation_and_label_accounts_separate():
+    audit = _ReadAudit({})
+    audit.record("observation-pack", 17, 2, "observation")
+    audit.record("label-pack", 19, 2, "evaluator")
+    assert audit.reads_by_path == {
+        "label-pack": (1, 19),
+        "observation-pack": (1, 17),
+    }
+    assert audit.payload_gets == 2
+    assert audit.payload_bytes == 36
+    assert audit.observation_records == audit.label_records == 2
 
 
 def test_five_bearings_pass_only_actual_adapter_outcomes(evaluator_fixture):

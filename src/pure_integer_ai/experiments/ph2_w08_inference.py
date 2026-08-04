@@ -71,7 +71,10 @@ def _projection_value(value: object, *, parent: str = "") -> object:
         return [_projection_value(item, parent=parent) for item in value]
     if value is None or type(value) in {bool, int} or isinstance(value, str):
         return value
-    raise W08CandidateInferenceError("Observation projection value 类型非法")
+    raise W08CandidateInferenceError(
+        "Observation projection value 类型非法",
+        reason_code="OUTPUT_CONTRACT_REJECTED",
+    )
 
 
 def w08_observation_projection_sha256(observation: ObservationRecord) -> str:
@@ -148,7 +151,18 @@ def _selector(observation: ObservationRecord) -> str:
     else:
         value = None
     if not isinstance(value, str) or not value:
-        raise W08CandidateInferenceError("Observation selector 未注册")
+        raise W08CandidateInferenceError(
+            "Observation selector 未注册",
+            reason_code=(
+                "PAYLOAD_KIND_UNSUPPORTED"
+                if observation.payload_kind not in {
+                    *_COURSE_PAYLOAD_KINDS,
+                    "DiscourseRevisionQuery",
+                    "RAW_SOURCE_OBSERVATION_V1",
+                }
+                else "SELECTOR_MISSING"
+            ),
+        )
     return value
 
 
@@ -156,16 +170,25 @@ def _state(rule: W08CandidateInferenceRule, payload: dict[str, Any]) -> str:
     if rule.state_policy == "SAMPLE_FAMILY_STATE":
         state = _SAMPLE_FAMILY_STATES.get(payload.get("sample_family"))
         if state is None:
-            raise W08CandidateInferenceError("sample family 没有 state rule")
+            raise W08CandidateInferenceError(
+                "sample family 没有 state rule",
+                reason_code="STATE_INPUT_REJECTED",
+            )
         return state
     if rule.state_policy == "EVIDENCE_BITS_STATE":
         evidence = payload.get("evidence_state")
         if not isinstance(evidence, dict):
-            raise W08CandidateInferenceError("revision evidence state 缺失")
+            raise W08CandidateInferenceError(
+                "revision evidence state 缺失",
+                reason_code="STATE_INPUT_REJECTED",
+            )
         support = evidence.get("support")
         refute = evidence.get("refute")
         if support not in {0, 1} or refute not in {0, 1}:
-            raise W08CandidateInferenceError("revision evidence state 非 binary")
+            raise W08CandidateInferenceError(
+                "revision evidence state 非 binary",
+                reason_code="STATE_INPUT_REJECTED",
+            )
         return {
             (0, 0): "UNKNOWN",
             (0, 1): "FALSE",
@@ -174,15 +197,24 @@ def _state(rule: W08CandidateInferenceRule, payload: dict[str, Any]) -> str:
         }[(support, refute)]
     if rule.state_policy == "SOURCE_RECEIPT_STATE":
         raw_sha = payload.get("raw_observation_sha256")
+        raw_observation = payload.get("raw_observation")
         if (
             payload.get("raw_observation_append_only") != 1
             or not isinstance(raw_sha, str)
             or len(raw_sha) != 64
             or any(char not in "0123456789abcdef" for char in raw_sha)
+            or not isinstance(raw_observation, dict)
+            or _sha256_bytes(canonical_json_bytes(raw_observation)) != raw_sha
         ):
-            raise W08CandidateInferenceError("source receipt 输入非法")
+            raise W08CandidateInferenceError(
+                "source receipt 输入非法",
+                reason_code="STATE_INPUT_REJECTED",
+            )
         return "TRUE"
-    raise W08CandidateInferenceError("Candidate state policy 未实现")
+    raise W08CandidateInferenceError(
+        "Candidate state policy 未实现",
+        reason_code="STATE_POLICY_UNSUPPORTED",
+    )
 
 
 def _visible_input(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, int]:
@@ -198,7 +230,10 @@ def _visible_input(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, int]
             }, 1
         return None, 0
     if not isinstance(value, dict):
-        raise W08CandidateInferenceError("visible input receipt 类型非法")
+        raise W08CandidateInferenceError(
+            "visible input receipt 类型非法",
+            reason_code="RENDER_INPUT_REJECTED",
+        )
     text = value.get("text")
     sha = value.get("sha256")
     if (
@@ -209,7 +244,10 @@ def _visible_input(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, int]
         or not isinstance(sha, str)
         or _sha256_bytes(text.encode("utf-8")) != sha
     ):
-        raise W08CandidateInferenceError("visible input receipt SHA/state 漂移")
+        raise W08CandidateInferenceError(
+            "visible input receipt SHA/state 漂移",
+            reason_code="RENDER_INPUT_REJECTED",
+        )
     return value, 1
 
 
@@ -241,7 +279,10 @@ def _structural_generation(payload_kind: str, payload: dict[str, Any]) -> str:
         uncertainty = str(first.get("uncertainty_state"))
         marker = "可能" if uncertainty not in {"CERTAIN", "ASSERTED"} else "已经"
         return f"据{role}判断，相关命题{marker}成立。"
-    raise W08CandidateInferenceError("结构生成器不支持该 payload kind")
+    raise W08CandidateInferenceError(
+        "结构生成器不支持该 payload kind",
+        reason_code="RENDER_POLICY_UNSUPPORTED",
+    )
 
 
 def _resolution_state(payload_kind: str, selector: str, state: str) -> str:
@@ -272,14 +313,23 @@ def _result_payload(
         outputs: list[str] = []
         if state == "TRUE" and rule.render_policy == "COPY_VISIBLE_TEXT":
             if visible is None or visible.get("target_hidden") != 0:
-                raise W08CandidateInferenceError("COPY_VISIBLE_TEXT 缺少可见输入")
+                raise W08CandidateInferenceError(
+                    "COPY_VISIBLE_TEXT 缺少可见输入",
+                    reason_code="RENDER_INPUT_REJECTED",
+                )
             outputs = [str(visible["text"])]
         elif state == "TRUE" and rule.render_policy == "STRUCTURAL_GENERATOR":
             if visible is None:
-                raise W08CandidateInferenceError("STRUCTURAL_GENERATOR 缺少 typed input")
+                raise W08CandidateInferenceError(
+                    "STRUCTURAL_GENERATOR 缺少 typed input",
+                    reason_code="RENDER_INPUT_REJECTED",
+                )
             outputs = [_structural_generation(observation.payload_kind, payload)]
         elif state == "TRUE" or rule.render_policy != "NO_TEXT":
-            raise W08CandidateInferenceError("Candidate render policy 与 state 漂移")
+            raise W08CandidateInferenceError(
+                "Candidate render policy 与 state 漂移",
+                reason_code="RENDER_POLICY_UNSUPPORTED",
+            )
         result = {
             "accepted": int(state == "TRUE"),
             "generated_outputs": outputs,
@@ -442,21 +492,36 @@ class W08CandidateInferenceAdapter:
         if not isinstance(observation, ObservationRecord):
             raise TypeError("Candidate inference input 必须是 ObservationRecord")
         if observation.split != "held_out":
-            raise W08CandidateInferenceError("Candidate inference 只接受 held-out Observation")
+            raise W08CandidateInferenceError(
+                "Candidate inference 只接受 held-out Observation",
+                reason_code="INPUT_CONTRACT_REJECTED",
+            )
         if dimension_key not in W08_DIMENSION_KEYS:
-            raise W08CandidateInferenceError("Candidate inference bearing 未注册")
+            raise W08CandidateInferenceError(
+                "Candidate inference bearing 未注册",
+                reason_code="INPUT_CONTRACT_REJECTED",
+            )
         if (
             tuple(sorted(set(disabled_components))) != disabled_components
             or any(item not in W08_DIMENSION_KEYS for item in disabled_components)
         ):
-            raise W08CandidateInferenceError("Candidate inference disabled component 非法")
+            raise W08CandidateInferenceError(
+                "Candidate inference disabled component 非法",
+                reason_code="INPUT_CONTRACT_REJECTED",
+            )
         selector = _selector(observation)
         rule = self._rules.get((observation.payload_kind, selector))
         if rule is None:
-            raise W08CandidateInferenceError("Candidate inference selector 未由 train state 学得")
+            raise W08CandidateInferenceError(
+                "Candidate inference selector 未由 train state 学得",
+                reason_code="SELECTOR_UNSEEN",
+            )
         typed_payload = observation.typed_payload.to_value()
         if w08_inference_schema_sha256(typed_payload) != rule.schema_sha256:
-            raise W08CandidateInferenceError("Candidate inference held-out schema 漂移")
+            raise W08CandidateInferenceError(
+                "Candidate inference held-out schema 漂移",
+                reason_code="SCHEMA_UNSEEN",
+            )
         state = _state(rule, typed_payload)
         actual_payload, input_reads = _result_payload(observation, rule, state)
         resource_available = _resource_available(typed_payload)

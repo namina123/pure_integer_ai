@@ -72,7 +72,10 @@ from pure_integer_ai.experiments.ph2_w08_inference import (
     W08CandidateInferenceAdapter,
 )
 from pure_integer_ai.experiments.ph2_w08_inference_contract import (
+    W08_INFERENCE_PAYLOAD_KINDS,
+    W08CandidateInferenceError,
     W08CandidateInferenceOutcome,
+    w08_inference_schema_sha256,
 )
 from pure_integer_ai.experiments.ph2_w08_runtime import (
     load_w08_candidate_inference_state,
@@ -128,6 +131,57 @@ class _ReadAudit:
             self.observation_records += records
         else:
             self.label_records += records
+
+
+class _W08SanitizedInferenceFailure(RuntimeError):
+    """只携带允许进入 public aggregate 的枚举诊断。"""
+
+    def __init__(self, infrastructure: dict[str, object]) -> None:
+        super().__init__("W08 Candidate inference failed")
+        self.infrastructure = infrastructure
+
+
+def _infer_observation_family(
+    adapter: W08CandidateInferenceAdapter,
+    observations: tuple[tuple[str, ObservationRecord], ...],
+    *,
+    disabled_components: tuple[str, ...] = (),
+) -> tuple[W08CandidateInferenceOutcome, ...]:
+    """执行一个 inference family；失败时只保留不可逆 schema 诊断。"""
+    outcomes: list[W08CandidateInferenceOutcome] = []
+    invocation_ordinal = 0
+    for _, observation in observations:
+        for dimension in W08_DIMENSION_KEYS:
+            invocation_ordinal += 1
+            schema_sha256 = "0" * 64
+            try:
+                schema_sha256 = w08_inference_schema_sha256(
+                    observation.typed_payload.to_value()
+                )
+                outcome = adapter.infer(
+                    observation,
+                    dimension_key=dimension,
+                    disabled_components=disabled_components,
+                )
+            except W08CandidateInferenceError as error:
+                failure_kind = error.reason_code
+            except Exception:
+                failure_kind = "OUTPUT_CONTRACT_REJECTED"
+            else:
+                outcomes.append(outcome)
+                continue
+            raise _W08SanitizedInferenceFailure({
+                "inference_failure_dimension_key": dimension,
+                "inference_failure_invocation_ordinal": invocation_ordinal,
+                "inference_failure_kind": failure_kind,
+                "inference_failure_payload_kind": (
+                    observation.payload_kind
+                    if observation.payload_kind in W08_INFERENCE_PAYLOAD_KINDS
+                    else "UNREGISTERED"
+                ),
+                "inference_failure_schema_sha256": schema_sha256,
+            }) from None
+    return tuple(outcomes)
 
 
 def _sha256(payload: bytes) -> str:
@@ -551,23 +605,15 @@ def run_w08_private_evaluation_once(
             raise W08EvaluatorInfrastructureError("W08 private label 在 inference 前已读取")
         current_phase = "BASELINE"
         _enter_phase(config, current_phase)
-        baseline_outcomes = tuple(
-            adapter.infer(observation, dimension_key=dimension)
-            for _, observation in observations
-            for dimension in W08_DIMENSION_KEYS
-        )
+        baseline_outcomes = _infer_observation_family(adapter, observations)
         outcome_families = []
         for index, ablation in enumerate(W08_ABLATION_KEYS):
             current_phase = W08_EVALUATOR_PHASES[5 + index]
             _enter_phase(config, current_phase)
-            rerun = tuple(
-                adapter.infer(
-                    observation,
-                    dimension_key=dimension,
-                    disabled_components=(W08_DIMENSION_KEYS[index],),
-                )
-                for _, observation in observations
-                for dimension in W08_DIMENSION_KEYS
+            rerun = _infer_observation_family(
+                adapter,
+                observations,
+                disabled_components=(W08_DIMENSION_KEYS[index],),
             )
             outcome_families.append((ablation, rerun))
         label_read_before_inference = int(audit.label_records == 0)
@@ -742,6 +788,15 @@ def run_w08_private_evaluation_once(
             family_freeze_sha256,
             guard_sha,
             dump_sha,
+        )
+    except _W08SanitizedInferenceFailure as error:
+        return _safe_failure(
+            family_root,
+            family=family,
+            phase=current_phase,
+            family_freeze_sha256=family_freeze_sha256,
+            guard_sha256=guard_sha,
+            infrastructure=error.infrastructure,
         )
     except Exception:
         return _safe_failure(
