@@ -623,8 +623,11 @@ class CurrentSituationProjection:
         if preserved_after != preserved_before:
             raise SituationStateError("原 situation event 被 revision 改写")
 
-        for key in affected:
-            self.work_memory.put(by_key[key].content_item)
+        before_work_memory_state = self.work_memory.state_key()
+        self.work_memory.commit_preview(
+            preview,
+            expected_state_key=before_work_memory_state,
+        )
         self._entries = preview_entries
         self._dependency_index = preview_index
         return SituationRebuildReceipt(

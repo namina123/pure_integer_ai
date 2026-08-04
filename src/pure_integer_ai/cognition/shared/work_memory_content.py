@@ -461,6 +461,31 @@ class WorkMemoryContentStore:
         cloned._superseded_by = dict(self._superseded_by)
         return cloned
 
+    def commit_preview(
+            self,
+            preview: "WorkMemoryContentStore",
+            *,
+            expected_state_key: tuple[int, ...],
+            ) -> None:
+        """在完整 preview 后一次切换 append-only transient 状态。"""
+        if not isinstance(preview, WorkMemoryContentStore):
+            raise TypeError("WorkMemory preview 类型错误")
+        if preview is self or preview.protocol != self.protocol:
+            raise WorkMemoryContentError("WorkMemory preview protocol 漂移")
+        if self.state_key() != expected_state_key:
+            raise WorkMemoryContentError("WorkMemory preview base state 漂移")
+        if preview._active_scopes != self._active_scopes:
+            raise WorkMemoryContentError("WorkMemory preview scope 漂移")
+        if any(preview._items.get(key) != item
+               for key, item in self._items.items()):
+            raise WorkMemoryContentError("WorkMemory preview 改写了既有 item")
+        if any(preview._superseded_by.get(key) != value
+               for key, value in self._superseded_by.items()):
+            raise WorkMemoryContentError("WorkMemory preview 改写了既有 supersede")
+        self._active_scopes = dict(preview._active_scopes)
+        self._items = dict(preview._items)
+        self._superseded_by = dict(preview._superseded_by)
+
     def state_key(self) -> tuple[int, ...]:
         """返回协议、活动 scope、内容历史和 supersede 投影的完整键。"""
         result = [
