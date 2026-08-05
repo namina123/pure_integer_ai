@@ -759,7 +759,9 @@ class W09CandidateInferenceAdapter:
             raise W09InferenceError("W09 payload kind 未由 train 登记")
         schema_known = shape in self._schemas[kind]
         selector = _selector(observation)
-        rule = self._rules.get((kind, selector))
+        # held-out 必须证明对 typed 结构的推导能力；selector 只用于编译
+        # train state 和审计身份，不能让部分 selector 命中覆盖新的结构语义。
+        rule = None if observation.split == "held_out" else self._rules.get((kind, selector))
         state = rule.state if rule is not None else _derived_state(observation)
         operation = rule.operation_key if rule is not None else "STRUCTURED_TYPED_RESULT"
         actual = _result_payload(observation, rule or W09InferenceRule(kind, selector, state, operation, shape, (tuple(observation.stable_key.components),)), state)

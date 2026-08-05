@@ -236,6 +236,30 @@ def test_train_kind_accepts_new_typed_shape_without_answer_input() -> None:
     assert outcome.observation_key == tuple(altered.stable_key.components)
 
 
+def test_held_out_selector_collision_uses_typed_projection() -> None:
+    """held-out 结构变化不得复用同 selector 的 train 状态。"""
+    root = __import__("pathlib").Path(__file__).resolve().parents[1]
+    context = open_w09_frozen_contract(root)
+    payload = W09PayloadFirewall.open(
+        root, context, make_w09_request(context)
+    ).read_training_payload()
+    observations = build_w09_rotation_records(payload).observations
+    original = next(
+        item for item in observations
+        if item.payload_kind == "FreeTextHierarchyRecallObservationV1"
+        and item.perturbation_kind == "PARAGRAPH_MOVE"
+    )
+    typed = original.typed_payload.to_value()
+    typed["phenomena"] = ["UNKNOWN"]
+    altered = replace(
+        original,
+        typed_payload=original.typed_payload.from_value(typed),
+    )
+    adapter = W09CandidateInferenceAdapter(compile_w09_inference_state(payload))
+    outcome = adapter.infer(altered, dimension_key=W09_DIMENSION_KEYS[0])
+    assert outcome.actual_state == "UNKNOWN"
+
+
 def test_public_rotation_ablations_are_orthogonal_and_walls_stay_ne(public_preflight: _Preflight) -> None:
     """五个承重消融各自击穿目标，两个墙消融保持 NE。"""
     assert [item["status"] for item in public_preflight.ablations] == ["PASS"] * 5 + ["NE", "NE"]
