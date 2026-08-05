@@ -385,6 +385,108 @@ def _bits_state(value: object) -> str:
     )
 
 
+def _candidate_kind_state(observation: ObservationRecord, payload: dict[str, Any]) -> str | None:
+    """从候选课程的 typed kind/基线投影四态，不读取 role 或答案字段。"""
+    kind = observation.payload_kind
+    candidate = payload.get("candidate_kind")
+    baseline = payload.get("baseline_kind")
+    if not isinstance(candidate, str):
+        return None
+
+    if kind == "TextFidelityCandidateV1":
+        if observation.perturbation_kind in {"BOUNDARY_AMBIGUITY", "SAME_SURFACE_AMBIGUITY"}:
+            return "CONFLICT"
+        if observation.perturbation_kind in {"TYPO_CANDIDATE", "LEXICAL_UNCERTAINTY"}:
+            return "UNKNOWN"
+        if observation.perturbation_kind in {"WHITESPACE_COLLAPSE", "PRIMITIVE_MISMATCH"}:
+            return "FALSE"
+        return "TRUE"
+
+    if kind == "MorphologyCandidateV1":
+        if candidate == "UNKNOWN" or observation.perturbation_kind in {"NOVEL_AFFIX", "UNKNOWN"}:
+            return "UNKNOWN"
+        if observation.perturbation_kind in {"BOUNDARY_ALTERNATIVE", "AMBIGUOUS_SEGMENTATION"}:
+            return "CONFLICT"
+        if candidate == "DICTIONARY_REPLAY" or observation.perturbation_kind == "DICTIONARY_REPLAY_ONLY":
+            return "FALSE"
+        return "TRUE"
+
+    if kind == "ConstructionCandidateV1":
+        if candidate == "AMBIGUOUS":
+            return "CONFLICT"
+        if candidate == "UNKNOWN":
+            return "UNKNOWN"
+        if candidate == "ANTI_LITERAL" or baseline == "LITERAL_TOKEN_SUM_ONLY":
+            return "FALSE"
+        return "TRUE"
+
+    if kind == "RecursiveParseCandidateV1":
+        if candidate == "AMBIGUOUS":
+            return "CONFLICT"
+        if candidate == "UNKNOWN":
+            return "UNKNOWN"
+        if candidate == "PRESELECTED_TREE" or baseline == "PRESELECTED_TREE_ONLY":
+            return "FALSE"
+        return "TRUE"
+
+    if kind == "EventTimeAspectCandidateV1":
+        if candidate == "AMBIGUOUS_ANCHOR":
+            return "CONFLICT"
+        if candidate == "UNKNOWN":
+            return "UNKNOWN"
+        if candidate in {"IMPLICIT_NOW_BASELINE", "SURFACE_ORDER_BASELINE"} or baseline in {
+            "IMPLICIT_NOW_ASSUMPTION", "SURFACE_ORDER_ONLY",
+        }:
+            return "FALSE"
+        return "TRUE"
+
+    if kind == "ComparisonQuantityCandidateV1":
+        if candidate == "AMBIGUOUS_STANDARD":
+            return "CONFLICT"
+        if candidate == "UNKNOWN":
+            return "UNKNOWN"
+        if candidate in {"BARE_PROPERTY_BASELINE", "UNIT_ERASURE_BASELINE"} or baseline in {
+            "BARE_PROPERTY_ONLY", "UNIT_ERASURE",
+        }:
+            return "FALSE"
+        return "TRUE"
+
+    if kind == "DiscourseInformationCandidateV1":
+        if candidate == "AMBIGUOUS_RELATION":
+            return "CONFLICT"
+        if candidate == "UNKNOWN":
+            return "UNKNOWN"
+        if candidate in {"NO_CONNECTIVE_BASELINE", "WRONG_CONNECTIVE_BASELINE"} or baseline in {
+            "NO_CONNECTIVE_ONLY", "WRONG_CONNECTIVE_ONLY",
+        }:
+            return "FALSE"
+        return "TRUE"
+
+    if kind == "OpenSetClarificationCandidateV1":
+        if candidate == "AMBIGUOUS_BRANCH":
+            return "CONFLICT"
+        if candidate in {"ACCESS_BLOCKED", "BUDGET_BLOCKED", "UNKNOWN"}:
+            return "UNKNOWN"
+        if candidate in {"INSUFFICIENT_GUESS_BASELINE", "OVERQUESTION_BASELINE"} or baseline in {
+            "INSUFFICIENT_EVIDENCE_GUESS", "SUFFICIENT_EVIDENCE_OVERQUESTION",
+        }:
+            return "FALSE"
+        return "TRUE"
+
+    if kind == "AttributionQuotationCandidateV1":
+        if candidate == "AMBIGUOUS_SCOPE":
+            return "CONFLICT"
+        if candidate == "UNKNOWN":
+            return "UNKNOWN"
+        if candidate in {"REPORTED_AS_FACT_BASELINE", "QUOTE_BOUNDARY_BASELINE"} or baseline in {
+            "REPORTED_AS_CURRENT_FACT", "QUOTE_BOUNDARY_SURFACE_ONLY",
+        }:
+            return "FALSE"
+        return "TRUE"
+
+    return None
+
+
 def _perturbation_state(observation: ObservationRecord, payload: dict[str, Any]) -> str | None:
     """从注册的 typed 扰动和结构字段推导未见 selector 的四态结果。
 
@@ -567,7 +669,7 @@ def _perturbation_state(observation: ObservationRecord, payload: dict[str, Any])
             return "TRUE"
         return None
 
-    return None
+    return _candidate_kind_state(observation, payload)
 
 
 def _derived_state(observation: ObservationRecord) -> str:
@@ -579,10 +681,6 @@ def _derived_state(observation: ObservationRecord) -> str:
     sample = payload.get("sample_family")
     if isinstance(sample, str) and sample in _SAMPLE_STATES:
         return _SAMPLE_STATES[sample]
-    if observation.sample_role == "conflict":
-        return "CONFLICT"
-    if observation.sample_role == "anomaly":
-        return "UNKNOWN"
     return "UNKNOWN"
 
 
