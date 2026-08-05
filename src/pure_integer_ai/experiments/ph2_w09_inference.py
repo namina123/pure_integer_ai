@@ -517,13 +517,16 @@ def _perturbation_state(observation: ObservationRecord, payload: dict[str, Any])
             return "UNKNOWN"
         if perturbation == "CONFLICT_SOURCE":
             return "CONFLICT"
+        if perturbation == "CONTENT_REPLACEMENT":
+            # 公开关系课程中，内容替换仍可保留一条有独立因果结构的正向关系；
+            # 其他 typed relation 的内容替换沿用 schema rejection 的 FALSE。
+            return "TRUE" if payload.get("relation_family") == "CAUSES" else "FALSE"
         if perturbation in {
             "DIRECTION_REVERSAL", "CORRELATION_CONFUSION", "COUNTERFACTUAL_OVERCLAIM",
             "CONFOUNDING_CONFUSION", "PSEUDO_RELATION", "TEMPORAL_ONLY",
             "RELATION_CONFUSION", "INVERSE_RELATION", "OCCURRENCE_ORDER_CONFUSION",
             "STRUCTURE_ORDER_CONFUSION", "INTENSITY_REPLACEMENT", "ROLE_MISMATCH",
             "VALUE_REPLACEMENT", "ALIAS_CONFUSION", "TYPE_MISMATCH",
-            "CONTENT_REPLACEMENT",
         }:
             return "FALSE"
         return "TRUE" if perturbation in {"NONE", "PARSER_REVISION", "PAIR_REVERSAL"} else None
@@ -719,7 +722,11 @@ def _free_text_answer(payload: dict[str, Any]) -> str:
     text = document.get("raw_text")
     if not isinstance(text, str):
         return ""
-    if "AMBIGUITY" in payload.get("phenomena", ()) or payload.get("sample_family") == "AMBIGUOUS":
+    if (
+        "AMBIGUITY" in payload.get("phenomena", ())
+        or "CONFLICT" in payload.get("phenomena", ())
+        or payload.get("sample_family") == "AMBIGUOUS"
+    ):
         return ""
     sentences = [item.strip() for item in re.split(r"[。！？!?]", text) if item.strip()]
     patterns = (
