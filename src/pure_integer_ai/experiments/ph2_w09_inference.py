@@ -392,6 +392,10 @@ def _candidate_kind_state(observation: ObservationRecord, payload: dict[str, Any
         return None
 
     if kind == "TextFidelityCandidateV1":
+        if payload.get("information_loss") == 1 and observation.perturbation_kind in {
+            "GENERATION_POSTCHECK", "PUNCTUATION_DROP",
+        }:
+            return "FALSE"
         if observation.perturbation_kind in {"BOUNDARY_AMBIGUITY", "SAME_SURFACE_AMBIGUITY"}:
             return "CONFLICT"
         if observation.perturbation_kind in {"TYPO_CANDIDATE", "LEXICAL_UNCERTAINTY"}:
@@ -519,11 +523,15 @@ def _perturbation_state(observation: ObservationRecord, payload: dict[str, Any])
             "RELATION_CONFUSION", "INVERSE_RELATION", "OCCURRENCE_ORDER_CONFUSION",
             "STRUCTURE_ORDER_CONFUSION", "INTENSITY_REPLACEMENT", "ROLE_MISMATCH",
             "VALUE_REPLACEMENT", "ALIAS_CONFUSION", "TYPE_MISMATCH",
+            "CONTENT_REPLACEMENT",
         }:
             return "FALSE"
         return "TRUE" if perturbation in {"NONE", "PARSER_REVISION", "PAIR_REVERSAL"} else None
 
     if kind == "PrimitiveSurfaceQuery":
+        primitive = payload.get("candidate_primitive")
+        if perturbation == "SAME_SURFACE_AMBIGUITY" and isinstance(primitive, dict):
+            return "CONFLICT" if primitive.get("registry") == "symbol_type" else "FALSE"
         return {
             "SAME_SURFACE_AMBIGUITY": "CONFLICT",
             "PRIMITIVE_MISMATCH": "FALSE",
@@ -540,6 +548,9 @@ def _perturbation_state(observation: ObservationRecord, payload: dict[str, Any])
         }.get(perturbation)
 
     if kind == "DiscourseRevisionQuery":
+        evidence = payload.get("evidence_state")
+        if isinstance(evidence, dict):
+            return _bits_state(evidence)
         variant = payload.get("variant_kind")
         if variant == "SOURCE_CONFLICT":
             return "CONFLICT"
@@ -553,6 +564,7 @@ def _perturbation_state(observation: ObservationRecord, payload: dict[str, Any])
         if perturbation in {
             "OPERATOR_CONFUSION", "CAUSAL_CONFUSION", "TEMPORAL_CONFUSION",
             "ANTECEDENT_CONSEQUENT_SWAP", "PSEUDO_OPERATOR", "CLOSED_WORLD_CONFUSION",
+            "REFUTE_EVIDENCE_CONFUSION", "SCOPE_TARGET_SHIFT",
         }:
             return "UNKNOWN"
         if perturbation == "CONFLICT_SOURCE":
@@ -565,7 +577,7 @@ def _perturbation_state(observation: ObservationRecord, payload: dict[str, Any])
         )
 
     if kind == "QuantifierExecutionQuery":
-        if perturbation in {"QUANTIFIER_SWAP", "DOMAIN_CLOSURE_CONFUSION", "DOMAIN_TYPE_MISMATCH"}:
+        if perturbation in {"QUANTIFIER_SWAP", "DOMAIN_CLOSURE_CONFUSION", "DOMAIN_TYPE_MISMATCH", "PSEUDO_OPERATOR"}:
             return "UNKNOWN"
         definition = payload.get("quantifier_definition")
         domain = definition.get("domain") if isinstance(definition, dict) else None
@@ -591,8 +603,10 @@ def _perturbation_state(observation: ObservationRecord, payload: dict[str, Any])
         return _bits_state(plan.get("resolution_state"))
 
     if kind == "NestedScopeExecutionQuery":
-        if perturbation in {"MISSING_INNER_OPERATOR", "BUDGET_UNDECIDED"}:
+        if perturbation in {"MISSING_INNER_OPERATOR", "BUDGET_UNDECIDED", "PSEUDO_OPERATOR"}:
             return "UNKNOWN"
+        if perturbation in {"CONTENT_REPLACEMENT", "DEPTH_REPLACEMENT"}:
+            return "FALSE"
         if perturbation == "CONFLICT_SOURCE":
             return "CONFLICT"
         layers = payload.get("layers", ())
@@ -653,7 +667,9 @@ def _perturbation_state(observation: ObservationRecord, payload: dict[str, Any])
 
     if kind == "FreeTextHierarchyRecallObservationV1":
         phenomena = payload.get("phenomena", ())
-        if "AMBIGUITY" in phenomena or "UNKNOWN" in phenomena or observation.perturbation_kind in {"ACL_NEIGHBOR", "AMBIGUITY"}:
+        if "CONFLICT" in phenomena:
+            return "CONFLICT"
+        if "AMBIGUITY" in phenomena or "UNKNOWN" in phenomena or payload.get("sample_family") == "UNKNOWN":
             return "UNKNOWN"
         return "TRUE" if isinstance((payload.get("document") or {}).get("raw_text"), str) else "UNKNOWN"
 
@@ -706,7 +722,14 @@ def _free_text_answer(payload: dict[str, Any]) -> str:
     if "AMBIGUITY" in payload.get("phenomena", ()) or payload.get("sample_family") == "AMBIGUOUS":
         return ""
     sentences = [item.strip() for item in re.split(r"[。！？!?]", text) if item.strip()]
-    patterns = (r"改由([^，。；]+)", r"改至([^，。；]+)", r"迁到了([^，。；]+)", r"采用([^，。；]+)", r"位于([^，。；]+)", r"指向([^，。；]+)", r"在([^，。；]+)")
+    patterns = (
+        r"改由([^，。；]+)", r"改至([^，。；]+)", r"改到([^，。；]+)",
+        r"改在([^，。；]+)", r"迁到了([^，。；]+)", r"换到([^，。；]+)",
+        r"换至([^，。；]+)", r"挪到([^，。；]+)", r"挪至([^，。；]+)",
+        r"应为([^，。；]+)", r"采用([^，。；]+)", r"位于([^，。；]+)",
+        r"属于([^，。；]+)", r"指向([^，。；]+)", r"为([^，。；]+)",
+        r"在([^，。；]+)",
+    )
     for sentence in reversed(sentences):
         for pattern in patterns:
             match = re.search(pattern, sentence)
