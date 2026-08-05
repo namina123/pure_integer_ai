@@ -26,19 +26,23 @@ def live_preflight():
     return build_jf2_preflight(ROOT)
 
 
-def test_preflight_reads_public_receipts_and_stays_blocked(live_preflight):
-    """J-F1 PASS 后只移除对应 blocker，Core 缺失仍阻断 J-F2。"""
+def test_preflight_reads_public_receipts_and_is_ready_for_final_seal(live_preflight):
+    """J-F1 与 Core artifact 均通过后，preflight 只允许进入最终封存前态。"""
     report = live_preflight
     assert report.artifact_kind == ARTIFACT_KIND
-    assert report.status == "BLOCKED"
+    assert report.status == "READY_FOR_FORMAL_SEAL"
     assert report.language_capability_mastered == 1
     assert report.language_readiness == 0
     assert "J_F1_FACILITY_MISSING" not in report.blockers
     assert "J_F1_FACILITY_INVALID" not in report.blockers
-    assert report.blockers == ("CORE_ARTIFACT_MISSING",)
+    assert report.blockers == ()
     assert next(
         item for item in report.dependencies
         if item.role == "J_F1_FACILITY"
+    ).status == "PASS"
+    assert next(
+        item for item in report.dependencies
+        if item.role == "CORE_ARTIFACT"
     ).status == "PASS"
     assert all(item.role != "PRIVATE_PAYLOAD" for item in report.dependencies)
 
@@ -56,9 +60,9 @@ def test_preflight_dependency_order_and_canonical_round_trip(
     assert restored.canonical_bytes() == target.read_bytes()
 
 
-def test_core_artifact_is_still_missing():
-    """JF2-01 不得顺带创建未来 Core artifact 占位文件。"""
-    assert not (ROOT / Path(*CORE_ARTIFACT_PATH.split("/"))).exists()
+def test_core_artifact_is_published_at_reserved_path():
+    """JF2-02 必须在预留路径发布真实 manifest，不允许占位文件。"""
+    assert (ROOT / Path(*CORE_ARTIFACT_PATH.split("/"))).is_file()
     assert (ROOT / Path(*J_F1_RECEIPT_PATH.split("/"))).is_file()
 
 
@@ -87,5 +91,23 @@ def test_preflight_marks_j_f1_invalid_when_content_replay_fails(monkeypatch):
     assert dependency.status == "FAIL"
     assert "J_F1_FACILITY_INVALID" in report.blockers
     assert "J_F1_FACILITY_MISSING" not in report.blockers
+    assert report.status == "BLOCKED"
+    assert report.language_readiness == 0
+
+
+def test_preflight_marks_core_artifact_invalid_on_content_drift(monkeypatch):
+    """Core manifest 存在但严格回读失败时必须 fail closed。"""
+    def reject_content(_repository, _path, *, verify_files=True):
+        """模拟 Core manifest 的内容身份漂移。"""
+        assert verify_files is True
+        raise RuntimeError("Core artifact identity drift")
+
+    monkeypatch.setattr(j_f2_contract, "read_core_artifact_manifest", reject_content)
+    report = build_jf2_preflight(ROOT)
+    dependency = next(
+        item for item in report.dependencies
+        if item.role == "CORE_ARTIFACT")
+    assert dependency.status == "FAIL"
+    assert report.blockers == ("CORE_ARTIFACT_INVALID",)
     assert report.status == "BLOCKED"
     assert report.language_readiness == 0

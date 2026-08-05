@@ -14,6 +14,10 @@ from typing import Any
 from pure_integer_ai.experiments.j_f1_facility_receipt import (
     read_j_f1_facility_receipt,
 )
+from pure_integer_ai.experiments.j_f2_core_artifact_manifest import (
+    CoreArtifactManifestError,
+    read_core_artifact_manifest,
+)
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
@@ -311,10 +315,15 @@ def build_jf2_preflight(repository_root: str | Path) -> JF2PreflightReport:
         blockers.add("CORE_ARTIFACT_MISSING")
     else:
         size_bytes, sha256 = core_identity
+        try:
+            read_core_artifact_manifest(root, CORE_ARTIFACT_PATH, verify_files=True)
+            core_status = "PASS"
+        except (OSError, RuntimeError, TypeError, ValueError, CoreArtifactManifestError):
+            core_status = "FAIL"
+            blockers.add("CORE_ARTIFACT_INVALID")
         dependencies.append(JF2Dependency(
             "CORE_ARTIFACT", CORE_ARTIFACT_PATH,
-            "NE", size_bytes, sha256))
-        blockers.add("CORE_ARTIFACT_NOT_VALIDATED")
+            core_status, size_bytes, sha256))
 
     ordered_blockers = tuple(sorted(blockers))
     return JF2PreflightReport(
