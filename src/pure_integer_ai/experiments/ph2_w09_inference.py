@@ -552,8 +552,9 @@ class W09CandidateInferenceAdapter:
             raise W09InferenceError("W09 disabled component 非法")
         kind = observation.payload_kind
         shape = schema_sha256(observation.typed_payload.to_value())
-        if shape not in self._schemas.get(kind, ()):
-            raise W09InferenceError("W09 held-out schema 未由 train 学得")
+        if kind not in self._schemas:
+            raise W09InferenceError("W09 payload kind 未由 train 登记")
+        schema_known = shape in self._schemas[kind]
         selector = _selector(observation)
         rule = self._rules.get((kind, selector))
         state = rule.state if rule is not None else _derived_state(observation)
@@ -574,6 +575,7 @@ class W09CandidateInferenceAdapter:
             "dimension": dimension_key,
             "disabled": list(disabled_components),
             "observation": list(observation.stable_key.components),
+            "schema_known": int(schema_known),
             "state": state,
             "state_commitment": self.state_sha256,
         })

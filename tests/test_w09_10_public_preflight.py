@@ -1,7 +1,7 @@
 """W09-10 private adapter 的 public train-only 合同预检。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 from typing import Any
 
@@ -39,6 +39,7 @@ from pure_integer_ai.experiments.ph2_w09_inference import (
     compile_w09_inference_state,
 )
 from pure_integer_ai.experiments.ph2_w09_rotation import build_w09_rotation_records
+from pure_integer_ai.experiments.ph2_w09_inference import W09InferenceOutcome
 
 
 def _sha(value: object) -> str:
@@ -174,6 +175,28 @@ def test_public_rotation_closes_all_bearing_dimensions(public_preflight: _Prefli
     """公开 rotation 预检必须逐项得到 309/309 PASS。"""
     assert len(public_preflight.dimensions) == len(W09_DIMENSION_KEYS)
     assert all(item.status == "PASS" and item.passed_count == 309 for item in public_preflight.dimensions)
+
+
+def test_train_kind_accepts_new_typed_shape_without_answer_input() -> None:
+    """同一登记 kind 的新 typed 形状不得因 shape 漂移越过 data-only 推理。"""
+    root = __import__("pathlib").Path(__file__).resolve().parents[1]
+    context = open_w09_frozen_contract(root)
+    payload = W09PayloadFirewall.open(
+        root, context, make_w09_request(context)
+    ).read_training_payload()
+    records = build_w09_rotation_records(payload)
+    state = compile_w09_inference_state(payload)
+    adapter = W09CandidateInferenceAdapter(state)
+    original = records.observations[0]
+    typed = original.typed_payload.to_value()
+    typed["unseen_typed_shape_marker"] = 1
+    altered = replace(
+        original,
+        typed_payload=original.typed_payload.from_value(typed),
+    )
+    outcome = adapter.infer(altered, dimension_key=W09_DIMENSION_KEYS[0])
+    assert isinstance(outcome, W09InferenceOutcome)
+    assert outcome.observation_key == tuple(altered.stable_key.components)
 
 
 def test_public_rotation_ablations_are_orthogonal_and_walls_stay_ne(public_preflight: _Preflight) -> None:

@@ -339,6 +339,7 @@ def publish_w09_private_family(
         "ablation_order": list(W09_ABLATION_KEYS),
         "artifact_kind": W09_PRIVATE_FAMILY_KIND,
         "bearing_dimension_order": list(W09_DIMENSION_KEYS),
+        "case_commitment": documents.case_commitment,
         "candidate_contract_sha256": documents.candidate_contract_sha256,
         "candidate_first_run_guard_sha256": documents.candidate_guard_sha256,
         "candidate_host_freeze_sha256": documents.candidate_host_sha256,
