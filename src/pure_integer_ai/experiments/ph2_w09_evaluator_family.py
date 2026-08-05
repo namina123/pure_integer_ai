@@ -218,6 +218,7 @@ def build_w09_private_family_documents(
         "wall_dimension_order": list(W09_WALL_DIMENSION_KEYS),
         "thresholds": [{"dimension_key": key, **W09_EVALUATOR_THRESHOLD} for key in W09_ALL_DIMENSION_KEYS],
         "schema_key": evidence_commitment({"ablations": list(W09_ABLATION_KEYS), "dimensions": list(W09_ALL_DIMENSION_KEYS), "family": family_key}),
+        "format_version": 1,
         "formal_run_count": 0,
     }
     cases = {
