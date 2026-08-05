@@ -60,6 +60,7 @@ class _Preflight:
     rollback: dict[str, object]
     resource: dict[str, object]
     aggregate: dict[str, object]
+    unseen_selector_dimensions: tuple[Any, ...]
 
 
 @pytest.fixture(scope="module")
@@ -117,6 +118,18 @@ def public_preflight() -> _Preflight:
         )
 
     baseline = infer()
+    unseen_observations = tuple(
+        replace(
+            observation,
+            sample_role=("support" if observation.sample_role == "supersede" else "supersede"),
+        )
+        for observation in records.observations
+    )
+    unseen_baseline = tuple(
+        adapter.infer(observation, dimension_key=dimension)
+        for observation in unseen_observations
+        for dimension in W09_DIMENSION_KEYS
+    )
     families = []
     for index, ablation in enumerate(W09_ABLATION_KEYS):
         values = infer((W09_DIMENSION_KEYS[index],)) if index < len(W09_DIMENSION_KEYS) else ()
@@ -168,13 +181,37 @@ def public_preflight() -> _Preflight:
         rollback=rollback,
         resource=resource,
     )
-    return _Preflight(dimensions, ablations, open_generation, j_lc, windows, v06, rollback, resource, aggregate)
+    unseen_dimensions = evaluate_w09_private_pairs(
+        snapshot,
+        tuple(
+            W09PrivateEvaluationPair("SYNTHETIC-UNSEEN", observation, label, "ROTATION")
+            for observation, label in zip(unseen_observations, records.labels)
+        ),
+        case_outcomes=unseen_baseline,
+    )
+    return _Preflight(
+        dimensions,
+        ablations,
+        open_generation,
+        j_lc,
+        windows,
+        v06,
+        rollback,
+        resource,
+        aggregate,
+        unseen_dimensions,
+    )
 
 
 def test_public_rotation_closes_all_bearing_dimensions(public_preflight: _Preflight) -> None:
     """公开 rotation 预检必须逐项得到 309/309 PASS。"""
     assert len(public_preflight.dimensions) == len(W09_DIMENSION_KEYS)
     assert all(item.status == "PASS" and item.passed_count == 309 for item in public_preflight.dimensions)
+
+
+def test_unseen_selector_uses_typed_semantics(public_preflight: _Preflight) -> None:
+    """改变 selector 元数据后仍须按 typed 结构完成五维验证。"""
+    assert all(item.status == "PASS" and item.passed_count == 309 for item in public_preflight.unseen_selector_dimensions)
 
 
 def test_train_kind_accepts_new_typed_shape_without_answer_input() -> None:

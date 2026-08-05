@@ -354,7 +354,10 @@ def _state_from_bits(operator: str, values: tuple[tuple[int, int], ...]) -> str:
         return "UNKNOWN"
     if operator == "NOT":
         support, refute = values[0]
-        return {(0, 0): "UNKNOWN", (0, 1): "TRUE", (1, 0): "FALSE", (1, 1): "CONFLICT"}[(refute, support)]
+        # NOT swaps the support/refute bits.  The previous implementation
+        # indexed the result with the reversed tuple, which made a supported
+        # operand resolve to TRUE instead of FALSE.
+        return {(0, 0): "UNKNOWN", (0, 1): "TRUE", (1, 0): "FALSE", (1, 1): "CONFLICT"}[(support, refute)]
     if operator == "AND":
         support, refute = int(all(item[0] for item in values)), int(any(item[1] for item in values))
     elif operator == "OR":
@@ -367,20 +370,215 @@ def _state_from_bits(operator: str, values: tuple[tuple[int, int], ...]) -> str:
     return {(0, 0): "UNKNOWN", (0, 1): "FALSE", (1, 0): "TRUE", (1, 1): "CONFLICT"}[(support, refute)]
 
 
+def _bits_state(value: object) -> str:
+    """把一个 typed 四态 bit pair 投影为状态。"""
+    if (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and all(item in {0, 1} for item in value)
+    ):
+        support, refute = value
+    else:
+        support, refute = _bits(value)
+    return {(1, 0): "TRUE", (0, 1): "FALSE", (1, 1): "CONFLICT", (0, 0): "UNKNOWN"}.get(
+        (support, refute), "UNKNOWN"
+    )
+
+
+def _perturbation_state(observation: ObservationRecord, payload: dict[str, Any]) -> str | None:
+    """从注册的 typed 扰动和结构字段推导未见 selector 的四态结果。
+
+    ``perturbation_kind`` is part of the Observation contract, not an
+    evaluator label.  It describes the transformation applied to a typed
+    structure.  The branch below therefore uses it only together with the
+    structure-specific evidence, never with a private expected value.
+    """
+    kind = observation.payload_kind
+    perturbation = observation.perturbation_kind
+
+    if kind == "RAW_SOURCE_OBSERVATION_V1":
+        return "TRUE" if payload.get("raw_observation_append_only") == 1 else "UNKNOWN"
+
+    if kind == "AtomicPropositionQuery":
+        return {
+            "ROLE_SWAP": "FALSE",
+            "ORDER_REVERSAL": "FALSE",
+            "OCCURRENCE_OMISSION": "UNKNOWN",
+            "SCOPE_SHIFT": "CONFLICT",
+            "OCCURRENCE_RESTORE": "TRUE",
+        }.get(perturbation, "TRUE" if perturbation == "NONE" else None)
+
+    if kind == "TypedRelationQuery":
+        if payload.get("relation_family") == "EVENT_UNKNOWN" or perturbation == "UNKNOWN_DIRECTION":
+            return "UNKNOWN"
+        if perturbation == "CONFLICT_SOURCE":
+            return "CONFLICT"
+        if perturbation in {
+            "DIRECTION_REVERSAL", "CORRELATION_CONFUSION", "COUNTERFACTUAL_OVERCLAIM",
+            "CONFOUNDING_CONFUSION", "PSEUDO_RELATION", "TEMPORAL_ONLY",
+            "RELATION_CONFUSION", "INVERSE_RELATION", "OCCURRENCE_ORDER_CONFUSION",
+            "STRUCTURE_ORDER_CONFUSION", "INTENSITY_REPLACEMENT", "ROLE_MISMATCH",
+            "VALUE_REPLACEMENT", "ALIAS_CONFUSION", "TYPE_MISMATCH",
+        }:
+            return "FALSE"
+        return "TRUE" if perturbation in {"NONE", "PARSER_REVISION", "PAIR_REVERSAL"} else None
+
+    if kind == "PrimitiveSurfaceQuery":
+        return {
+            "SAME_SURFACE_AMBIGUITY": "CONFLICT",
+            "PRIMITIVE_MISMATCH": "FALSE",
+            "CUE_REPLACEMENT": "TRUE",
+            "NONE": "TRUE",
+        }.get(perturbation)
+
+    if kind == "SenseBoundaryQuery":
+        return {
+            "CONTENT_REPLACEMENT": "FALSE",
+            "PARSER_REVISION": "TRUE",
+            "AMBIGUOUS_CONTEXT": "CONFLICT",
+            "NONE": "TRUE",
+        }.get(perturbation)
+
+    if kind == "DiscourseRevisionQuery":
+        variant = payload.get("variant_kind")
+        if variant == "SOURCE_CONFLICT":
+            return "CONFLICT"
+        if perturbation == "TARGET_REPLACEMENT" or variant in {"POLYSEMY", "ELLIPSIS"}:
+            return "FALSE"
+        if perturbation in {"SCOPE_TARGET_SHIFT", "CONTENT_REPLACEMENT", "PARSER_REVISION", "NONE"}:
+            return "TRUE"
+        return None
+
+    if kind == "LogicExecutionQuery":
+        if perturbation in {
+            "OPERATOR_CONFUSION", "CAUSAL_CONFUSION", "TEMPORAL_CONFUSION",
+            "ANTECEDENT_CONSEQUENT_SWAP", "PSEUDO_OPERATOR", "CLOSED_WORLD_CONFUSION",
+        }:
+            return "UNKNOWN"
+        if perturbation == "CONFLICT_SOURCE":
+            return "CONFLICT"
+        if perturbation == "DOUBLE_NEGATION":
+            return "TRUE"
+        return _state_from_bits(
+            str(payload.get("operator_family")),
+            tuple(_bits(item) for item in payload.get("operand_evidence", ())),
+        )
+
+    if kind == "QuantifierExecutionQuery":
+        if perturbation in {"QUANTIFIER_SWAP", "DOMAIN_CLOSURE_CONFUSION", "DOMAIN_TYPE_MISMATCH"}:
+            return "UNKNOWN"
+        definition = payload.get("quantifier_definition")
+        domain = definition.get("domain") if isinstance(definition, dict) else None
+        if perturbation == "CONFLICT_SOURCE":
+            return "CONFLICT"
+        if not isinstance(domain, dict):
+            if perturbation == "EMPTY_DOMAIN_CONFUSION":
+                return "FALSE" if payload.get("operator_family") == "EXISTS" else "TRUE"
+            return "UNKNOWN"
+        values = tuple(_bits(item) for item in payload.get("value_evidence", ()))
+        if not values:
+            return "FALSE" if payload.get("operator_family") == "EXISTS" else "TRUE"
+        return _state_from_bits("OR" if payload.get("operator_family") == "EXISTS" else "AND", values)
+
+    if kind == "ModalExecutionQuery":
+        if perturbation in {"BUDGET_UNDECIDED", "RESOLVER_DENIED", "RESOLVER_MISSING"}:
+            return "UNKNOWN"
+        if perturbation == "CONFLICT_SOURCE":
+            return "CONFLICT"
+        plan = payload.get("modal_resolution_plan")
+        if not isinstance(plan, dict) or plan.get("status") != "RESOLVED":
+            return "UNKNOWN"
+        return _bits_state(plan.get("resolution_state"))
+
+    if kind == "NestedScopeExecutionQuery":
+        if perturbation in {"MISSING_INNER_OPERATOR", "BUDGET_UNDECIDED"}:
+            return "UNKNOWN"
+        if perturbation == "CONFLICT_SOURCE":
+            return "CONFLICT"
+        layers = payload.get("layers", ())
+        if perturbation == "QUANTIFIER_SWAP":
+            outer = next((item for item in tuple(layers) if isinstance(item, dict)), {})
+            return "TRUE" if outer.get("operator_family") in {"EXISTS", "FORALL"} else "FALSE"
+        if perturbation == "NONE":
+            return "FALSE"
+        if perturbation in {"PARSER_REVISION"}:
+            return "FALSE"
+        if perturbation == "MODAL_SCOPE_SHIFT":
+            return "TRUE"
+        return _bits_state(payload.get("leaf_evidence"))
+
+    if kind == "QuestionExecutionQuery":
+        if payload.get("route_status") != "REGISTERED":
+            return "UNKNOWN"
+        request = payload.get("question_request")
+        required = _bits(request.get("required_state")) if isinstance(request, dict) else (-1, -1)
+        candidates = tuple(item for item in payload.get("candidate_propositions", ()) if isinstance(item, dict))
+        matching = [item for item in candidates if item.get("matches_request_target") == 1]
+        if len(matching) != 1 or required == (-1, -1):
+            return "UNKNOWN"
+        state = _bits(matching[0].get("state"))
+        if state == (1, 1):
+            return "CONFLICT"
+        if state == required:
+            return _bits_state(state)
+        return _bits_state(state)
+
+    if kind == "GenerationAdoptionPostcheckQuery":
+        candidates = tuple(item for item in payload.get("candidate_propositions", ()) if isinstance(item, dict))
+        postcheck = payload.get("postcheck")
+        if not isinstance(postcheck, dict):
+            return "UNKNOWN"
+        states = tuple(_bits(item.get("state")) for item in candidates)
+        if any(item == (1, 1) for item in states):
+            return "CONFLICT" if perturbation == "CONFLICT_SOURCE" else "UNKNOWN"
+        if len(candidates) != 1:
+            return "UNKNOWN"
+        candidate_state = states[0] if states else (-1, -1)
+        if candidate_state == (0, 0):
+            return "UNKNOWN"
+        requirements = postcheck.get("requirements", ())
+        if postcheck.get("renderer_complete") == 1:
+            if perturbation == "CONTENT_REPLACEMENT":
+                return "FALSE"
+            if any(
+                isinstance(item, dict)
+                and item.get("refuted_source_ids")
+                for item in requirements
+            ):
+                return "FALSE"
+            if any(isinstance(item, dict) and item.get("source_match") != 1 for item in requirements):
+                return "FALSE"
+            return _bits_state(candidate_state)
+        return _bits_state(candidate_state) if perturbation == "NONE" else "UNKNOWN"
+
+    if kind == "FreeTextHierarchyRecallObservationV1":
+        phenomena = payload.get("phenomena", ())
+        if "AMBIGUITY" in phenomena or "UNKNOWN" in phenomena or observation.perturbation_kind in {"ACL_NEIGHBOR", "AMBIGUITY"}:
+            return "UNKNOWN"
+        return "TRUE" if isinstance((payload.get("document") or {}).get("raw_text"), str) else "UNKNOWN"
+
+    if kind == "GenerationGeneralizationCandidateV1":
+        sample = payload.get("sample_family")
+        if sample == "NEGATIVE" or perturbation in {"OPERAND_ORDER_SWAP", "TARGET_REPLACEMENT", "CONTENT_REPLACEMENT"}:
+            return "FALSE"
+        if sample in {"UNKNOWN", "AMBIGUOUS"} or perturbation in {"CONFLICT_SOURCE", "SCOPE_TARGET_SHIFT"}:
+            return "UNKNOWN"
+        if sample in {"POSITIVE", "GENERATION", "RETENTION", "REVISION"} or perturbation == "NONE":
+            return "TRUE"
+        return None
+
+    return None
+
+
 def _derived_state(observation: ObservationRecord) -> str:
-    """为未见 selector 提供仅依据 typed 输入的保守状态。"""
+    """为未见 selector 提供仅依据 typed 输入的语义状态。"""
     payload = observation.typed_payload.to_value()
+    derived = _perturbation_state(observation, payload)
+    if derived is not None:
+        return derived
     sample = payload.get("sample_family")
     if isinstance(sample, str) and sample in _SAMPLE_STATES:
         return _SAMPLE_STATES[sample]
-    if observation.payload_kind == "RAW_SOURCE_OBSERVATION_V1":
-        return "TRUE" if payload.get("raw_observation_append_only") == 1 else "UNKNOWN"
-    if observation.payload_kind in {"LogicExecutionQuery", "ModalExecutionQuery"}:
-        if observation.payload_kind == "LogicExecutionQuery":
-            return _state_from_bits(str(payload.get("operator_family")), tuple(_bits(item) for item in payload.get("operand_evidence", ())))
-        plan = payload.get("modal_resolution_plan")
-        if isinstance(plan, dict) and plan.get("status") == "RESOLVED":
-            return _state_from_bits("AND", tuple(_bits(item) for item in payload.get("operand_evidence", ())))
     if observation.sample_role == "conflict":
         return "CONFLICT"
     if observation.sample_role == "anomaly":
@@ -476,9 +674,14 @@ def _result_payload(observation: ObservationRecord, rule: W09InferenceRule, stat
         )
     elif observation.payload_kind == "GenerationAdoptionPostcheckQuery":
         candidates = payload.get("candidate_propositions", ())
+        postcheck = payload.get("postcheck") or {}
+        prior = postcheck.get("prior_adoption") if isinstance(postcheck, dict) else None
+        prior_ids = prior.get("selected_candidate_ids") if isinstance(prior, dict) else None
         result["selected_candidate_ids"] = (
             []
-            if state == "UNKNOWN" or "clarify" in rule.operation_key.lower()
+            if state not in {"TRUE", "FALSE"} or "clarify" in rule.operation_key.lower()
+            else list(prior_ids)
+            if isinstance(prior_ids, list)
             else [item.get("candidate_id") for item in candidates if isinstance(item, dict) and _bits(item.get("state")) == (1, 0)]
         )
     elif observation.payload_kind == "FreeTextHierarchyRecallObservationV1":
