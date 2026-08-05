@@ -144,6 +144,8 @@ class TrainContext:
     language_generation_runtime_factory: Any = None
     language_generation_runtime: Any = None
     language_generation_stage4_runtime: Any = None
+    w09_weaning_protocol: Any = None
+    w09_weaning_runtime: Any = None
     span_index: Any = None
     segmentation_span_materializer: Any = None
     boundary_hypothesis_engine: Any = None

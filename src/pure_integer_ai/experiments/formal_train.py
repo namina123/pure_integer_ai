@@ -505,6 +505,10 @@ class FormalTrainConfig:
     # V-04 每次只测一个真实 checkpoint；runtime/request 必须成对注入且不推进课程终态。
     pre_weaning_validation_runtime: Any = None
     pre_weaning_validation_request: Any = None
+    # W09 typed 教师退出协议和 runtime 必须成对注入，并绑定 W09-01 frozen contract。
+    # 本入口只执行训练材料、dev 校准和 shadow 审计；三个正式零调用窗口由后续 V-06 clone 消费。
+    w09_weaning_protocol: Any = None
+    w09_weaning_runtime: Any = None
 
     # W-00 版本化 hard gate；None 保持旧课程兼容路径。
     curriculum_mastery_protocol: CurriculumMasteryProtocol | None = None
@@ -587,6 +591,8 @@ class FormalTrainResult:
     typed_language_floor_report: Any = None
     typed_language_stage4_report: Any = None
     pre_weaning_validation_report: Any = None
+    typed_w09_weaning_report: Any = None
+    w09_weaning_report: Any = None
     occurrence_count: int = 0
     source_record_count: int = 0
     occurrence_order_fact_count: int = 0
@@ -684,6 +690,8 @@ def _formal_train_impl(config: FormalTrainConfig,
         mastery_stage_keys = mastery_protocol.stage_keys_for(
             tuple(requested_stages))
     ctx = make_train_context(backend, teacher=teacher, weights=weights)
+    ctx.w09_weaning_protocol = config.w09_weaning_protocol
+    ctx.w09_weaning_runtime = config.w09_weaning_runtime
     ctx.language_property_attr_instruction_key = (
         config.language_property_attr_instruction_key)
     ctx.language_property_value_instruction_key = (
@@ -809,6 +817,25 @@ def _formal_train_impl(config: FormalTrainConfig,
         config.language_generation_runtime_factory is not None
         or all(default_generation_configured)
     )
+    w09_weaning_configured = (
+        config.w09_weaning_protocol is not None,
+        config.w09_weaning_runtime is not None,
+    )
+    if any(w09_weaning_configured) and not all(w09_weaning_configured):
+        raise ValueError("W-09 typed weaning protocol 与 runtime 必须成对配置")
+    if all(w09_weaning_configured):
+        if not generation_owner_configured:
+            raise ValueError("W-09 typed weaning 必须配套 typed generation owner")
+        if STAGE4_PROMOTE_WEAN not in requested_stages:
+            raise ValueError("W-09 typed weaning 不得跳过 language stage4")
+        from pure_integer_ai.experiments.ph2_w09_weaning import (
+            validate_w09_weaning_pair,
+        )
+        validate_w09_weaning_pair(
+            config.w09_weaning_protocol,
+            config.w09_weaning_runtime,
+            require_frozen_contract=True,
+        )
     if (all(default_generation_configured)
             and config.language_semantic_course_protocol is None):
         raise ValueError("默认 connector 课程需要正式 semantic course runtime")
@@ -1954,12 +1981,25 @@ def _formal_train_impl(config: FormalTrainConfig,
             if not stage_gate_passed:
                 break
 
-        # typed stage4 只完成候选 lifecycle；W-09 接线前不得回退旧标量断奶、旧 floor 或退场模拟。
+        # typed stage4 完成后只进入显式 W-09 runtime；缺失时保留原硬阻断，绝不回退旧标量尾部。
         if (STAGE4_PROMOTE_WEAN in result.stages_completed
                 and ctx.language_generation_runtime is not None):
-            result.weaning_blockers = [
-                "W-09_typed_weaning_protocol_missing",
-            ]
+            if config.w09_weaning_runtime is None:
+                result.weaning_blockers = [
+                    "W-09_typed_weaning_protocol_missing",
+                ]
+            else:
+                result.typed_w09_weaning_report = (
+                    config.w09_weaning_runtime.run(
+                        ctx,
+                        result.typed_language_stage4_report,
+                    ))
+                result.w09_weaning_report = result.typed_w09_weaning_report
+                if result.typed_w09_weaning_report.ready:
+                    raise RuntimeError(
+                        "W-09 formal stage4 不得提前消费三个 V-06 零调用窗口")
+                result.weaning_blockers = list(
+                    result.typed_w09_weaning_report.blockers)
         # 阶段4 断奶判据（D1-D5/E2 六闸门·#358 完整实现·非布尔阈值·非只看 4 能力指标平台）
         elif STAGE4_PROMOTE_WEAN in result.stages_completed:
             # W5 D5 Mode B 预验台账：stage4 末并行 Mode A vs B 评估·写 calibration 台账
