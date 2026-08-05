@@ -11,6 +11,9 @@ import hashlib
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from pure_integer_ai.experiments.j_f1_facility_receipt import (
+    read_j_f1_facility_receipt,
+)
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
@@ -282,17 +285,36 @@ def build_jf2_preflight(repository_root: str | Path) -> JF2PreflightReport:
     if w03 is not None:
         blockers.update(_w09_blockers(loaded.get("W09_RUNTIME", {})))
 
-    for role, relative_path in (
-            ("J_F1_FACILITY", J_F1_RECEIPT_PATH),
-            ("CORE_ARTIFACT", CORE_ARTIFACT_PATH)):
-        identity = _identity(root, relative_path)
-        if identity is None:
-            dependencies.append(JF2Dependency(role, relative_path, "MISSING", 0, "0" * 64))
-            blockers.add(f"{role}_MISSING")
-        else:
-            size_bytes, sha256 = identity
-            dependencies.append(JF2Dependency(role, relative_path, "NE", size_bytes, sha256))
-            blockers.add(f"{role}_NOT_VALIDATED")
+    j_f1_identity = _identity(root, J_F1_RECEIPT_PATH)
+    if j_f1_identity is None:
+        dependencies.append(JF2Dependency(
+            "J_F1_FACILITY", J_F1_RECEIPT_PATH,
+            "MISSING", 0, "0" * 64))
+        blockers.add("J_F1_FACILITY_MISSING")
+    else:
+        size_bytes, sha256 = j_f1_identity
+        try:
+            read_j_f1_facility_receipt(root, verify_runtime=True)
+            j_f1_status = "PASS"
+        except (OSError, RuntimeError, TypeError, ValueError):
+            j_f1_status = "FAIL"
+            blockers.add("J_F1_FACILITY_INVALID")
+        dependencies.append(JF2Dependency(
+            "J_F1_FACILITY", J_F1_RECEIPT_PATH,
+            j_f1_status, size_bytes, sha256))
+
+    core_identity = _identity(root, CORE_ARTIFACT_PATH)
+    if core_identity is None:
+        dependencies.append(JF2Dependency(
+            "CORE_ARTIFACT", CORE_ARTIFACT_PATH,
+            "MISSING", 0, "0" * 64))
+        blockers.add("CORE_ARTIFACT_MISSING")
+    else:
+        size_bytes, sha256 = core_identity
+        dependencies.append(JF2Dependency(
+            "CORE_ARTIFACT", CORE_ARTIFACT_PATH,
+            "NE", size_bytes, sha256))
+        blockers.add("CORE_ARTIFACT_NOT_VALIDATED")
 
     ordered_blockers = tuple(sorted(blockers))
     return JF2PreflightReport(
