@@ -17,6 +17,7 @@ from pure_integer_ai.experiments.ph2_w09_evaluator_contract import (
     W09_PRIVATE_AGGREGATE_NAME,
     W09_PRIVATE_FAMILY_FREEZE_NAME,
     W09_PRIVATE_FIRST_RUN_GUARD_NAME,
+    strict_sha1,
 )
 from pure_integer_ai.experiments.ph2_w09_evaluator_family import (
     build_w09_private_family_documents,
@@ -88,6 +89,10 @@ def _preflight_candidate(candidate: Path, *, public_head: str) -> dict[str, str]
     values = {key: item[0] for key, item in loaded.items()}
     digests = {key: item[1] for key, item in loaded.items()}
     host = values["host"]
+    candidate_head = strict_sha1(
+        str(values["contract"].get("public_head_commit_sha1")),
+        label="Candidate public HEAD",
+    )
     seal = values["seal"]
     state = host.get("execution_state", {})
     if (
@@ -95,7 +100,7 @@ def _preflight_candidate(candidate: Path, *, public_head: str) -> dict[str, str]
         or values["guard"].get("formal_run_count_after") != 1
         or host.get("formal_run_count") != 1
         or host.get("candidate_sealed") != 1
-        or host.get("public_head_commit_sha1") != public_head
+        or host.get("public_head_commit_sha1") != candidate_head
         or seal.get("terminal_state") != "PASS"
         or seal.get("candidate_host_freeze_sha256") != digests["host"]
         or state.get("W09_RUNTIME_EVIDENCED") != 1
@@ -105,7 +110,11 @@ def _preflight_candidate(candidate: Path, *, public_head: str) -> dict[str, str]
         or state.get("LANGUAGE_READINESS") != 0
     ):
         raise RuntimeError("W09 Candidate PASS preflight 失败")
-    return digests
+    try:
+        _git("merge-base", "--is-ancestor", candidate_head, public_head)
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError("W09 Candidate base HEAD 不是 evaluator public HEAD 的祖先") from error
+    return {**digests, "candidate_public_head": candidate_head}
 
 
 def _validate_roots(candidate: Path, rotation: Path, family: Path | None = None) -> None:
@@ -159,6 +168,7 @@ def _freeze(args: argparse.Namespace) -> int:
         candidate_guard_sha256=digests["guard"],
         candidate_host_sha256=digests["host"],
         candidate_seal_sha256=digests["seal"],
+        candidate_public_head_commit_sha1=digests["candidate_public_head"],
         evaluator_public_head_commit_sha1=head,
         rotation_manifest=manifest,
     )

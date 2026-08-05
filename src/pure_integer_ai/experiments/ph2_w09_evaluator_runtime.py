@@ -278,7 +278,7 @@ def _candidate_documents(candidate: Path, family: dict[str, Any]) -> dict[str, d
         or values["guard"].get("formal_run_count_after") != 1
         or values["host"].get("formal_run_count") != 1
         or values["host"].get("candidate_sealed") != 1
-        or values["host"].get("public_head_commit_sha1") != family.get("evaluator_public_head_commit_sha1")
+        or values["host"].get("public_head_commit_sha1") != family.get("candidate_public_head_commit_sha1")
         or values["seal"].get("terminal_state") != "PASS"
         or values["seal"].get("candidate_host_freeze_sha256") != expected["host"]
         or state.get("W09_RUNTIME_EVIDENCED") != 1

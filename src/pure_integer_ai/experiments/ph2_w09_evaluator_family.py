@@ -96,6 +96,7 @@ class W09PrivateFamilyDocuments:
     candidate_guard_sha256: str
     candidate_host_sha256: str
     candidate_seal_sha256: str
+    candidate_public_head_commit_sha1: str
     evaluator_public_head_commit_sha1: str
     rotation_manifest_sha256: str
     rotation_package_commitment: str
@@ -142,6 +143,7 @@ def build_w09_private_family_documents(
     candidate_guard_sha256: str,
     candidate_host_sha256: str,
     candidate_seal_sha256: str,
+    candidate_public_head_commit_sha1: str,
     evaluator_public_head_commit_sha1: str | None = None,
     rotation_manifest: W09RotationManifest | None = None,
     fixed_d03_exposure_eligible: int = 0,
@@ -159,6 +161,7 @@ def build_w09_private_family_documents(
         "candidate_host_freeze_sha256": strict_sha256(candidate_host_sha256, label="Candidate host"),
         "candidate_terminal_seal_sha256": strict_sha256(candidate_seal_sha256, label="Candidate seal"),
     }
+    candidate_head = strict_sha1(candidate_public_head_commit_sha1, label="Candidate public HEAD")
     if type(fixed_d03_exposure_eligible) is not int or fixed_d03_exposure_eligible not in {0, 1}:
         raise W09PrivateEvaluationError("W09 fixed D-03 exposure flag 非法")
     if fixed_d03_exposure_eligible:
@@ -173,6 +176,7 @@ def build_w09_private_family_documents(
         raise W09PrivateEvaluationError("W09 D-03 evaluator inventory 不闭合")
     family_identity = {
         **values,
+        "candidate_head": candidate_head,
         "evaluator_head": supplied_head,
         "owner": W09_PRIVATE_OWNER_KEY,
         "rotation_manifest_sha256": rotation_sha,
@@ -185,6 +189,7 @@ def build_w09_private_family_documents(
         "candidate_first_run_guard_sha256": values["candidate_first_run_guard_sha256"],
         "candidate_host_freeze_sha256": values["candidate_host_freeze_sha256"],
         "candidate_terminal_seal_sha256": values["candidate_terminal_seal_sha256"],
+        "candidate_public_head_commit_sha1": candidate_head,
         "d03_observation_bindings": [_identity(item) for item in observations],
         "d03_label_bindings": [_identity(item) for item in labels],
         "evaluator_public_head_commit_sha1": supplied_head,
@@ -266,7 +271,7 @@ def build_w09_private_family_documents(
         family_key, payload_commitment, case_commitment, label_commitment,
         cluster_commitment, values["candidate_contract_sha256"],
         values["candidate_first_run_guard_sha256"], values["candidate_host_freeze_sha256"],
-        values["candidate_terminal_seal_sha256"], supplied_head, rotation_sha,
+        values["candidate_terminal_seal_sha256"], candidate_head, supplied_head, rotation_sha,
         rotation_commitment, 0, 1,
     )
 
@@ -286,6 +291,7 @@ def validate_w09_private_family_documents(documents: W09PrivateFamilyDocuments) 
         or source.get("candidate_first_run_guard_sha256") != documents.candidate_guard_sha256
         or source.get("candidate_host_freeze_sha256") != documents.candidate_host_sha256
         or source.get("candidate_terminal_seal_sha256") != documents.candidate_seal_sha256
+        or source.get("candidate_public_head_commit_sha1") != documents.candidate_public_head_commit_sha1
         or source.get("evaluator_public_head_commit_sha1") != documents.evaluator_public_head_commit_sha1
         or schema.get("dimension_order") != list(W09_ALL_DIMENSION_KEYS)
         or schema.get("ablation_order") != list(W09_ABLATION_KEYS)
@@ -336,6 +342,7 @@ def publish_w09_private_family(
         "candidate_first_run_guard_sha256": documents.candidate_guard_sha256,
         "candidate_host_freeze_sha256": documents.candidate_host_sha256,
         "candidate_terminal_seal_sha256": documents.candidate_seal_sha256,
+        "candidate_public_head_commit_sha1": documents.candidate_public_head_commit_sha1,
         "cluster_commitment": documents.cluster_commitment,
         "dimension_order": list(W09_ALL_DIMENSION_KEYS),
         "documents": identities,
