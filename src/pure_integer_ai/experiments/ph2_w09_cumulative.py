@@ -230,28 +230,38 @@ def read_w09_public_parent_receipts(
         repository_root: str | Path,
         ) -> tuple[W09PublicParentReceipt, ...]:
     """只读回读 W01-W08 public receipts 并校验 canonical status/bytes。"""
-    root = Path(repository_root).resolve()
-    result = []
-    for relative, expected_status in W09_PUBLIC_PARENT_RECEIPTS:
-        relative = _safe_relative(relative)
-        path = root / PurePosixPath(relative)
-        if not path.is_file() or path.is_symlink():
-            raise W09CumulativeError("W-09 public parent receipt is missing")
-        try:
-            payload = path.read_bytes()
-            body = payload[:-1] if payload.endswith(b"\n") else payload
-            value = parse_canonical_json_bytes(body, require_object=True)
-        except (OSError, DatasetContractError) as error:
-            raise W09CumulativeError("W-09 public parent receipt is invalid") from error
-        if not isinstance(value, dict) or value.get("status") != expected_status:
-            raise W09CumulativeError("W-09 public parent receipt status drifted")
-        result.append(W09PublicParentReceipt(
-            relative,
-            expected_status,
-            len(payload),
-            hashlib.sha256(payload).hexdigest(),
-        ))
+    result = [
+        read_w09_public_receipt(repository_root, relative, expected_status)
+        for relative, expected_status in W09_PUBLIC_PARENT_RECEIPTS
+    ]
     return _validate_parent_receipts(tuple(result))
+
+
+def read_w09_public_receipt(
+        repository_root: str | Path,
+        relative_path: str,
+        expected_status: str,
+        ) -> W09PublicParentReceipt:
+    """严格回读一个冻结路径和状态的 canonical public receipt。"""
+    root = Path(repository_root).resolve()
+    relative = _safe_relative(relative_path)
+    path = root / PurePosixPath(relative)
+    if not path.is_file() or path.is_symlink():
+        raise W09CumulativeError("W-09 public parent receipt is missing")
+    try:
+        payload = path.read_bytes()
+        body = payload[:-1] if payload.endswith(b"\n") else payload
+        value = parse_canonical_json_bytes(body, require_object=True)
+    except (OSError, DatasetContractError) as error:
+        raise W09CumulativeError("W-09 public parent receipt is invalid") from error
+    if not isinstance(value, dict) or value.get("status") != expected_status:
+        raise W09CumulativeError("W-09 public parent receipt status drifted")
+    return W09PublicParentReceipt(
+        relative,
+        expected_status,
+        len(payload),
+        hashlib.sha256(payload).hexdigest(),
+    )
 
 
 class W09CumulativeRuntime:
@@ -341,6 +351,16 @@ class W09CumulativeRuntime:
 
     def report(self) -> W09CumulativeReport:
         """返回累计 runtime bounded report，缺失 consumer 明确保持 pending。"""
+        if not isinstance(self.registry, W09Registry):
+            raise W09CumulativeError("W-09 cumulative registry is invalid")
+        bindings = self.registry.carrier_bindings
+        shared_engine_count = len({item.semantic_engine_key for item in bindings})
+        runtime_connected = int(
+            tuple(item.carrier_key for item in bindings) == W09_CARRIER_KEYS
+            and len({item.carrier_adapter_key for item in bindings})
+            == len(W09_CARRIER_KEYS)
+            and shared_engine_count == 1
+        )
         cells = tuple(
             (carrier, consumer, self._consumer_cells.get((carrier, consumer), "PENDING"))
             for carrier in W09_CARRIER_KEYS
@@ -350,8 +370,8 @@ class W09CumulativeRuntime:
             self.parent_receipts,
             self.training_delta,
             cells,
-            1,
-            1,
+            shared_engine_count,
+            runtime_connected,
             0,
             0,
             0,
@@ -391,5 +411,6 @@ __all__ = [
     "W09CumulativeRuntime",
     "W09PublicParentReceipt",
     "open_w09_cumulative_runtime",
+    "read_w09_public_receipt",
     "read_w09_public_parent_receipts",
 ]
