@@ -7,7 +7,10 @@ from typing import Any
 
 import pytest
 
-from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_bytes
+from pure_integer_ai.experiments.ph2_dataset_contract import (
+    CanonicalJsonObject,
+    canonical_json_bytes,
+)
 from pure_integer_ai.experiments.ph2_w09_authority import (
     W09_ABLATION_KEYS,
     W09_CONSUMER_KEYS,
@@ -19,6 +22,7 @@ from pure_integer_ai.experiments.ph2_w09_contract import (
     open_w09_frozen_contract,
 )
 from pure_integer_ai.experiments.ph2_w09_evaluator import (
+    W09_CONTENT_FAILURE_KINDS,
     W09PrivateEvaluationPair,
     W09EvaluatorSnapshot,
     assess_w09_orthogonal_ablations,
@@ -29,9 +33,11 @@ from pure_integer_ai.experiments.ph2_w09_evaluator import (
     assess_w09_private_v06,
     assess_w09_private_windows,
     evaluate_w09_private_pairs,
+    summarize_w09_content_failures,
 )
 from pure_integer_ai.experiments.ph2_w09_evaluator_contract import (
     public_safe_w09_aggregate,
+    validate_w09_safe_report,
 )
 from pure_integer_ai.experiments.ph2_w09_firewall import W09PayloadFirewall
 from pure_integer_ai.experiments.ph2_w09_inference import (
@@ -61,6 +67,8 @@ class _Preflight:
     resource: dict[str, object]
     aggregate: dict[str, object]
     unseen_selector_dimensions: tuple[Any, ...]
+    content_failure_summary: tuple[dict[str, object], ...]
+    synthetic_failure_summary: tuple[dict[str, object], ...]
 
 
 @pytest.fixture(scope="module")
@@ -118,6 +126,27 @@ def public_preflight() -> _Preflight:
         )
 
     baseline = infer()
+    content_failure_summary = summarize_w09_content_failures(
+        snapshot, pairs, case_outcomes=baseline,
+    )
+    synthetic_failures = list(baseline)
+    first_expected_state = pairs[0].label.expected_state
+    mismatched_state = next(
+        state for state in ("TRUE", "FALSE", "CONFLICT", "UNKNOWN")
+        if state != first_expected_state
+    )
+    for index in range(len(W09_DIMENSION_KEYS)):
+        synthetic_failures[index] = replace(
+            synthetic_failures[index], actual_state=mismatched_state,
+        )
+    for index in range(len(W09_DIMENSION_KEYS), 2 * len(W09_DIMENSION_KEYS)):
+        synthetic_failures[index] = replace(
+            synthetic_failures[index],
+            actual_payload=CanonicalJsonObject.from_value({"accepted": 2}),
+        )
+    synthetic_failure_summary = summarize_w09_content_failures(
+        snapshot, pairs, case_outcomes=tuple(synthetic_failures),
+    )
     unseen_observations = tuple(
         replace(
             observation,
@@ -200,6 +229,8 @@ def public_preflight() -> _Preflight:
         resource,
         aggregate,
         unseen_dimensions,
+        content_failure_summary,
+        synthetic_failure_summary,
     )
 
 
@@ -212,6 +243,45 @@ def test_public_rotation_closes_all_bearing_dimensions(public_preflight: _Prefli
 def test_unseen_selector_uses_typed_semantics(public_preflight: _Preflight) -> None:
     """改变 selector 元数据后仍须按 typed 结构完成五维验证。"""
     assert all(item.status == "PASS" and item.passed_count == 309 for item in public_preflight.unseen_selector_dimensions)
+
+
+def test_content_failure_summary_is_empty_for_public_pass(public_preflight: _Preflight) -> None:
+    """全 PASS rotation 不得发布虚假失败分组。"""
+    assert public_preflight.content_failure_summary == ()
+
+
+def test_content_failure_summary_only_publishes_enumerated_counts(public_preflight: _Preflight) -> None:
+    """失败遥测只允许 schema 枚举和五维重复计数。"""
+    summary = public_preflight.synthetic_failure_summary
+    validate_w09_safe_report(summary)
+    assert {item["failure_kind"] for item in summary} == {
+        "STATE_MISMATCH", "PAYLOAD_MISMATCH",
+    }
+    assert sum(item["count"] for item in summary if item["failure_kind"] == "STATE_MISMATCH") == len(W09_DIMENSION_KEYS)
+    assert sum(item["count"] for item in summary if item["failure_kind"] == "PAYLOAD_MISMATCH") == len(W09_DIMENSION_KEYS)
+    assert all(
+        set(item) == {
+            "count", "failure_kind", "family_kind", "payload_kind",
+            "perturbation_kind",
+        }
+        and item["failure_kind"] in W09_CONTENT_FAILURE_KINDS
+        and item["family_kind"] == "ROTATION"
+        and type(item["count"]) is int
+        and item["count"] > 0
+        for item in summary
+    )
+    serialized_keys = {
+        str(key).lower()
+        for item in summary
+        for key in item
+    }
+    assert serialized_keys.isdisjoint({
+        "case", "case_key", "expected", "expected_payload", "expected_state",
+        "label", "label_key", "message", "path", "private_path",
+        "relative_path", "surface", "surface_form", "text", "typed_payload",
+        "raw_text", "raw_observation", "observed_surface", "exception",
+        "error_message",
+    })
 
 
 def test_train_kind_accepts_new_typed_shape_without_answer_input() -> None:

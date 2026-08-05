@@ -1,6 +1,7 @@
 """W09-10 private pair、五维、消融、窗口与 J-LC-W09 裁决。"""
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -41,6 +42,16 @@ W09_OPEN_GENERATION_LAYER_KEYS = (
 W09_J_LC_SCOPE_COUNT = 8
 W09_J_LC_CELL_COUNT = 216
 W09_J_LC_RETENTION_CELL_COUNT = 27
+W09_CONTENT_FAILURE_KINDS = (
+    "MISSING_OUTCOME",
+    "STATE_MISMATCH",
+    "COMPONENT_STATE_MISMATCH",
+    "STATE_COMMITMENT_MISMATCH",
+    "CONSUMER_STATE_MISMATCH",
+    "OUTCOME_CONTRACT_MISMATCH",
+    "DIMENSION_ARTIFACT_MISSING",
+    "PAYLOAD_MISMATCH",
+)
 
 
 @dataclass(frozen=True)
@@ -294,6 +305,49 @@ def _outcome_passes_pair(snapshot: W09EvaluatorSnapshot, pair: W09PrivateEvaluat
     )
 
 
+def summarize_w09_content_failures(
+    snapshot: W09EvaluatorSnapshot,
+    pairs: tuple[W09PrivateEvaluationPair, ...],
+    *,
+    case_outcomes: tuple[W09InferenceOutcome, ...],
+) -> tuple[dict[str, object], ...]:
+    """只发布未通过原因的枚举计数，不回显私有内容或身份。"""
+    inventory = _outcome_inventory(pairs, case_outcomes)
+    counts: Counter[tuple[str, str, str, str]] = Counter()
+    for pair in pairs:
+        for dimension_ordinal, dimension in enumerate(W09_DIMENSION_KEYS):
+            outcome = inventory.get((dimension, tuple(pair.observation.stable_key.components)))
+            if outcome is None:
+                reason = "MISSING_OUTCOME"
+            elif outcome.actual_state != pair.label.expected_state:
+                reason = "STATE_MISMATCH"
+            elif outcome.component_state != "ACTIVE":
+                reason = "COMPONENT_STATE_MISMATCH"
+            elif outcome.state_commitment_sha256 != snapshot.inference_state_sha256:
+                reason = "STATE_COMMITMENT_MISMATCH"
+            elif any(state != "RESOLVED" for _, state in outcome.consumer_states):
+                reason = "CONSUMER_STATE_MISMATCH"
+            elif not validate_w09_inference_outcome(pair.observation, outcome):
+                reason = "OUTCOME_CONTRACT_MISMATCH"
+            elif not snapshot.dimension_artifact_keys[dimension_ordinal]:
+                reason = "DIMENSION_ARTIFACT_MISSING"
+            elif not _payload_matches(pair, outcome):
+                reason = "PAYLOAD_MISMATCH"
+            else:
+                continue
+            counts[(pair.family_kind, pair.observation.payload_kind, pair.observation.perturbation_kind, reason)] += 1
+    return tuple(
+        {
+            "count": count,
+            "failure_kind": reason,
+            "family_kind": family,
+            "payload_kind": payload_kind,
+            "perturbation_kind": perturbation,
+        }
+        for (family, payload_kind, perturbation, reason), count in sorted(counts.items())
+    )
+
+
 def evaluate_w09_private_pairs(
     snapshot: W09EvaluatorSnapshot,
     pairs: tuple[W09PrivateEvaluationPair, ...],
@@ -512,6 +566,7 @@ def assess_w09_private_resource(snapshot: W09EvaluatorSnapshot, *, worker_invari
 
 
 __all__ = [
+    "W09_CONTENT_FAILURE_KINDS",
     "W09EvaluatorSnapshot",
     "W09PrivateEvaluationPair",
     "assess_w09_orthogonal_ablations",
@@ -522,6 +577,7 @@ __all__ = [
     "assess_w09_private_v06",
     "assess_w09_private_windows",
     "evaluate_w09_private_pairs",
+    "summarize_w09_content_failures",
     "snapshot_from_w09_host_document",
     "validate_w09_inference_outcome",
 ]

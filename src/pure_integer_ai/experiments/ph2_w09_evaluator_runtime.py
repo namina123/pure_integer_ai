@@ -42,6 +42,7 @@ from pure_integer_ai.experiments.ph2_w09_evaluator import (
     assess_w09_private_windows,
     evaluate_w09_private_pairs,
     snapshot_from_w09_host_document,
+    summarize_w09_content_failures,
 )
 from pure_integer_ai.experiments.ph2_w09_evaluator_contract import (
     W09_EVALUATOR_PHASES,
@@ -592,6 +593,9 @@ def run_w09_private_evaluation_once(
         phase = "BASELINE_EVALUATION"
         _enter_phase(config, phase)
         results = evaluate_w09_private_pairs(snapshot, pairs, case_outcomes=baseline_outcomes)
+        content_failure_summary = summarize_w09_content_failures(
+            snapshot, pairs, case_outcomes=baseline_outcomes,
+        )
         rotation_keys = {tuple(item.observation.stable_key.components) for item in pairs if item.family_kind == "ROTATION"}
         rotation_pairs = tuple(item for item in pairs if item.family_kind == "ROTATION")
         rotation_outcomes = tuple(item for item in baseline_outcomes if item.observation_key in rotation_keys)
@@ -661,6 +665,7 @@ def run_w09_private_evaluation_once(
             raise W09EvaluatorInfrastructureError("W09 private evaluator owner isolation 失败")
         infrastructure = {
             "candidate_inventory_match": 1,
+            "content_failure_summary": list(content_failure_summary),
             "d03_fixed_family_eligible": 0,
             "d03_observation_record_count": audit.d03_observation_records,
             "exposure_incident_102_83_retained": 1,

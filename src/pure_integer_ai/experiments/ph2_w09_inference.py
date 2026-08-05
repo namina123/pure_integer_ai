@@ -354,9 +354,7 @@ def _state_from_bits(operator: str, values: tuple[tuple[int, int], ...]) -> str:
         return "UNKNOWN"
     if operator == "NOT":
         support, refute = values[0]
-        # NOT swaps the support/refute bits.  The previous implementation
-        # indexed the result with the reversed tuple, which made a supported
-        # operand resolve to TRUE instead of FALSE.
+        # NOT 交换支持/反驳位；必须用原位序索引，避免把支持态误判为 TRUE。
         return {(0, 0): "UNKNOWN", (0, 1): "TRUE", (1, 0): "FALSE", (1, 1): "CONFLICT"}[(support, refute)]
     if operator == "AND":
         support, refute = int(all(item[0] for item in values)), int(any(item[1] for item in values))
