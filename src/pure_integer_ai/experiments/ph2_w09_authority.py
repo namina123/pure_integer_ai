@@ -34,9 +34,13 @@ W09_DIMENSION_KEYS = (
     "W-09-TEACHER_ZERO_WINDOW",
     "W-09-V06_CLONE",
 )
+W09_WALL_DIMENSION_KEYS = (
+    "W-09-W1_PHYSICAL_GROUNDING",
+    "W-09-W2_DEFINITIVE_TRUTH",
+)
+W09_ALL_DIMENSION_KEYS = W09_DIMENSION_KEYS + W09_WALL_DIMENSION_KEYS
 W09_ABLATION_KEYS = tuple(f"{key}-ABLATION" for key in W09_DIMENSION_KEYS) + (
-    "W-09-W1_PHYSICAL_GROUNDING-ABLATION",
-    "W-09-W2_DEFINITIVE_TRUTH-ABLATION",
+    *(f"{key}-ABLATION" for key in W09_WALL_DIMENSION_KEYS),
 )
 W09_SUBTASK_ORDER = (
     "AUTHORITY",
@@ -439,13 +443,18 @@ def read_w09_authority(repository_root: str | Path) -> dict[str, Any]:
 
 __all__ = [
     "W09_ABLATION_KEYS",
+    "W09_ALL_DIMENSION_KEYS",
     "W09_ALLOWED_WORKER_COUNTS",
     "W09_AUTHORITY_RELATIVE_PATH",
     "W09AuthorityError",
+    "W09_CARRIER_KEYS",
+    "W09_CONSUMER_KEYS",
     "W09_DIMENSION_KEYS",
     "W09_FAILURE_POINT_KEYS",
     "W09_RESOURCE_BUDGET",
     "W09_STOP_STATES",
+    "W09_SUBTASK_ORDER",
+    "W09_WALL_DIMENSION_KEYS",
     "build_w09_authority",
     "canonical_w09_authority_bytes",
     "publish_w09_authority",
