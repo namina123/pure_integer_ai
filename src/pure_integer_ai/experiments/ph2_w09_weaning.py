@@ -728,13 +728,11 @@ class W09TypedWeaningRuntime:
         if after != (teacher, api, llm):
             raise W09WeaningError("W-09 phase performed a live teacher/API/LLM call")
 
-    def execute_zero_call_window(
+    def _validate_zero_call_identity(
             self,
-            ctx: object,
-            identity: W09WindowIdentity,
-            operation: Callable[[], object] | None = None,
+            identity: object,
             ) -> W09WindowIdentity:
-        """按预注册序执行一个独立零调用窗口并拒绝任何计数、输入或 id 漂移。"""
+        """按当前连续 ordinal 校验实际窗口 identity、input 和 Candidate。"""
         if not isinstance(identity, W09WindowIdentity):
             raise W09WeaningError("W-09 zero-call window identity is invalid")
         if self._report is None:
@@ -748,6 +746,33 @@ class W09TypedWeaningRuntime:
             raise W09WeaningError("W-09 window input commitment drifted")
         if identity.candidate_identity != self.protocol.candidate_identity:
             raise W09WeaningError("W-09 window candidate identity drifted")
+        return identity
+
+    def _append_zero_call_identity(
+            self,
+            identity: W09WindowIdentity,
+            ) -> W09WindowIdentity:
+        """一次追加已量测窗口并重算三个窗口的 ready/blocker 状态。"""
+        self._window_identities.append(identity)
+        assert self._report is not None
+        self._report = W09WeaningReport(
+            self.protocol.stable_key(),
+            self._report.phase_audits,
+            tuple(self._window_identities),
+            ready=len(self._window_identities) == self.protocol.window_count,
+            blockers=() if len(self._window_identities) == self.protocol.window_count
+            else (W09_ZERO_CALL_WINDOWS_PENDING,),
+        )
+        return identity
+
+    def execute_zero_call_window(
+            self,
+            ctx: object,
+            identity: W09WindowIdentity,
+            operation: Callable[[], object] | None = None,
+            ) -> W09WindowIdentity:
+        """按预注册序执行一个已知 identity 的窗口，并包住实际 operation 审计。"""
+        identity = self._validate_zero_call_identity(identity)
         before_host = self._host(ctx)
         before = (
             self._count(ctx, self._teacher_counter, ("call_count", "teacher_calls")),
@@ -765,16 +790,35 @@ class W09TypedWeaningRuntime:
             raise W09WeaningError("W-09 zero-call window performed a live call")
         if before_host != self._host(ctx):
             raise W09WeaningError("W-09 zero-call window wrote formal host state")
-        self._window_identities.append(identity)
-        self._report = W09WeaningReport(
-            self.protocol.stable_key(),
-            self._report.phase_audits,
-            tuple(self._window_identities),
-            ready=len(self._window_identities) == self.protocol.window_count,
-            blockers=() if len(self._window_identities) == self.protocol.window_count
-            else (W09_ZERO_CALL_WINDOWS_PENDING,),
+        return self._append_zero_call_identity(identity)
+
+    def execute_measured_zero_call_window(
+            self,
+            ctx: object,
+            operation: Callable[[], object],
+            ) -> W09WindowIdentity:
+        """先执行真实窗口，再用其实际输出 identity 完成同一零调用和 host 零写审计。"""
+        if not callable(operation):
+            raise W09WeaningError("W-09 measured window operation is invalid")
+        if self._report is None:
+            raise W09WeaningError("W-09 pre-window phases are not complete")
+        before_host = self._host(ctx)
+        before = (
+            self._count(ctx, self._teacher_counter, ("call_count", "teacher_calls")),
+            self._count(ctx, self._api_counter, ("api_call_count", "api_calls")),
+            self._count(ctx, self._llm_counter, ("llm_call_count", "llm_calls")),
         )
-        return identity
+        identity = self._validate_zero_call_identity(operation())
+        after = (
+            self._count(ctx, self._teacher_counter, ("call_count", "teacher_calls")),
+            self._count(ctx, self._api_counter, ("api_call_count", "api_calls")),
+            self._count(ctx, self._llm_counter, ("llm_call_count", "llm_calls")),
+        )
+        if after != before or identity.teacher_call_count != 0:
+            raise W09WeaningError("W-09 measured window performed a live call")
+        if before_host != self._host(ctx):
+            raise W09WeaningError("W-09 measured window wrote formal host state")
+        return self._append_zero_call_identity(identity)
 
     zero_call_window = execute_zero_call_window
 
