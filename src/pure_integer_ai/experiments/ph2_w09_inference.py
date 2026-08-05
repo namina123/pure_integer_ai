@@ -812,7 +812,11 @@ def _result_payload(observation: ObservationRecord, rule: W09InferenceRule, stat
         )
     elif observation.payload_kind == "FreeTextHierarchyRecallObservationV1":
         result["answer_surface"] = _free_text_answer(payload)
-        result["required_stop_reason"] = "CLARIFY" if state == "UNKNOWN" and payload.get("sample_family") == "AMBIGUOUS" else "RESOLVED" if state == "TRUE" else "UNKNOWN"
+        result["required_stop_reason"] = (
+            "CLARIFY"
+            if state == "CONFLICT" or state == "UNKNOWN" and payload.get("sample_family") == "AMBIGUOUS"
+            else "RESOLVED" if state == "TRUE" else "UNKNOWN"
+        )
     elif observation.payload_kind == "SenseBoundaryQuery":
         result["boundary"] = payload.get("candidate_sense")
     elif observation.payload_kind == "PrimitiveSurfaceQuery":
