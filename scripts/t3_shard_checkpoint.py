@@ -363,7 +363,7 @@ def _import_carried_passes(
                     "source_test_sha256", "source_log_path", "source_log_sha256",
                     "source_log_size", "pytest_summary",
                 }
-                if set(carried) < required:
+                if not required.issubset(carried):
                     raise T3ShardRunnerError(f"来源 carried PASS provenance 不完整: {relative}")
                 if not isinstance(carried["source_state_root"], str):
                     raise T3ShardRunnerError(f"来源 carried PASS state 路径无效: {relative}")
