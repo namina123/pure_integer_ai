@@ -7,6 +7,8 @@ import json
 
 import pytest
 
+import pure_integer_ai.experiments.ph2_w04_candidate as candidate_owner
+import pure_integer_ai.experiments.ph2_w04_runtime as runtime_owner
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_bytes
 from pure_integer_ai.experiments.ph2_w04_adapter import adapt_w04_training_payload
 from pure_integer_ai.experiments.ph2_w04_candidate import (
@@ -21,7 +23,6 @@ from pure_integer_ai.experiments.ph2_w04_contract import (
     W04_STAGE_KEY,
     W04_W03_BASE_RUN_ID,
     W04RunRequest,
-    open_w04_frozen_context,
 )
 from pure_integer_ai.experiments.ph2_w04_evaluator import (
     W04EvaluatorAblation,
@@ -47,11 +48,27 @@ from pure_integer_ai.experiments.ph2_w04_learning import (
 )
 from pure_integer_ai.experiments.ph2_w04_runtime import W04RuntimeConfig
 from pure_integer_ai.storage.backend import SQLiteBackend
+from tests.w04_historical_context import open_historical_w04_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HEAD = "da69958c1f149a2f264053f7b7407a53f575cd93"
 GLOBAL = "data/ph2/manifests/d03_v1/ph2_global_course_manifest_v1.json"
+
+
+@pytest.fixture(autouse=True)
+def _historical_candidate_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """候选编排只消费冻结上下文，不改生产 authority 的 fail-closed。"""
+    monkeypatch.setattr(
+        candidate_owner,
+        "open_w04_frozen_context",
+        open_historical_w04_context,
+    )
+    monkeypatch.setattr(
+        runtime_owner,
+        "open_w04_frozen_context",
+        open_historical_w04_context,
+    )
 
 
 def _documents(contract_sha="a" * 64, host_sha="b" * 64):
@@ -64,7 +81,7 @@ def _documents(contract_sha="a" * 64, host_sha="b" * 64):
 
 def _learning(tmp_path: Path):
     backend = SQLiteBackend(str(tmp_path / "learning.sqlite"))
-    context = open_w04_frozen_context(
+    context = open_historical_w04_context(
         ROOT,
         GLOBAL,
         current_remote_commit_sha1=HEAD,
@@ -155,10 +172,10 @@ def test_w04_private_family_and_guard_are_non_overwritable(tmp_path: Path):
             root, family_freeze_sha256=freeze_sha)
 
 
-def test_w04_private_runtime_passes_once_without_host_or_label_writes(
+def test_w04_private_runtime_seals_ne_once_without_host_or_label_writes(
         tmp_path: Path,
         ):
-    """正式 private family 只运行一次并产出安全 PASS aggregate。"""
+    """历史 gate 漂移后的 private 重跑只能封存安全 NE，且仍不可重跑。"""
     contract = _candidate_contract(tmp_path)
     candidate_root = tmp_path / "candidate"
     _, contract_sha = publish_w04_candidate_contract_freeze(
@@ -207,9 +224,11 @@ def test_w04_private_runtime_passes_once_without_host_or_label_writes(
         ),
         family_freeze_sha256=family_sha,
     )
-    assert result.status == "PASS"
+    assert result.status == "NE"
     assert result.aggregate_path.is_file()
-    assert result.recommendation_path is not None
+    aggregate = json.loads(result.aggregate_path.read_text("utf-8"))
+    assert aggregate["failure_phase"] == "BASELINE"
+    assert result.recommendation_path is None
     with pytest.raises(RuntimeError, match="不可重跑"):
         run_w04_private_evaluation_once(
             W04PrivateEvaluatorRuntimeConfig(

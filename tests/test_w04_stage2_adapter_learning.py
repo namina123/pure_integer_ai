@@ -15,7 +15,6 @@ from pure_integer_ai.experiments.ph2_w04_contract import (
     W04_STAGE_KEY,
     W04_W03_BASE_RUN_ID,
     W04RunRequest,
-    open_w04_frozen_context,
 )
 from pure_integer_ai.experiments.ph2_w04_firewall import W04PayloadFirewall
 from pure_integer_ai.experiments.ph2_w04_generation import (
@@ -37,6 +36,7 @@ from pure_integer_ai.experiments.ph2_w04_understanding import (
     build_w04_understanding_runtime,
 )
 from pure_integer_ai.storage.backend import SQLiteBackend
+from tests.w04_historical_context import open_historical_w04_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,7 +46,7 @@ HEAD = "da69958c1f149a2f264053f7b7407a53f575cd93"
 def _context_and_payload(tmp_path):
     backend = SQLiteBackend(str(tmp_path / "context.sqlite"))
     try:
-        context = open_w04_frozen_context(
+        context = open_historical_w04_context(
             ROOT,
             current_remote_commit_sha1=HEAD,
             backend_profile_key=backend.storage_capabilities().stable_key(),

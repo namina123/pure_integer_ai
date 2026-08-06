@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+import pure_integer_ai.experiments.ph2_w04_candidate as candidate_owner
+import pure_integer_ai.experiments.ph2_w04_runtime as runtime_owner
 from pure_integer_ai.experiments.ph2_w04_candidate import (
     W04_CANDIDATE_FORMAL_MODE,
     W04_CANDIDATE_FORMAL_WORKER_COUNT,
@@ -20,11 +22,27 @@ from pure_integer_ai.experiments.ph2_w04_contract import (
 )
 from pure_integer_ai.experiments.ph2_w04_runtime import W04RuntimeConfig
 from pure_integer_ai.storage.backend import SQLiteBackend
+from tests.w04_historical_context import open_historical_w04_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HEAD = "da69958c1f149a2f264053f7b7407a53f575cd93"
 GLOBAL = "data/ph2/manifests/d03_v1/ph2_global_course_manifest_v1.json"
+
+
+@pytest.fixture(autouse=True)
+def _historical_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """候选行为使用冻结上下文，同时保留生产 opener 的独立拒绝测试。"""
+    monkeypatch.setattr(
+        candidate_owner,
+        "open_w04_frozen_context",
+        open_historical_w04_context,
+    )
+    monkeypatch.setattr(
+        runtime_owner,
+        "open_w04_frozen_context",
+        open_historical_w04_context,
+    )
 
 
 def _contract(tmp_path: Path):

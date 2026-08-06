@@ -21,7 +21,11 @@ from pure_integer_ai.experiments.ph2_w04_contract import (
     validate_w04_request,
 )
 from pure_integer_ai.experiments.ph2_w04_firewall import W04PayloadFirewall
+from pure_integer_ai.experiments.ph2_carrier_projection_runtime_contract import (
+    CarrierProjectionRuntimeContractError,
+)
 from pure_integer_ai.storage.backend import SQLiteBackend
+from tests.w04_historical_context import open_historical_w04_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,11 +45,21 @@ def backend_key(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def context(backend_key):
-    return open_w04_frozen_context(
+    return open_historical_w04_context(
         ROOT,
         current_remote_commit_sha1=HEAD,
         backend_profile_key=backend_key,
     )
+
+
+def test_current_authority_open_rejects_historical_parent_drift(backend_key):
+    """生产 opener 必须拒绝已演进 evidence，行为 harness 不得改变它。"""
+    with pytest.raises(CarrierProjectionRuntimeContractError, match="身份漂移"):
+        open_w04_frozen_context(
+            ROOT,
+            current_remote_commit_sha1=HEAD,
+            backend_profile_key=backend_key,
+        )
 
 
 def _request(context, *, mode="fresh", worker_count=1):
