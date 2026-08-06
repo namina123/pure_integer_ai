@@ -15,6 +15,7 @@ from pure_integer_ai.cognition.process.structure_discover import (
     shape_signature,
 )
 from pure_integer_ai.cognition.shared.types import ConceptRef, MODALITY_ARITH
+from pure_integer_ai.crosscut.determinism.hasher import Hasher
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.crosscut.integer import rational
 from pure_integer_ai.experiments.collection import CollectedItem
@@ -25,6 +26,7 @@ from pure_integer_ai.storage.op_confidence import record_op_outcome
 from pure_integer_ai.training.vm_proof import execute_composes_value
 
 _DISC_ROOT_SEED = "formal_train.disc_src"
+_DISC_ROOT_HASHER = Hasher(_DISC_ROOT_SEED)
 
 
 def _discover_and_recognize_arith_operators(
@@ -62,7 +64,6 @@ def _discover_and_recognize_arith_operators(
     抽 PARAM 绑定·READ）→ _verify_generalization（vm_proof 验骨架绑参复现 held-out 新输入值·消费 recognitions）。
     """
     from pure_integer_ai.cognition.understanding.arith_observe import build_composes_from_arith
-    from pure_integer_ai.crosscut.determinism.hasher import Hasher
     from pure_integer_ai.storage.edge_types import EDGE_COMPOSES
     from pure_integer_ai.storage.edge_store import SOURCE_MATH
     from pure_integer_ai.storage.node_store import NODE_CONCEPT
@@ -95,7 +96,7 @@ def _discover_and_recognize_arith_operators(
     # 内容哈希独立根（同程序同根幂等·不同程序不同根·绕 observe struct_ref 碰撞 + EdgeStore.add 不去重）
     roots: list[ConceptRef] = []
     for item in arith_items:
-        h = Hasher(_DISC_ROOT_SEED).h63(item.arith_source)
+        h = _DISC_ROOT_HASHER.h63(item.arith_source)
         root = ctx.concept_index.ensure(
             f"__disc_src_{h}", space_id=ctx.space_id,
             tier=TIER_PRIMARY, node_type=NODE_CONCEPT)

@@ -31,6 +31,7 @@ class SourceReadError(Exception):
 - 冻结 baseline 只承认 guard 引入前已经存在的类；不得把新类加入 baseline。
 - 既存类可以删除或增强为 frozen/slots。身份类别漂移、移除 frozen/slots 或新增未声明类都会使 guard 失败。
 - 既存类补齐声明时，必须同时从 baseline 删除对应条目，避免以后退回旧豁免。
+- 固定 seed 的 `Hasher` 不得在 token/record 循环中重复构造；应在明确 owner 模块级复用，且保持原 seed 与完整 canonical 输出不变。
 
 The rules are:
 
@@ -40,6 +41,7 @@ The rules are:
 - The frozen baseline covers only classes that existed when the guard was introduced. New classes must not be added to it.
 - Existing classes may be deleted or strengthened with frozen/slots semantics. Category drift, removing frozen/slots, or adding an undeclared class fails the guard.
 - When an existing class gains a declaration, remove its legacy baseline entry so the exemption cannot return later.
+- A fixed-seed `Hasher` must not be constructed repeatedly inside token or record loops. Hoist it to the owning module while preserving the original seed and complete canonical output.
 
 从仓库根目录运行：
 

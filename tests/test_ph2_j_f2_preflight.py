@@ -7,6 +7,10 @@ import pytest
 
 import pure_integer_ai.experiments.ph2_j_f2_contract as j_f2_contract
 from pure_integer_ai.experiments.j_f1_facility_receipt import JF1ReceiptError
+from pure_integer_ai.experiments.j_f2_core_artifact_manifest import (
+    CoreArtifactManifestError,
+    read_core_artifact_manifest,
+)
 from pure_integer_ai.experiments.ph2_j_f2_contract import (
     ARTIFACT_KIND,
     CORE_ARTIFACT_PATH,
@@ -15,6 +19,7 @@ from pure_integer_ai.experiments.ph2_j_f2_contract import (
     build_jf2_preflight,
     read_jf2_preflight,
 )
+from tests.jf2_historical_context import build_historical_jf2_preflight
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,12 +27,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(scope="module")
 def live_preflight():
-    """只重跑一次真实 J-F1 adapter，供公开 preflight 专项共享。"""
-    return build_jf2_preflight(ROOT)
+    """只重跑一次历史 J-F1 闭包，供已发布 preflight 专项共享。"""
+    return build_historical_jf2_preflight(ROOT)
 
 
-def test_preflight_reads_public_receipts_and_is_ready_for_final_seal(live_preflight):
-    """J-F1 与 Core artifact 均通过后，preflight 只允许进入最终封存前态。"""
+def test_historical_preflight_reads_receipts_and_rebuilds_sealed_state(live_preflight):
+    """历史 J-F1 与 Core 闭包仍可逐字节重建已封存前态。"""
     report = live_preflight
     assert report.artifact_kind == ARTIFACT_KIND
     assert report.status == "READY_FOR_FORMAL_SEAL"
@@ -45,6 +50,12 @@ def test_preflight_reads_public_receipts_and_is_ready_for_final_seal(live_prefli
         if item.role == "CORE_ARTIFACT"
     ).status == "PASS"
     assert all(item.role != "PRIVATE_PAYLOAD" for item in report.dependencies)
+
+
+def test_current_source_successor_cannot_reuse_historical_core_authority():
+    """生产 reader 必须拒绝把后继源码冒充旧 Core manifest 所绑定的闭包。"""
+    with pytest.raises(CoreArtifactManifestError, match="Core 文件身份漂移"):
+        read_core_artifact_manifest(ROOT, verify_files=True)
 
 
 def test_preflight_dependency_order_and_canonical_round_trip(

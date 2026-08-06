@@ -110,6 +110,7 @@ from pure_integer_ai.training.vm_proof import vm_proof_fn_factory
 
 # 目标达成覆盖率阈值；保持在 round runtime 的路径调度职责内。
 COVERAGE_THRESHOLD = 500
+_VERIFICATION_EPISODE_HASHER = Hasher("verification.episode.v1")
 
 @runtime_checkable
 class RoundRunner(Protocol):
@@ -762,9 +763,7 @@ class DefaultRoundRunner:
                 route, item, raw.segments)
             route_round_id = round_id
             if multiple:
-                route_round_id = Hasher(
-                    "verification.episode.v1",
-                ).h63((
+                route_round_id = _VERIFICATION_EPISODE_HASHER.h63((
                     round_id,
                     *verification_dimension_key(route).stable_key(),
                 ))

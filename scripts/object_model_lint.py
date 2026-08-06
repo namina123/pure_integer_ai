@@ -186,6 +186,81 @@ def _apply_inheritance_families(facts: list[dict[str, object]]) -> None:
                     changed = True
 
 
+def _fixed_seed_expression(node: ast.expr, names: frozenset[str]) -> bool:
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (str, bytes, int)) or node.value is None
+    if isinstance(node, ast.Name):
+        return node.id in names
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return all(_fixed_seed_expression(item, names) for item in node.elts)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        return _fixed_seed_expression(node.operand, names)
+    return False
+
+
+def _module_fixed_seed_names(tree: ast.Module) -> frozenset[str]:
+    assignments: list[tuple[str, ast.expr]] = []
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            assignments.append((node.targets[0].id, node.value))
+        elif (isinstance(node, ast.AnnAssign)
+              and isinstance(node.target, ast.Name)
+              and node.value is not None):
+            assignments.append((node.target.id, node.value))
+    fixed: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        known = frozenset(fixed)
+        for name, value in assignments:
+            if name not in fixed and _fixed_seed_expression(value, known):
+                fixed.add(name)
+                changed = True
+    return frozenset(fixed)
+
+
+def _iter_hot_loop_fixed_hasher_calls(
+        node: ast.AST,
+        fixed_names: frozenset[str],
+        in_loop: bool = False,
+        ) -> Iterator[ast.Call]:
+    loop_scope = in_loop or isinstance(node, (
+        ast.For, ast.AsyncFor, ast.While,
+        ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp,
+    ))
+    if loop_scope and isinstance(node, ast.Call):
+        call_name = _expr_name(node.func)
+        if (call_name.rsplit(".", 1)[-1] == "Hasher" and node.args
+                and _fixed_seed_expression(node.args[0], fixed_names)):
+            yield node
+    for child in ast.iter_child_nodes(node):
+        yield from _iter_hot_loop_fixed_hasher_calls(
+            child, fixed_names, loop_scope)
+
+
+def scan_hot_loop_fixed_hasher_calls(
+        source_root: Path,
+        ) -> list[tuple[str, int, str]]:
+    """找出循环内重复创建固定 seed Hasher 的确定性性能债务。"""
+    source_root = source_root.resolve()
+    violations: list[tuple[str, int, str]] = []
+    for path in sorted(source_root.rglob("*.py")):
+        relative = path.relative_to(source_root).as_posix()
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+        except (OSError, UnicodeError, SyntaxError) as error:
+            raise ValueError(f"无法解析 {relative}: {error}") from error
+        fixed_names = _module_fixed_seed_names(tree)
+        for call in _iter_hot_loop_fixed_hasher_calls(tree, fixed_names):
+            violations.append((
+                relative,
+                call.lineno,
+                ast.unparse(call.args[0]),
+            ))
+    return violations
+
+
 def scan_source(source_root: Path) -> list[dict[str, object]]:
     """扫描生产源码，返回带声明和结构形状的确定性类台账。"""
     source_root = source_root.resolve()
@@ -394,6 +469,10 @@ def check_object_model(
             continue
         for problem in _legacy_shape_regressions(fact, legacy):
             violations.append(f"{prefix}: {problem}")
+    for path, line, seed in scan_hot_loop_fixed_hasher_calls(source_root):
+        violations.append(
+            f"{path}:L{line}:Hasher: 循环内重复构造固定 seed Hasher: {seed}"
+        )
     return violations, len(facts)
 
 

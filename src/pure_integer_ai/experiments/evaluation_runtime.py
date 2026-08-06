@@ -31,6 +31,7 @@ from pure_integer_ai.cognition.shared.types import (
 from pure_integer_ai.cognition.shared.work_memory import WorkMemory
 from pure_integer_ai.cognition.understanding.observe import observe
 from pure_integer_ai.config import gates
+from pure_integer_ai.crosscut.determinism.hasher import Hasher
 from pure_integer_ai.experiments.collection import CollectedItem
 from pure_integer_ai.experiments.evaluation_protocol import (
     EvaluationAssignment,
@@ -77,6 +78,9 @@ from pure_integer_ai.training.vm_proof import vm_proof_fn_factory
 H2_CALIB_BATCH = 16
 _DISC_LANG_SEED = "formal_train.disc_lang"
 _DISC_LANG_ALIGN_SEED = "formal_train.disc_lang_align"
+_XVER_B_HASHER = Hasher("xver.b.v1")
+_DISC_LANG_HASHER = Hasher(_DISC_LANG_SEED)
+_DISC_LANG_ALIGN_HASHER = Hasher(_DISC_LANG_ALIGN_SEED)
 
 EvaluationProbeEvaluator = Callable[[
     TrainContext,
@@ -338,7 +342,6 @@ def _run_calibration_phase_impl(ctx: TrainContext, corpus: list,
     from pure_integer_ai.teacher.weaning_calibration import record_calibration
     from pure_integer_ai.teacher.weaning import WEANING_WINDOW_ROUNDS
     from pure_integer_ai.cognition.understanding.arith_observe import build_composes_from_arith
-    from pure_integer_ai.crosscut.determinism.hasher import Hasher
     from pure_integer_ai.storage.edge_types import EDGE_COMPOSES
     from pure_integer_ai.storage.node_store import NODE_CONCEPT
     from pure_integer_ai.storage.edge_store import SOURCE_MATH
@@ -367,7 +370,7 @@ def _run_calibration_phase_impl(ctx: TrainContext, corpus: list,
             continue
         root_a = obs.struct_refs[0]   # observe 学树 COMPOSES 根（单函数单 struct_ref·镜像 :566）
         # root_b：参树（异 shape·build_composes_from_arith 二次独立建·镜像 POST :619-627·R6 真守）
-        h_b = Hasher('xver.b.v1').h63(item.arith_source_b)
+        h_b = _XVER_B_HASHER.h63(item.arith_source_b)
         root_b = ctx.concept_index.ensure(
             f"__xver_b_{h_b}", space_id=ctx.space_id,
             tier=TIER_PRIMARY, node_type=NODE_CONCEPT)
@@ -464,7 +467,6 @@ def _run_simulated_offline_eval_impl(ctx: TrainContext, corpus: list,
 
     from pure_integer_ai.cognition.understanding.arith_observe import build_composes_from_arith
     from pure_integer_ai.cognition.understanding.pronoun_features import lookup_pronoun_features
-    from pure_integer_ai.crosscut.determinism.hasher import Hasher
     from pure_integer_ai.storage.edge_types import EDGE_COMPOSES
     from pure_integer_ai.storage.node_store import NODE_CONCEPT
     from pure_integer_ai.storage.edge_store import SOURCE_MATH
@@ -490,7 +492,7 @@ def _run_simulated_offline_eval_impl(ctx: TrainContext, corpus: list,
             continue
         root_a = obs.struct_refs[0]   # observe 学树 COMPOSES 根（单函数单 struct_ref·镜像 :1265）
         # build root_b 参树（镜像 calibration :1266-1275·异 shape R6 真守）
-        h_b = Hasher('xver.b.v1').h63(item.arith_source_b)
+        h_b = _XVER_B_HASHER.h63(item.arith_source_b)
         root_b = ctx.concept_index.ensure(
             f"__xver_b_{h_b}", space_id=ctx.space_id,
             tier=TIER_PRIMARY, node_type=NODE_CONCEPT)
@@ -587,7 +589,6 @@ def _held_out_discovery_tally_free(
     from pure_integer_ai.storage.edge_store import SOURCE_BARE_TEXT, EPI_STRUCTURED
     from pure_integer_ai.storage.edge_types import EDGE_COMPOSES
     from pure_integer_ai.storage.node_store import NODE_CONCEPT
-    from pure_integer_ai.crosscut.determinism.hasher import Hasher
     from pure_integer_ai.cognition.process.structure_discover import (
         auto_discover_operators, shape_signature as _dim_shape_sig,
         label_realizes_is_a, label_realizes_causes,
@@ -607,7 +608,7 @@ def _held_out_discovery_tally_free(
             if _toks:
                 _flat_units.append((item, item_key, seg_idx, _toks))
     for item, item_key, seg_idx, tokens in _flat_units:
-        h = Hasher(_DISC_LANG_SEED).h63("\x1f".join(tokens))
+        h = _DISC_LANG_HASHER.h63("\x1f".join(tokens))
         root = ctx.concept_index.ensure(
             f"__disc_lang_{h}", space_id=ctx.space_id,
             tier=TIER_PRIMARY, node_type=NODE_CONCEPT)
@@ -640,7 +641,7 @@ def _held_out_discovery_tally_free(
         if aligned_seqs is not None:
             new_roots: list[ConceptRef] = []
             for seq, _orig_root in zip(aligned_seqs, roots):
-                h = Hasher(_DISC_LANG_ALIGN_SEED).h63(
+                h = _DISC_LANG_ALIGN_HASHER.h63(
                     "\x1f".join(f"{r[0]}:{r[1]}" for r in seq))
                 align_root = ctx.concept_index.ensure(
                     f"__disc_lang_align_{h}", space_id=ctx.space_id,

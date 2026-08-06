@@ -79,6 +79,10 @@ from pure_integer_ai.cognition.shared.scoped_persistence import ScopedIdentitySt
 from pure_integer_ai.cognition.shared.work_memory import WorkMemoryScopeError
 
 
+_OBSERVE_PROGRAM_HASHER = Hasher("observe.prog.v1")
+_OBSERVE_SEGMENT_HASHER = Hasher("observe.seg.v1")
+
+
 class ObservePipeline:
     """observe 流水线（持 backend/edge_store/concept_index/work_memory + 外部资源 hook）。
 
@@ -424,11 +428,11 @@ class ObservePipeline:
             # 同句/跨轮 re-observe 仍撞同 struct_ref 仍累积（~16× 残留·baseline 既有·非本修引入）。真根因=attach 无幂等·
             # defer（first-write-wins guard·round8b）。default OFF 守 CI bit-identical·断奶/perf env 翻 ON。
             if seg.modality == MODALITY_CODE and seg.code_source:
-                seg_label = f"__prog_{raw.stage}_{Hasher('observe.prog.v1').h63(seg.code_source)}"
+                seg_label = f"__prog_{raw.stage}_{_OBSERVE_PROGRAM_HASHER.h63(seg.code_source)}"
             elif seg.modality == MODALITY_ARITH and seg.arith_source:
-                seg_label = f"__prog_{raw.stage}_{Hasher('observe.prog.v1').h63(seg.arith_source)}"
+                seg_label = f"__prog_{raw.stage}_{_OBSERVE_PROGRAM_HASHER.h63(seg.arith_source)}"
             elif getattr(gates, "STRUCT_REF_CONTENT_HASH_MODE", False) and seg.tokens:
-                seg_label = f"__seg_{raw.stage}_{Hasher('observe.seg.v1').h63(seg.tokens)}"
+                seg_label = f"__seg_{raw.stage}_{_OBSERVE_SEGMENT_HASHER.h63(seg.tokens)}"
             else:
                 seg_label = f"__seg_{raw.stage}_{seg_idx}"
             struct_ref = self.concept_index.ensure(

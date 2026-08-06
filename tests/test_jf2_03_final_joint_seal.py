@@ -17,6 +17,7 @@ from pure_integer_ai.experiments.j_f2_final_joint_seal import (
     read_final_joint_seal,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_bytes
+from tests.jf2_historical_context import build_historical_final_joint_seal
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,12 +25,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(scope="module")
 def live_seal() -> FinalJointSeal:
-    """共享一次真实 preflight，控制 J-F1 live 回验成本。"""
-    return build_final_joint_seal(ROOT)
+    """共享一次历史闭包 preflight，控制 J-F1 回验成本。"""
+    return build_historical_final_joint_seal(ROOT)
 
 
-def test_live_seal_has_complete_joint_conjuncts(live_seal: FinalJointSeal) -> None:
-    """真实公开依赖必须全 PASS，墙维保持 NE，状态转换保持受控。"""
+def test_historical_seal_has_complete_joint_conjuncts(live_seal: FinalJointSeal) -> None:
+    """历史公开依赖必须全 PASS，墙维保持 NE，状态转换保持受控。"""
     assert all(item.status == "PASS" for item in live_seal.dependency_bindings)
     assert all(item.status == "PASS" for item in live_seal.hard_conjuncts)
     assert live_seal.w09_evidence["j_lc"]["wall_dimension_states"] == [
@@ -43,6 +44,8 @@ def test_live_seal_has_complete_joint_conjuncts(live_seal: FinalJointSeal) -> No
         "PW00A_STARTED": 0,
         "can_ween_language_modified": 0,
     }
+    assert read_final_joint_seal(
+        ROOT, verify_dependencies=False) == live_seal
 
 
 def test_canonical_readback_rejects_state_drift(

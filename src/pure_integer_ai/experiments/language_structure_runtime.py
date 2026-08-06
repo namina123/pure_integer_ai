@@ -45,6 +45,9 @@ from pure_integer_ai.storage.node_store import TIER_PRIMARY
 _DISC_LANG_SEED = "formal_train.disc_lang"
 _DISC_LANG_ALIGN_SEED = "formal_train.disc_lang_align"
 _DISC_LANG_SENSE_SEED = "formal_train.disc_lang_sense"
+_DISC_LANG_HASHER = Hasher(_DISC_LANG_SEED)
+_DISC_LANG_ALIGN_HASHER = Hasher(_DISC_LANG_ALIGN_SEED)
+_DISC_LANG_SENSE_HASHER = Hasher(_DISC_LANG_SENSE_SEED)
 
 
 def _discover_and_recognize_lang_structures(
@@ -78,7 +81,6 @@ def _discover_and_recognize_lang_structures(
     from pure_integer_ai.storage.edge_store import SOURCE_BARE_TEXT, EPI_STRUCTURED
     from pure_integer_ai.storage.edge_types import EDGE_COMPOSES
     from pure_integer_ai.storage.node_store import NODE_CONCEPT
-    from pure_integer_ai.crosscut.determinism.hasher import Hasher
 
     lang_items = [it for it in corpus
                   if it.modality == MODALITY_LANGUAGE and it.tokens]
@@ -134,7 +136,7 @@ def _discover_and_recognize_lang_structures(
     root_token_spans: dict[
         ConceptRef, tuple[tuple[int, int, int], ...]] = {}
     for item, item_key, seg_idx, token_start, token_end, tokens in _flat_units:
-        h = Hasher(_DISC_LANG_SEED).h63("\x1f".join(tokens))
+        h = _DISC_LANG_HASHER.h63("\x1f".join(tokens))
         root = ctx.concept_index.ensure(
             f"__disc_lang_{h}", space_id=ctx.space_id,
             tier=TIER_PRIMARY, node_type=NODE_CONCEPT)
@@ -209,7 +211,7 @@ def _discover_and_recognize_lang_structures(
             new_roots: list[ConceptRef] = []
             new_expected: dict[ConceptRef, ConceptRef | None] = {}
             for seq, orig_root in zip(aligned_seqs, roots):
-                h = Hasher(_DISC_LANG_ALIGN_SEED).h63(
+                h = _DISC_LANG_ALIGN_HASHER.h63(
                     "\x1f".join(f"{r[0]}:{r[1]}" for r in seq))
                 align_root = ctx.concept_index.ensure(
                     f"__disc_lang_align_{h}", space_id=ctx.space_id,
@@ -319,7 +321,7 @@ def _discover_and_recognize_lang_structures(
             if len(_cands) > 1:
                 # 该位 N sense·首 sense 已是原 root 叶·clone 其余 N-1 sense（每 sense 一 aligning_root）
                 for _sense_ref in _cands[1:]:
-                    _clone_h = Hasher(_DISC_LANG_SENSE_SEED).h63(
+                    _clone_h = _DISC_LANG_SENSE_HASHER.h63(
                         f"{_rr[0]}:{_rr[1]}:{_sense_ref[0]}:{_sense_ref[1]}")
                     _clone_root = ctx.concept_index.ensure(
                         f"__disc_lang_sense_{_clone_h}", space_id=ctx.space_id,

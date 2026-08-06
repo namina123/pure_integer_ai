@@ -53,6 +53,9 @@ from pure_integer_ai.cognition.shared.types import (
     CodeSpec, ConceptRef, TransformSpec, TransformHeldOut, InverseRelationSpec,
 )
 
+
+_LOCAL_DIR_SOURCE_HASHER = Hasher("local_dir.source_file.v1")
+
 # ---- 五类收集类型 ----
 COLLECT_CAUSES = 1       # ① 逻辑因果 → CAUSES
 COLLECT_PRECEDES = 2     # ② 结构序 → PRECEDES + role_seq
@@ -238,7 +241,7 @@ class LocalDirSource:
                 continue
             with open(path, "r", encoding="utf-8") as f:
                 text = f.read()
-            file_source_id = Hasher("local_dir.source_file.v1").h63(
+            file_source_id = _LOCAL_DIR_SOURCE_HASHER.h63(
                 (os.path.normcase(os.path.abspath(self._dir)), fn))
             if file_source_id == 0:
                 file_source_id = 1

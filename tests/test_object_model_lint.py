@@ -166,3 +166,27 @@ def test_baseline_digest_and_overwrite_are_fail_closed(tmp_path):
         assert "inventory_sha256" in str(error)
     else:
         raise AssertionError("corrupt baseline digest must be rejected")
+
+
+def test_fixed_seed_hasher_construction_inside_loop_is_rejected(tmp_path):
+    source_root, baseline_path = _empty_baseline(tmp_path)
+    _write(
+        source_root / "hot_loop.py",
+        """from pure_integer_ai.crosscut.determinism.hasher import Hasher
+
+_SEED = "fixed"
+
+def values(items):
+    result = []
+    for item in items:
+        result.append(Hasher(_SEED).h63(item))
+    return result
+""",
+    )
+
+    violations, class_count = object_model_lint.check_object_model(
+        source_root, baseline_path)
+
+    assert class_count == 0
+    assert len(violations) == 1
+    assert "循环内重复构造固定 seed Hasher" in violations[0]
