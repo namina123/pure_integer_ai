@@ -279,7 +279,7 @@ def test_sensitive_headers_are_hash_bound_but_not_serialized(tmp_path):
     assert "192.0.2.1" not in serialized
     assert str(tmp_path).casefold() not in serialized
     value = manifest.to_dict()
-    value["proxy"] = "http://127.0.0.1:7890"
+    value["proxy"] = "http://proxy.invalid:8080"
     path = tmp_path / "bad-sensitive.json"
     path.write_bytes(canonical_json_line(value))
     with pytest.raises(MediaWikiSnapshotError, match="fields are not exact"):

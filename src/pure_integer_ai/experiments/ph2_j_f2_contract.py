@@ -22,6 +22,11 @@ from pure_integer_ai.experiments.ph2_dataset_contract import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
+from pure_integer_ai.experiments.ph2_w09_authority import (
+    W09_ABLATION_KEYS,
+    W09_DIMENSION_KEYS,
+    W09_WALL_DIMENSION_KEYS,
+)
 
 
 FORMAT_VERSION = 1
@@ -250,13 +255,98 @@ def _w09_blockers(value: dict[str, Any]) -> list[str]:
         blockers.append("LANGUAGE_CAPABILITY_NOT_MASTERED")
     if state.get("LANGUAGE_READINESS") != 0:
         blockers.append("LANGUAGE_READINESS_PRESET")
-    if value.get("j_lc", {}).get("status") != "PASS":
+    j_lc = value.get("j_lc", {})
+    if (not isinstance(j_lc, dict) or j_lc.get("status") != "PASS"
+            or j_lc.get("bearing_cell_count") != 216
+            or j_lc.get("lc_task_count") != 16
+            or j_lc.get("retention_continual_learning_cell_count") != 27):
         blockers.append("J_LC_W09_NOT_PASS")
-    if value.get("open_generation", {}).get("status") != "PASS":
+    expected_walls = [[key, "NE"] for key in W09_WALL_DIMENSION_KEYS]
+    if j_lc.get("wall_dimension_states") != expected_walls:
+        blockers.append("W09_WALL_DIMENSION_DRIFT")
+    generation = value.get("open_generation", {})
+    expected_layers = [[key, "PASS"] for key in (
+        "CONTENT_SEMANTICS", "STRUCTURE", "DISCOURSE_SCOPE",
+        "MORPHOLOGY_SURFACE", "TASK_USE")]
+    if (not isinstance(generation, dict) or generation.get("status") != "PASS"
+            or generation.get("layer_states") != expected_layers
+            or generation.get("output_invocation_count", 0) <= 0
+            or any(generation.get(key) != 0 for key in (
+                "complete_template_replay_count", "exact_surface_read_count",
+                "source_replay_count"))):
         blockers.append("OPEN_GENERATION_NOT_PASS")
     dimensions = value.get("dimension_results", ())
-    if (not dimensions or any(item.get("status") != "PASS" for item in dimensions)):
+    if (not isinstance(dimensions, list)
+            or tuple(item.get("dimension_key") for item in dimensions
+                     if isinstance(item, dict)) != W09_DIMENSION_KEYS
+            or any(not isinstance(item, dict)
+                   or item.get("status") != "PASS"
+                   or item.get("required_count", 0) <= 0
+                   or item.get("passed_count") != item.get("required_count")
+                   or item.get("fail_count") != 0
+                   or item.get("ne_count") != 0
+                   for item in dimensions)):
         blockers.append("W09_BEARING_DIMENSION_NOT_PASS")
+    ablations = value.get("ablation_results", ())
+    if (not isinstance(ablations, list)
+            or tuple(item.get("ablation_key") for item in ablations
+                     if isinstance(item, dict)) != W09_ABLATION_KEYS
+            or any(not isinstance(item, dict)
+                   or item.get("target_dimension_key")
+                   != W09_ABLATION_KEYS[index].removesuffix("-ABLATION")
+                   or item.get("real_component_disabled") != 1
+                   or item.get("status") != (
+                       "PASS" if index < len(W09_DIMENSION_KEYS) else "NE")
+                   or (index < len(W09_DIMENSION_KEYS)
+                       and item.get("invocation_count", 0) <= 0)
+                   or (index >= len(W09_DIMENSION_KEYS)
+                       and item.get("invocation_count") != 0)
+                   for index, item in enumerate(ablations))):
+        blockers.append("W09_ABLATION_OR_WALL_DRIFT")
+    v06 = value.get("v06", {})
+    if (not isinstance(v06, dict) or v06.get("status") != "PASS"
+            or v06.get("core_bit_identical") != 1
+            or v06.get("host_write_count") != 0
+            or v06.get("improved_probe_count", 0) <= 0
+            or v06.get("improved_probe_count") != v06.get("independent_probe_count")
+            or v06.get("isolated_learning_write_count", 0) <= 0):
+        blockers.append("W09_V06_NOT_PASS")
+    rollback = value.get("rollback", {})
+    if (not isinstance(rollback, dict) or rollback.get("status") != "PASS"
+            or rollback.get("invalidated_count", 0) <= 0
+            or rollback.get("preserved_count", 0) <= 0
+            or rollback.get("leaked_write_count") != 0):
+        blockers.append("W09_ROLLBACK_NOT_PASS")
+    resource = value.get("resource", {})
+    if (not isinstance(resource, dict) or resource.get("status") != "PASS"
+            or resource.get("fresh_resume_equivalent") != 1
+            or resource.get("worker_1_2_4_invariant") != 1):
+        blockers.append("W09_RESOURCE_NOT_PASS")
+    windows = value.get("windows", ())
+    if (not isinstance(windows, list) or len(windows) != 3
+            or any(not isinstance(item, dict)
+                   or item.get("window_ordinal") != index
+                   or item.get("status") != "PASS"
+                   or item.get("teacher_calls") != 0
+                   for index, item in enumerate(windows, start=1))):
+        blockers.append("W09_TEACHER_ZERO_WINDOW_NOT_PASS")
+    write_counts = value.get("write_counts", {})
+    expected_write_keys = {
+        "assessment_writes", "candidate_writes", "clock_writes", "core_writes",
+        "evidence_writes", "host_writes", "label_writes", "memory_writes",
+        "public_writes", "use_writes",
+    }
+    if (not isinstance(write_counts, dict) or set(write_counts) != expected_write_keys
+            or any(type(item) is not int or item != 0
+                   for item in write_counts.values())):
+        blockers.append("W09_PROTECTED_WRITE_NONZERO")
+    owner_writes = value.get("candidate_evidence", {}).get("owner_write_counts", {})
+    if (not isinstance(owner_writes, dict)
+            or any(owner_writes.get(key) != 0 for key in (
+                "companion_writes", "evaluator_label_writes", "host_learning_writes",
+                "memory_learning_writes", "readback_payload_gets", "teacher_calls"))
+            or owner_writes.get("formal_training_runs") != 1):
+        blockers.append("W09_OWNER_BOUNDARY_DRIFT")
     if value.get("private_evidence", {}).get("terminal_state") != "PASS":
         blockers.append("W09_PRIVATE_TERMINAL_NOT_PASS")
     return blockers

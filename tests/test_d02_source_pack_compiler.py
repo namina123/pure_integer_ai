@@ -363,7 +363,7 @@ def test_blocker_cannot_forge_pack_and_extra_coverage_fields_fail_closed(tmp_pat
         )
     value = SourcePackCoverageManifest(
         1, "D02-source-pack-coverage-test-v1", (blocked,)).to_dict()
-    value["proxy"] = "http://127.0.0.1:7890"
+    value["proxy"] = "http://proxy.invalid:8080"
     path = tmp_path / "bad.json"
     from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_line
     path.write_bytes(canonical_json_line(value))
