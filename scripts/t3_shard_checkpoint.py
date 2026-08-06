@@ -258,6 +258,7 @@ def _source_log_payload(
     source_head: str,
     test_file: str,
     attempt: dict[str, Any],
+    expected_attempt: int | None = None,
 ) -> bytes:
     """严格回读来源 PASS 日志，并拒绝路径逃逸或伪造 header。"""
     if "\\" in relative or ":" in relative:
@@ -290,7 +291,10 @@ def _source_log_payload(
         or header.get("contract") != RUNNER_CONTRACT
         or header.get("head") != source_head
         or header.get("test_file") != test_file
-        or header.get("attempt") != attempt.get("attempt")
+        or (
+            expected_attempt is not None
+            and header.get("attempt") != expected_attempt
+        )
         or attempt.get("return_code") != 0
         or not isinstance(attempt.get("pytest_summary"), str)
         or attempt["pytest_summary"].encode("utf-8") not in payload
@@ -321,8 +325,7 @@ def _import_carried_passes(
             raise T3ShardRunnerError("后继 PASS 来源必须是较早 HEAD")
         changed = _changed_paths(repository_root, source_head)
         _carryable_changed_paths(changed)
-        changed_sha = sha256_bytes(canonical_bytes({"paths": list(changed)}))
-        source_state_sha = _state_sha256(source_root)
+        relay_source_state_sha = _state_sha256(source_root)
         source_files = {item["path"]: item for item in source["inventory"]["files"]}
         for relative in selected:
             if relative in imported or relative not in source_files:
@@ -335,35 +338,97 @@ def _import_carried_passes(
             if result.get("status") != "PASS":
                 continue
             attempts = result.get("attempts", [])
-            if not isinstance(attempts, list) or not attempts:
-                raise T3ShardRunnerError(f"来源 PASS 缺少 attempt: {relative}")
-            latest = attempts[-1]
-            if not isinstance(latest, dict) or latest.get("status") != "PASS":
-                raise T3ShardRunnerError(f"来源 PASS attempt 不闭合: {relative}")
-            log_relative = latest.get("log_path")
-            if not isinstance(log_relative, str):
-                raise T3ShardRunnerError(f"来源 PASS 缺少日志: {relative}")
+            carried = result.get("carried_pass")
+            relay_root: Path | None = None
+            relay_sha: str | None = None
+            if isinstance(attempts, list) and attempts:
+                latest = attempts[-1]
+                if not isinstance(latest, dict) or latest.get("status") != "PASS":
+                    raise T3ShardRunnerError(f"来源 PASS attempt 不闭合: {relative}")
+                provenance_root = source_root
+                provenance_head = source_head
+                log_relative = latest.get("log_path")
+                if not isinstance(log_relative, str):
+                    raise T3ShardRunnerError(f"来源 PASS 缺少日志: {relative}")
+                expected_attempt = latest.get("attempt")
+                expected_log_sha = None
+                expected_log_size = None
+                source_test_sha = source_files[relative]["sha256"]
+                provenance_state_sha = relay_source_state_sha
+                provenance_summary = latest.get("pytest_summary")
+                provenance_changed = changed
+            elif isinstance(carried, dict):
+                required = {
+                    "source_head", "source_state_root", "source_state_sha256",
+                    "source_test_sha256", "source_log_path", "source_log_sha256",
+                    "source_log_size", "pytest_summary",
+                }
+                if set(carried) < required:
+                    raise T3ShardRunnerError(f"来源 carried PASS provenance 不完整: {relative}")
+                if not isinstance(carried["source_state_root"], str):
+                    raise T3ShardRunnerError(f"来源 carried PASS state 路径无效: {relative}")
+                provenance_head = carried["source_head"]
+                provenance_root = Path(carried["source_state_root"]).resolve()
+                _require_external_state_root(repository_root, provenance_root)
+                relay_root = source_root
+                relay_sha = relay_source_state_sha
+                log_relative = carried["source_log_path"]
+                expected_attempt = None
+                expected_log_sha = carried["source_log_sha256"]
+                expected_log_size = carried["source_log_size"]
+                source_test_sha = carried["source_test_sha256"]
+                provenance_state_sha = carried["source_state_sha256"]
+                provenance_summary = carried["pytest_summary"]
+                if source_test_sha != source_files[relative]["sha256"]:
+                    raise T3ShardRunnerError(f"来源 carried PASS 测试身份不闭合: {relative}")
+                if (
+                    not isinstance(provenance_state_sha, str)
+                    or _state_sha256(provenance_root) != provenance_state_sha
+                ):
+                    raise T3ShardRunnerError(f"来源 carried PASS state 身份不闭合: {relative}")
+                provenance_changed = _changed_paths(repository_root, provenance_head)
+                _carryable_changed_paths(provenance_changed)
+                if set(provenance_changed) & _test_dependency_closure(
+                    repository_root, relative
+                ):
+                    continue
+            else:
+                raise T3ShardRunnerError(f"来源 PASS 缺少 attempt 或 provenance: {relative}")
             log_payload = _source_log_payload(
-                source_root,
+                provenance_root,
                 log_relative,
-                source_head=source_head,
+                source_head=provenance_head,
                 test_file=relative,
-                attempt=latest,
+                attempt={"return_code": 0, "pytest_summary": provenance_summary},
+                expected_attempt=expected_attempt,
             )
+            log_sha = hashlib.sha256(log_payload).hexdigest()
+            if (
+                expected_log_sha is not None
+                and (log_sha != expected_log_sha or len(log_payload) != expected_log_size)
+            ):
+                raise T3ShardRunnerError(f"来源 PASS 日志身份不闭合: {relative}")
+            provenance_changed_sha = sha256_bytes(canonical_bytes({
+                "paths": list(provenance_changed),
+            }))
             state["results"][relative] = {
                 "status": "PASS",
                 "attempts": [],
                 "carried_pass": {
-                    "source_head": source_head,
-                    "source_state_root": str(source_root),
-                    "source_state_sha256": source_state_sha,
-                    "source_test_sha256": source_files[relative]["sha256"],
+                    "source_head": provenance_head,
+                    "source_state_root": str(provenance_root),
+                    "source_state_sha256": provenance_state_sha,
+                    "source_test_sha256": source_test_sha,
                     "source_log_path": log_relative,
-                    "source_log_sha256": hashlib.sha256(log_payload).hexdigest(),
+                    "source_log_sha256": log_sha,
                     "source_log_size": len(log_payload),
-                    "changed_path_count": len(changed),
-                    "changed_paths_sha256": changed_sha,
-                    "pytest_summary": latest.get("pytest_summary"),
+                    "changed_path_count": len(provenance_changed),
+                    "changed_paths_sha256": provenance_changed_sha,
+                    "pytest_summary": provenance_summary,
+                    **({
+                        "relay_state_root": str(relay_root),
+                        "relay_state_sha256": relay_sha,
+                    } if relay_root is not None else {}),
                 },
             }
             imported.add(relative)

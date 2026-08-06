@@ -304,6 +304,36 @@ def test_carry_forward_keeps_unchanged_pass_and_leaves_changed_file_pending(
     assert "tests/test_b.py" not in target["results"]
 
 
+def test_carry_forward_can_relay_an_unchanged_pass_provenance(tmp_path: Path) -> None:
+    """后继 state 再作为来源时，必须沿原始日志和 state 身份继承。"""
+    repository = _make_repository(
+        tmp_path / "repo",
+        {"test_a.py": "def test_a():\n    assert True\n"},
+    )
+    first_root = tmp_path / "first-state"
+    first = _prepare(repository, first_root)
+    first = run_state(repository, first_root, first, retry_failed=False, max_files=None)
+    (repository / "tests" / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repository, "add", "tests/helper.py")
+    _git(repository, "commit", "-q", "-m", "first successor")
+    second_root = tmp_path / "second-state"
+    second = _prepare(repository, second_root, carry_forward_from=(first_root,))
+    assert second["results"]["tests/test_a.py"]["attempts"] == []
+    assert "relay_state_root" not in second["results"]["tests/test_a.py"]["carried_pass"]
+    (repository / "tests" / "helper.py").write_text("VALUE = 2\n", encoding="utf-8")
+    _git(repository, "add", "tests/helper.py")
+    _git(repository, "commit", "-q", "-m", "second successor")
+    third = _prepare(
+        repository,
+        tmp_path / "third-state",
+        carry_forward_from=(second_root,),
+    )
+    carried = third["results"]["tests/test_a.py"]["carried_pass"]
+    assert carried["source_state_root"] == str(first_root.resolve())
+    assert carried["relay_state_root"] == str(second_root.resolve())
+    assert len(carried["relay_state_sha256"]) == 64
+
+
 def test_carry_forward_rejects_global_and_production_changes(tmp_path: Path) -> None:
     """conftest 或 src 改动必须使整个来源 fail closed。"""
     for changed_path in ("tests/nested/conftest.py", "src/package/runtime.py"):
