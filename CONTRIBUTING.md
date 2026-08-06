@@ -26,11 +26,36 @@ Contributors do not need to sign a separate agreement or assign rights. Contribu
 - 运行时依赖限于 Python 标准库，除非社区先就变更达成明确共识。
 - 解释性注释和文档字符串使用中文；公共标识符、协议常量和外部格式名可保留英文。
 - 新增行为应提供可证伪的验证，失败路径不得静默降级。
+- 新增生产类必须使用紧邻类或其首个装饰器的 `object-model` 注释归类；值对象使用 `@dataclass(frozen=True, slots=True)`，生命周期对象声明 `owner` 与 `cleanup` 边界。
 
 - Preserve the pure-integer core, deterministic execution, append-only audit, and downward-only dependency constraints.
 - Runtime dependencies remain limited to the Python standard library unless a change is explicitly agreed on first.
 - Explanatory comments and docstrings are written in Chinese; public identifiers, protocol constants, and external format names may remain in English.
 - New behavior should include falsifiable verification, and failure paths must not degrade silently.
+- Every new production class must carry an adjacent `object-model` classification comment. Value objects use `@dataclass(frozen=True, slots=True)`; lifecycle objects declare their `owner` and `cleanup` boundaries.
+
+支持的声明形式如下；既存未声明类由冻结 baseline 管理，不得把新类加入 baseline：
+
+The supported declarations are shown below. A frozen baseline covers existing undeclared classes; new classes must never be added to it:
+
+```python
+# object-model: value
+@dataclass(frozen=True, slots=True)
+class SourceRef:
+    source_id: int
+
+# object-model: lifecycle; owner=request; cleanup=scope-end
+class QueryRuntime:
+    pass
+
+# object-model: protocol
+class SourceReaderProtocol(Protocol):
+    pass
+
+# object-model: exception
+class SourceReadError(Exception):
+    pass
+```
 
 ## 本地检查 / Local checks
 
@@ -41,6 +66,7 @@ Install test dependencies and run the guards and full suite from the repository 
 ```bash
 python -m pip install -e ".[test]"
 python -m pure_integer_ai.crosscut.guards.lint
+python scripts/object_model_lint.py
 python -m pytest -q
 ```
 
