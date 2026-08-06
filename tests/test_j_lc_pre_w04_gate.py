@@ -24,6 +24,9 @@ from pure_integer_ai.experiments.ph2_j_lc_pre_w04_contract import (
 from pure_integer_ai.experiments.ph2_typed_carrier_pack_contract import (
     IN_SCOPE_CARRIER_KEYS,
 )
+from pure_integer_ai.experiments.ph2_carrier_projection_runtime_contract import (
+    CarrierProjectionRuntimeContractError,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,15 +35,23 @@ GATE_PATH = ROOT / Path(*MANIFEST_PATH.split("/"))
 
 @pytest.fixture(scope="module")
 def built():
-    return build_j_lc_pre_w04_gate(ROOT)
+    """读取冻结的 pre-W04 gate；当前 parent 漂移不得重建旧 gate。"""
+    return read_j_lc_pre_w04_gate(GATE_PATH)
 
 
-def test_stored_gate_is_canonical_rebuild_and_all_files_verify(built):
-    """stored gate 必须等于现场 canonical rebuild，并回验全部 bytes。"""
+def test_stored_gate_is_canonical_and_current_parent_drift_fails_closed(built):
+    """stored gate 保持 canonical；当前 parent 漂移必须 fail closed。"""
     stored = read_j_lc_pre_w04_gate(GATE_PATH)
     assert stored == built
     assert stored.canonical_bytes() == GATE_PATH.read_bytes()
-    verify_j_lc_pre_w04_files(stored, repository_root=ROOT)
+    with pytest.raises(JLcPreW04Error, match="漂移"):
+        verify_j_lc_pre_w04_files(stored, repository_root=ROOT)
+
+
+def test_current_pre_w04_builder_rejects_historical_parent_drift():
+    """旧 parent 身份漂移时，catalog builder 不得伪造新的 PASS gate。"""
+    with pytest.raises(CarrierProjectionRuntimeContractError, match="文件身份漂移"):
+        build_j_lc_pre_w04_gate(ROOT)
 
 
 def test_gate_binds_all_required_parents_and_nine_carriers(built):

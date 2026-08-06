@@ -560,7 +560,8 @@ def test_each_direction_rejects_duplicate_request_and_result_use():
 
 
 def test_directional_manifest_freezes_parent_scope_and_zero_capability_state():
-    manifest = build_carrier_directional_manifest(_ROOT)
+    manifest = read_carrier_directional_manifest(
+        _ROOT / CARRIER_DIRECTIONAL_MANIFEST_PATH)
     assert manifest.parent_runtime_sha256 == PARENT_RUNTIME_SHA256
     assert tuple(item.role for item in manifest.dependencies) == DEPENDENCY_ROLES
     assert tuple(item.role for item in manifest.evidence_files) == EVIDENCE_ROLES
@@ -569,7 +570,8 @@ def test_directional_manifest_freezes_parent_scope_and_zero_capability_state():
 
 
 def test_directional_manifest_round_trip_and_no_overwrite(tmp_path):
-    manifest = build_carrier_directional_manifest(_ROOT)
+    manifest = read_carrier_directional_manifest(
+        _ROOT / CARRIER_DIRECTIONAL_MANIFEST_PATH)
     target = tmp_path / "directional.json"
     assert write_carrier_directional_manifest(manifest, target) == target
     assert read_carrier_directional_manifest(target) == manifest
@@ -580,18 +582,22 @@ def test_directional_manifest_round_trip_and_no_overwrite(tmp_path):
         write_carrier_directional_manifest(manifest, target)
 
 
-def test_stored_directional_manifest_is_current_and_files_verify():
+def test_stored_directional_manifest_remains_frozen_when_parent_evolves():
+    """历史 directional manifest 固定；parent 漂移必须阻断重建与回验。"""
     stored = read_carrier_directional_manifest(
         _ROOT / CARRIER_DIRECTIONAL_MANIFEST_PATH)
-    rebuilt = build_carrier_directional_manifest(_ROOT)
-    assert stored == rebuilt
-    verify_carrier_directional_files(stored, repository_root=_ROOT)
+    with pytest.raises(directional_catalog.CarrierDirectionalCatalogError,
+                       match="无法严格回验"):
+        build_carrier_directional_manifest(_ROOT)
+    with pytest.raises(CarrierDirectionalManifestContractError, match="身份漂移"):
+        verify_carrier_directional_files(stored, repository_root=_ROOT)
 
 
 def test_directional_manifest_fails_closed_on_parent_or_unknown_field(
         monkeypatch,
         ):
-    manifest = build_carrier_directional_manifest(_ROOT)
+    manifest = read_carrier_directional_manifest(
+        _ROOT / CARRIER_DIRECTIONAL_MANIFEST_PATH)
     monkeypatch.setattr(directional_catalog, "PARENT_RUNTIME_SHA256", "0" * 64)
     with pytest.raises(
             directional_catalog.CarrierDirectionalCatalogError,

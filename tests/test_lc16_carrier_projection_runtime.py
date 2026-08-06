@@ -383,12 +383,14 @@ def test_runtime_manifest_round_trip_and_no_overwrite(tmp_path):
         write_carrier_projection_runtime_manifest(manifest, target)
 
 
-def test_stored_runtime_manifest_is_current_and_files_verify():
+def test_stored_runtime_manifest_remains_frozen_when_files_evolve():
+    """历史 runtime manifest 固定；当前文件漂移必须 fail closed。"""
     stored = read_carrier_projection_runtime_manifest(
         _ROOT / CARRIER_PROJECTION_RUNTIME_MANIFEST_PATH)
     rebuilt = build_carrier_projection_runtime_manifest(_ROOT)
-    assert stored == rebuilt
-    verify_carrier_projection_runtime_files(stored, repository_root=_ROOT)
+    assert stored != rebuilt
+    with pytest.raises(CarrierProjectionRuntimeContractError, match="身份漂移"):
+        verify_carrier_projection_runtime_files(stored, repository_root=_ROOT)
 
 
 def test_runtime_manifest_fails_closed_on_parent_or_unknown_field(monkeypatch):

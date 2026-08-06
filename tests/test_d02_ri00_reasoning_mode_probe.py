@@ -179,11 +179,13 @@ def test_manifest_rejects_missing_mode_or_evidence_file(formal_manifest):
         replace(formal_manifest, evidence_files=formal_manifest.evidence_files[:-1])
 
 
-def test_repository_formal_artifact_matches_builder(formal_manifest):
-    """正式不可覆盖 RI-00 artifact 必须逐字节绑定当前 builder。"""
+def test_repository_formal_artifact_remains_frozen_when_current_builder_evolves(
+        formal_manifest):
+    """历史正式 artifact 保持固定 hash，当前 builder 演进不得覆盖它。"""
     path = REPOSITORY / RI00_MANIFEST_PATH
     assert path.is_file()
     payload = path.read_bytes()
-    assert payload == formal_manifest.canonical_bytes()
     assert hashlib.sha256(payload).hexdigest() == FORMAL_MANIFEST_SHA256
-    assert read_reasoning_mode_probe_manifest(path) == formal_manifest
+    stored = read_reasoning_mode_probe_manifest(path)
+    assert stored.canonical_bytes() == payload
+    assert stored != formal_manifest

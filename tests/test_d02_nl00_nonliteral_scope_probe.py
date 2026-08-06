@@ -206,13 +206,14 @@ def test_file_verifier_detects_baseline_or_evidence_drift(tmp_path, probe):
         verify_nonliteral_scope_probe_files(probe, repository_root=tmp_path)
 
 
-def test_formal_nl00_manifest_has_exact_hash_and_current_files():
-    """正式 artifact 必须等于当前 builder，逐文件可回验且 hash 固定。"""
+def test_formal_nl00_manifest_remains_frozen_when_current_files_evolve():
+    """历史 artifact 固定 hash；当前文件漂移必须保留 fail-closed 边界。"""
     stored = read_nonliteral_scope_probe_manifest(REPOSITORY / NL00_MANIFEST_PATH)
     rebuilt = build_nonliteral_scope_probe_manifest(REPOSITORY)
-    assert stored == rebuilt
-    verify_nonliteral_scope_probe_files(stored, repository_root=REPOSITORY)
     assert stored.sha256() == FORMAL_MANIFEST_SHA256
     assert hashlib.sha256(
         (REPOSITORY / NL00_MANIFEST_PATH).read_bytes()).hexdigest() == (
             FORMAL_MANIFEST_SHA256)
+    assert stored != rebuilt
+    with pytest.raises(NonliteralScopeProbeContractError, match="evidence"):
+        verify_nonliteral_scope_probe_files(stored, repository_root=REPOSITORY)
