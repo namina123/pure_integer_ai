@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+import pure_integer_ai.experiments.ph2_w05_candidate as candidate_owner
+import pure_integer_ai.experiments.ph2_w05_runtime as runtime_owner
 from pure_integer_ai.experiments.ph2_w05_candidate import (
     W05_CANDIDATE_FORMAL_MODE,
     W05_CANDIDATE_FORMAL_WORKER_COUNT,
@@ -23,11 +25,23 @@ from pure_integer_ai.experiments.ph2_w05_contract import (
 )
 from pure_integer_ai.experiments.ph2_w05_runtime import W05RuntimeConfig
 from pure_integer_ai.storage.backend import SQLiteBackend
+from tests.w05_historical_context import open_historical_w05_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HEAD = "693867db349e0ce05782fbaf6fa2b9206b26b4dc"
 GLOBAL = "data/ph2/manifests/d03_v1/ph2_global_course_manifest_v1.json"
+
+
+@pytest.fixture(autouse=True)
+def _historical_candidate_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """candidate/runtime 行为消费冻结 gate，不改变生产 authority。"""
+    for owner in (candidate_owner, runtime_owner):
+        monkeypatch.setattr(
+            owner,
+            "open_w05_frozen_context",
+            open_historical_w05_context,
+        )
 
 
 def _contract(tmp_path: Path):

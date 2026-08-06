@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import pure_integer_ai.experiments.ph2_w05_runtime as runtime_owner
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     parse_canonical_json_bytes,
 )
@@ -31,6 +32,7 @@ from pure_integer_ai.experiments.ph2_w05_transaction import (
     W05TransactionStore,
 )
 from pure_integer_ai.storage.backend import DictBackend
+from tests.w05_historical_context import open_historical_w05_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +59,16 @@ def _config(root, *, worker=1, mode="fresh", fault=None):
         mode=mode,
         current_remote_commit_sha1=HEAD,
         fault_point=fault,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _historical_runtime_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """历史 runtime 行为消费冻结 gate，生产 opener 仍严格拒绝漂移。"""
+    monkeypatch.setattr(
+        runtime_owner,
+        "open_w05_frozen_context",
+        open_historical_w05_context,
     )
 
 

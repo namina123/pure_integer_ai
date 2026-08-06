@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import pure_integer_ai.experiments.ph2_w04_runtime as runtime_owner
 from pure_integer_ai.experiments.ph2_w04_contract import (
     W04_FORMAL_RUN_ID,
     W04_W03_BASE_RUN_ID,
@@ -18,6 +19,7 @@ from pure_integer_ai.experiments.ph2_w04_runtime import (
     load_w04_candidate_dump,
     run_language_stage4,
 )
+from tests.w04_historical_context import open_historical_w04_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +41,16 @@ def _config(tmp_path, *, worker=1, mode="fresh", fault=None):
         mode=mode,
         current_remote_commit_sha1=HEAD,
         fault_point=fault,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _historical_runtime_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """历史 runtime 行为消费冻结 gate，生产 opener 仍由 contract 专项审计。"""
+    monkeypatch.setattr(
+        runtime_owner,
+        "open_w04_frozen_context",
+        open_historical_w04_context,
     )
 
 

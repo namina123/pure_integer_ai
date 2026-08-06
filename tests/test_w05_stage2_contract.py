@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from pure_integer_ai.experiments.ph2_carrier_projection_runtime_contract import (
+    CarrierProjectionRuntimeContractError,
+)
 from pure_integer_ai.experiments.ph2_w05_contract import (
     W05_ALLOWED_WORKER_COUNTS,
     W05_EVALUATION_ORDER,
@@ -23,6 +26,7 @@ from pure_integer_ai.experiments.ph2_w05_contract import (
 )
 from pure_integer_ai.experiments.ph2_w05_firewall import W05PayloadFirewall
 from pure_integer_ai.storage.backend import SQLiteBackend
+from tests.w05_historical_context import open_historical_w05_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,11 +46,21 @@ def backend_key(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def context(backend_key):
-    return open_w05_frozen_context(
+    return open_historical_w05_context(
         ROOT,
         current_remote_commit_sha1=HEAD,
         backend_profile_key=backend_key,
     )
+
+
+def test_current_authority_open_rejects_historical_parent_drift(backend_key):
+    """生产 opener 必须拒绝历史 parent 漂移，行为 harness 不得改变它。"""
+    with pytest.raises(CarrierProjectionRuntimeContractError, match="身份漂移"):
+        open_w05_frozen_context(
+            ROOT,
+            current_remote_commit_sha1=HEAD,
+            backend_profile_key=backend_key,
+        )
 
 
 def _request(context, *, mode="fresh", worker_count=1):

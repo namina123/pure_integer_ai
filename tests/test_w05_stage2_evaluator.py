@@ -7,6 +7,9 @@ from pathlib import Path
 
 import pytest
 
+import pure_integer_ai.experiments.ph2_w05_candidate as candidate_owner
+import pure_integer_ai.experiments.ph2_w05_evaluator_runtime as evaluator_runtime_owner
+import pure_integer_ai.experiments.ph2_w05_runtime as runtime_owner
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_bytes
 from pure_integer_ai.experiments.ph2_w05_adapter import adapt_w05_training_payload
 from pure_integer_ai.experiments.ph2_w05_candidate import (
@@ -25,7 +28,6 @@ from pure_integer_ai.experiments.ph2_w05_contract import (
     W05_W04_BASE_RUN_ID,
     W05RunRequest,
     digest_value,
-    open_w05_frozen_context,
 )
 from pure_integer_ai.experiments.ph2_w05_evaluator import (
     W05EvaluatorAblation,
@@ -48,11 +50,23 @@ from pure_integer_ai.experiments.ph2_w05_firewall import W05PayloadFirewall
 from pure_integer_ai.experiments.ph2_w05_learning import build_w05_learning_runtime
 from pure_integer_ai.experiments.ph2_w05_runtime import W05RuntimeConfig
 from pure_integer_ai.storage.backend import SQLiteBackend
+from tests.w05_historical_context import open_historical_w05_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HEAD = "693867db349e0ce05782fbaf6fa2b9206b26b4dc"
 GLOBAL = "data/ph2/manifests/d03_v1/ph2_global_course_manifest_v1.json"
+
+
+@pytest.fixture(autouse=True)
+def _historical_evaluator_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """评测行为消费冻结 gate，不绕过生产 authority 的独立拒绝。"""
+    for owner in (candidate_owner, evaluator_runtime_owner, runtime_owner):
+        monkeypatch.setattr(
+            owner,
+            "open_w05_frozen_context",
+            open_historical_w05_context,
+        )
 
 
 def _documents(contract_sha: str = "a" * 64, host_sha: str = "b" * 64):
@@ -67,7 +81,7 @@ def _documents(contract_sha: str = "a" * 64, host_sha: str = "b" * 64):
 def _learning(tmp_path: Path):
     """通过 W-05 public firewall 构造临时只读评估学习态。"""
     backend = SQLiteBackend(str(tmp_path / "learning.sqlite"))
-    context = open_w05_frozen_context(
+    context = open_historical_w05_context(
         ROOT,
         GLOBAL,
         current_remote_commit_sha1=HEAD,

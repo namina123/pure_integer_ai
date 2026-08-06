@@ -30,7 +30,6 @@ from pure_integer_ai.experiments.ph2_w05_contract import (
     W05_W04_BASE_RUN_ID,
     W05RunRequest,
     digest_value,
-    open_w05_frozen_context,
 )
 from pure_integer_ai.experiments.ph2_w05_firewall import W05PayloadFirewall
 from pure_integer_ai.experiments.ph2_w05_learning import (
@@ -38,6 +37,7 @@ from pure_integer_ai.experiments.ph2_w05_learning import (
 )
 from pure_integer_ai.experiments.ph2_w05_payload import W05TrainingPayload
 from pure_integer_ai.storage.backend import SQLiteBackend
+from tests.w05_historical_context import open_historical_w05_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,7 +47,7 @@ HEAD = "693867db349e0ce05782fbaf6fa2b9206b26b4dc"
 def _context_and_payload(tmp_path):
     backend = SQLiteBackend(str(tmp_path / "context.sqlite"))
     try:
-        context = open_w05_frozen_context(
+        context = open_historical_w05_context(
             ROOT,
             current_remote_commit_sha1=HEAD,
             backend_profile_key=backend.storage_capabilities().stable_key(),
