@@ -1,0 +1,260 @@
+"""JF2-04 逐文件隔离 T3 runner 的有界契约测试。"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import subprocess
+
+import pytest
+
+from scripts.t3_shard_checkpoint import prepare_state, read_state, write_state
+from scripts.t3_shard_contract import (
+    T3ShardRunnerError,
+    build_inventory,
+    select_files,
+)
+from scripts.t3_shard_runner import run_state, summarize_state
+
+
+def _git(repository: Path, *arguments: str) -> None:
+    """在有界临时仓库执行测试所需的 Git 操作。"""
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr.decode("utf-8", errors="replace"))
+
+
+def _make_repository(root: Path, tests: dict[str, str]) -> Path:
+    """建立只含极小测试文件的 clean Git 仓库。"""
+    root.mkdir()
+    tests_root = root / "tests"
+    tests_root.mkdir()
+    (root / ".gitignore").write_text("__pycache__/\n*.py[cod]\n", encoding="utf-8")
+    for name, source in tests.items():
+        (tests_root / name).write_text(source, encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "config", "user.name", "T3 Test")
+    _git(root, "config", "user.email", "t3@example.invalid")
+    _git(root, "add", ".gitignore", "tests")
+    _git(root, "commit", "-q", "-m", "freeze tests")
+    return root
+
+
+def _prepare(
+    repository: Path,
+    state_root: Path,
+    *,
+    resume: bool = False,
+    continue_on_failure: bool = False,
+):
+    """用固定单分片参数建立或恢复测试 checkpoint。"""
+    return prepare_state(
+        repository,
+        state_root,
+        resume=resume,
+        shard_count=1,
+        shard_index=0,
+        start_at=None,
+        end_at=None,
+        file_timeout_seconds=30,
+        continue_on_failure=continue_on_failure,
+    )
+
+
+def test_inventory_selection_is_deterministic_and_disjoint(tmp_path: Path) -> None:
+    """相同 inventory 的两片选择稳定、不重叠且完整覆盖。"""
+    repository = _make_repository(
+        tmp_path / "repo",
+        {
+            "test_c.py": "def test_c():\n    assert True\n",
+            "test_a.py": "def test_a():\n    assert True\n",
+            "test_b.py": "def test_b():\n    assert True\n",
+        },
+    )
+    inventory = build_inventory(repository)
+    first = select_files(
+        inventory,
+        shard_count=2,
+        shard_index=0,
+        start_at=None,
+        end_at=None,
+    )
+    second = select_files(
+        inventory,
+        shard_count=2,
+        shard_index=1,
+        start_at=None,
+        end_at=None,
+    )
+    assert set(first).isdisjoint(second)
+    assert sorted((*first, *second)) == [
+        "tests/test_a.py",
+        "tests/test_b.py",
+        "tests/test_c.py",
+    ]
+
+
+def test_each_file_gets_fresh_process_log_and_resumable_checkpoint(tmp_path: Path) -> None:
+    """执行预算中断后只续跑 pending 文件，PASS 尝试和日志不变。"""
+    repository = _make_repository(
+        tmp_path / "repo",
+        {
+            "test_a.py": "import os\ndef test_a():\n    assert os.environ['PYTHONHASHSEED'] == '0'\n",
+            "test_b.py": "def test_b():\n    assert True\n",
+        },
+    )
+    state_root = tmp_path / "state"
+    state = _prepare(repository, state_root)
+    first = run_state(repository, state_root, state, retry_failed=False, max_files=1)
+    first_attempt = first["results"]["tests/test_a.py"]["attempts"][0]
+    assert summarize_state(first)["status_counts"] == {"PASS": 1, "PENDING": 1}
+    assert "1 passed" in first_attempt["pytest_summary"]
+    assert (state_root / first_attempt["log_path"]).is_file()
+
+    resumed = _prepare(repository, state_root, resume=True)
+    completed = run_state(
+        repository,
+        state_root,
+        resumed,
+        retry_failed=False,
+        max_files=None,
+    )
+    assert summarize_state(completed)["aggregate_status"] == "PASS"
+    assert completed["results"]["tests/test_a.py"]["attempts"] == [first_attempt]
+    assert len(completed["results"]["tests/test_b.py"]["attempts"]) == 1
+    assert read_state(state_root) == completed
+
+
+def test_resume_rejects_head_or_inventory_drift(tmp_path: Path) -> None:
+    """测试内容或 HEAD 改变后，旧 checkpoint 必须 fail closed。"""
+    repository = _make_repository(
+        tmp_path / "repo",
+        {"test_a.py": "def test_a():\n    assert True\n"},
+    )
+    state_root = tmp_path / "state"
+    _prepare(repository, state_root)
+    (repository / "tests" / "test_a.py").write_text(
+        "def test_a():\n    assert False\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(T3ShardRunnerError, match="clean"):
+        _prepare(repository, state_root, resume=True)
+    _git(repository, "add", "tests/test_a.py")
+    _git(repository, "commit", "-q", "-m", "drift")
+    with pytest.raises(T3ShardRunnerError, match="漂移"):
+        _prepare(repository, state_root, resume=True)
+
+
+def test_failure_is_checkpointed_and_fail_fast_leaves_suffix_pending(tmp_path: Path) -> None:
+    """文件失败应留下正式汇总，并在 fail-fast 下保留后续 pending。"""
+    repository = _make_repository(
+        tmp_path / "repo",
+        {
+            "test_a.py": "def test_a():\n    assert False\n",
+            "test_b.py": "def test_b():\n    assert True\n",
+        },
+    )
+    state_root = tmp_path / "state"
+    state = _prepare(repository, state_root)
+    completed = run_state(
+        repository,
+        state_root,
+        state,
+        retry_failed=False,
+        max_files=None,
+    )
+    summary = summarize_state(completed)
+    assert summary["aggregate_status"] == "FAIL"
+    assert summary["status_counts"] == {"FAIL": 1, "PENDING": 1}
+    attempt = completed["results"]["tests/test_a.py"]["attempts"][0]
+    assert attempt["return_code"] == 1
+    assert "1 failed" in attempt["pytest_summary"]
+
+
+def test_continue_on_failure_runs_remaining_files(tmp_path: Path) -> None:
+    """continue 模式必须保留失败并继续取得后续文件的正式汇总。"""
+    repository = _make_repository(
+        tmp_path / "repo",
+        {
+            "test_a.py": "def test_a():\n    assert False\n",
+            "test_b.py": "def test_b():\n    assert True\n",
+        },
+    )
+    state_root = tmp_path / "state"
+    state = _prepare(repository, state_root, continue_on_failure=True)
+    completed = run_state(
+        repository,
+        state_root,
+        state,
+        retry_failed=False,
+        max_files=None,
+    )
+    assert summarize_state(completed)["status_counts"] == {"FAIL": 1, "PASS": 1}
+
+
+def test_checkpoint_is_canonical_and_must_stay_outside_repository(tmp_path: Path) -> None:
+    """状态必须 canonical，且公开仓库内路径一律拒绝。"""
+    repository = _make_repository(
+        tmp_path / "repo",
+        {"test_a.py": "def test_a():\n    assert True\n"},
+    )
+    with pytest.raises(T3ShardRunnerError, match="Git 根之外"):
+        _prepare(repository, repository / ".t3-state")
+    state_root = tmp_path / "state"
+    _prepare(repository, state_root)
+    payload = (state_root / "state.json").read_bytes()
+    assert payload.endswith(b"\n")
+    assert payload == (
+        json.dumps(
+            json.loads(payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def test_resume_seals_abandoned_attempt_and_uses_a_new_log(tmp_path: Path) -> None:
+    """强制中断留下的 RUNNING attempt 必须封存，恢复不得覆盖旧日志。"""
+    repository = _make_repository(
+        tmp_path / "repo",
+        {"test_a.py": "def test_a():\n    assert True\n"},
+    )
+    state_root = tmp_path / "state"
+    state = _prepare(repository, state_root)
+    old_log = "logs/0000-abandoned-attempt-001.log"
+    (state_root / "logs").mkdir()
+    (state_root / old_log).write_text("abandoned\n", encoding="utf-8")
+    state["results"]["tests/test_a.py"] = {
+        "status": "RUNNING",
+        "attempts": [
+            {
+                "status": "RUNNING",
+                "attempt": 1,
+                "started_at_utc": "2026-08-06T00:00:00+00:00",
+                "log_path": old_log,
+            }
+        ],
+    }
+    state["aggregate_status"] = "RUNNING"
+    write_state(state_root, state)
+
+    resumed = _prepare(repository, state_root, resume=True)
+    completed = run_state(
+        repository,
+        state_root,
+        resumed,
+        retry_failed=False,
+        max_files=None,
+    )
+    attempts = completed["results"]["tests/test_a.py"]["attempts"]
+    assert [item["status"] for item in attempts] == ["INTERRUPTED", "PASS"]
+    assert attempts[0]["log_path"] == old_log
+    assert attempts[1]["log_path"] != old_log
+    assert (state_root / old_log).read_text(encoding="utf-8") == "abandoned\n"
