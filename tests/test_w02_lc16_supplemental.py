@@ -9,12 +9,12 @@ import pytest
 
 from pure_integer_ai.experiments.ph2_d03_lc16_overlay_catalog import (
     OVERLAY_MANIFEST_PATH,
-    build_d03_lc16_successor_overlay,
 )
 from pure_integer_ai.experiments.ph2_d03_lc16_overlay_contract import (
     read_d03_lc16_successor_overlay,
 )
 from pure_integer_ai.experiments.ph2_w02_lc16_supplemental_catalog import (
+    W02Lc16SupplementalCatalogError,
     build_w02_lc16_supplemental_manifest,
     verify_w02_lc16_supplemental_files,
 )
@@ -139,8 +139,9 @@ def _safe_pack(overlay):
 
 @pytest.fixture(scope="module")
 def overlay():
-    """读取并严格回验当前冻结 overlay。"""
-    return build_d03_lc16_successor_overlay(ROOT)
+    """读取已经 append-only 发布的历史 overlay。"""
+    return read_d03_lc16_successor_overlay(
+        ROOT / Path(*OVERLAY_MANIFEST_PATH.split("/")))
 
 
 @pytest.fixture(scope="module")
@@ -159,11 +160,14 @@ def report(overlay):
     )
 
 
-def test_formal_manifest_is_canonical_and_parent_verified():
-    """正式 supplemental manifest 必须由公开 parent 重建且仍为零执行。"""
+def test_formal_manifest_is_frozen_and_current_rebuild_fails_closed():
+    """正式 manifest 保持冻结，证据演进后重建和严格回验均须拒绝。"""
     manifest = read_w02_lc16_supplemental_manifest(FORMAL_MANIFEST)
-    assert manifest == build_w02_lc16_supplemental_manifest(ROOT)
-    verify_w02_lc16_supplemental_files(manifest, repository_root=ROOT)
+    assert manifest.canonical_bytes() == FORMAL_MANIFEST.read_bytes()
+    with pytest.raises(W02Lc16SupplementalCatalogError, match="身份漂移"):
+        verify_w02_lc16_supplemental_files(manifest, repository_root=ROOT)
+    with pytest.raises(W02Lc16SupplementalCatalogError, match="overlay"):
+        build_w02_lc16_supplemental_manifest(ROOT)
     assert manifest.parent_overlay_sha256 == OVERLAY_SHA256
     state = manifest.execution_state.to_value()
     assert state["runtime_observed"] == 0
@@ -291,7 +295,7 @@ def test_receipt_readback_revalidates_the_full_public_contract(tmp_path, report)
 
 def test_manifest_writer_is_idempotent_but_rejects_different_bytes(tmp_path):
     """预注册 manifest 写入保持追加式，不接受异内容覆盖。"""
-    manifest = build_w02_lc16_supplemental_manifest(ROOT)
+    manifest = read_w02_lc16_supplemental_manifest(FORMAL_MANIFEST)
     target = tmp_path / "manifest.json"
     assert write_w02_lc16_supplemental_manifest(manifest, target) == target
     assert write_w02_lc16_supplemental_manifest(manifest, target) == target
@@ -314,20 +318,16 @@ def test_manifest_mutation_is_fail_closed():
             type(manifest).from_dict(value)
 
 
-def test_safe_result_pack_round_trip_and_runner_are_read_only(tmp_path, overlay):
-    """新 producer pack 可规范回读并形成 PASS，runner 不负责发布。"""
+def test_safe_result_pack_round_trip_and_stale_runner_fails_closed(tmp_path, overlay):
+    """安全 pack 可规范回读；历史 manifest 漂移时 runner 必须拒绝重跑。"""
     target = tmp_path / "safe-result-pack.json"
     original = _safe_pack(overlay).canonical_bytes()
     target.write_bytes(original)
     pack, sha256 = read_w02_lc16_supplemental_safe_result_pack(target)
     assert pack.canonical_bytes() == original
-    outcome = run_w02_lc16_supplemental_safe_pack(
-        target, repository_root=ROOT)
-    assert outcome.status == "PASS"
-    assert outcome.safe_pack_sha256 == sha256
-    assert outcome.report is not None
-    assert outcome.report.safe_result_pack_sha256 == sha256
-    assert outcome.report.private_bundle_commitment_sha256 == "9" * 64
+    assert len(sha256) == 64
+    with pytest.raises(W02Lc16SupplementalRunnerError, match="无法聚合"):
+        run_w02_lc16_supplemental_safe_pack(target, repository_root=ROOT)
     assert target.read_bytes() == original
 
 

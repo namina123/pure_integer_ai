@@ -11,7 +11,7 @@ import pytest
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_SAFE_TMP_ROOT = _REPO_ROOT / ".pytest_tmp_safe"
+_SAFE_TMP_ROOT = _REPO_ROOT.parent / ".pure_integer_ai_pytest_tmp_safe"
 
 
 def _safe_name(value: str) -> str:

@@ -14,6 +14,7 @@ from scripts.t3_shard_checkpoint import prepare_state  # noqa: E402
 from scripts.t3_shard_contract import (  # noqa: E402
     T3ShardRunnerError,
     build_inventory,
+    read_head,
     select_files,
 )
 from scripts.t3_shard_runner import run_state, summarize_state  # noqa: E402
@@ -52,9 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def default_state_root(repository_root: Path, shard_count: int, shard_index: int) -> Path:
     """把默认证据目录放在公开 Git 根之外。"""
+    head = read_head(repository_root)[:12]
     return (
         repository_root.resolve().parent
         / "t3_public_validation_artifacts"
+        / head
         / f"file-shard-{shard_index:03d}-of-{shard_count:03d}"
     )
 

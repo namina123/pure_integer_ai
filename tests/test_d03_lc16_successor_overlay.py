@@ -63,19 +63,22 @@ def _sha(relative_path: str) -> str:
 
 @pytest.fixture(scope="module")
 def built_overlay() -> D03Lc16SuccessorOverlay:
-    """从公开冻结依赖构建唯一 overlay。"""
-    return build_d03_lc16_successor_overlay(REPOSITORY_ROOT)
+    """读取已经 append-only 发布的唯一历史 overlay。"""
+    return read_d03_lc16_successor_overlay(FORMAL_PATH)
 
 
-def test_formal_overlay_is_canonical_rebuild_and_all_files_verify(
+def test_formal_overlay_stays_canonical_and_current_rebuild_fails_closed(
         built_overlay: D03Lc16SuccessorOverlay,
         ) -> None:
-    """正式文件必须可规范回读、逐字节回验并与目录重建相同。"""
+    """正式字节保持冻结；证据演进后不得伪装成当前可重建对象。"""
     formal = read_d03_lc16_successor_overlay(FORMAL_PATH)
     assert formal == built_overlay
     assert formal.canonical_bytes() == FORMAL_PATH.read_bytes()
     assert formal.sha256() == _sha(OVERLAY_MANIFEST_PATH)
-    verify_d03_lc16_overlay_files(formal, repository_root=REPOSITORY_ROOT)
+    with pytest.raises(D03Lc16OverlayError, match="身份漂移"):
+        verify_d03_lc16_overlay_files(formal, repository_root=REPOSITORY_ROOT)
+    with pytest.raises(catalog.D03Lc16OverlayCatalogError, match="无法严格回验"):
+        build_d03_lc16_successor_overlay(REPOSITORY_ROOT)
 
 
 def test_overlay_preserves_d03_v1_and_binds_directional_parent(
