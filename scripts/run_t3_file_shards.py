@@ -26,6 +26,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repository-root", type=Path, default=REPOSITORY_ROOT)
     parser.add_argument("--state-root", type=Path)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--carry-forward-from",
+        action="append",
+        type=Path,
+        help="从较早 HEAD 的 state.json 受控继承 PASS，可重复指定",
+    )
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
@@ -106,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             end_at=args.end_at,
             file_timeout_seconds=args.file_timeout_seconds,
             continue_on_failure=args.continue_on_failure,
+            carry_forward_from=tuple(args.carry_forward_from or ()),
         )
         state = run_state(
             repository_root,
