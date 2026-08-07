@@ -16,6 +16,7 @@ from scripts.performance_baseline_receipt import (
     read_performance_baseline_receipt,
 )
 from scripts.performance_baseline_contract import PerformanceBaselineError
+from scripts.performance_baseline_contract import read_state
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,15 +61,26 @@ def test_p0_receipt_replays_external_artifacts() -> None:
 
 def test_p0_receipt_publish_is_append_only_when_checkpoint_exists(
         tmp_path: Path,
+        monkeypatch,
         ) -> None:
     if not (CHECKPOINT / "state.json").exists():
         pytest.skip("本地 Git 外 P0 checkpoint 不存在")
+    frozen_head = read_state(CHECKPOINT)["manifest"]["head"]
+    monkeypatch.setattr(
+        "scripts.performance_baseline_receipt.read_head",
+        lambda root: frozen_head,
+    )
     target = tmp_path / "performance_baseline_receipt.json"
     value = publish_performance_baseline_receipt(
         ROOT, CHECKPOINT, target=target)
     assert read_performance_baseline_receipt(ROOT, CHECKPOINT, target) == value
     with pytest.raises(ValueError, match="禁止覆盖"):
         publish_performance_baseline_receipt(ROOT, CHECKPOINT, target=target)
+
+
+def test_published_p0_receipt_rejects_duplicate_before_historical_rebuild() -> None:
+    with pytest.raises(ValueError, match="禁止覆盖"):
+        publish_performance_baseline_receipt(ROOT, CHECKPOINT)
 
 
 def test_p0_receipt_rejects_malformed_result_and_external_path(
