@@ -365,6 +365,7 @@ class PostWeaningOperationRuntime:
                 after,
             )
             self._validate_committed(report)
+            self.ctx.backend.commit()
             self._reports.append(report)
             return PostWeaningOperationRun(result, report)
         except BaseException as exc:
@@ -415,6 +416,7 @@ class PostWeaningOperationRuntime:
                 after,
             )
             self._validate_committed(report)
+            self.ctx.backend.commit()
             self._reports.append(report)
             return PostWeaningOperationRun(result, report)
         except BaseException as exc:
