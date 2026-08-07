@@ -5,7 +5,7 @@
 Production code defaults to value structures. Behavioral classes are retained only for explicit lifecycles, resources, caches, persistence boundaries, or replaceable protocols. Every new production class must declare its object category on the line immediately before the class or its first decorator.
 
 ```python
-# object-model: value
+# object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
 class SourceRef:
     source_id: int
@@ -25,7 +25,12 @@ class SourceReadError(Exception):
 
 规则如下：
 
-- `value` 必须使用 `@dataclass(frozen=True, slots=True)`。
+- `value` 必须使用 `@dataclass(frozen=True, slots=True)`，并声明
+  `representation=struct` 与 `interop` 状态。
+- `representation=struct` 表达“字段定义身份、行为仅作值级校验/派生”的语义，
+  不承诺 CPython、C 或其他语言的物理内存 ABI。
+- `interop=pending` 表示尚未完成跨语言字段与 canonical 编码审计；
+  `interop=portable` 表示已通过该审计；`interop=python-only` 表示需要适配器。
 - `lifecycle` 必须声明 `owner` 和 `cleanup`，明确状态归属与清理边界。
 - `protocol` 和 `exception` 必须与对应继承家族一致。
 - 冻结 baseline 只承认 guard 引入前已经存在的类；不得把新类加入 baseline。
@@ -35,7 +40,10 @@ class SourceReadError(Exception):
 
 The rules are:
 
-- `value` requires `@dataclass(frozen=True, slots=True)`.
+- `value` requires `@dataclass(frozen=True, slots=True)`,
+  `representation=struct`, and an explicit `interop` state.
+- `representation=struct` is a semantic record contract, not a physical ABI.
+- `interop` is one of `pending`, `portable`, or `python-only`.
 - `lifecycle` requires `owner` and `cleanup` metadata.
 - `protocol` and `exception` must match their inheritance families.
 - The frozen baseline covers only classes that existed when the guard was introduced. New classes must not be added to it.

@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from pure_integer_ai.crosscut.guards.float_guard import assert_no_float
 
 
-@dataclass(frozen=True)
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
 class Rational:
     """有理数 num/den。den > 0（符号承载于 num）。纯值，无算术方法。"""
 
@@ -36,7 +37,8 @@ class Rational:
             raise ValueError(f"Rational.den 须为正，got den={self.den}")
 
 
-@dataclass(frozen=True)
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
 class FixedQuotient:
     """代分数定点商：值 = M/B^k + r/(b·B^k) = a/b（其中 a·B^k = M·b + r）。
 

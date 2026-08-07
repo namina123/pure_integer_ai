@@ -45,7 +45,7 @@ def test_all_four_declared_object_model_families_pass(tmp_path):
         """from dataclasses import dataclass
 from typing import Protocol
 
-# object-model: value
+# object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
 class Value:
     number: int
@@ -77,7 +77,7 @@ def test_value_requires_frozen_slots_dataclass(tmp_path):
         source_root / "bad_value.py",
         """from dataclasses import dataclass
 
-# object-model: value
+# object-model: value; representation=struct; interop=pending
 @dataclass
 class MutableValue:
     number: int
@@ -89,6 +89,46 @@ class MutableValue:
 
     assert any("frozen=True" in item for item in violations)
     assert any("slots=True" in item for item in violations)
+
+
+def test_value_requires_registered_struct_and_interop_metadata(tmp_path):
+    source_root, baseline_path = _empty_baseline(tmp_path)
+    _write(
+        source_root / "bad_metadata.py",
+        """from dataclasses import dataclass
+
+# object-model: value; representation=object; interop=unknown
+@dataclass(frozen=True, slots=True)
+class AmbiguousValue:
+    number: int
+""",
+    )
+
+    violations, _ = object_model_lint.check_object_model(
+        source_root, baseline_path)
+
+    assert any("representation 未注册" in item for item in violations)
+    assert any("interop 未注册" in item for item in violations)
+
+
+def test_value_rejects_missing_struct_migration_metadata(tmp_path):
+    source_root, baseline_path = _empty_baseline(tmp_path)
+    _write(
+        source_root / "missing_metadata.py",
+        """from dataclasses import dataclass
+
+# object-model: value
+@dataclass(frozen=True, slots=True)
+class UnclassifiedValue:
+    number: int
+""",
+    )
+
+    violations, _ = object_model_lint.check_object_model(
+        source_root, baseline_path)
+
+    assert any("interop" in item for item in violations)
+    assert any("representation" in item for item in violations)
 
 
 def test_lifecycle_requires_owner_and_cleanup_boundaries(tmp_path):

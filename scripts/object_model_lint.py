@@ -17,6 +17,8 @@ DEFAULT_BASELINE = Path(__file__).with_name("object_model_baseline_v1.json")
 BASELINE_SCHEMA = "pure_integer_ai.object_model_baseline"
 BASELINE_VERSION = 1
 MODEL_KINDS = frozenset({"value", "lifecycle", "protocol", "exception"})
+VALUE_REPRESENTATIONS = frozenset({"struct"})
+VALUE_INTEROP_STATES = frozenset({"pending", "portable", "python-only"})
 BASELINE_FIELDS = frozenset({
     "id", "dataclass", "frozen", "slots", "protocol", "exception",
 })
@@ -390,7 +392,24 @@ def _validate_marker(fact: dict[str, object]) -> list[str]:
         return ["object-model kind 不合法"]
     fields = frozenset(marker) - {"kind"}
     problems: list[str] = []
-    if kind == "lifecycle":
+    if kind == "value":
+        missing = {"representation", "interop"} - fields
+        unknown = fields - {"representation", "interop"}
+        if missing:
+            problems.append(
+                "value 缺少元数据: " + ", ".join(sorted(missing)))
+        if unknown:
+            problems.append(
+                "value 含未知元数据: " + ", ".join(sorted(unknown)))
+        representation = marker.get("representation")
+        if ("representation" in fields
+                and representation not in VALUE_REPRESENTATIONS):
+            problems.append(
+                "value representation 未注册: " + str(representation))
+        interop = marker.get("interop")
+        if "interop" in fields and interop not in VALUE_INTEROP_STATES:
+            problems.append("value interop 未注册: " + str(interop))
+    elif kind == "lifecycle":
         missing = {"owner", "cleanup"} - fields
         unknown = fields - {"owner", "cleanup"}
         if missing:
