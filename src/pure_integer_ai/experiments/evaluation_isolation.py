@@ -423,6 +423,9 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
                 "A-10 runtime clone 缺少 M-07 resolver runtime")
         cloned.attractor_runtime = ctx.attractor_runtime.clone_for_context(
             cloned)
+    if ctx.cross_memory_use_runtime is not None:
+        cloned.cross_memory_use_runtime = (
+            ctx.cross_memory_use_runtime.clone_for_context(cloned))
     if ctx.memory_use_runtime is not None:
         if cloned.attractor_runtime is None:
             raise EvaluationIsolationError(

@@ -169,6 +169,12 @@ class MemoryUseRuntime:
             raise ValueError("M-08 只为实际使用的非 Use Memory 对象写 Use")
         if candidate_ref.memory_space.stable_key() not in self._candidate_logs:
             raise ValueError("processing candidate 不属于 M-07 查询联邦")
+        cross_runtime = None
+        if candidate_ref.memory_space != self.event_log.memory_space_identity:
+            cross_runtime = self._ctx.cross_memory_use_runtime
+            if cross_runtime is None:
+                raise ValueError("跨空间 M-08 Use 缺少 bridge runtime")
+            cross_runtime.require_target(candidate_ref)
         self._memory_declaration(candidate_ref)
         if not isinstance(influence_kind, MemoryLinkedRef):
             raise TypeError("influence_kind 必须是一等引用")
@@ -236,6 +242,8 @@ class MemoryUseRuntime:
             MEMORY_EVENT_EPISODE, episode_ref, state.scope, episode_payload))
         use = self.event_log.append(MemoryEvent(
             MEMORY_EVENT_USE, use_ref, state.scope, use_payload))
+        if cross_runtime is not None:
+            cross_runtime.record(use)
         return MemoryUseAttributionResult(processing, episode, use)
 
     def record_outcome(
@@ -358,6 +366,9 @@ class MemoryUseRuntime:
             ]
             for key in candidate_spaces:
                 result.extend((len(key), *key))
+            bridge = self._ctx.cross_memory_use_runtime
+            bridge_key = () if bridge is None else bridge.state_key()
+            result.extend((len(bridge_key), *bridge_key))
             result.extend(self.protocol.stable_key())
             return tuple(result)
         return (

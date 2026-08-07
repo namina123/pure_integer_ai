@@ -38,9 +38,13 @@ from pure_integer_ai.cognition.understanding.memory_intake import (
     ObservationIntakeDraft,
 )
 from pure_integer_ai.experiments.facility_readiness_scenarios import (
+    _ACCESS,
     _goals,
     _instruction,
     _question_dialogue,
+)
+from pure_integer_ai.experiments.cross_memory_use_runtime import (
+    install_cross_memory_use_runtime,
 )
 from pure_integer_ai.experiments.memory_resolver_runtime import (
     federate_hypothesis_memory_runtimes,
@@ -205,6 +209,7 @@ def install_pw01_controlled_query(ctx: TrainContext) -> None:
         raise TypeError("PW-01 ctx 必须是 TrainContext")
     if ctx.attractor_runtime is None:
         raise ValueError("PW-01 安装前缺少 A-10 runtime")
+    install_cross_memory_use_runtime(ctx, recovery_access=_ACCESS)
     mapper = PW01HypothesisMapper(
         ctx.attractor_runtime.mapper,
         ctx.memory_read_events.memory_space_identity,

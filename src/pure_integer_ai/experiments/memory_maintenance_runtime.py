@@ -29,10 +29,14 @@ class MemoryMaintenanceRuntime:
                 ctx.memory_interact_aggregates,
         )):
             raise ValueError("M-09 aggregate 不属于当前 TrainContext")
-        if service.event_log is not ctx.memory_use_runtime.event_log:
-            raise ValueError("M-09 必须绑定 M-08 使用的 Memory event log")
+        external_uses = service.event_log is not ctx.memory_use_runtime.event_log
+        if external_uses and (
+                service.aggregates is not ctx.memory_read_aggregates
+                or ctx.cross_memory_use_runtime is None):
+            raise ValueError("跨空间 M-09 必须绑定阅读 aggregate 和 Use bridge")
         self._ctx = ctx
         self.service = service
+        self._external_uses = external_uses
 
     def assess(
             self,
@@ -51,6 +55,18 @@ class MemoryMaintenanceRuntime:
             ):
         """按注入 retention 规则执行一次巩固尝试。"""
         return self.service.consolidate(hypothesis_ref, access=access)
+
+    def cross_space_uses(
+            self,
+            hypothesis_ref: MemoryObjectRef,
+            *,
+            access: MemoryAccessContext,
+            ):
+        """返回独立 interaction timeline 的最小 Use 事实，不改写 read aggregate。"""
+        if not self._external_uses:
+            return ()
+        return self._ctx.cross_memory_use_runtime.uses_for(
+            hypothesis_ref, access=access)
 
     def resolve_lifecycle(self, *args, **kwargs):
         """把生命周期修正转发给已绑定 H-04 的 M-09 service。"""
@@ -95,7 +111,17 @@ class MemoryMaintenanceRuntime:
 
     def state_key(self) -> tuple[int, ...]:
         """返回 M-09 service 的完整注入状态。"""
-        return self.service.state_key()
+        if not self._external_uses:
+            return self.service.state_key()
+        bridge_key = self._ctx.cross_memory_use_runtime.state_key()
+        service_key = self.service.state_key()
+        return (
+            2,
+            len(service_key),
+            *service_key,
+            len(bridge_key),
+            *bridge_key,
+        )
 
 
 def install_memory_maintenance_runtime(

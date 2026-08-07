@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from scripts.publish_pw00a_formal_start_receipt import execute_formal_start
+from pure_integer_ai.experiments.facility_readiness_scenarios import (
+    prepare_facility_context,
+)
+from pure_integer_ai.experiments.pw00a_formal_transaction import (
+    PW00AFormalEventStore,
+)
+from pure_integer_ai.experiments.train_context import make_train_context
+from pure_integer_ai.storage.backend import SQLiteBackend
 from scripts.publish_pw01_formal_successor_receipt import (
     RECEIPT_PATH,
     STATUS,
@@ -19,12 +26,55 @@ from scripts.publish_pw01_formal_successor_receipt import (
 RECEIPT_SHA256 = "236f02c5750589a1bafea9d204be3d7895643e498cd0bcb65c0a94e4dbf67ed7"
 
 
+def _identity(path: Path) -> dict[str, int | str]:
+    """返回测试 base 的文件身份。"""
+    payload = path.read_bytes()
+    return {"sha256": hashlib.sha256(payload).hexdigest(), "size_bytes": len(payload)}
+
+
+def _base_fixture(root: Path, database: Path):
+    """不调用历史 authority，构造含唯一 PW-00A 双事件的最小继承 base。"""
+    del root
+    backend = SQLiteBackend(str(database))
+    try:
+        ctx = make_train_context(backend, companion=True)
+        prepare_facility_context(ctx)
+        store = PW00AFormalEventStore(backend)
+        manifest_sha256 = "1" * 64
+        prepared = store.prepared(
+            run_id=2026080701,
+            publish_epoch=1,
+            manifest_sha256=manifest_sha256,
+            payload={"fixture": 1},
+        )
+        published = store.published(
+            run_id=2026080701,
+            publish_epoch=1,
+            manifest_sha256=manifest_sha256,
+            payload={"fixture": 2},
+        )
+    finally:
+        backend.close()
+    events = [
+        {
+            "event_kind": item.event_kind,
+            "event_seq": item.event_seq,
+            "manifest_sha256": item.manifest_sha256,
+            "payload_sha256": item.payload_sha256,
+            "publish_epoch": item.publish_epoch,
+            "run_id": item.run_id,
+        }
+        for item in (prepared, published)
+    ]
+    return {"formal_events": events, "runtime_database": _identity(database)}
+
+
 def test_pw01_formal_successor_inherits_base_without_overwrite(tmp_path: Path):
     """由临时 PW-00A 原件产生 successor，base 不变且目标不可覆盖。"""
     root = Path(__file__).resolve().parents[1]
     base_database = tmp_path / "pw00a-base.sqlite3"
     successor_database = tmp_path / "pw01-successor.sqlite3"
-    base_receipt = execute_formal_start(root, base_database)
+    base_receipt = _base_fixture(root, base_database)
     base_bytes = base_database.read_bytes()
 
     def base_reader(*args, **kwargs):

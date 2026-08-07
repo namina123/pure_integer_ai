@@ -217,6 +217,11 @@ def post_weaning_component_state_key(ctx: TrainContext) -> tuple[int, ...]:
             (10, companion.space_id)):
         result.extend((tag, *_packed(registry.identity(space_id).stable_key())))
     result.extend((11, *_packed(_batch_config_key(ctx))))
+    if ctx.cross_memory_use_runtime is not None:
+        result.extend((
+            12,
+            *_packed(ctx.cross_memory_use_runtime.state_key()),
+        ))
     return tuple(result)
 
 
@@ -442,6 +447,9 @@ class PostWeaningOperationRuntime:
             )
             for space in (self.ctx.memory_read, self.ctx.memory_interact)
         )
+        if self.ctx.cross_memory_use_runtime is not None:
+            memory_count += len(
+                self.ctx.cross_memory_use_runtime.repository.all_records())
         companion = self.ctx.memory_read_intake.source_intake.companion
         return PostWeaningStateSnapshot(
             self.core_reader.read(),

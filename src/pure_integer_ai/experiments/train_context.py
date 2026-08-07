@@ -77,6 +77,7 @@ class TrainContext:
     memory_hot_set_runtime: Any = None
     attractor_runtime: Any = None
     memory_use_runtime: Any = None
+    cross_memory_use_runtime: Any = None
     memory_maintenance_runtime: Any = None
     memory_read_intake: Any = None
     memory_interact_intake: Any = None

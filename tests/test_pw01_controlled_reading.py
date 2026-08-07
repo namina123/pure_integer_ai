@@ -5,7 +5,18 @@ from pure_integer_ai.cognition.shared.hypothesis import (
     EVIDENCE_REFUTE,
     EVIDENCE_SUPPORT,
 )
-from pure_integer_ai.cognition.shared.memory_event import MEMORY_EVENT_USE
+from pure_integer_ai.cognition.shared.memory_decay import (
+    LinearTimelineDecayPolicy,
+    RetentionDecayCurve,
+)
+from pure_integer_ai.cognition.shared.memory_event import (
+    MEMORY_EVENT_USE,
+    RETENTION_EPISODIC,
+)
+from pure_integer_ai.cognition.shared.memory_maintenance import (
+    MemoryMaintenanceService,
+    MemoryRetentionDecision,
+)
 from pure_integer_ai.cognition.shared.memory_overlay import MemoryAccessContext
 from pure_integer_ai.cognition.shared.post_weaning import PostWeaningIntakeRequest
 from pure_integer_ai.experiments.evaluation_isolation import isolated_evaluation
@@ -21,6 +32,9 @@ from pure_integer_ai.experiments.facility_readiness_scenarios import (
 from pure_integer_ai.experiments.post_weaning_runtime import (
     PostWeaningDryRunRuntime,
 )
+from pure_integer_ai.experiments.memory_maintenance_runtime import (
+    install_memory_maintenance_runtime,
+)
 from pure_integer_ai.experiments.pw01_controlled_reading import (
     PW01ControlledReadingParser,
     PW01_HYPOTHESIS_KIND,
@@ -30,6 +44,62 @@ from pure_integer_ai.experiments.pw01_controlled_reading import (
 )
 from pure_integer_ai.experiments.train_context import make_train_context
 from pure_integer_ai.storage.backend import SQLiteBackend
+from pure_integer_ai.storage.placement import (
+    TemperatureProfile,
+    TemperatureTier,
+)
+from pure_integer_ai.storage.storage_role import StorageRoleRegistry
+
+
+class _NoRetention:
+    """桥索引专项只读 retention 策略。"""
+
+    def state_key(self):
+        """返回固定策略身份。"""
+        return (2026080781,)
+
+    def assess(self, snapshot):
+        """保持 episodic，不把 Use 次数冒充 Evidence 理由。"""
+        del snapshot
+        return MemoryRetentionDecision(False, (), (2026080782,), self.state_key())
+
+
+class _NoPlacement:
+    """桥索引专项不产生物理迁移 hint。"""
+
+    def state_key(self):
+        """返回固定策略身份。"""
+        return (2026080783,)
+
+    def hints(self, snapshot):
+        """保持只读，不产生 hint。"""
+        del snapshot
+        return ()
+
+
+def _read_maintenance(ctx):
+    """装配 read aggregate + interaction bridge 的 M-09 只读入口。"""
+    activation = LinearTimelineDecayPolicy(
+        (2026080784,),
+        (RetentionDecayCurve(RETENTION_EPISODIC, 100, 1, 0),),
+        (2026080785,),
+    )
+    profile = TemperatureProfile(
+        (2026080786,),
+        (
+            TemperatureTier((2026080787,), 0),
+            TemperatureTier((2026080788,), 1),
+        ),
+    )
+    service = MemoryMaintenanceService(
+        ctx.memory_read_aggregates,
+        activation,
+        _NoRetention(),
+        _NoPlacement(),
+        StorageRoleRegistry(),
+        profile,
+    )
+    return install_memory_maintenance_runtime(ctx, service)
 
 
 def _question(ctx, source, observation):
@@ -167,8 +237,25 @@ def test_pw01_reading_causes_held_out_answer_and_survives_restart(tmp_path):
             ctx.memory_read_events.memory_space_identity)
         assert use.episode_ref.memory_space == (
             ctx.memory_interact_events.memory_space_identity)
+        bridge_records = ctx.cross_memory_use_runtime.uses_for(
+            use.memory_ref, access=_ACCESS)
+        assert len(bridge_records) == 1
+        assert ctx.cross_memory_use_runtime.uses_for(
+            use.memory_ref, access=same_user_other_session) == bridge_records
+        assert ctx.cross_memory_use_runtime.uses_for(
+            use.memory_ref, access=other_user) == ()
+        assert ctx.cross_memory_use_runtime.audit_use(
+            bridge_records[0], access=_ACCESS) is not None
+        assert ctx.cross_memory_use_runtime.audit_use(
+            bridge_records[0], access=same_user_other_session) is None
         ctx.memory_read_aggregates.require_clean(access=_ACCESS)
         ctx.memory_interact_aggregates.require_clean(access=_ACCESS)
+        maintenance = _read_maintenance(ctx)
+        assessment = maintenance.assess(use.memory_ref, access=_ACCESS)
+        assert assessment.snapshot.aggregate.last_used_seq == 0
+        assert assessment.snapshot.uses == ()
+        assert maintenance.cross_space_uses(
+            use.memory_ref, access=_ACCESS) == bridge_records
         projection_key = _refresh_projection(ctx).stable_key()
     finally:
         backend.close()
@@ -186,5 +273,10 @@ def test_pw01_reading_causes_held_out_answer_and_survives_restart(tmp_path):
             pw01_source(parser_version=1)}
         assert resumed.report.core_unchanged
         assert resumed.report.query_closed
+        resumed_use = _uses(restored)[-1].event.payload
+        # 同一确定性 question 重放复用同一 Use 身份，桥索引也必须保持一条。
+        assert len(restored.cross_memory_use_runtime.uses_for(
+            resumed_use.memory_ref, access=_ACCESS)) == 1
+        assert restored.cross_memory_use_runtime.recover(access=_ACCESS) == 0
     finally:
         restored_backend.close()
