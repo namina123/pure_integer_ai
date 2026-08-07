@@ -13,8 +13,6 @@ from scripts.performance_successor_receipt import (
     V2_CHANGE_COMMIT,
     V2_PARENT_COMMIT,
     V2_RECEIPT_PATH,
-    V3_CHANGE_COMMIT,
-    V3_PARENT_COMMIT,
     V3_RECEIPT_PATH,
     V4_CHANGE_COMMIT,
     V4_PARENT_COMMIT,
@@ -43,6 +41,9 @@ PUBLISHED_V2_SHA256 = (
 )
 PUBLISHED_V3_SHA256 = (
     "13ca4b1d2256b097c7c93481ca632702b24336a161fa683250229e025ec13a8e"
+)
+PUBLISHED_V4_SHA256 = (
+    "71cc8c02c1dd7d663cc3b551e5c46d3584cf9fb37ed6072f3ea611c34b61e97f"
 )
 
 
@@ -83,6 +84,18 @@ def test_published_v3_receipt_is_historical_and_strictly_invalidated() -> None:
     }
     with pytest.raises(ValueError, match="当前 identity 漂移"):
         read_v3_performance_successor_receipt(ROOT)
+
+
+def test_published_v4_receipt_is_canonical_and_current() -> None:
+    target = ROOT / V4_RECEIPT_PATH
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == PUBLISHED_V4_SHA256
+    value = read_v4_performance_successor_receipt(ROOT)
+    assert value["status"] == "PERFORMANCE_SUCCESSOR_EVIDENCED"
+    assert value["prior_successor_receipt"]["sha256"] == PUBLISHED_V3_SHA256
+    assert value["readiness_transition"] == {
+        "LANGUAGE_READINESS_REPUBLISHED": 0,
+        "PW00A_STARTED": 0,
+    }
 
 
 def test_v1_performance_receipt_build_is_invalidated_by_v2_source() -> None:
