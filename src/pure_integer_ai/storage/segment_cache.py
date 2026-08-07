@@ -274,6 +274,11 @@ class SegmentPageCache:
             if flush is None:
                 raise SegmentCacheError("清空含 dirty 记录的热集必须提供 flush")
             self.flush_dirty(flush)
+            # flush 回调允许观察 owner，但不得借清空流程绕过新状态的协议检查。
+            if any(item.pinned for item in self._entries.values()):
+                raise SegmentCacheError("清空热集前必须释放全部 pin")
+            if any(item.dirty for item in self._entries.values()):
+                return self.evict(tuple(sorted(self._entries)))
         # 完整 clean/unpinned 热集无需逐条重新校验或重算大小。
         removed = len(self._entries)
         self._entries.clear()

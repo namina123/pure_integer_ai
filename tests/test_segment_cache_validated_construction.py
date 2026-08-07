@@ -6,6 +6,7 @@ import pytest
 from pure_integer_ai.storage.sealed_segment import SegmentBudget, SegmentRecord
 from pure_integer_ai.storage.segment_cache import (
     CachedSegmentRecord,
+    SegmentCacheError,
     SegmentPageCache,
 )
 
@@ -81,3 +82,18 @@ def test_owner_validated_get_skips_key_rescan_but_public_get_stays_guarded(
     assert cache._get_validated((99,), (1,)) is not None
     with pytest.raises(AssertionError, match="must not rescan"):
         cache.get((99,), (1,))
+
+
+def test_clear_rechecks_reentrant_dirty_state_after_flush() -> None:
+    first = SegmentRecord((1,), (11,))
+    second = SegmentRecord((2,), (22,))
+    cache = SegmentPageCache(SegmentBudget(3, 1_000_000))
+    cache.put_dirty((99,), first)
+
+    def reentrant_flush(_records) -> None:
+        cache.put_dirty((99,), second)
+
+    with pytest.raises(SegmentCacheError, match="dirty"):
+        cache.clear(flush=reentrant_flush)
+    assert cache.object_count == 2
+    assert cache.get((99,), (2,)) is not None
