@@ -34,6 +34,35 @@ def encode_integer_tuple(values: tuple[int, ...]) -> bytes:
     return bytes(encoded)
 
 
+def encoded_integer_tuple_size(values: tuple[int, ...]) -> int:
+    """直接计算规范整数流字节数，不分配实际编码。"""
+    strict_integer_tuple(values, label="integer codec values", empty=True)
+    size = _unsigned_varint_size(len(values))
+    for value in values:
+        unsigned = value * 2 if value >= 0 else (-value * 2) - 1
+        size += _unsigned_varint_size(unsigned)
+    return size
+
+
+def encoded_framed_integer_tuple_size(
+        values: tuple[tuple[int, ...], ...],
+        ) -> int:
+    """计算按长度分帧的多个整数键的规范编码字节数。"""
+    if not isinstance(values, tuple):
+        raise ValueError("framed integer codec values 必须是 tuple")
+    item_count = 0
+    for value in values:
+        strict_integer_tuple(
+            value, label="framed integer codec value", empty=True)
+        item_count += 1 + len(value)
+    size = _unsigned_varint_size(item_count)
+    for value in values:
+        size += _signed_varint_size(len(value))
+        for item in value:
+            size += _signed_varint_size(item)
+    return size
+
+
 def decode_integer_tuple(data: bytes) -> tuple[int, ...]:
     """解码规范整数流，并拒绝截断、尾随字节和非最短 varint。"""
     if not isinstance(data, bytes) or not data:
@@ -69,6 +98,21 @@ def _append_unsigned(target: bytearray, value: int) -> None:
         target.append((value & 127) | 128)
         value >>= 7
     target.append(value)
+
+
+def _unsigned_varint_size(value: int) -> int:
+    """返回非负严格整数的最短 unsigned varint 字节数。"""
+    if type(value) is not int or value < 0:
+        raise ValueError("unsigned varint 只能计算非负严格整数")
+    return max(1, (value.bit_length() + 6) // 7)
+
+
+def _signed_varint_size(value: int) -> int:
+    """返回严格整数经 zigzag 后的最短 unsigned varint 字节数。"""
+    if type(value) is not int:
+        raise ValueError("zigzag varint 只能计算严格整数")
+    unsigned = value * 2 if value >= 0 else (-value * 2) - 1
+    return _unsigned_varint_size(unsigned)
 
 
 def _read_unsigned(data: bytes, cursor: int) -> tuple[int, int]:
@@ -148,6 +192,8 @@ __all__ = [
     "IntegerCodecError",
     "IntegerStreamReader",
     "decode_integer_tuple",
+    "encoded_framed_integer_tuple_size",
+    "encoded_integer_tuple_size",
     "encode_integer_tuple",
     "pack_key",
     "strict_integer_tuple",

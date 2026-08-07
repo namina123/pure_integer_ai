@@ -8,6 +8,7 @@ from pure_integer_ai.storage.integer_codec import (
     IntegerCodecError,
     IntegerStreamReader,
     decode_integer_tuple,
+    encoded_framed_integer_tuple_size,
     encode_integer_tuple,
     pack_key,
     strict_integer_tuple,
@@ -67,7 +68,10 @@ class SegmentRecord:
 
     def size_bytes(self) -> int:
         """返回该记录规范整数编码的实际字节数。"""
-        return len(encode_integer_tuple(self.integer_stream()))
+        return encoded_framed_integer_tuple_size((
+            self.record_key,
+            self.payload,
+        ))
 
 
 @dataclass(frozen=True)

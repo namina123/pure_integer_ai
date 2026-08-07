@@ -114,3 +114,18 @@ canonical SHA-256 仍为
 第二批生产变更提交为 `6c1c70b`，receipt v2 严格串接 v1，并记录两个接受对象、
 一个已撤回对象、两次废弃采样和有界验证。其状态仍只表示源码后继证据，
 不发布 readiness，也不启动 PW-00A。
+
+## 热缓存后续决策
+
+第三个 slots 候选 `CachedSegmentRecord` 在 100,000 实例测量中可将内存由
+12,001,608 降至 8,001,608 bytes，但同进程 5,000 条 page-in+get 交错周期稳定慢
+约 3.1%，因此完整撤回且未形成公开代码提交。局部剖析证明真实热点是
+`SegmentRecord.size_bytes()`：旧实现为了只取得长度，仍构造完整 framed integer
+stream、编码 bytearray，再调用 `len()`。
+
+新增的 `encoded_integer_tuple_size()` 与 `encoded_framed_integer_tuple_size()` 直接按
+现有 outer-count、zigzag 和最短 unsigned-varint 规则累计位宽，不改变
+`encode_integer_tuple()`。所有 7-bit 边界、负数、127/128 元素、511-bit 大整数和
+非法输入异常类型均与实际编码交叉验证。`SegmentRecord.size_bytes()` 改用 framed
+直算后，同进程 5,000 条 cache cycle、11 轮交错中位改善约 7.4%，canonical bytes
+保持由原编码器产生。
