@@ -85,3 +85,8 @@ class Rational:
 它只支持“没有观察到构造性能退化”的本机结论。两类实例均不再有 `__dict__`，
 相等、hash、`asdict`、`replace` 与 pickle round-trip 保持；pickle 字节 SHA 发生变化，
 因此不得把 Python pickle 当成 bit-identical canonical 合同。
+
+本批生产变更提交为 `c6799cb`，并由 append-only
+`struct_layout_successor_receipt_v1.json` 绑定 parent/current 源码身份、布局变化、
+本机方向性性能数据和有界验证。receipt 状态仅为
+`STRUCT_LAYOUT_SUCCESSOR_EVIDENCED`，显式保持 readiness 未重发、PW-00A 未启动。
