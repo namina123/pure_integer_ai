@@ -151,11 +151,19 @@ class SegmentPageCache:
             record_key: tuple[int, ...],
             ) -> CachedSegmentRecord | None:
         """读取一条热记录并推进确定性逻辑访问序。"""
-        key = (
-            strict_integer_tuple(
-                descriptor_key, label="cache get descriptor_key"),
-            strict_integer_tuple(record_key, label="cache get record_key"),
-        )
+        descriptor = strict_integer_tuple(
+            descriptor_key, label="cache get descriptor_key")
+        record = strict_integer_tuple(
+            record_key, label="cache get record_key")
+        return self._get_validated(descriptor, record)
+
+    def _get_validated(
+            self,
+            descriptor_key: tuple[int, ...],
+            record_key: tuple[int, ...],
+            ) -> CachedSegmentRecord | None:
+        """由 query owner 读取已校验的 descriptor/record 键。"""
+        key = (descriptor_key, record_key)
         previous = self._entries.get(key)
         if previous is None:
             return None

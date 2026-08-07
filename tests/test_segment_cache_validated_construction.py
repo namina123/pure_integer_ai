@@ -62,3 +62,22 @@ def test_clear_clean_cache_does_not_recompute_record_sizes(
     assert cache.clear() == 3
     assert cache.object_count == 0
     assert cache.size_bytes == 0
+
+
+def test_owner_validated_get_skips_key_rescan_but_public_get_stays_guarded(
+        monkeypatch: pytest.MonkeyPatch,
+        ) -> None:
+    import pure_integer_ai.storage.segment_cache as segment_cache_module
+
+    record = SegmentRecord((1,), (11,))
+    cache = SegmentPageCache(SegmentBudget(2, 1_000_000))
+    cache.page_in((99,), (record,))
+
+    def forbidden_key_scan(*_args, **_kwargs):
+        raise AssertionError("owner-validated get must not rescan keys")
+
+    monkeypatch.setattr(
+        segment_cache_module, "strict_integer_tuple", forbidden_key_scan)
+    assert cache._get_validated((99,), (1,)) is not None
+    with pytest.raises(AssertionError, match="must not rescan"):
+        cache.get((99,), (1,))

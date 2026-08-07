@@ -282,7 +282,7 @@ class QuerySegmentHotSet:
                 result = prepared
                 prepared = None
             for record in result.records:
-                cached = self.cache.get(
+                cached = self.cache._get_validated(
                     self.descriptor_key, record.record_key)
                 if cached is None:
                     raise QueryHotSetError("page-in 后记录未保留在 query cache")
