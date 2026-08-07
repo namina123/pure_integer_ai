@@ -327,6 +327,10 @@ class SegmentPageCache:
         """按最早逻辑访问序淘汰至多指定数量的 unpinned clean 记录。"""
         if type(object_limit) is not int or object_limit < 0:
             raise ValueError("clean evict object_limit 必须是非负严格整数")
+        if (object_limit >= len(self._entries)
+                and all(not item.dirty and not item.pinned
+                        for item in self._entries.values())):
+            return self.clear()
         candidates = sorted(
             (item for item in self._entries.values()
              if not item.dirty and not item.pinned),

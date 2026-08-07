@@ -97,3 +97,20 @@ def test_clear_rechecks_reentrant_dirty_state_after_flush() -> None:
         cache.clear(flush=reentrant_flush)
     assert cache.object_count == 2
     assert cache.get((99,), (2,)) is not None
+
+
+def test_evict_all_clean_reuses_clear_without_recomputing_sizes(
+        monkeypatch: pytest.MonkeyPatch,
+        ) -> None:
+    records = tuple(
+        SegmentRecord((index,), (index + 10,)) for index in range(3))
+    cache = SegmentPageCache(SegmentBudget(3, 1_000_000))
+    cache.page_in((99,), records)
+
+    def forbidden_size(_record: SegmentRecord) -> int:
+        raise AssertionError("full clean eviction must not recompute sizes")
+
+    monkeypatch.setattr(SegmentRecord, "size_bytes", forbidden_size)
+    assert cache.evict_clean(cache.object_count) == 3
+    assert cache.object_count == 0
+    assert cache.size_bytes == 0
