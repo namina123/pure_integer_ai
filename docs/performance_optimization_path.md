@@ -172,3 +172,9 @@ records、11 轮 page-in+get+clear 交错中位由 85,376,300 降至 62,555,800 
 该变更提交为 `7cb4a3c`，性能 receipt v5 绑定 `query_hot_set.py` 与
 `segment_cache.py` 两个源码 identity，严格串接 v4；仍不重发 readiness，也不启动
 PW-00A。
+
+对 v4 clean clear 分支做重入审计时发现，flush 回调可能在原 dirty 集之外新增 dirty
+或 pinned 条目；直接清空会放宽旧 `evict()` 的拒绝语义。修正版在 flush 返回后重新检查
+两类状态，异常时回到原有拒绝路径，clean/unpinned 快路径和 `-262‰` cycle 数据不变。
+修正版提交为 `ec03b7a`，receipt v6 严格串接 v5；v5 仅作为 historical 性能证据，默认
+不再宣称 current。
