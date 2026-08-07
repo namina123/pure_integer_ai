@@ -20,6 +20,7 @@ from pure_integer_ai.cognition.shared.memory_event import MemoryObjectRef
 from pure_integer_ai.cognition.shared.memory_query import MemoryActivationRequest
 from pure_integer_ai.cognition.shared.memory_resolver import (
     ActivationScoreReason,
+    FederatedMemoryResolution,
     MemoryResolution,
     ResolvedCandidate,
 )
@@ -699,14 +700,15 @@ class AttractorState:
 
     def activate(
             self,
-            resolution: MemoryResolution,
+            resolution: MemoryResolution | FederatedMemoryResolution,
             obligations: tuple[ReasoningObligation, ...],
             mapper: AttractorActivationMapper,
             ) -> tuple[AttractorActivation, ...]:
         """将 M-07 候选投影为当前目标 agenda，并按注入方向分截取预算。"""
         if self.activated:
             raise RuntimeError("AttractorState 已完成 activation，不能重复投影")
-        if not isinstance(resolution, MemoryResolution):
+        if not isinstance(
+                resolution, (MemoryResolution, FederatedMemoryResolution)):
             raise TypeError("resolution 必须是 MemoryResolution")
         current = resolution.compilation.current
         if (current.scope != self.scope

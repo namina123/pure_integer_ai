@@ -109,20 +109,43 @@ class MemoryUseRuntime:
     """只为当前 A-10 frontier 真实选择写 Use，并支持延迟 outcome。"""
 
     def __init__(self, ctx: TrainContext, event_log: MemoryEventLog) -> None:
-        """绑定 A-10 所属 Memory event log，拒绝另建私有写空间。"""
+        """绑定交互写空间，并登记 M-07 可返回候选的全部只读空间。"""
         if not isinstance(ctx, TrainContext):
             raise TypeError("ctx 必须是 TrainContext")
         if not isinstance(event_log, MemoryEventLog):
             raise TypeError("event_log 必须是 MemoryEventLog")
         if ctx.attractor_runtime is None:
             raise ValueError("安装 M-08 前必须先安装 A-10 runtime")
-        resolver_log = (
-            ctx.memory_resolver_runtime.resolver.aggregates.event_log)
-        if event_log is not resolver_log:
-            raise ValueError("M-08 必须写入 M-07 当前候选所属 Memory event log")
+        if event_log is not ctx.memory_interact_events:
+            raise ValueError("M-08 Episode/Use/outcome 必须写入 memory_interact")
+        resolver_logs = tuple(
+            item.aggregates.event_log
+            for item in ctx.memory_resolver_runtime.resolvers
+        )
+        if event_log not in resolver_logs:
+            raise ValueError("M-08 交互写空间必须属于 M-07 查询联邦")
         self._ctx = ctx
         self.event_log = event_log
+        self._candidate_logs = {
+            item.memory_space_identity.stable_key(): item
+            for item in resolver_logs
+        }
         self.protocol = ctx.attractor_runtime.protocol
+
+    def register_candidate_event_log(self, event_log: MemoryEventLog) -> None:
+        """在 query 外登记新联邦空间，只扩候选读取范围，不改变 Use 写空间。"""
+        if not isinstance(event_log, MemoryEventLog):
+            raise TypeError("candidate event_log 必须是 MemoryEventLog")
+        if self._ctx.work_memory.active_query_scope is not None:
+            raise RuntimeError("活动 query 中不得改变 M-08 候选空间")
+        if all(event_log is not item.aggregates.event_log
+               for item in self._ctx.memory_resolver_runtime.resolvers):
+            raise ValueError("M-08 候选空间不属于当前 M-07 联邦")
+        key = event_log.memory_space_identity.stable_key()
+        previous = self._candidate_logs.get(key)
+        if previous is not None and previous is not event_log:
+            raise ValueError("M-08 候选空间身份对应其他 event log")
+        self._candidate_logs[key] = event_log
 
     def record_selection_use(
             self,
@@ -144,8 +167,8 @@ class MemoryUseRuntime:
         candidate_ref = activation.candidate.memory_ref
         if candidate_ref is None or candidate_ref.object_kind == MEMORY_OBJECT_USE:
             raise ValueError("M-08 只为实际使用的非 Use Memory 对象写 Use")
-        if candidate_ref.memory_space != self.event_log.memory_space_identity:
-            raise ValueError("processing candidate 属于其他 Memory 空间")
+        if candidate_ref.memory_space.stable_key() not in self._candidate_logs:
+            raise ValueError("processing candidate 不属于 M-07 查询联邦")
         self._memory_declaration(candidate_ref)
         if not isinstance(influence_kind, MemoryLinkedRef):
             raise TypeError("influence_kind 必须是一等引用")
@@ -271,7 +294,10 @@ class MemoryUseRuntime:
 
     def _memory_declaration(self, ref: MemoryObjectRef) -> MemoryEvent:
         """恢复目标对象的唯一可见声明，拒绝不存在或只有状态事件的引用。"""
-        events = self.event_log.query(
+        event_log = self._candidate_logs.get(ref.memory_space.stable_key())
+        if event_log is None:
+            raise ValueError("Memory candidate 属于未登记空间")
+        events = event_log.query(
             access=_access_for(ref),
             object_ref=ref,
         )
@@ -323,6 +349,17 @@ class MemoryUseRuntime:
 
     def state_key(self) -> tuple[int, ...]:
         """返回绑定 Memory 空间和 A-10 状态协议的配置键。"""
+        candidate_spaces = tuple(sorted(self._candidate_logs))
+        if len(candidate_spaces) > 1:
+            result = [
+                3,
+                *self.event_log.memory_space_identity.stable_key(),
+                len(candidate_spaces),
+            ]
+            for key in candidate_spaces:
+                result.extend((len(key), *key))
+            result.extend(self.protocol.stable_key())
+            return tuple(result)
         return (
             2,
             *self.event_log.memory_space_identity.stable_key(),
@@ -330,7 +367,7 @@ class MemoryUseRuntime:
         )
 
     def clone_for_context(self, ctx: TrainContext) -> "MemoryUseRuntime":
-        """为 V-06 重绑同 identity 的独立 Memory event log。"""
+        """为 V-06 重绑交互写空间，候选空间由 clone M-07 重新登记。"""
         matches = tuple(
             item for item in (
                 ctx.memory_read_events,
@@ -354,7 +391,7 @@ def install_memory_use_runtime(ctx: TrainContext) -> MemoryUseRuntime:
         raise TypeError("ctx 必须是 TrainContext")
     if ctx.memory_use_runtime is not None:
         raise ValueError("TrainContext 已安装 M-08 runtime")
-    event_log = ctx.memory_resolver_runtime.resolver.aggregates.event_log
+    event_log = ctx.memory_interact_events
     runtime = MemoryUseRuntime(ctx, event_log)
     ctx.memory_use_runtime = runtime
     return runtime

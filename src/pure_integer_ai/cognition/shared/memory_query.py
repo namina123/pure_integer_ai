@@ -505,6 +505,54 @@ class MemoryQueryCompilation:
         return tuple(result)
 
 
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class FederatedMemoryQueryCompilation:
+    """同一当前输入在多个隔离 Memory 空间形成的查询集合。"""
+
+    compilations: tuple[MemoryQueryCompilation, ...]
+
+    def __post_init__(self) -> None:
+        """要求子查询同源同 ACL，空间互异且按完整身份稳定排序。"""
+        if (not isinstance(self.compilations, tuple)
+                or len(self.compilations) < 2
+                or any(not isinstance(item, MemoryQueryCompilation)
+                       for item in self.compilations)):
+            raise TypeError("联邦 Memory query 至少需要两个 compilation")
+        first = self.compilations[0]
+        if any(item.current != first.current or item.access != first.access
+               for item in self.compilations[1:]):
+            raise ValueError("联邦 Memory query 的当前输入或 ACL 漂移")
+        space_keys = tuple(
+            item.memory_space.stable_key() for item in self.compilations)
+        if len(set(space_keys)) != len(space_keys):
+            raise ValueError("联邦 Memory query 不得重复 Memory 空间")
+        if space_keys != tuple(sorted(space_keys)):
+            raise ValueError("联邦 Memory query 必须按空间完整身份稳定排序")
+
+    @property
+    def current(self) -> MemoryCurrentQuery:
+        """返回所有子查询共同绑定的当前 typed 输入。"""
+        return self.compilations[0].current
+
+    @property
+    def access(self) -> MemoryAccessContext:
+        """返回所有子查询共同使用的最小读取权限。"""
+        return self.compilations[0].access
+
+    @property
+    def memory_spaces(self) -> tuple[SpaceIdentity, ...]:
+        """返回规范顺序的全部隔离 Memory 空间身份。"""
+        return tuple(item.memory_space for item in self.compilations)
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回不抹除空间边界的确定性联邦查询键。"""
+        result = [_QUERY_PROTOCOL_VERSION, len(self.compilations)]
+        for compilation in self.compilations:
+            result.extend(_packed(compilation.stable_key()))
+        return tuple(result)
+
+
 class MemoryQueryCompiler:
     """绑定 M-04 aggregate 目标空间的无写入 current-input query compiler。"""
 
@@ -585,6 +633,7 @@ class MemoryQueryCompiler:
 
 
 __all__ = [
+    "FederatedMemoryQueryCompilation",
     "MemoryActivationRequest",
     "MemoryCurrentQuery",
     "MemoryQueryCompilation",

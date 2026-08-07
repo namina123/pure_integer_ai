@@ -25,6 +25,7 @@ from pure_integer_ai.cognition.shared.memory_event import (
     MemoryObjectRef,
 )
 from pure_integer_ai.cognition.shared.memory_query import (
+    FederatedMemoryQueryCompilation,
     MemoryActivationRequest,
     MemoryQueryCompilation,
 )
@@ -702,6 +703,48 @@ class MemoryResolution:
         return tuple(result)
 
 
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class FederatedMemoryResolution:
+    """多个隔离 Memory 空间对同一 query 的完整仲裁结果。"""
+
+    compilation: FederatedMemoryQueryCompilation
+    resolutions: tuple[MemoryResolution, ...]
+
+    def __post_init__(self) -> None:
+        """逐空间覆盖子查询，不允许遗漏、替换或重排结果。"""
+        if not isinstance(
+                self.compilation, FederatedMemoryQueryCompilation):
+            raise TypeError("联邦 Memory resolution compilation 类型错误")
+        if (not isinstance(self.resolutions, tuple)
+                or any(not isinstance(item, MemoryResolution)
+                       for item in self.resolutions)):
+            raise TypeError("联邦 Memory resolutions 类型错误")
+        if tuple(item.compilation for item in self.resolutions) != (
+                self.compilation.compilations):
+            raise ValueError("联邦 Memory resolution 未逐空间覆盖 compilation")
+
+    @property
+    def sets(self) -> tuple[ResolvedCandidateSet, ...]:
+        """只在当前 query 局部展平候选集，完整 request 仍保留所属空间。"""
+        return tuple(
+            candidate_set
+            for resolution in self.resolutions
+            for candidate_set in resolution.sets
+        )
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回包含全部空间边界和子结果的稳定键。"""
+        result = [
+            MEMORY_RESOLVER_PROTOCOL_VERSION,
+            *_packed(self.compilation.stable_key()),
+            len(self.resolutions),
+        ]
+        for resolution in self.resolutions:
+            result.extend(_packed(resolution.stable_key()))
+        return tuple(result)
+
+
 
 __all__ = [
     "ActivationScore",
@@ -711,6 +754,7 @@ __all__ = [
     "MEMORY_RESOLVER_PROTOCOL_VERSION",
     "MemoryAggregateFilter",
     "MemoryCandidateBundle",
+    "FederatedMemoryResolution",
     "MemoryIndexFilterProvider",
     "MemoryResolution",
     "MemorySourceTrace",

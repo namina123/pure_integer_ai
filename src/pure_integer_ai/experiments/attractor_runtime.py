@@ -16,8 +16,14 @@ from pure_integer_ai.cognition.shared.attractor_state import (
     AttractorRecomputeStrategy,
     AttractorState,
 )
-from pure_integer_ai.cognition.shared.memory_query import MemoryQueryCompilation
-from pure_integer_ai.cognition.shared.memory_resolver import MemoryResolution
+from pure_integer_ai.cognition.shared.memory_query import (
+    FederatedMemoryQueryCompilation,
+    MemoryQueryCompilation,
+)
+from pure_integer_ai.cognition.shared.memory_resolver import (
+    FederatedMemoryResolution,
+    MemoryResolution,
+)
 from pure_integer_ai.cognition.shared.reasoning_planner import (
     ReasoningBudget,
     ReasoningObligation,
@@ -69,11 +75,13 @@ class AttractorRuntime:
 
     def resolve_and_activate(
             self,
-            compilation: MemoryQueryCompilation,
+            compilation: MemoryQueryCompilation | FederatedMemoryQueryCompilation,
             obligations: tuple[ReasoningObligation, ...],
             ) -> AttractorState:
         """沿 M-07 resolver 到 A-10 agenda 完成当前 query 的真实接线。"""
-        if not isinstance(compilation, MemoryQueryCompilation):
+        if not isinstance(
+                compilation,
+                (MemoryQueryCompilation, FederatedMemoryQueryCompilation)):
             raise TypeError("compilation 必须是 MemoryQueryCompilation")
         if self._ctx.work_memory.active_query_scope != compilation.current.scope:
             raise ValueError("compilation 不属于当前活动 query")
@@ -82,11 +90,12 @@ class AttractorRuntime:
 
     def activate_resolution(
             self,
-            resolution: MemoryResolution,
+            resolution: MemoryResolution | FederatedMemoryResolution,
             obligations: tuple[ReasoningObligation, ...],
             ) -> AttractorState:
         """把已验证的 M-07 结果投影成唯一当前 query AttractorState。"""
-        if not isinstance(resolution, MemoryResolution):
+        if not isinstance(
+                resolution, (MemoryResolution, FederatedMemoryResolution)):
             raise TypeError("resolution 必须是 MemoryResolution")
         if self._ctx.work_memory.active_query_scope != (
                 resolution.compilation.current.scope):

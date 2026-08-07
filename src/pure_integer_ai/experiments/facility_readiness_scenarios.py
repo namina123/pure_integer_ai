@@ -644,8 +644,15 @@ def _attractor_protocol(source: SourceRef) -> AttractorProtocol:
         _instruction(source, value) for value in range(9101, 9105)))
 
 
-def _goals(source: SourceRef, scope: Any) -> tuple[ReasoningObligation, ...]:
-    """构造属于当前 query 的两个 typed 目标，不预置真值。"""
+def _goals(
+        source: SourceRef,
+        scope: Any,
+        *,
+        count: int = 2,
+        ) -> tuple[ReasoningObligation, ...]:
+    """构造属于当前 query 的指定数量 typed 目标，不预置真值。"""
+    if type(count) is not int or count <= 0:
+        raise ValueError("goal count 必须是正严格整数")
     definitions = tuple(
         AtomicPropositionDefinition(
             proposition_identity(source, (9130, ordinal)),
@@ -663,7 +670,7 @@ def _goals(source: SourceRef, scope: Any) -> tuple[ReasoningObligation, ...]:
             context_scope_identity(source, (9132, ordinal)),
             (),
         )
-        for ordinal in range(1, 3)
+        for ordinal in range(1, count + 1)
     )
     graph = PropositionTemplateGraph(tuple(
         ScopedPropositionTemplate(
@@ -945,17 +952,21 @@ def _complete_source(
         ordinal: int,
         ) -> MemoryGenerationSource:
     """为一条 resolver 来源分账建立完整 SourceRecord。"""
-    record = repository.put_complete(
-        trace.source.stable_key(),
-        f"设施来源{ordinal}",
-        metadata=SourceRecordMetadata(
-            "facility-license",
-            ordinal,
-            100 + ordinal,
-            200 + ordinal,
-            300 + ordinal,
-        ),
-    )
+    record = repository.find(trace.source.stable_key())
+    if record is None:
+        record = repository.put_complete(
+            trace.source.stable_key(),
+            f"设施来源{ordinal}",
+            metadata=SourceRecordMetadata(
+                "facility-license",
+                ordinal,
+                100 + ordinal,
+                200 + ordinal,
+                300 + ordinal,
+            ),
+        )
+    elif not record.metadata_complete:
+        raise ValueError("既有设施来源缺少完整 SourceRecord metadata")
     return MemoryGenerationSource.from_record(trace, record)
 
 
@@ -1024,7 +1035,14 @@ def _outcome_protocol(source: SourceRef, postchecker: Any) -> Any:
     return MemoryGenerationOutcomeProtocol(tuple(routes))
 
 
-def _question_dialogue(ctx: Any, source: SourceRef, observation: Any) -> tuple[Any, Any]:
+def _question_dialogue(
+        ctx: Any,
+        source: SourceRef,
+        observation: Any,
+        *,
+        target_index: int = 1,
+        obligation_factory: Any = None,
+        ) -> tuple[Any, Any]:
     """装配走 K-04、A-10、M-08、G-00..G-05 的完整 question caller。"""
     scope = _open_query(ctx, source)
     current = _current(ctx, source, scope)
@@ -1040,7 +1058,21 @@ def _question_dialogue(ctx: Any, source: SourceRef, observation: Any) -> tuple[A
     for ordinal, trace in enumerate(
             (traces[key] for key in sorted(traces)), start=1):
         _complete_source(repository, trace, ordinal)
-    goals = _goals(source, scope)
+    goals = (
+        _goals(source, scope)
+        if obligation_factory is None
+        else obligation_factory(source, scope)
+    )
+    if (not isinstance(goals, tuple) or not goals
+            or any(not isinstance(item, ReasoningObligation)
+                   for item in goals)):
+        raise TypeError("question obligations 类型错误")
+    if any(item.source != source or item.scope != scope for item in goals):
+        raise ValueError("question obligations 不属于当前 query")
+    if (type(target_index) is not int
+            or target_index < 0
+            or target_index >= len(goals)):
+        raise ValueError("question target_index 超出目标范围")
     ctx.work_memory.end_query()
     executor = ResolvedMemoryQuestionExecutor(
         ctx,
@@ -1062,7 +1094,7 @@ def _question_dialogue(ctx: Any, source: SourceRef, observation: Any) -> tuple[A
     mapper, postchecker = build_postcheck_owners()
     fixture = build_question_fixture(
         executor_factory=lambda route: executor,
-        world=(source, scope, goals[1].proposition),
+        world=(source, scope, goals[target_index].proposition),
         selection_committer=committer,
         postcheck_mapper=mapper,
         postchecker=postchecker,

@@ -176,6 +176,9 @@ class MemoryHypothesisAggregateIndex:
         hypothesis_ref = self._hypothesis_for_event(event, access=access)
         if hypothesis_ref is None:
             return
+        if hypothesis_ref.memory_space != self.event_log.memory_space_identity:
+            # 跨空间 Use 由交互账本保留强引用；本空间派生不能借用另一时间轴标脏。
+            return
         hypothesis_hash = self._hypothesis_hash(hypothesis_ref)
         owner_key = hypothesis_ref.owner.stable_key()
         self.store.index_event(MemoryHypothesisEventIndexRecord(
