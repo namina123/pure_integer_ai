@@ -45,3 +45,20 @@ def test_public_cached_record_constructor_still_validates() -> None:
         CachedSegmentRecord((99,), record, 1, 1, 0)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="access_seq"):
         CachedSegmentRecord((99,), record, False, 0, 0)
+
+
+def test_clear_clean_cache_does_not_recompute_record_sizes(
+        monkeypatch: pytest.MonkeyPatch,
+        ) -> None:
+    records = tuple(
+        SegmentRecord((index,), (index + 10,)) for index in range(3))
+    cache = SegmentPageCache(SegmentBudget(3, 1_000_000))
+    cache.page_in((99,), records)
+
+    def forbidden_size(_record: SegmentRecord) -> int:
+        raise AssertionError("clean cache clear must not recompute sizes")
+
+    monkeypatch.setattr(SegmentRecord, "size_bytes", forbidden_size)
+    assert cache.clear() == 3
+    assert cache.object_count == 0
+    assert cache.size_bytes == 0
