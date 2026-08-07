@@ -42,6 +42,11 @@ class CoreStrViolation(disc.DisciplineViolation):
     """核心表行含 str 违例（文本不入核心·入伴随库·守纯整数）。"""
 
 
+# object-model: exception
+class CoreOwnerWriteProtectionError(PermissionError):
+    """正式断奶状态试图写入已保护的 Core owner。"""
+
+
 def _validate_row(row: dict[str, Any], *, allow_text: bool = False) -> None:
     """拒 float 值（纯整数铁律·raise FloatViolation 与 crosscut 守卫一致）。
     TEXT 列允许 str（仅伴随/审计非核心·allow_text 时）；核心表拒 str。"""
@@ -76,6 +81,10 @@ class StorageBackend(Protocol):
     def delete(self, table: str, where: dict[str, Any]) -> int: ...
     def next_id(self, space_id: int) -> int: ...
     def advance_id_pool(self, space_id: int, floor: int) -> None: ...
+    def id_pool_floor(self, space_id: int) -> int: ...
+    def protect_owner_space(self, space_id: int) -> None: ...
+    def owner_write_protection_state(self) -> tuple[int, ...]: ...
+    def restore_owner_write_protection(self, state: tuple[int, ...]) -> None: ...
     def schema_snapshot(self) -> dict[str, dict[str, Any]]: ...
     def snapshot(self) -> dict[str, list[dict[str, Any]]]: ...
     def load_snapshot(self, snap: dict[str, list[dict[str, Any]]]) -> None: ...
@@ -119,6 +128,8 @@ class _BaseBackend:
         self._id_pool: dict[int, int] = {}
         # isa_edge_gen: space_id → IS_A 拓扑版本号（perf #1144·bump on EDGE_IS_A insert·ancestor_map cache O(1) 命中用）
         self._isa_edge_gen: dict[int, int] = {}
+        # PW-00A 显式启用；默认空集合保持既有训练和评测行为不变。
+        self._protected_owner_space_ids: set[int] = set()
 
     # -- 表元数据 --
     def register_table(self, table: str, columns: list[tuple[str, str]],
@@ -182,12 +193,61 @@ class _BaseBackend:
             }
         return result
 
+    @staticmethod
+    def _owner_columns(meta: dict[str, Any]) -> tuple[str, ...]:
+        """返回与 CoreCanonicalStateReader 相同的显式空间 owner 列。"""
+        return tuple(
+            column for column in meta["columns"]
+            if (column == "space_id"
+                or column.startswith("space_id_")
+                or column.endswith("_space_id"))
+        )
+
+    def _require_owner_write_allowed(
+            self,
+            table: str,
+            meta: dict[str, Any],
+            rows: tuple[dict[str, Any], ...],
+            ) -> None:
+        """在物理写前拒绝触达受保护 owner。"""
+        if not self._protected_owner_space_ids:
+            return
+        owner_columns = self._owner_columns(meta)
+        if not owner_columns:
+            # 全局身份池会为 Memory 对象增长；没有 owner 证据时不能把它归给 Core。
+            return
+        for row in rows:
+            if any(row.get(column) in self._protected_owner_space_ids
+                   for column in owner_columns):
+                raise CoreOwnerWriteProtectionError(
+                    f"正式状态禁止写 Core owner 表 {table!r}")
+
+    def protect_owner_space(self, space_id: int) -> None:
+        """单调启用一个正整数空间的持久写保护。"""
+        assert_int(space_id, _where="protect_owner_space")
+        if type(space_id) is not int or space_id <= 0:
+            raise ValueError("受保护 space_id 必须为严格正整数")
+        self._protected_owner_space_ids.add(space_id)
+
+    def owner_write_protection_state(self) -> tuple[int, ...]:
+        """返回当前受保护空间的稳定有序快照。"""
+        return tuple(sorted(self._protected_owner_space_ids))
+
+    def restore_owner_write_protection(self, state: tuple[int, ...]) -> None:
+        """只供原子启动或事务回滚恢复此前保护集合。"""
+        if (not isinstance(state, tuple)
+                or tuple(sorted(set(state))) != state
+                or any(type(item) is not int or item <= 0 for item in state)):
+            raise ValueError("owner write protection state 非法")
+        self._protected_owner_space_ids = set(state)
+
     # -- 写操作（经纪律闸门） --
     def insert(self, table: str, row: dict[str, Any]) -> None:
         """执行一次受运行时只读区和表纪律共同约束的插入。"""
-        require_write_allowed(table, "insert")
-        telemetry = active_backend_telemetry()
         m = self._meta(table)
+        require_write_allowed(table, "insert")
+        self._require_owner_write_allowed(table, m, (row,))
+        telemetry = active_backend_telemetry()
         allow_text = any(t == TYPE_TEXT for t in m["col_types"].values())
         _validate_row(row, allow_text=allow_text)
         disc.check_write(table, "insert", m["discipline"], m["core"])
@@ -210,9 +270,21 @@ class _BaseBackend:
     def update(self, table: str, where: dict[str, Any],
                set_: dict[str, Any]) -> int:
         """执行一次受运行时只读区和表纪律共同约束的更新。"""
-        require_write_allowed(table, "update")
-        telemetry = active_backend_telemetry()
         m = self._meta(table)
+        require_write_allowed(table, "update")
+        current_rows = self._do_select(
+            table, where, None, None, False, None)
+        changed_rows = []
+        for row in current_rows:
+            changed = dict(row)
+            for key, value in set_.items():
+                if not (isinstance(value, tuple) and len(value) == 2
+                        and value[0] == "+="):
+                    changed[key] = value
+            changed_rows.append(changed)
+        self._require_owner_write_allowed(
+            table, m, tuple((*current_rows, *changed_rows)))
+        telemetry = active_backend_telemetry()
         allow_text = any(t == TYPE_TEXT for t in m["col_types"].values())
         # 增量元组 ("+=", n) 的 n 须纯整数；其余值经 _validate_row 拒 float/str
         for k, v in set_.items():
@@ -233,9 +305,12 @@ class _BaseBackend:
 
     def delete(self, table: str, where: dict[str, Any]) -> int:
         """执行一次受运行时只读区和表纪律共同约束的删除。"""
-        require_write_allowed(table, "delete")
-        telemetry = active_backend_telemetry()
         m = self._meta(table)
+        require_write_allowed(table, "delete")
+        current_rows = tuple(self._do_select(
+            table, where, None, None, False, None))
+        self._require_owner_write_allowed(table, m, current_rows)
+        telemetry = active_backend_telemetry()
         disc.check_write(table, "delete", m["discipline"], m["core"])
         try:
             affected = self._do_delete(table, where)
@@ -314,12 +389,20 @@ class _BaseBackend:
         if floor > self._id_pool.get(space_id, 0):
             self._id_pool[space_id] = floor
 
+    def id_pool_floor(self, space_id: int) -> int:
+        """只读返回空间当前已分配 local_id 水位。"""
+        assert_int(space_id, _where="id_pool_floor.space_id")
+        if type(space_id) is not int or space_id <= 0:
+            raise ValueError("id_pool_floor space_id 必须为严格正整数")
+        return self._id_pool.get(space_id, 0)
+
     def recovery_state_snapshot(self) -> dict[str, Any]:
         """捕获数据与运行时水位，用于恢复失败后精确回滚。"""
         return {
             "tables": self.snapshot(),
             "id_pool": dict(self._id_pool),
             "isa_edge_gen": dict(self._isa_edge_gen),
+            "protected_owner_space_ids": self.owner_write_protection_state(),
         }
 
     def restore_recovery_state(self, state: dict[str, Any]) -> None:
@@ -329,6 +412,7 @@ class _BaseBackend:
         tables = state.get("tables")
         id_pool = state.get("id_pool")
         isa_edge_gen = state.get("isa_edge_gen")
+        protected = state.get("protected_owner_space_ids", ())
         if not isinstance(tables, dict):
             raise TypeError("recovery state.tables 必须是 dict")
         if not isinstance(id_pool, dict) or not isinstance(isa_edge_gen, dict):
@@ -336,6 +420,7 @@ class _BaseBackend:
         self.load_snapshot(tables)
         self._id_pool = dict(id_pool)
         self._isa_edge_gen = dict(isa_edge_gen)
+        self.restore_owner_write_protection(tuple(protected))
 
     def commit(self) -> None:
         pass

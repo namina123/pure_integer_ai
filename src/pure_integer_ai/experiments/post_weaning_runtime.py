@@ -18,6 +18,9 @@ from pure_integer_ai.cognition.shared.post_weaning import (
     PostWeaningRouteProtocol,
     PostWeaningStateSnapshot,
 )
+from pure_integer_ai.cognition.shared.formal_post_weaning import (
+    FormalPostWeaningManifest,
+)
 from pure_integer_ai.cognition.shared.identity import ObjectIdentity
 from pure_integer_ai.cognition.shared.question_answer import QuestionRequest
 from pure_integer_ai.cognition.shared.types import WEANING_PRE
@@ -121,7 +124,7 @@ class CoreCanonicalStateReader:
         return 1, *self._core_identity.stable_key()
 
     def read(self) -> tuple[int, ...]:
-        """扫描带空间 owner 的表，只摘要直接触达当前 Core 的行。"""
+        """摘要显式指向 Core owner 的行。"""
         schema = self._backend.schema_snapshot()
         selected: dict[str, list[dict[str, object]]] = {}
         for table in sorted(schema):
@@ -268,25 +271,29 @@ def build_post_weaning_dry_run_manifest(
     )
 
 
-class PostWeaningDryRunRuntime:
-    """只在隔离 fixture 上运行的独立 PW-00 入口与边界审计器。"""
+# object-model: lifecycle; owner=post-weaning-context; cleanup=backend-close
+class PostWeaningOperationRuntime:
+    """dry-run 与正式状态共用的入口、回滚、预算和 Core 边界。"""
 
     def __init__(
             self,
             ctx: TrainContext,
-            manifest: PostWeaningDryRunManifest,
+            manifest: PostWeaningDryRunManifest | FormalPostWeaningManifest,
             *,
             core_reader: CoreCanonicalStateReader | None = None,
+            required_phase: int = WEANING_PRE,
             ) -> None:
-        """核验 PH1 状态、实际设施 owner、artifact 清单和全部探针后启动。"""
+        """核验状态、实际设施 owner、artifact 清单和全部探针后绑定。"""
         if not isinstance(ctx, TrainContext):
             raise TypeError("post-weaning runtime ctx 类型错误")
-        if not isinstance(manifest, PostWeaningDryRunManifest):
+        if not isinstance(
+                manifest,
+                (PostWeaningDryRunManifest, FormalPostWeaningManifest)):
             raise TypeError("post-weaning manifest 类型错误")
         if ctx.teacher is not None:
-            raise PostWeaningStartupError("PW-00 dry-run 禁止安装教师")
-        if ctx.weaning_phase != WEANING_PRE:
-            raise PostWeaningStartupError("PW-00 不得形成正式 post-weaning 状态")
+            raise PostWeaningStartupError("post-weaning runtime 禁止安装教师")
+        if ctx.weaning_phase != required_phase:
+            raise PostWeaningStartupError("post-weaning runtime 阶段不匹配")
         if (ctx.work_memory.active_query_scope is not None
                 or ctx.work_memory.active_generation_scope is not None
                 or ctx.work_memory.attractor_state is not None):
@@ -315,13 +322,6 @@ class PostWeaningDryRunRuntime:
         self.manifest = manifest
         self.core_reader = reader
         self._reports: list[PostWeaningOperationReport] = []
-
-    @classmethod
-    def start_formal(cls, *args, **kwargs):
-        """在 PW-00A 发布 verifier 缺席时无条件拒绝正式状态。"""
-        del args, kwargs
-        raise PostWeaningStartupError(
-            "PW-00A 尚未发布正式启动 verifier，拒绝正式 post-weaning")
 
     def reports(self) -> tuple[PostWeaningOperationReport, ...]:
         """按调用顺序返回不可变操作报告。"""
@@ -597,9 +597,46 @@ class PostWeaningDryRunRuntime:
         raise TypeError("PW-00 不支持该入口结果类型")
 
 
+class PostWeaningDryRunRuntime(PostWeaningOperationRuntime):
+    """只允许 WEANING_PRE 隔离 fixture 的 PW-00 dry-run 薄门面。"""
+
+    def __init__(
+            self,
+            ctx: TrainContext,
+            manifest: PostWeaningDryRunManifest,
+            *,
+            core_reader: CoreCanonicalStateReader | None = None,
+            ) -> None:
+        """拒绝正式清单，并委托共用操作核心核验 dry-run。"""
+        if not isinstance(manifest, PostWeaningDryRunManifest):
+            raise TypeError("PW-00 dry-run manifest 类型错误")
+        super().__init__(
+            ctx,
+            manifest,
+            core_reader=core_reader,
+            required_phase=WEANING_PRE,
+        )
+
+    @classmethod
+    def start_formal(cls, *args, **kwargs):
+        """薄转发到 PW-00A verifier，错误 dry-run 请求仍会 fail closed。"""
+        from pure_integer_ai.cognition.shared.formal_post_weaning import (
+            FormalPostWeaningLoadRequest,
+        )
+        if (len(args) < 2
+                or not isinstance(args[1], FormalPostWeaningLoadRequest)):
+            raise PostWeaningStartupError(
+                "PW-00A formal start 必须使用正式装载请求")
+        from pure_integer_ai.experiments.pw00a_formal_runtime import (
+            PW00AFormalRuntime,
+        )
+        return PW00AFormalRuntime.start(*args, **kwargs)
+
+
 __all__ = [
     "CoreCanonicalStateReader",
     "PostWeaningDryRunRuntime",
+    "PostWeaningOperationRuntime",
     "PostWeaningRuntimeError",
     "PostWeaningStartupError",
     "build_post_weaning_dry_run_manifest",
