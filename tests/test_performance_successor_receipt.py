@@ -13,12 +13,18 @@ from scripts.performance_successor_receipt import (
     V2_CHANGE_COMMIT,
     V2_PARENT_COMMIT,
     V2_RECEIPT_PATH,
+    V3_CHANGE_COMMIT,
+    V3_PARENT_COMMIT,
+    V3_RECEIPT_PATH,
     build_performance_successor_receipt,
     build_v2_performance_successor_receipt,
+    build_v3_performance_successor_receipt,
     publish_performance_successor_receipt,
     publish_v2_performance_successor_receipt,
+    publish_v3_performance_successor_receipt,
     read_performance_successor_receipt,
     read_v2_performance_successor_receipt,
+    read_v3_performance_successor_receipt,
 )
 
 
@@ -130,3 +136,48 @@ def test_v2_performance_receipt_rejects_source_and_readiness_drift(
     target.write_bytes(canonical_json_bytes(altered) + b"\n")
     with pytest.raises(ValueError, match="readiness"):
         read_v2_performance_successor_receipt(ROOT, target)
+
+
+def test_v3_performance_receipt_builds_with_owner_validated_constructor(
+        tmp_path: Path,
+        ) -> None:
+    value = build_v3_performance_successor_receipt(ROOT)
+    assert value["change_commit"] == V3_CHANGE_COMMIT
+    assert value["parent_commit"] == V3_PARENT_COMMIT
+    assert value["receipt_relative_path"] == V3_RECEIPT_PATH
+    assert value["transformation"]["public_validation_changed"] == 0
+    assert value["transformation"]["cached_record_layout_changed"] == 0
+    assert value["transformation"]["internal_post_init_calls_after"] == 0
+    assert value["readiness_transition"] == {
+        "LANGUAGE_READINESS_REPUBLISHED": 0,
+        "PW00A_STARTED": 0,
+    }
+    target = tmp_path / "v3.json"
+    target.write_bytes(canonical_json_bytes(value) + b"\n")
+    assert read_v3_performance_successor_receipt(ROOT, target) == value
+
+
+def test_v3_performance_receipt_publish_is_append_only(tmp_path: Path) -> None:
+    target = tmp_path / "v3.json"
+    published = publish_v3_performance_successor_receipt(ROOT, target=target)
+    assert read_v3_performance_successor_receipt(ROOT, target) == published
+    with pytest.raises(ValueError, match="禁止覆盖"):
+        publish_v3_performance_successor_receipt(ROOT, target=target)
+
+
+def test_v3_performance_receipt_rejects_source_and_readiness_drift(
+        tmp_path: Path,
+        ) -> None:
+    value = build_v3_performance_successor_receipt(ROOT)
+    target = tmp_path / "v3.json"
+    altered = json.loads(json.dumps(value))
+    altered["source_bindings"][0]["current_sha256"] = "0" * 64
+    target.write_bytes(canonical_json_bytes(altered) + b"\n")
+    with pytest.raises(ValueError, match="源码绑定"):
+        read_v3_performance_successor_receipt(ROOT, target)
+
+    altered = json.loads(json.dumps(value))
+    altered["readiness_transition"]["LANGUAGE_READINESS_REPUBLISHED"] = 1
+    target.write_bytes(canonical_json_bytes(altered) + b"\n")
+    with pytest.raises(ValueError, match="readiness"):
+        read_v3_performance_successor_receipt(ROOT, target)

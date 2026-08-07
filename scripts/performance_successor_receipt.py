@@ -35,6 +35,14 @@ V2_PRIOR_RECEIPT_PATH = RECEIPT_PATH
 V2_PRIOR_RECEIPT_SHA256 = (
     "01ecdb29437d3ce7ac88e126cc7a4ccff206fc458290cf7ad65f80457d9ecb17"
 )
+V3_ARTIFACT_VERSION = "PERFORMANCE-SUCCESSOR-CACHE-CONSTRUCT-20260807-A"
+V3_RECEIPT_PATH = "data/ph2/manifests/performance_successor_receipt_v3.json"
+V3_PARENT_COMMIT = "cf3b844b927a2eebb6b923fca2669d765d4718d7"
+V3_CHANGE_COMMIT = "02fff5563d6886c3c600c0c5f73dd64e233b389f"
+V3_PRIOR_RECEIPT_PATH = V2_RECEIPT_PATH
+V3_PRIOR_RECEIPT_SHA256 = (
+    "53162d1a89da5f0c3e9dfb85384bfbab285d560999ec778a57eeed8df4b7a055"
+)
 _SOURCE_BINDINGS = [
     {
         "current_sha256": (
@@ -148,6 +156,46 @@ _V2_VERIFICATION = {
     "python311_direct_check_clean": 1,
     "python314_direct_check_clean": 1,
     "source_guards_clean": 1,
+}
+_V3_SOURCE_BINDINGS = [
+    {
+        "current_sha256": (
+            "6cbdf509282fa3392e062d9aed0970735dad02e326427a752d3ba40281a2ee0c"
+        ),
+        "current_size_bytes": 14912,
+        "parent_sha256": (
+            "19a87dac1170889b7b6331ea3686f8c46196078308cd4a6c5d2550fb3bd44cb6"
+        ),
+        "parent_size_bytes": 14204,
+        "relative_path": "src/pure_integer_ai/storage/segment_cache.py",
+    },
+]
+_V3_TRANSFORMATION = {
+    "algorithm": "PUBLIC_VALIDATION_TO_OWNER_VALIDATED_CONSTRUCTION",
+    "cache_cycle": {
+        "delta_per_mille": -308,
+        "new_median_ns": 70977400,
+        "old_median_ns": 102564100,
+        "record_count": 5000,
+        "repeats": 11,
+    },
+    "cached_record_fields_changed": 0,
+    "cached_record_layout_changed": 0,
+    "internal_constructor_sites": 6,
+    "internal_post_init_calls_after": 0,
+    "performance_claim_scope": "LOCAL_DIRECTION_ONLY",
+    "public_validation_changed": 0,
+    "validated_constructor_owner": "SEGMENT_PAGE_CACHE",
+}
+_V3_VERIFICATION = {
+    "direct_test_files": 3,
+    "direct_tests_passed": 64,
+    "full_suite_run": 0,
+    "object_model_class_count": 3140,
+    "python311_direct_check_clean": 1,
+    "python314_direct_check_clean": 1,
+    "source_guards_clean": 1,
+    "validated_constructor_tests_passed": 2,
 }
 
 
@@ -453,9 +501,139 @@ def publish_v2_performance_successor_receipt(
     return restored
 
 
+def build_v3_performance_successor_receipt(
+        repository_root: str | Path,
+        ) -> dict[str, Any]:
+    """构造热缓存 owner 已验证构造路径的链式性能 receipt。"""
+    root = Path(repository_root).resolve()
+    for binding in _V3_SOURCE_BINDINGS:
+        if _identity(root, binding["relative_path"]) != (
+                binding["current_size_bytes"], binding["current_sha256"]):
+            raise ValueError(
+                f"v3 性能后继源码 identity 漂移: {binding['relative_path']}")
+    prior_size, prior_sha = _identity(root, V3_PRIOR_RECEIPT_PATH)
+    if prior_size < 1 or prior_sha != V3_PRIOR_RECEIPT_SHA256:
+        raise ValueError("前序 v2 performance receipt identity 漂移")
+    return {
+        "artifact_kind": ARTIFACT_KIND,
+        "artifact_version": V3_ARTIFACT_VERSION,
+        "change_commit": V3_CHANGE_COMMIT,
+        "format_version": FORMAT_VERSION,
+        "parent_commit": V3_PARENT_COMMIT,
+        "prior_successor_receipt": {
+            "relative_path": V3_PRIOR_RECEIPT_PATH,
+            "sha256": V3_PRIOR_RECEIPT_SHA256,
+            "status": "PERFORMANCE_PREDECESSOR",
+        },
+        "readiness_transition": {
+            "LANGUAGE_READINESS_REPUBLISHED": 0,
+            "PW00A_STARTED": 0,
+        },
+        "receipt_relative_path": V3_RECEIPT_PATH,
+        "receipt_self_excluded": 1,
+        "source_bindings": deepcopy(_V3_SOURCE_BINDINGS),
+        "status": "PERFORMANCE_SUCCESSOR_EVIDENCED",
+        "transformation": deepcopy(_V3_TRANSFORMATION),
+        "verification": deepcopy(_V3_VERIFICATION),
+    }
+
+
+def _validate_v3(value: dict[str, Any]) -> None:
+    raw = _exact(value, {
+        "artifact_kind", "artifact_version", "change_commit",
+        "format_version", "parent_commit", "prior_successor_receipt",
+        "readiness_transition", "receipt_relative_path",
+        "receipt_self_excluded", "source_bindings", "status",
+        "transformation", "verification",
+    }, where="v3 performance successor receipt")
+    if (raw["artifact_kind"] != ARTIFACT_KIND
+            or raw["artifact_version"] != V3_ARTIFACT_VERSION
+            or raw["change_commit"] != V3_CHANGE_COMMIT
+            or raw["format_version"] != FORMAT_VERSION
+            or raw["parent_commit"] != V3_PARENT_COMMIT
+            or raw["receipt_relative_path"] != V3_RECEIPT_PATH
+            or raw["receipt_self_excluded"] != 1
+            or raw["status"] != "PERFORMANCE_SUCCESSOR_EVIDENCED"):
+        raise ValueError("v3 performance successor receipt 固定身份漂移")
+    _digest(raw["change_commit"], length=40, where="v3 change_commit")
+    _digest(raw["parent_commit"], length=40, where="v3 parent_commit")
+    if raw["prior_successor_receipt"] != {
+            "relative_path": V3_PRIOR_RECEIPT_PATH,
+            "sha256": V3_PRIOR_RECEIPT_SHA256,
+            "status": "PERFORMANCE_PREDECESSOR",
+    }:
+        raise ValueError("前序 v2 performance receipt 声明漂移")
+    transition = _exact(raw["readiness_transition"], {
+        "LANGUAGE_READINESS_REPUBLISHED", "PW00A_STARTED",
+    }, where="v3 readiness_transition")
+    if transition != {
+            "LANGUAGE_READINESS_REPUBLISHED": 0,
+            "PW00A_STARTED": 0,
+    }:
+        raise ValueError("v3 performance successor 不得转移 readiness")
+    if raw["source_bindings"] != _V3_SOURCE_BINDINGS:
+        raise ValueError("v3 性能后继源码绑定漂移")
+    if raw["transformation"] != _V3_TRANSFORMATION:
+        raise ValueError("v3 性能 transformation 证据漂移")
+    if raw["verification"] != _V3_VERIFICATION:
+        raise ValueError("v3 性能 verification 证据漂移")
+
+
+def read_v3_performance_successor_receipt(
+        repository_root: str | Path,
+        path: str | Path = V3_RECEIPT_PATH,
+        ) -> dict[str, Any]:
+    root = Path(repository_root).resolve()
+    target = Path(path)
+    if not target.is_absolute():
+        target = root / Path(*str(target).replace("\\", "/").split("/"))
+    payload = target.read_bytes()
+    if not payload.endswith(b"\n") or payload.endswith(b"\n\n"):
+        raise ValueError("v3 performance receipt newline 非法")
+    try:
+        value = parse_canonical_json_bytes(payload[:-1], require_object=True)
+    except Exception as error:
+        raise ValueError("v3 performance receipt JSON 非 canonical") from error
+    if canonical_json_bytes(value) + b"\n" != payload:
+        raise ValueError("v3 performance receipt canonical bytes 漂移")
+    _validate_v3(value)
+    for binding in value["source_bindings"]:
+        if _identity(root, binding["relative_path"]) != (
+                binding["current_size_bytes"], binding["current_sha256"]):
+            raise ValueError(
+                f"v3 性能后继源码当前 identity 漂移: {binding['relative_path']}")
+    if _identity(root, V3_PRIOR_RECEIPT_PATH)[1] != V3_PRIOR_RECEIPT_SHA256:
+        raise ValueError("前序 v2 performance receipt 当前 identity 漂移")
+    return value
+
+
+def publish_v3_performance_successor_receipt(
+        repository_root: str | Path,
+        *, target: str | Path = V3_RECEIPT_PATH,
+        ) -> dict[str, Any]:
+    root = Path(repository_root).resolve()
+    destination = Path(target)
+    if not destination.is_absolute():
+        destination = root / Path(*str(destination).replace("\\", "/").split("/"))
+    if destination.exists():
+        raise ValueError("v3 performance successor receipt 已发布，禁止覆盖")
+    value = build_v3_performance_successor_receipt(root)
+    payload = canonical_json_bytes(value) + b"\n"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with destination.open("xb") as stream:
+            stream.write(payload)
+    except FileExistsError as error:
+        raise ValueError("v3 performance successor receipt 已发布，禁止覆盖") from error
+    restored = read_v3_performance_successor_receipt(root, destination)
+    if restored != value:
+        raise ValueError("v3 performance successor receipt 发布回读不一致")
+    return restored
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="发布性能 successor receipt。")
-    parser.add_argument("--revision", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--revision", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument("--publish", action="store_true", help="独占发布正式 receipt")
     parser.add_argument("--target", type=Path)
     return parser
@@ -468,7 +646,14 @@ def main(argv: list[str] | None = None) -> int:
             reconfigure(encoding="utf-8")
     args = _build_parser().parse_args(argv)
     try:
-        if args.revision == 2:
+        if args.revision == 3:
+            target = args.target or Path(V3_RECEIPT_PATH)
+            if args.publish:
+                value = publish_v3_performance_successor_receipt(
+                    REPOSITORY_ROOT, target=target)
+            else:
+                value = build_v3_performance_successor_receipt(REPOSITORY_ROOT)
+        elif args.revision == 2:
             target = args.target or Path(V2_RECEIPT_PATH)
             if args.publish:
                 value = publish_v2_performance_successor_receipt(
@@ -506,4 +691,8 @@ __all__ = [
     "V2_RECEIPT_PATH", "build_v2_performance_successor_receipt",
     "publish_v2_performance_successor_receipt",
     "read_v2_performance_successor_receipt",
+    "V3_ARTIFACT_VERSION", "V3_CHANGE_COMMIT", "V3_PARENT_COMMIT",
+    "V3_RECEIPT_PATH", "build_v3_performance_successor_receipt",
+    "publish_v3_performance_successor_receipt",
+    "read_v3_performance_successor_receipt",
 ]
