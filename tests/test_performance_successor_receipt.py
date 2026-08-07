@@ -16,15 +16,21 @@ from scripts.performance_successor_receipt import (
     V3_CHANGE_COMMIT,
     V3_PARENT_COMMIT,
     V3_RECEIPT_PATH,
+    V4_CHANGE_COMMIT,
+    V4_PARENT_COMMIT,
+    V4_RECEIPT_PATH,
     build_performance_successor_receipt,
     build_v2_performance_successor_receipt,
     build_v3_performance_successor_receipt,
+    build_v4_performance_successor_receipt,
     publish_performance_successor_receipt,
     publish_v2_performance_successor_receipt,
     publish_v3_performance_successor_receipt,
+    publish_v4_performance_successor_receipt,
     read_performance_successor_receipt,
     read_v2_performance_successor_receipt,
     read_v3_performance_successor_receipt,
+    read_v4_performance_successor_receipt,
 )
 
 
@@ -65,16 +71,18 @@ def test_published_v2_receipt_is_canonical_and_current() -> None:
     }
 
 
-def test_published_v3_receipt_is_canonical_and_current() -> None:
+def test_published_v3_receipt_is_historical_and_strictly_invalidated() -> None:
     target = ROOT / V3_RECEIPT_PATH
     assert hashlib.sha256(target.read_bytes()).hexdigest() == PUBLISHED_V3_SHA256
-    value = read_v3_performance_successor_receipt(ROOT)
+    value = read_v3_performance_successor_receipt(ROOT, verify_current=False)
     assert value["status"] == "PERFORMANCE_SUCCESSOR_EVIDENCED"
     assert value["prior_successor_receipt"]["sha256"] == PUBLISHED_V2_SHA256
     assert value["readiness_transition"] == {
         "LANGUAGE_READINESS_REPUBLISHED": 0,
         "PW00A_STARTED": 0,
     }
+    with pytest.raises(ValueError, match="当前 identity 漂移"):
+        read_v3_performance_successor_receipt(ROOT)
 
 
 def test_v1_performance_receipt_build_is_invalidated_by_v2_source() -> None:
@@ -153,37 +161,21 @@ def test_v2_performance_receipt_rejects_source_and_readiness_drift(
         read_v2_performance_successor_receipt(ROOT, target)
 
 
-def test_v3_performance_receipt_builds_with_owner_validated_constructor(
-        tmp_path: Path,
-        ) -> None:
-    value = build_v3_performance_successor_receipt(ROOT)
-    assert value["change_commit"] == V3_CHANGE_COMMIT
-    assert value["parent_commit"] == V3_PARENT_COMMIT
-    assert value["receipt_relative_path"] == V3_RECEIPT_PATH
-    assert value["transformation"]["public_validation_changed"] == 0
-    assert value["transformation"]["cached_record_layout_changed"] == 0
-    assert value["transformation"]["internal_post_init_calls_after"] == 0
-    assert value["readiness_transition"] == {
-        "LANGUAGE_READINESS_REPUBLISHED": 0,
-        "PW00A_STARTED": 0,
-    }
-    target = tmp_path / "v3.json"
-    target.write_bytes(canonical_json_bytes(value) + b"\n")
-    assert read_v3_performance_successor_receipt(ROOT, target) == value
+def test_v3_performance_receipt_build_is_invalidated_by_v4_source() -> None:
+    with pytest.raises(ValueError, match="源码 identity 漂移"):
+        build_v3_performance_successor_receipt(ROOT)
 
 
-def test_v3_performance_receipt_publish_is_append_only(tmp_path: Path) -> None:
-    target = tmp_path / "v3.json"
-    published = publish_v3_performance_successor_receipt(ROOT, target=target)
-    assert read_v3_performance_successor_receipt(ROOT, target) == published
+def test_v3_performance_receipt_publish_is_append_only() -> None:
     with pytest.raises(ValueError, match="禁止覆盖"):
-        publish_v3_performance_successor_receipt(ROOT, target=target)
+        publish_v3_performance_successor_receipt(ROOT)
 
 
 def test_v3_performance_receipt_rejects_source_and_readiness_drift(
         tmp_path: Path,
         ) -> None:
-    value = build_v3_performance_successor_receipt(ROOT)
+    value = read_v3_performance_successor_receipt(
+        ROOT, verify_current=False)
     target = tmp_path / "v3.json"
     altered = json.loads(json.dumps(value))
     altered["source_bindings"][0]["current_sha256"] = "0" * 64
@@ -195,4 +187,50 @@ def test_v3_performance_receipt_rejects_source_and_readiness_drift(
     altered["readiness_transition"]["LANGUAGE_READINESS_REPUBLISHED"] = 1
     target.write_bytes(canonical_json_bytes(altered) + b"\n")
     with pytest.raises(ValueError, match="readiness"):
-        read_v3_performance_successor_receipt(ROOT, target)
+        read_v3_performance_successor_receipt(
+            ROOT, target, verify_current=False)
+
+
+def test_v4_performance_receipt_builds_with_clean_clear_fast_path(
+        tmp_path: Path,
+        ) -> None:
+    value = build_v4_performance_successor_receipt(ROOT)
+    assert value["change_commit"] == V4_CHANGE_COMMIT
+    assert value["parent_commit"] == V4_PARENT_COMMIT
+    assert value["receipt_relative_path"] == V4_RECEIPT_PATH
+    assert value["transformation"]["dirty_requires_flush"] == 1
+    assert value["transformation"]["pinned_clear_rejected"] == 1
+    assert value["transformation"]["clean_clear_record_size_calls_after"] == 0
+    assert value["readiness_transition"] == {
+        "LANGUAGE_READINESS_REPUBLISHED": 0,
+        "PW00A_STARTED": 0,
+    }
+    target = tmp_path / "v4.json"
+    target.write_bytes(canonical_json_bytes(value) + b"\n")
+    assert read_v4_performance_successor_receipt(ROOT, target) == value
+
+
+def test_v4_performance_receipt_publish_is_append_only(tmp_path: Path) -> None:
+    target = tmp_path / "v4.json"
+    published = publish_v4_performance_successor_receipt(ROOT, target=target)
+    assert read_v4_performance_successor_receipt(ROOT, target) == published
+    with pytest.raises(ValueError, match="禁止覆盖"):
+        publish_v4_performance_successor_receipt(ROOT, target=target)
+
+
+def test_v4_performance_receipt_rejects_source_and_readiness_drift(
+        tmp_path: Path,
+        ) -> None:
+    value = build_v4_performance_successor_receipt(ROOT)
+    target = tmp_path / "v4.json"
+    altered = json.loads(json.dumps(value))
+    altered["source_bindings"][0]["current_sha256"] = "0" * 64
+    target.write_bytes(canonical_json_bytes(altered) + b"\n")
+    with pytest.raises(ValueError, match="源码绑定"):
+        read_v4_performance_successor_receipt(ROOT, target)
+
+    altered = json.loads(json.dumps(value))
+    altered["readiness_transition"]["LANGUAGE_READINESS_REPUBLISHED"] = 1
+    target.write_bytes(canonical_json_bytes(altered) + b"\n")
+    with pytest.raises(ValueError, match="readiness"):
+        read_v4_performance_successor_receipt(ROOT, target)

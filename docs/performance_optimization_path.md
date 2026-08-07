@@ -152,3 +152,12 @@ pin、unpin、flush 和 put 时用公开构造器重复验证已知字段。现�
 `storage/segment_cache.py` 的 parent/current 身份。receipt 固定六处内部构造点、
 公开校验与缓存记录布局均未变化、内部 `__post_init__` 调用降为零；状态仍只表示
 性能后继证据，不重发 readiness，也不启动 PW-00A。
+
+后续 profile 表明完整 clean/unpinned cache 的 `clear()` 仍会经 `evict()` 对全部键
+排序、逐字段校验并再次计算记录大小。`clear()` 已经先拒绝 pinned，并把 dirty 全部
+flush 为 clean，因此成功分支可直接清空 owner 字典并把聚合字节计数归零，同时保留
+逻辑访问序。固定 5,000 条 page-in+get+clear、11 轮交错中位由 118,593,100 降至
+87,606,000 ns，约改善 26.2%；dirty flush、pinned 拒绝、返回计数和公开布局不变。
+
+该变更提交为 `4930d57`，性能 receipt v4 严格串接 v3。v3 在后继源码上默认严格
+失效，只允许显式 historical 回读；v4 仍仅为本机方向性性能证据，不转移 readiness。
