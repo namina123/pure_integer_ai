@@ -90,3 +90,23 @@ class Rational:
 `struct_layout_successor_receipt_v1.json` 绑定 parent/current 源码身份、布局变化、
 本机方向性性能数据和有界验证。receipt 状态仅为
 `STRUCT_LAYOUT_SUCCESSOR_EVIDENCED`，显式保持 readiness 未重发、PW-00A 未启动。
+
+## 第二批施工
+
+第二批依据既有 100,000-record SQLite 存储剖析场景选择
+`storage/sealed_segment.py`。全局 pytest 调用剖析与 dataclass 包装采样分别超过
+5 分钟、3 分钟预算且没有形成可用报告，已经停止，不应沿该高侵入路径重试。
+
+三个候选均先做相同基线与交错复测，最终只接受高频 `SegmentBudget` 和
+`SegmentRecord`：
+
+| 结构 | 存活数量 | 迁移前 | 迁移后 | 内存变化 | 交错构造变化 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `SegmentBudget` | 100,000 | 9,601,264 bytes | 5,601,264 bytes | -41.7% | -4.9% |
+| `SegmentRecord` | 100,000 | 9,601,648 bytes | 5,601,648 bytes | -41.7% | -4.7% |
+
+`SealedSegment` 虽可使 20,000 实例由 3,693,712 降至 2,893,712 bytes，交错构造
+却稳定慢约 4.1%，且 100,000-record 场景仅需约 100 个 segment。该迁移已撤回，
+继续保留在 legacy baseline。嵌套 `SegmentRecord` 改为 slots 后，`SealedSegment`
+canonical SHA-256 仍为
+`f5a4f44527d919871d01e009763fbca049b363108ccc7e45d4f54804104a0312`。

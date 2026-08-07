@@ -29,7 +29,8 @@ class SegmentBudgetExceeded(RuntimeError):
     """开放 delta 或单次读取超过调用方注入的对象/字节预算。"""
 
 
-@dataclass(frozen=True)
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
 class SegmentBudget:
     """开放 delta 或分页读取使用的对象数和规范字节硬预算。"""
 
@@ -43,7 +44,8 @@ class SegmentBudget:
             raise ValueError("segment budget 必须使用正严格整数")
 
 
-@dataclass(frozen=True, order=True)
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, order=True, slots=True)
 class SegmentRecord:
     """sealed segment 中一条完整稳定键和纯整数载荷记录。"""
 
