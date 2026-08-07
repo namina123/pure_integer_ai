@@ -428,6 +428,8 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
                 cloned_hot_set.policy,
                 resolver=cloned_hot_set.resolver,
             )
+            installed.replace_query_index(
+                cloned_hot_set.query_index_projection())
             if installed.state_key() != source_hot_set.state_key():
                 raise EvaluationIsolationError(
                     "K-04 hot-set clone 改变装配状态")

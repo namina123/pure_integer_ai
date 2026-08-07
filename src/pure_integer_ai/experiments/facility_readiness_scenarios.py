@@ -54,6 +54,8 @@ from pure_integer_ai.cognition.shared.memory_event import (
     memory_object_ref,
 )
 from pure_integer_ai.cognition.shared.memory_hot_set import (
+    MemoryProjectionIndexEntry,
+    MemoryProjectionQueryGroup,
     StableTopKSourcePolicy,
 )
 from pure_integer_ai.cognition.shared.memory_hypothesis import (
@@ -425,9 +427,47 @@ class _CurrentContextScorer:
         del ctx
         return _CurrentContextScorer()
 
+    def index_entries(
+            self,
+            bundle: Any,
+            ) -> tuple[MemoryProjectionIndexEntry, ...]:
+        """按唯一 candidate 值建立精确命中和非命中静态分数双入口。"""
+        candidate_key = bundle.hypothesis.candidate_key
+        competition_key = bundle.hypothesis.competition_key
+        if len(candidate_key) != 1 or len(competition_key) != 1:
+            raise ValueError("current-context 索引要求单整数 candidate/competition")
+        identity = bundle.hypothesis_ref.stable_key()
+        tie_break = (competition_key[0], *identity)
+        return (
+            MemoryProjectionIndexEntry(
+                (1, candidate_key[0]),
+                tie_break,
+            ),
+            MemoryProjectionIndexEntry(
+                (2,),
+                (-bundle.aggregate.support_count, *tie_break),
+            ),
+        )
+
+    def query_groups(
+            self,
+            request: Any,
+            ) -> tuple[MemoryProjectionQueryGroup, ...]:
+        """读取精确命中和双倍 fallback 前缀，覆盖同值多候选 Top-K。"""
+        return (
+            MemoryProjectionQueryGroup(
+                (1, request.source.document_id),
+                request.budget,
+            ),
+            MemoryProjectionQueryGroup(
+                (2,),
+                request.budget * 2,
+            ),
+        )
+
     def state_key(self) -> tuple[int, ...]:
-        """返回评分协议版本。"""
-        return (1,)
+        """返回评分、双入口排序和 fallback 完备前缀因子。"""
+        return (3, 1000, 100, 1, 2, 2)
 
 
 class _IndexFilterProvider:

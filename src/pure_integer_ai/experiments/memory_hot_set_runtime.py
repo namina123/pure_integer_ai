@@ -6,17 +6,23 @@ from dataclasses import dataclass
 
 from pure_integer_ai.cognition.shared.memory_hot_set import (
     BoundedCandidateSelectionPolicy,
+    ExactMemoryProjectionPlanner,
+    MemoryProjectionQueryGroup,
     decode_memory_candidate,
+    decode_memory_candidate_payload,
     encode_memory_candidate,
     matches_memory_filter,
     memory_candidate_record_key,
     memory_candidate_scan_range,
+    memory_query_index_record_key,
+    memory_query_index_scan_range,
     visible_owner_keys,
 )
 from pure_integer_ai.cognition.shared.memory_event import (
     LIFECYCLE_ACTIVE,
     MemoryObjectRef,
 )
+from pure_integer_ai.cognition.shared.identity import OwnerScope
 from pure_integer_ai.cognition.shared.memory_maintenance import (
     MemoryMaintenanceAssessment,
     MemoryPlacementHint,
@@ -80,6 +86,7 @@ MEMORY_PROJECTION_PLACEMENT_MIGRATION_OBJECT = 7
 MEMORY_PROJECTION_PLACEMENT_READER_OBJECT = 8
 MEMORY_PROJECTION_GENERATION_KEY_VERSION = 1
 MEMORY_PROJECTION_PLACEMENT_PLAN_VERSION = 1
+MEMORY_QUERY_INDEX_MANIFEST_VERSION = 1
 
 
 class MemoryProjectionError(RuntimeError):
@@ -311,6 +318,129 @@ class MemoryCandidateProjectionManifest:
                     or entry.key_range.lower_key != summary.lower_key
                     or entry.key_range.upper_key != summary.upper_key):
                 raise MemoryProjectionError("候选投影 segment 与 location entry 漂移")
+
+
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, order=True, slots=True)
+class MemoryQueryIndexPartition:
+    """精确查询索引中一个 kind/owner 分区的逻辑候选数。"""
+
+    hypothesis_kind_hash: int
+    owner_key: tuple[int, int, int, int]
+    candidate_count: int
+    index_record_count: int
+
+    def __post_init__(self) -> None:
+        """核验派生 kind hash、完整 owner 和正候选数。"""
+        if type(self.hypothesis_kind_hash) is not int or self.hypothesis_kind_hash <= 0:
+            raise ValueError("query index hypothesis_kind_hash 必须是正严格整数")
+        object.__setattr__(self, "owner_key", OwnerScope(*self.owner_key).stable_key())
+        if type(self.candidate_count) is not int or self.candidate_count <= 0:
+            raise ValueError("query index candidate_count 必须是正严格整数")
+        if (type(self.index_record_count) is not int
+                or self.index_record_count < self.candidate_count):
+            raise ValueError("query index record_count 不得小于逻辑候选数")
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回分区身份和逻辑候选数。"""
+        return (
+            self.hypothesis_kind_hash,
+            *self.owner_key,
+            self.candidate_count,
+            self.index_record_count,
+        )
+
+
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class MemoryQueryIndexProjectionManifest:
+    """绑定基础 Memory source state、planner 和双入口索引段的冻结清单。"""
+
+    storage: MemoryCandidateProjectionManifest
+    planner_key: tuple[int, ...]
+    partitions: tuple[MemoryQueryIndexPartition, ...]
+
+    def __post_init__(self) -> None:
+        """核验存储清单、planner 身份和唯一分区计数。"""
+        if not isinstance(self.storage, MemoryCandidateProjectionManifest):
+            raise TypeError("query index storage manifest 类型错误")
+        strict_integer_tuple(
+            self.planner_key, label="query index planner_key")
+        if (not isinstance(self.partitions, tuple)
+                or not self.partitions
+                or any(not isinstance(item, MemoryQueryIndexPartition)
+                       for item in self.partitions)):
+            raise TypeError("query index partitions 必须是非空 tuple")
+        partitions = tuple(sorted(self.partitions))
+        keys = tuple(
+            (item.hypothesis_kind_hash, item.owner_key)
+            for item in partitions
+        )
+        if len(set(keys)) != len(keys):
+            raise ValueError("query index kind/owner 分区不得重复")
+        if sum(item.index_record_count for item in partitions) != (
+                self.storage.record_count):
+            raise ValueError("query index 分区记录数与冷段总数不闭合")
+        object.__setattr__(self, "partitions", partitions)
+
+    @property
+    def candidate_count(self) -> int:
+        """返回全部 kind/owner 分区的逻辑候选总数。"""
+        return sum(item.candidate_count for item in self.partitions)
+
+    def partition_count(
+            self,
+            hypothesis_kind_hash: int,
+            owner_key: tuple[int, int, int, int],
+            ) -> int:
+        """返回一个精确 kind/owner 分区的逻辑候选数。"""
+        for item in self.partitions:
+            if (item.hypothesis_kind_hash == hypothesis_kind_hash
+                    and item.owner_key == owner_key):
+                return item.candidate_count
+        return 0
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回可跨重启恢复的存储、planner 和分区完整键。"""
+        result = [MEMORY_QUERY_INDEX_MANIFEST_VERSION]
+        pack_key(result, self.storage.stable_key())
+        pack_key(result, self.planner_key)
+        result.append(len(self.partitions))
+        for item in self.partitions:
+            pack_key(result, item.stable_key())
+        return tuple(result)
+
+    @classmethod
+    def from_stable_key(
+            cls,
+            key: tuple[int, ...],
+            ) -> "MemoryQueryIndexProjectionManifest":
+        """从纯整数键严格恢复查询索引清单。"""
+        reader = IntegerStreamReader(key)
+        version = reader.read_positive(label="query index manifest version")
+        if version != MEMORY_QUERY_INDEX_MANIFEST_VERSION:
+            raise MemoryProjectionError("query index manifest 版本未注册")
+        storage = MemoryCandidateProjectionManifest.from_stable_key(
+            reader.read_key(label="query index storage manifest"))
+        planner_key = reader.read_key(label="query index planner_key")
+        count = reader.read_positive(label="query index partition count")
+        partitions = []
+        for index in range(count):
+            values = reader.read_key(label=f"query index partition[{index}]")
+            if len(values) != 7:
+                raise MemoryProjectionError("query index partition 长度漂移")
+            partitions.append(MemoryQueryIndexPartition(
+                values[0],
+                tuple(values[1:5]),
+                values[5],
+                values[6],
+            ))
+        reader.finish()
+        return cls(storage, planner_key, tuple(partitions))
+
+    def validate_store(self, store: TieredSegmentStore) -> None:
+        """委托底层冻结投影核验 location manifest。"""
+        self.storage.validate_store(store)
 
 
 @dataclass(frozen=True)
@@ -983,6 +1113,9 @@ class MemoryHotSetRuntime:
         self._compilation_key: tuple[int, ...] | None = None
         self._resolution: MemoryResolution | None = None
         self._last_metrics: QueryHotSetMetrics | None = None
+        self._last_considered_count: int | None = None
+        self._last_selected_candidate_keys: tuple[tuple[int, ...], ...] | None = None
+        self._query_index_projection: MemoryQueryIndexProjectionManifest | None = None
 
     def resolve(self, compilation: MemoryQueryCompilation) -> MemoryResolution:
         """从固定源 fence 的候选页流式评分并返回与全热策略等价的结果。"""
@@ -1002,12 +1135,18 @@ class MemoryHotSetRuntime:
             return self._resolution
         self._require_fresh_projection()
         self.projection.validate_store(self.store)
-        if self.projection.segments:
+        active_projection = (
+            self.projection
+            if self._query_index_projection is None
+            else self._query_index_projection.storage
+        )
+        active_projection.validate_store(self.store)
+        if active_projection.segments:
             reader_key = (
                 MEMORY_PROJECTION_MANIFEST_VERSION,
                 *active_scope.stable_key(),
-                len(self.projection.projection_key),
-                *self.projection.projection_key,
+                len(active_projection.projection_key),
+                *active_projection.projection_key,
             )
             self._hot_set = QuerySegmentHotSet(
                 self.store,
@@ -1019,6 +1158,20 @@ class MemoryHotSetRuntime:
         sets = tuple(self._resolve_request(request)
                      for request in compilation.requests)
         self._resolution = MemoryResolution(compilation, sets)
+        self._last_considered_count = sum(
+            item.considered_count for item in sets)
+        self._last_selected_candidate_keys = tuple(
+            (
+                request_ordinal,
+                candidate_ordinal,
+                candidate.origin_kind,
+                len(candidate.candidate_key),
+                *candidate.candidate_key,
+            )
+            for request_ordinal, candidate_set in enumerate(sets, start=1)
+            for candidate_ordinal, candidate in enumerate(
+                candidate_set.candidates, start=1)
+        )
         self._compilation_key = current_key
         return self._resolution
 
@@ -1036,6 +1189,22 @@ class MemoryHotSetRuntime:
         if self._hot_set is not None:
             return self._hot_set.metrics()
         return self._last_metrics
+
+    def considered_count(self) -> int | None:
+        """返回当前或最近完成 query 在本 Memory 空间的逻辑候选考虑数。"""
+        if self._resolution is not None:
+            return sum(item.considered_count for item in self._resolution.sets)
+        return self._last_considered_count
+
+    def selected_candidate_keys(self) -> tuple[tuple[int, ...], ...] | None:
+        """返回当前或最近 query 逐 request、逐序位的候选完整身份。"""
+        return self._last_selected_candidate_keys
+
+    def query_index_projection(
+            self,
+            ) -> MemoryQueryIndexProjectionManifest | None:
+        """返回当前只读精确查询索引清单；未安装时为空。"""
+        return self._query_index_projection
 
     def query_resources_closed(self) -> bool:
         """返回当前 query 的 reader、热集和缓存结果是否已经全部释放。"""
@@ -1067,7 +1236,62 @@ class MemoryHotSetRuntime:
             raise MemoryProjectionError("待切换 Memory 候选投影已经失效")
         projection.validate_store(self.store)
         self.projection = projection
+        if (self._query_index_projection is not None
+                and (self._query_index_projection.storage.source_state_key
+                     != projection.source_state_key
+                     or self._query_index_projection.storage.memory_space
+                     != projection.memory_space)):
+            self._query_index_projection = None
         self._last_metrics = None
+        self._last_considered_count = None
+        self._last_selected_candidate_keys = None
+
+    def replace_query_index(
+            self,
+            projection: MemoryQueryIndexProjectionManifest | None,
+            ) -> None:
+        """在无活动 query 时安装或移除同 source state 的精确查询索引。"""
+        if (self._ctx.work_memory.active_query_scope is not None
+                or self._hot_set is not None
+                or self._resolution is not None):
+            raise RuntimeError("活动 query 期间不得替换 Memory 查询索引")
+        if projection is not None:
+            if not isinstance(projection, MemoryQueryIndexProjectionManifest):
+                raise TypeError("replace query index projection 类型错误")
+            storage = projection.storage
+            if (storage.memory_space != self.projection.memory_space
+                    or storage.memory_space_id != self.projection.memory_space_id
+                    or storage.access != self.projection.access
+                    or storage.hypothesis_kinds
+                    != self.projection.hypothesis_kinds
+                    or storage.source_state_key
+                    != self.projection.source_state_key):
+                raise ValueError("查询索引与基础候选投影的空间、ACL、kind 或 source state 漂移")
+            planner = self.resolver.score_provider
+            if not isinstance(planner, ExactMemoryProjectionPlanner):
+                raise TypeError("当前 scorer 未实现精确投影 planner")
+            planner_key = strict_integer_tuple(
+                planner.state_key(), label="query index live planner_key")
+            if planner_key != projection.planner_key:
+                raise ValueError("查询索引 planner 与当前 scorer 状态漂移")
+            projection.validate_store(self.store)
+        self._query_index_projection = projection
+        self._last_metrics = None
+        self._last_considered_count = None
+        self._last_selected_candidate_keys = None
+
+    def replace_policy(self, policy: QueryHotSetPolicy) -> None:
+        """在无活动 query 时替换同语义的设备热集预算和预取策略。"""
+        if not isinstance(policy, QueryHotSetPolicy):
+            raise TypeError("replace memory hot-set policy 类型错误")
+        if (self._ctx.work_memory.active_query_scope is not None
+                or self._hot_set is not None
+                or self._resolution is not None):
+            raise RuntimeError("活动 query 期间不得替换 Memory hot-set policy")
+        self.policy = policy
+        self._last_metrics = None
+        self._last_considered_count = None
+        self._last_selected_candidate_keys = None
 
     def apply_maintenance_assessments(
             self,
@@ -1148,6 +1372,8 @@ class MemoryHotSetRuntime:
                 ),
                 self.policy.prefetch_state_key()):
             pack_key(result, value)
+        if self._query_index_projection is not None:
+            pack_key(result, self._query_index_projection.stable_key())
         return tuple(result)
 
     def clone_for_context(self, ctx: TrainContext) -> "MemoryHotSetRuntime":
@@ -1170,6 +1396,8 @@ class MemoryHotSetRuntime:
             self.projection,
             self.policy,
         )
+        if self._query_index_projection is not None:
+            cloned.replace_query_index(self._query_index_projection)
         if cloned.state_key() != self.state_key():
             raise ValueError("memory hot-set clone 改变装配状态")
         return cloned
@@ -1186,6 +1414,10 @@ class MemoryHotSetRuntime:
             raise TypeError("resolver diversity policy 不再满足有界协议")
         if self._hot_set is None and self.projection.segments:
             raise RuntimeError("memory hot-set reader 尚未打开")
+        filters = self._filters(request)
+        if (self._query_index_projection is not None
+                and filters == (MemoryAggregateFilter(),)):
+            return self._resolve_indexed_request(request)
 
         def pin(record_key: tuple[int, ...]) -> None:
             """把进入有界候选集的冷记录固定在当前 query cache。"""
@@ -1209,7 +1441,6 @@ class MemoryHotSetRuntime:
         for candidate in self.resolver.core_candidates(request):
             accumulator.offer(candidate, None)
             considered += 1
-        filters = self._filters(request)
         kind_hash = self.resolver.aggregates.hypothesis_kind_hash(
             request.hypothesis_kind)
         if self._hot_set is not None:
@@ -1241,6 +1472,108 @@ class MemoryHotSetRuntime:
             raise ValueError("有界选择策略未返回精确 Top-K 数量")
         return ResolvedCandidateSet(request, selected, considered)
 
+    def _resolve_indexed_request(
+            self,
+            request: MemoryActivationRequest,
+            ) -> ResolvedCandidateSet:
+        """按 planner 完备组读取有界前缀，并保留完整分区逻辑考虑数。"""
+        projection = self._query_index_projection
+        if projection is None:
+            raise RuntimeError("indexed request 缺少查询索引")
+        if self._hot_set is None:
+            raise RuntimeError("indexed request reader 尚未打开")
+        planner = self.resolver.score_provider
+        if not isinstance(planner, ExactMemoryProjectionPlanner):
+            raise TypeError("indexed request scorer 未实现精确 planner")
+        if strict_integer_tuple(
+                planner.state_key(), label="indexed request planner_key"
+                ) != projection.planner_key:
+            raise MemoryProjectionError("indexed request planner 状态漂移")
+        groups = planner.query_groups(request)
+        if (not isinstance(groups, tuple)
+                or not groups
+                or any(not isinstance(item, MemoryProjectionQueryGroup)
+                       for item in groups)):
+            raise TypeError("精确 planner query_groups 返回类型错误")
+        group_keys = tuple(item.group_key for item in groups)
+        if len(set(group_keys)) != len(group_keys):
+            raise ValueError("精确 planner query group 不得重复")
+        policy = self.resolver.diversity_policy
+        if not isinstance(policy, BoundedCandidateSelectionPolicy):
+            raise TypeError("indexed resolver diversity policy 不满足有界协议")
+
+        def pin(record_key: tuple[int, ...]) -> None:
+            """持有进入精确 Top-K 的查询索引记录。"""
+            self._hot_set.pin(record_key)
+
+        def unpin(record_key: tuple[int, ...]) -> None:
+            """释放被更优候选替换的查询索引记录。"""
+            self._hot_set.unpin(record_key)
+
+        accumulator = policy.new_accumulator(
+            request,
+            request.budget,
+            pin=pin,
+            unpin=unpin,
+        )
+        core_candidates = self.resolver.core_candidates(request)
+        seen = set()
+        for candidate in core_candidates:
+            accumulator.offer(candidate, None)
+            seen.add((candidate.origin_kind, candidate.candidate_key))
+        kind_hash = self.resolver.aggregates.hypothesis_kind_hash(
+            request.hypothesis_kind)
+        logical_memory_count = 0
+        for owner_key in visible_owner_keys(request.access):
+            logical_memory_count += projection.partition_count(
+                kind_hash, owner_key)
+            for group in groups:
+                lower, upper = memory_query_index_scan_range(
+                    projection.storage.projection_key,
+                    kind_hash,
+                    owner_key,
+                    group.group_key,
+                )
+                consumed = 0
+                for cached in self._hot_set.iter_range(
+                        lower_key=lower, upper_key=upper):
+                    if consumed >= group.limit:
+                        break
+                    consumed += 1
+                    bundle = decode_memory_candidate_payload(cached.record)
+                    if (bundle.hypothesis.hypothesis_kind
+                            != request.hypothesis_kind
+                            or bundle.aggregate.lifecycle_state
+                            != LIFECYCLE_ACTIVE):
+                        raise MemoryProjectionError(
+                            "查询索引含错误 kind 或 inactive 候选")
+                    entries = planner.index_entries(bundle)
+                    expected = {
+                        memory_query_index_record_key(
+                            projection.storage.projection_key,
+                            bundle.aggregate,
+                            entry,
+                        )
+                        for entry in entries
+                        if entry.group_key == group.group_key
+                    }
+                    if cached.record.record_key not in expected:
+                        raise MemoryProjectionError(
+                            "查询索引 record key 与 planner entry 漂移")
+                    candidate = self.resolver.candidate_from_bundle(
+                        request, bundle)
+                    candidate_key = (
+                        candidate.origin_kind, candidate.candidate_key)
+                    if candidate_key in seen:
+                        continue
+                    seen.add(candidate_key)
+                    accumulator.offer(candidate, cached.record.record_key)
+        considered = len(core_candidates) + logical_memory_count
+        selected = accumulator.finish()
+        if len(selected) != min(request.budget, considered):
+            raise MemoryProjectionError("精确查询索引未恢复足量 Top-K")
+        return ResolvedCandidateSet(request, selected, considered)
+
     def _filters(
             self,
             request: MemoryActivationRequest,
@@ -1262,6 +1595,10 @@ class MemoryHotSetRuntime:
                 != self.projection.source_state_key):
             raise MemoryProjectionError(
                 "Memory 候选投影已因 event/batch/forget epoch 变化失效")
+        if (self._query_index_projection is not None
+                and self._query_index_projection.storage.source_state_key
+                != self.projection.source_state_key):
+            raise MemoryProjectionError("Memory 查询索引 source state 已失效")
 
 
 def memory_hot_set_runtimes(
@@ -1362,6 +1699,8 @@ __all__ = [
     "MemoryProjectionPlacementReceipt",
     "MemoryProjectionPublication",
     "MemoryProjectionSegment",
+    "MemoryQueryIndexPartition",
+    "MemoryQueryIndexProjectionManifest",
     "install_memory_hot_set_runtime",
     "memory_hot_set_runtime_for",
     "memory_hot_set_runtimes",

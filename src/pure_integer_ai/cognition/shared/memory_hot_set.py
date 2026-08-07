@@ -42,6 +42,66 @@ class MemoryHotSetIntegrityError(RuntimeError):
     """候选投影的完整身份、范围或 payload 发生漂移。"""
 
 
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class MemoryProjectionIndexEntry:
+    """一个候选在精确查询索引中的分组键和组内稳定顺序。"""
+
+    group_key: tuple[int, ...]
+    order_key: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        """核验分组和组内顺序均为非空严格整数键。"""
+        group = strict_integer_tuple(
+            self.group_key, label="memory projection index group_key")
+        order = strict_integer_tuple(
+            self.order_key, label="memory projection index order_key")
+        if not group or not order:
+            raise ValueError("memory projection index group/order key 不得为空")
+
+
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class MemoryProjectionQueryGroup:
+    """一次 query 需要读取的一个索引组及精确前缀上限。"""
+
+    group_key: tuple[int, ...]
+    limit: int
+
+    def __post_init__(self) -> None:
+        """核验分组身份和正严格整数读取上限。"""
+        group = strict_integer_tuple(
+            self.group_key, label="memory projection query group_key")
+        if not group:
+            raise ValueError("memory projection query group_key 不得为空")
+        if type(self.limit) is not int or self.limit <= 0:
+            raise ValueError("memory projection query group limit 必须是正严格整数")
+
+
+# object-model: protocol
+@runtime_checkable
+class ExactMemoryProjectionPlanner(Protocol):
+    """把 scorer 的完整 Top-K 分解为可证明完备的有界索引组。"""
+
+    def index_entries(
+            self,
+            bundle: MemoryCandidateBundle,
+            ) -> tuple[MemoryProjectionIndexEntry, ...]:
+        """返回候选必须进入的全部查询索引组。"""
+        ...
+
+    def query_groups(
+            self,
+            request: MemoryActivationRequest,
+            ) -> tuple[MemoryProjectionQueryGroup, ...]:
+        """返回足以重建该 request 精确 Top-K 的有界组前缀。"""
+        ...
+
+    def state_key(self) -> tuple[int, ...]:
+        """返回同时约束评分、分组、顺序和完备性证明的稳定键。"""
+        ...
+
+
 def visible_owner_keys(
         access: MemoryAccessContext,
         ) -> tuple[tuple[int, int, int, int], ...]:
@@ -108,13 +168,62 @@ def memory_candidate_scan_range(
     return lower, upper
 
 
-def encode_memory_candidate(
+def memory_query_index_record_key(
         projection_key: tuple[int, ...],
+        aggregate: MemoryHypothesisAggregateRecord,
+        entry: MemoryProjectionIndexEntry,
+        ) -> tuple[int, ...]:
+    """形成按 projection/kind/owner/group/order 隔离的索引记录键。"""
+    projection = strict_integer_tuple(
+        projection_key, label="memory query index projection_key")
+    if not isinstance(aggregate, MemoryHypothesisAggregateRecord):
+        raise TypeError("memory query index aggregate 类型错误")
+    if not isinstance(entry, MemoryProjectionIndexEntry):
+        raise TypeError("memory query index entry 类型错误")
+    return (
+        len(projection),
+        *projection,
+        aggregate.hypothesis_kind_hash,
+        *aggregate.owner_key,
+        len(entry.group_key),
+        *entry.group_key,
+        *entry.order_key,
+        aggregate.hypothesis_hash,
+    )
+
+
+def memory_query_index_scan_range(
+        projection_key: tuple[int, ...],
+        hypothesis_kind_hash: int,
+        owner_key: tuple[int, int, int, int],
+        group_key: tuple[int, ...],
+        ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """返回一个精确 kind/owner/group 的前缀闭区间。"""
+    projection = strict_integer_tuple(
+        projection_key, label="memory query index scan projection_key")
+    if type(hypothesis_kind_hash) is not int or hypothesis_kind_hash <= 0:
+        raise ValueError("memory query index hypothesis_kind_hash 非法")
+    owner = OwnerScope(*owner_key).stable_key()
+    group = strict_integer_tuple(
+        group_key, label="memory query index scan group_key")
+    lower = (
+        len(projection),
+        *projection,
+        hypothesis_kind_hash,
+        *owner,
+        len(group),
+        *group,
+    )
+    upper = (*lower[:-1], lower[-1] + 1)
+    return lower, upper
+
+
+def encode_memory_candidate_payload(
         bundle: MemoryCandidateBundle,
-        ) -> SegmentRecord:
-    """把完整 typed 候选编码为 K-02 纯整数 canonical record。"""
+        ) -> tuple[int, ...]:
+    """把完整 typed 候选编码为可由基础投影和查询索引共用的 payload。"""
     if not isinstance(bundle, MemoryCandidateBundle):
-        raise TypeError("encode memory candidate bundle 类型错误")
+        raise TypeError("encode memory candidate payload bundle 类型错误")
     aggregate = bundle.aggregate
     payload: list[int] = [MEMORY_CANDIDATE_PROJECTION_FORMAT_VERSION]
     pack_key(payload, bundle.hypothesis_ref.stable_key())
@@ -154,9 +263,17 @@ def encode_memory_candidate(
             trace.last_observed_seq,
             trace.evidence_count,
         ))
+    return tuple(payload)
+
+
+def encode_memory_candidate(
+        projection_key: tuple[int, ...],
+        bundle: MemoryCandidateBundle,
+        ) -> SegmentRecord:
+    """把完整 typed 候选编码为 K-02 纯整数 canonical record。"""
     return SegmentRecord(
-        memory_candidate_record_key(projection_key, aggregate),
-        tuple(payload),
+        memory_candidate_record_key(projection_key, bundle.aggregate),
+        encode_memory_candidate_payload(bundle),
     )
 
 
@@ -167,8 +284,19 @@ def decode_memory_candidate(
     """从冷页恢复完整 typed 候选，并逐层核验 record key 与 payload。"""
     projection = strict_integer_tuple(
         projection_key, label="decode memory candidate projection_key")
+    bundle = decode_memory_candidate_payload(record)
+    expected = memory_candidate_record_key(projection, bundle.aggregate)
+    if record.record_key != expected:
+        raise MemoryHotSetIntegrityError("Memory candidate record key 与 payload 漂移")
+    return bundle
+
+
+def decode_memory_candidate_payload(
+        record: SegmentRecord,
+        ) -> MemoryCandidateBundle:
+    """从基础或查询索引记录恢复完整候选，不猜测外层索引键。"""
     if not isinstance(record, SegmentRecord):
-        raise TypeError("decode memory candidate record 类型错误")
+        raise TypeError("decode memory candidate payload record 类型错误")
     reader = IntegerStreamReader(record.payload)
     version = reader.read_positive(label="memory candidate format version")
     if version != MEMORY_CANDIDATE_PROJECTION_FORMAT_VERSION:
@@ -223,9 +351,6 @@ def decode_memory_candidate(
         tuple(sources_by_key[key] for key in sorted(sources_by_key)),
         normalized_traces,
     )
-    expected = memory_candidate_record_key(projection, aggregate)
-    if record.record_key != expected:
-        raise MemoryHotSetIntegrityError("Memory candidate record key 与 payload 漂移")
     return bundle
 
 
@@ -419,14 +544,21 @@ class StableTopKSourcePolicy:
 __all__ = [
     "BoundedCandidateAccumulator",
     "BoundedCandidateSelectionPolicy",
+    "ExactMemoryProjectionPlanner",
     "MEMORY_CANDIDATE_PROJECTION_FORMAT_VERSION",
     "MemoryHotSetIntegrityError",
+    "MemoryProjectionIndexEntry",
+    "MemoryProjectionQueryGroup",
     "StableTopKSourcePolicy",
     "decode_memory_candidate",
+    "decode_memory_candidate_payload",
     "encode_memory_candidate",
+    "encode_memory_candidate_payload",
     "matches_memory_filter",
     "memory_candidate_record_key",
     "memory_candidate_scan_range",
+    "memory_query_index_record_key",
+    "memory_query_index_scan_range",
     "resolved_candidate_order_key",
     "visible_owner_keys",
 ]
