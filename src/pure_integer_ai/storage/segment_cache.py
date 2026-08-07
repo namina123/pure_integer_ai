@@ -46,6 +46,23 @@ class CachedSegmentRecord:
         return self.pin_count > 0
 
 
+def _validated_cached_segment_record(
+        descriptor_key: tuple[int, ...],
+        record: SegmentRecord,
+        dirty: bool,
+        access_seq: int,
+        pin_count: int,
+        ) -> CachedSegmentRecord:
+    """由 cache owner 重建已经通过公开入口校验的冻结记录。"""
+    value = object.__new__(CachedSegmentRecord)
+    object.__setattr__(value, "descriptor_key", descriptor_key)
+    object.__setattr__(value, "record", record)
+    object.__setattr__(value, "dirty", dirty)
+    object.__setattr__(value, "access_seq", access_seq)
+    object.__setattr__(value, "pin_count", pin_count)
+    return value
+
+
 FlushRecords = Callable[[tuple[CachedSegmentRecord, ...]], None]
 
 
@@ -142,7 +159,7 @@ class SegmentPageCache:
         previous = self._entries.get(key)
         if previous is None:
             return None
-        current = CachedSegmentRecord(
+        current = _validated_cached_segment_record(
             previous.descriptor_key,
             previous.record,
             previous.dirty,
@@ -166,7 +183,7 @@ class SegmentPageCache:
         previous = self._entries.get(key)
         if previous is None:
             raise SegmentCacheError("不能 pin 未 page-in 的记录")
-        current = CachedSegmentRecord(
+        current = _validated_cached_segment_record(
             previous.descriptor_key,
             previous.record,
             previous.dirty,
@@ -190,7 +207,7 @@ class SegmentPageCache:
         previous = self._entries.get(key)
         if previous is None or previous.pin_count <= 0:
             raise SegmentCacheError("cache unpin 缺少配对 pin")
-        current = CachedSegmentRecord(
+        current = _validated_cached_segment_record(
             previous.descriptor_key,
             previous.record,
             previous.dirty,
@@ -208,7 +225,7 @@ class SegmentPageCache:
             if previous.pin_count <= 0:
                 continue
             released += previous.pin_count
-            self._entries[key] = CachedSegmentRecord(
+            self._entries[key] = _validated_cached_segment_record(
                 previous.descriptor_key,
                 previous.record,
                 previous.dirty,
@@ -232,7 +249,7 @@ class SegmentPageCache:
             current = self._entries.get(item.cache_key)
             if current != item:
                 raise SegmentCacheError("dirty flush 期间热集状态发生漂移")
-            self._entries[item.cache_key] = CachedSegmentRecord(
+            self._entries[item.cache_key] = _validated_cached_segment_record(
                 item.descriptor_key,
                 item.record,
                 False,
@@ -321,7 +338,7 @@ class SegmentPageCache:
         object_delta = 1 if previous is None else 0
         byte_delta = new_size - previous_size
         self._make_room(object_delta, byte_delta, protected_key=key)
-        current = CachedSegmentRecord(
+        current = _validated_cached_segment_record(
             descriptor_key,
             record,
             dirty or (False if previous is None else previous.dirty),

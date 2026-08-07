@@ -142,3 +142,8 @@ stream、编码 bytearray，再调用 `len()`。
 
 已验证长度核提交为 `b9c8170`，性能 receipt v2 严格串接 v1。v1 在当前源码上默认
 严格失效，只允许显式 historical 回读；v2 是当前源码证据，仍不转移 readiness。
+
+`CachedSegmentRecord` 的 slots 方案虽被拒绝，但 cache owner 内部仍会在每次 get、
+pin、unpin、flush 和 put 时用公开构造器重复验证已知字段。现在保留公开冻结记录和
+全部外部校验，内部转换改用私有已验证构造器；同进程 5,000 条 page-in+get、11 轮
+交错中位由 102,564,100 降至 70,977,400 ns，约改善 30.8%，实例布局不变。
