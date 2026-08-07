@@ -19,10 +19,16 @@ from pure_integer_ai.experiments.pw01_formal_successor import (
     validate_pw00a_base_events,
 )
 from pure_integer_ai.storage.backend import SQLiteBackend
-from scripts.publish_pw00a_formal_start_receipt import (
-    RECEIPT_PATH as PW00A_RECEIPT_PATH,
-    read_formal_start_receipt,
-)
+try:
+    from scripts.publish_pw00a_formal_start_receipt import (
+        RECEIPT_PATH as PW00A_RECEIPT_PATH,
+        read_formal_start_receipt,
+    )
+except ModuleNotFoundError:
+    from publish_pw00a_formal_start_receipt import (
+        RECEIPT_PATH as PW00A_RECEIPT_PATH,
+        read_formal_start_receipt,
+    )
 
 
 FORMAT_VERSION = 1
