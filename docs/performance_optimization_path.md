@@ -178,3 +178,9 @@ PW-00A。
 两类状态，异常时回到原有拒绝路径，clean/unpinned 快路径和 `-262‰` cycle 数据不变。
 修正版提交为 `ec03b7a`，receipt v6 严格串接 v5；v5 仅作为 historical 性能证据，默认
 不再宣称 current。
+
+`evict_clean(object_count)` 是 query 每页结束的常见调用；当 limit 覆盖全部 entry 且
+每项均 clean/unpinned 时，LRU 顺序不再影响最终集合，故复用已审计 `clear()` 直清。
+存在 dirty、pinned 或仅部分淘汰时仍完整执行原排序、键校验和 `evict()`。固定 5,000
+records、11 轮 page-in+validated-get+evict 交错中位由 99,305,600 降至 54,398,600 ns，
+约改善 45.3%；v7 receipt 仍只表示本机方向性证据。

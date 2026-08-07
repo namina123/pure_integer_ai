@@ -16,26 +16,30 @@ from scripts.performance_successor_receipt import (
     V3_RECEIPT_PATH,
     V4_RECEIPT_PATH,
     V5_RECEIPT_PATH,
-    V6_PARENT_COMMIT,
     V6_RECEIPT_PATH,
+    V7_PARENT_COMMIT,
+    V7_RECEIPT_PATH,
     build_performance_successor_receipt,
     build_v2_performance_successor_receipt,
     build_v3_performance_successor_receipt,
     build_v4_performance_successor_receipt,
     build_v5_performance_successor_receipt,
     build_v6_performance_successor_receipt,
+    build_v7_performance_successor_receipt,
     publish_performance_successor_receipt,
     publish_v2_performance_successor_receipt,
     publish_v3_performance_successor_receipt,
     publish_v4_performance_successor_receipt,
     publish_v5_performance_successor_receipt,
     publish_v6_performance_successor_receipt,
+    publish_v7_performance_successor_receipt,
     read_performance_successor_receipt,
     read_v2_performance_successor_receipt,
     read_v3_performance_successor_receipt,
     read_v4_performance_successor_receipt,
     read_v5_performance_successor_receipt,
     read_v6_performance_successor_receipt,
+    read_v7_performance_successor_receipt,
 )
 
 
@@ -127,16 +131,18 @@ def test_published_v5_receipt_is_historical_and_strictly_invalidated() -> None:
         read_v5_performance_successor_receipt(ROOT)
 
 
-def test_published_v6_receipt_is_canonical_and_current() -> None:
+def test_published_v6_receipt_is_historical_and_strictly_invalidated() -> None:
     target = ROOT / V6_RECEIPT_PATH
     assert hashlib.sha256(target.read_bytes()).hexdigest() == PUBLISHED_V6_SHA256
-    value = read_v6_performance_successor_receipt(ROOT)
+    value = read_v6_performance_successor_receipt(ROOT, verify_current=False)
     assert value["status"] == "PERFORMANCE_SUCCESSOR_EVIDENCED"
     assert value["prior_successor_receipt"]["sha256"] == PUBLISHED_V5_SHA256
     assert value["readiness_transition"] == {
         "LANGUAGE_READINESS_REPUBLISHED": 0,
         "PW00A_STARTED": 0,
     }
+    with pytest.raises(ValueError, match="当前 identity 漂移"):
+        read_v6_performance_successor_receipt(ROOT)
 
 
 def test_v1_performance_receipt_build_is_invalidated_by_v2_source() -> None:
@@ -305,36 +311,21 @@ def test_v5_performance_receipt_rejects_source_and_readiness_drift(
             ROOT, target, verify_current=False)
 
 
-def test_v6_performance_receipt_builds_with_reentrant_clear_recheck(
-        tmp_path: Path,
-        ) -> None:
-    value = build_v6_performance_successor_receipt(ROOT)
-    assert value["parent_commit"] == V6_PARENT_COMMIT
-    assert value["receipt_relative_path"] == V6_RECEIPT_PATH
-    assert value["transformation"]["clean_clear_path_unchanged"] == 1
-    assert value["transformation"]["dirty_reentrant_recheck"] == 1
-    assert value["transformation"]["pinned_reentrant_recheck"] == 1
-    assert value["readiness_transition"] == {
-        "LANGUAGE_READINESS_REPUBLISHED": 0,
-        "PW00A_STARTED": 0,
-    }
-    target = tmp_path / "v6.json"
-    target.write_bytes(canonical_json_bytes(value) + b"\n")
-    assert read_v6_performance_successor_receipt(ROOT, target) == value
+def test_v6_performance_receipt_build_is_invalidated_by_v7_source() -> None:
+    with pytest.raises(ValueError, match="源码 identity 漂移"):
+        build_v6_performance_successor_receipt(ROOT)
 
 
-def test_v6_performance_receipt_publish_is_append_only(tmp_path: Path) -> None:
-    target = tmp_path / "v6.json"
-    published = publish_v6_performance_successor_receipt(ROOT, target=target)
-    assert read_v6_performance_successor_receipt(ROOT, target) == published
+def test_v6_performance_receipt_publish_is_append_only() -> None:
     with pytest.raises(ValueError, match="禁止覆盖"):
-        publish_v6_performance_successor_receipt(ROOT, target=target)
+        publish_v6_performance_successor_receipt(ROOT)
 
 
 def test_v6_performance_receipt_rejects_source_and_readiness_drift(
         tmp_path: Path,
         ) -> None:
-    value = build_v6_performance_successor_receipt(ROOT)
+    value = read_v6_performance_successor_receipt(
+        ROOT, verify_current=False)
     target = tmp_path / "v6.json"
     altered = json.loads(json.dumps(value))
     altered["source_bindings"][0]["current_sha256"] = "0" * 64
@@ -346,4 +337,49 @@ def test_v6_performance_receipt_rejects_source_and_readiness_drift(
     altered["readiness_transition"]["LANGUAGE_READINESS_REPUBLISHED"] = 1
     target.write_bytes(canonical_json_bytes(altered) + b"\n")
     with pytest.raises(ValueError, match="readiness"):
-        read_v6_performance_successor_receipt(ROOT, target)
+        read_v6_performance_successor_receipt(
+            ROOT, target, verify_current=False)
+
+
+def test_v7_performance_receipt_builds_with_full_clean_evict_fast_path(
+        tmp_path: Path,
+        ) -> None:
+    value = build_v7_performance_successor_receipt(ROOT)
+    assert value["parent_commit"] == V7_PARENT_COMMIT
+    assert value["receipt_relative_path"] == V7_RECEIPT_PATH
+    assert value["transformation"]["partial_lru_selection_changed"] == 0
+    assert value["transformation"]["fast_path_requires_all_clean"] == 1
+    assert value["transformation"]["fast_path_requires_all_unpinned"] == 1
+    assert value["readiness_transition"] == {
+        "LANGUAGE_READINESS_REPUBLISHED": 0,
+        "PW00A_STARTED": 0,
+    }
+    target = tmp_path / "v7.json"
+    target.write_bytes(canonical_json_bytes(value) + b"\n")
+    assert read_v7_performance_successor_receipt(ROOT, target) == value
+
+
+def test_v7_performance_receipt_publish_is_append_only(tmp_path: Path) -> None:
+    target = tmp_path / "v7.json"
+    published = publish_v7_performance_successor_receipt(ROOT, target=target)
+    assert read_v7_performance_successor_receipt(ROOT, target) == published
+    with pytest.raises(ValueError, match="禁止覆盖"):
+        publish_v7_performance_successor_receipt(ROOT, target=target)
+
+
+def test_v7_performance_receipt_rejects_source_and_readiness_drift(
+        tmp_path: Path,
+        ) -> None:
+    value = build_v7_performance_successor_receipt(ROOT)
+    target = tmp_path / "v7.json"
+    altered = json.loads(json.dumps(value))
+    altered["source_bindings"][0]["current_sha256"] = "0" * 64
+    target.write_bytes(canonical_json_bytes(altered) + b"\n")
+    with pytest.raises(ValueError, match="源码绑定"):
+        read_v7_performance_successor_receipt(ROOT, target)
+
+    altered = json.loads(json.dumps(value))
+    altered["readiness_transition"]["LANGUAGE_READINESS_REPUBLISHED"] = 1
+    target.write_bytes(canonical_json_bytes(altered) + b"\n")
+    with pytest.raises(ValueError, match="readiness"):
+        read_v7_performance_successor_receipt(ROOT, target)

@@ -67,6 +67,14 @@ V6_PRIOR_RECEIPT_PATH = V5_RECEIPT_PATH
 V6_PRIOR_RECEIPT_SHA256 = (
     "ddc0cf1861723ba68a946b2f3bd44a23edaa2b020c1a2834b759da04f21b36ca"
 )
+V7_ARTIFACT_VERSION = "PERFORMANCE-SUCCESSOR-CACHE-EVICT-20260807-A"
+V7_RECEIPT_PATH = "data/ph2/manifests/performance_successor_receipt_v7.json"
+V7_PARENT_COMMIT = "b472d968ed13a02346d0cca7808fa7d811dfb8f4"
+V7_CHANGE_COMMIT = "7d8d0666543772473eec65f5c7b950573f927b3a"
+V7_PRIOR_RECEIPT_PATH = V6_RECEIPT_PATH
+V7_PRIOR_RECEIPT_SHA256 = (
+    "54949d483ed4f591ad51790f983c93fc16d0327058daceaa07fa1ba92669de1c"
+)
 _SOURCE_BINDINGS = [
     {
         "current_sha256": (
@@ -347,6 +355,46 @@ _V6_VERIFICATION = {
     "full_suite_run": 0,
     "object_model_class_count": 3140,
     "reentrant_clear_tests_passed": 1,
+    "python311_direct_check_clean": 1,
+    "python314_direct_check_clean": 1,
+    "source_guards_clean": 1,
+}
+_V7_SOURCE_BINDINGS = [
+    {
+        "current_sha256": (
+            "43f0c8b81bda50d85164fade572b2e69fbd748c5b94a647a0c10ec460bff80b2"
+        ),
+        "current_size_bytes": 15982,
+        "parent_sha256": (
+            "6aac183107c75bd437de857afb28ad6b0388702182fca879cc36aa1edf277d8f"
+        ),
+        "parent_size_bytes": 15782,
+        "relative_path": "src/pure_integer_ai/storage/segment_cache.py",
+    },
+]
+_V7_TRANSFORMATION = {
+    "algorithm": "FULL_CLEAN_EVICTION_TO_DIRECT_CLEAR",
+    "cache_cycle": {
+        "delta_per_mille": -453,
+        "new_median_ns": 54398600,
+        "old_median_ns": 99305600,
+        "record_count": 5000,
+        "repeats": 11,
+    },
+    "cached_record_layout_changed": 0,
+    "dirty_or_pinned_behavior_changed": 0,
+    "fast_path_requires_all_clean": 1,
+    "fast_path_requires_all_unpinned": 1,
+    "fast_path_requires_limit_cover_all": 1,
+    "partial_lru_selection_changed": 0,
+    "performance_claim_scope": "LOCAL_DIRECTION_ONLY",
+}
+_V7_VERIFICATION = {
+    "direct_test_files": 3,
+    "direct_tests_passed": 68,
+    "full_clean_evict_tests_passed": 1,
+    "full_suite_run": 0,
+    "object_model_class_count": 3140,
     "python311_direct_check_clean": 1,
     "python314_direct_check_clean": 1,
     "source_guards_clean": 1,
@@ -1138,6 +1186,7 @@ def _validate_v6(value: dict[str, Any]) -> None:
 def read_v6_performance_successor_receipt(
         repository_root: str | Path,
         path: str | Path = V6_RECEIPT_PATH,
+        *, verify_current: bool = True,
         ) -> dict[str, Any]:
     root = Path(repository_root).resolve()
     target = Path(path)
@@ -1153,13 +1202,16 @@ def read_v6_performance_successor_receipt(
     if canonical_json_bytes(value) + b"\n" != payload:
         raise ValueError("v6 performance receipt canonical bytes 漂移")
     _validate_v6(value)
-    for binding in value["source_bindings"]:
-        if _identity(root, binding["relative_path"]) != (
-                binding["current_size_bytes"], binding["current_sha256"]):
-            raise ValueError(
-                f"v6 性能后继源码当前 identity 漂移: {binding['relative_path']}")
-    if _identity(root, V6_PRIOR_RECEIPT_PATH)[1] != V6_PRIOR_RECEIPT_SHA256:
-        raise ValueError("前序 v5 performance receipt 当前 identity 漂移")
+    if verify_current:
+        for binding in value["source_bindings"]:
+            if _identity(root, binding["relative_path"]) != (
+                    binding["current_size_bytes"], binding["current_sha256"]):
+                raise ValueError(
+                    "v6 性能后继源码当前 identity 漂移: "
+                    f"{binding['relative_path']}")
+        if (_identity(root, V6_PRIOR_RECEIPT_PATH)[1]
+                != V6_PRIOR_RECEIPT_SHA256):
+            raise ValueError("前序 v5 performance receipt 当前 identity 漂移")
     return value
 
 
@@ -1187,9 +1239,139 @@ def publish_v6_performance_successor_receipt(
     return restored
 
 
+def build_v7_performance_successor_receipt(
+        repository_root: str | Path,
+        ) -> dict[str, Any]:
+    """构造全量 clean/unpinned eviction 直清的链式性能 receipt。"""
+    root = Path(repository_root).resolve()
+    for binding in _V7_SOURCE_BINDINGS:
+        if _identity(root, binding["relative_path"]) != (
+                binding["current_size_bytes"], binding["current_sha256"]):
+            raise ValueError(
+                f"v7 性能后继源码 identity 漂移: {binding['relative_path']}")
+    prior_size, prior_sha = _identity(root, V7_PRIOR_RECEIPT_PATH)
+    if prior_size < 1 or prior_sha != V7_PRIOR_RECEIPT_SHA256:
+        raise ValueError("前序 v6 performance receipt identity 漂移")
+    return {
+        "artifact_kind": ARTIFACT_KIND,
+        "artifact_version": V7_ARTIFACT_VERSION,
+        "change_commit": V7_CHANGE_COMMIT,
+        "format_version": FORMAT_VERSION,
+        "parent_commit": V7_PARENT_COMMIT,
+        "prior_successor_receipt": {
+            "relative_path": V7_PRIOR_RECEIPT_PATH,
+            "sha256": V7_PRIOR_RECEIPT_SHA256,
+            "status": "PERFORMANCE_PREDECESSOR",
+        },
+        "readiness_transition": {
+            "LANGUAGE_READINESS_REPUBLISHED": 0,
+            "PW00A_STARTED": 0,
+        },
+        "receipt_relative_path": V7_RECEIPT_PATH,
+        "receipt_self_excluded": 1,
+        "source_bindings": deepcopy(_V7_SOURCE_BINDINGS),
+        "status": "PERFORMANCE_SUCCESSOR_EVIDENCED",
+        "transformation": deepcopy(_V7_TRANSFORMATION),
+        "verification": deepcopy(_V7_VERIFICATION),
+    }
+
+
+def _validate_v7(value: dict[str, Any]) -> None:
+    raw = _exact(value, {
+        "artifact_kind", "artifact_version", "change_commit",
+        "format_version", "parent_commit", "prior_successor_receipt",
+        "readiness_transition", "receipt_relative_path",
+        "receipt_self_excluded", "source_bindings", "status",
+        "transformation", "verification",
+    }, where="v7 performance successor receipt")
+    if (raw["artifact_kind"] != ARTIFACT_KIND
+            or raw["artifact_version"] != V7_ARTIFACT_VERSION
+            or raw["change_commit"] != V7_CHANGE_COMMIT
+            or raw["format_version"] != FORMAT_VERSION
+            or raw["parent_commit"] != V7_PARENT_COMMIT
+            or raw["receipt_relative_path"] != V7_RECEIPT_PATH
+            or raw["receipt_self_excluded"] != 1
+            or raw["status"] != "PERFORMANCE_SUCCESSOR_EVIDENCED"):
+        raise ValueError("v7 performance successor receipt 固定身份漂移")
+    _digest(raw["change_commit"], length=40, where="v7 change_commit")
+    _digest(raw["parent_commit"], length=40, where="v7 parent_commit")
+    if raw["prior_successor_receipt"] != {
+            "relative_path": V7_PRIOR_RECEIPT_PATH,
+            "sha256": V7_PRIOR_RECEIPT_SHA256,
+            "status": "PERFORMANCE_PREDECESSOR",
+    }:
+        raise ValueError("前序 v6 performance receipt 声明漂移")
+    transition = _exact(raw["readiness_transition"], {
+        "LANGUAGE_READINESS_REPUBLISHED", "PW00A_STARTED",
+    }, where="v7 readiness_transition")
+    if transition != {
+            "LANGUAGE_READINESS_REPUBLISHED": 0,
+            "PW00A_STARTED": 0,
+    }:
+        raise ValueError("v7 performance successor 不得转移 readiness")
+    if raw["source_bindings"] != _V7_SOURCE_BINDINGS:
+        raise ValueError("v7 性能后继源码绑定漂移")
+    if raw["transformation"] != _V7_TRANSFORMATION:
+        raise ValueError("v7 性能 transformation 证据漂移")
+    if raw["verification"] != _V7_VERIFICATION:
+        raise ValueError("v7 性能 verification 证据漂移")
+
+
+def read_v7_performance_successor_receipt(
+        repository_root: str | Path,
+        path: str | Path = V7_RECEIPT_PATH,
+        ) -> dict[str, Any]:
+    root = Path(repository_root).resolve()
+    target = Path(path)
+    if not target.is_absolute():
+        target = root / Path(*str(target).replace("\\", "/").split("/"))
+    payload = target.read_bytes()
+    if not payload.endswith(b"\n") or payload.endswith(b"\n\n"):
+        raise ValueError("v7 performance receipt newline 非法")
+    try:
+        value = parse_canonical_json_bytes(payload[:-1], require_object=True)
+    except Exception as error:
+        raise ValueError("v7 performance receipt JSON 非 canonical") from error
+    if canonical_json_bytes(value) + b"\n" != payload:
+        raise ValueError("v7 performance receipt canonical bytes 漂移")
+    _validate_v7(value)
+    for binding in value["source_bindings"]:
+        if _identity(root, binding["relative_path"]) != (
+                binding["current_size_bytes"], binding["current_sha256"]):
+            raise ValueError(
+                f"v7 性能后继源码当前 identity 漂移: {binding['relative_path']}")
+    if _identity(root, V7_PRIOR_RECEIPT_PATH)[1] != V7_PRIOR_RECEIPT_SHA256:
+        raise ValueError("前序 v6 performance receipt 当前 identity 漂移")
+    return value
+
+
+def publish_v7_performance_successor_receipt(
+        repository_root: str | Path,
+        *, target: str | Path = V7_RECEIPT_PATH,
+        ) -> dict[str, Any]:
+    root = Path(repository_root).resolve()
+    destination = Path(target)
+    if not destination.is_absolute():
+        destination = root / Path(*str(destination).replace("\\", "/").split("/"))
+    if destination.exists():
+        raise ValueError("v7 performance successor receipt 已发布，禁止覆盖")
+    value = build_v7_performance_successor_receipt(root)
+    payload = canonical_json_bytes(value) + b"\n"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with destination.open("xb") as stream:
+            stream.write(payload)
+    except FileExistsError as error:
+        raise ValueError("v7 performance successor receipt 已发布，禁止覆盖") from error
+    restored = read_v7_performance_successor_receipt(root, destination)
+    if restored != value:
+        raise ValueError("v7 performance receipt 发布回读不一致")
+    return restored
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="发布性能 successor receipt。")
-    parser.add_argument("--revision", type=int, choices=(1, 2, 3, 4, 5, 6), default=1)
+    parser.add_argument("--revision", type=int, choices=(1, 2, 3, 4, 5, 6, 7), default=1)
     parser.add_argument("--publish", action="store_true", help="独占发布正式 receipt")
     parser.add_argument("--target", type=Path)
     return parser
@@ -1202,7 +1384,14 @@ def main(argv: list[str] | None = None) -> int:
             reconfigure(encoding="utf-8")
     args = _build_parser().parse_args(argv)
     try:
-        if args.revision == 6:
+        if args.revision == 7:
+            target = args.target or Path(V7_RECEIPT_PATH)
+            if args.publish:
+                value = publish_v7_performance_successor_receipt(
+                    REPOSITORY_ROOT, target=target)
+            else:
+                value = build_v7_performance_successor_receipt(REPOSITORY_ROOT)
+        elif args.revision == 6:
             target = args.target or Path(V6_RECEIPT_PATH)
             if args.publish:
                 value = publish_v6_performance_successor_receipt(
@@ -1284,4 +1473,8 @@ __all__ = [
     "V6_RECEIPT_PATH", "build_v6_performance_successor_receipt",
     "publish_v6_performance_successor_receipt",
     "read_v6_performance_successor_receipt",
+    "V7_ARTIFACT_VERSION", "V7_CHANGE_COMMIT", "V7_PARENT_COMMIT",
+    "V7_RECEIPT_PATH", "build_v7_performance_successor_receipt",
+    "publish_v7_performance_successor_receipt",
+    "read_v7_performance_successor_receipt",
 ]
