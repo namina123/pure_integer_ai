@@ -133,3 +133,9 @@ stream、编码 bytearray，再调用 `len()`。
 该算法变更提交为 `0bb9a43`，并由独立
 `performance_successor_receipt_v1.json` 串接结构体 receipt v2。性能 receipt 明确
 限定为本机方向性证据，保持 readiness 未重发、PW-00A 未启动。
+
+后续剖析发现上一版仍在每次 `SegmentRecord.size_bytes()` 调用中重复执行构造时已经
+完成的 tuple/int 校验。公共 framed-size API 继续完整校验；新增内部 validated 核只由
+`SegmentRecord` 调用，因为其字段已由 `__post_init__` 校验且 frozen+slots。相对上一
+公开版，同进程交错测量中单独 size 调用约改善 38.1%，5,000 条 cache cycle 本轮约
+改善 14.7%。这些仍是本机方向性数据，不能解释为跨平台固定比例。

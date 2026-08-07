@@ -37,10 +37,9 @@ def encode_integer_tuple(values: tuple[int, ...]) -> bytes:
 def encoded_integer_tuple_size(values: tuple[int, ...]) -> int:
     """直接计算规范整数流字节数，不分配实际编码。"""
     strict_integer_tuple(values, label="integer codec values", empty=True)
-    size = _unsigned_varint_size(len(values))
+    size = _unsigned_varint_size_validated(len(values))
     for value in values:
-        unsigned = value * 2 if value >= 0 else (-value * 2) - 1
-        size += _unsigned_varint_size(unsigned)
+        size += _signed_varint_size_validated(value)
     return size
 
 
@@ -54,12 +53,19 @@ def encoded_framed_integer_tuple_size(
     for value in values:
         strict_integer_tuple(
             value, label="framed integer codec value", empty=True)
-        item_count += 1 + len(value)
-    size = _unsigned_varint_size(item_count)
+    return _encoded_framed_integer_tuple_size_validated(values)
+
+
+def _encoded_framed_integer_tuple_size_validated(
+        values: tuple[tuple[int, ...], ...],
+        ) -> int:
+    """计算调用方已经完整校验的分帧整数键编码长度。"""
+    item_count = sum(1 + len(value) for value in values)
+    size = _unsigned_varint_size_validated(item_count)
     for value in values:
-        size += _signed_varint_size(len(value))
+        size += _signed_varint_size_validated(len(value))
         for item in value:
-            size += _signed_varint_size(item)
+            size += _signed_varint_size_validated(item)
     return size
 
 
@@ -104,15 +110,26 @@ def _unsigned_varint_size(value: int) -> int:
     """返回非负严格整数的最短 unsigned varint 字节数。"""
     if type(value) is not int or value < 0:
         raise ValueError("unsigned varint 只能计算非负严格整数")
-    return max(1, (value.bit_length() + 6) // 7)
+    return _unsigned_varint_size_validated(value)
+
+
+def _unsigned_varint_size_validated(value: int) -> int:
+    """返回调用方已校验非负整数的 varint 字节数。"""
+    size = (value.bit_length() + 6) // 7
+    return size if size else 1
 
 
 def _signed_varint_size(value: int) -> int:
     """返回严格整数经 zigzag 后的最短 unsigned varint 字节数。"""
     if type(value) is not int:
         raise ValueError("zigzag varint 只能计算严格整数")
+    return _signed_varint_size_validated(value)
+
+
+def _signed_varint_size_validated(value: int) -> int:
+    """返回调用方已校验严格整数的 zigzag varint 字节数。"""
     unsigned = value * 2 if value >= 0 else (-value * 2) - 1
-    return _unsigned_varint_size(unsigned)
+    return _unsigned_varint_size_validated(unsigned)
 
 
 def _read_unsigned(data: bytes, cursor: int) -> tuple[int, int]:
