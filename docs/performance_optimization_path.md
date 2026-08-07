@@ -147,3 +147,8 @@ stream、编码 bytearray，再调用 `len()`。
 pin、unpin、flush 和 put 时用公开构造器重复验证已知字段。现在保留公开冻结记录和
 全部外部校验，内部转换改用私有已验证构造器；同进程 5,000 条 page-in+get、11 轮
 交错中位由 102,564,100 降至 70,977,400 ns，约改善 30.8%，实例布局不变。
+
+该变更提交为 `02fff55`，性能 receipt v3 严格串接 v2，并绑定唯一生产源码
+`storage/segment_cache.py` 的 parent/current 身份。receipt 固定六处内部构造点、
+公开校验与缓存记录布局均未变化、内部 `__post_init__` 调用降为零；状态仍只表示
+性能后继证据，不重发 readiness，也不启动 PW-00A。

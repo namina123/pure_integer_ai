@@ -35,6 +35,9 @@ PUBLISHED_SHA256 = (
 PUBLISHED_V2_SHA256 = (
     "53162d1a89da5f0c3e9dfb85384bfbab285d560999ec778a57eeed8df4b7a055"
 )
+PUBLISHED_V3_SHA256 = (
+    "13ca4b1d2256b097c7c93481ca632702b24336a161fa683250229e025ec13a8e"
+)
 
 
 def test_published_v1_receipt_is_historical_and_strictly_invalidated() -> None:
@@ -56,6 +59,18 @@ def test_published_v2_receipt_is_canonical_and_current() -> None:
     value = read_v2_performance_successor_receipt(ROOT)
     assert value["status"] == "PERFORMANCE_SUCCESSOR_EVIDENCED"
     assert value["prior_successor_receipt"]["sha256"] == PUBLISHED_SHA256
+    assert value["readiness_transition"] == {
+        "LANGUAGE_READINESS_REPUBLISHED": 0,
+        "PW00A_STARTED": 0,
+    }
+
+
+def test_published_v3_receipt_is_canonical_and_current() -> None:
+    target = ROOT / V3_RECEIPT_PATH
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == PUBLISHED_V3_SHA256
+    value = read_v3_performance_successor_receipt(ROOT)
+    assert value["status"] == "PERFORMANCE_SUCCESSOR_EVIDENCED"
+    assert value["prior_successor_receipt"]["sha256"] == PUBLISHED_V2_SHA256
     assert value["readiness_transition"] == {
         "LANGUAGE_READINESS_REPUBLISHED": 0,
         "PW00A_STARTED": 0,
