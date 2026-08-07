@@ -1,4 +1,4 @@
-"""Focused checks for the benchmark-only PERF-P3 SQLite trial."""
+"""仅基准使用的 PERF-P3 SQLite 试验专项检查。"""
 from __future__ import annotations
 
 import os

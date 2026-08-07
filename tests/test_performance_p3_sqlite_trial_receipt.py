@@ -1,4 +1,4 @@
-"""Canonical and external-evidence checks for the PERF-P3 trial receipt."""
+"""PERF-P3 试验 receipt 的规范编码与外部证据检查。"""
 from __future__ import annotations
 
 import hashlib
@@ -11,7 +11,6 @@ from scripts.performance_p3_sqlite_trial_receipt import (
     STATUS,
     TRIAL_COMMIT,
     TRIAL_ROOT_NAME,
-    build_performance_p3_sqlite_trial_receipt,
     publish_performance_p3_sqlite_trial_receipt,
     read_performance_p3_sqlite_trial_receipt,
 )
@@ -30,7 +29,7 @@ def test_published_trial_receipt_is_canonical_without_external_root() -> None:
         pytest.skip("P3 SQLite trial receipt not published yet")
     payload = target.read_bytes()
     value = read_performance_p3_sqlite_trial_receipt(
-        ROOT, verify_external=False)
+        ROOT, verify_external=False, verify_current_sources=False)
     assert hashlib.sha256(payload).hexdigest() == PUBLISHED_SHA256
     assert value["status"] == STATUS
     assert value["trial_commit"] == TRIAL_COMMIT
@@ -38,6 +37,9 @@ def test_published_trial_receipt_is_canonical_without_external_root() -> None:
         "LANGUAGE_READINESS_REPUBLISHED": 0,
         "PW00A_STARTED": 0,
     }
+    with pytest.raises(ValueError, match="source identity drifted"):
+        read_performance_p3_sqlite_trial_receipt(
+            ROOT, verify_external=False, verify_current_sources=True)
 
 
 @pytest.mark.skipif(
@@ -45,7 +47,12 @@ def test_published_trial_receipt_is_canonical_without_external_root() -> None:
     reason="Git-external P3 SQLite trial artifact is absent",
 )
 def test_trial_receipt_replays_all_external_artifacts() -> None:
-    value = build_performance_p3_sqlite_trial_receipt(ROOT, ARTIFACT_ROOT)
+    value = read_performance_p3_sqlite_trial_receipt(
+        ROOT,
+        ARTIFACT_ROOT,
+        verify_external=True,
+        verify_current_sources=False,
+    )
     assert value["verification"] == {
         "canonical_report_count": 15,
         "empty_stderr_count": 15,
@@ -61,11 +68,10 @@ def test_trial_receipt_replays_all_external_artifacts() -> None:
     reason="Git-external P3 SQLite trial artifact is absent",
 )
 def test_trial_receipt_publish_is_append_only(tmp_path: Path) -> None:
-    target = tmp_path / "trial-receipt.json"
-    value = publish_performance_p3_sqlite_trial_receipt(
-        ROOT, ARTIFACT_ROOT, target=target)
-    assert read_performance_p3_sqlite_trial_receipt(
-        ROOT, ARTIFACT_ROOT, target) == value
+    del tmp_path
+    target = ROOT / RECEIPT_PATH
+    before = target.read_bytes()
     with pytest.raises(ValueError, match="overwrite forbidden"):
         publish_performance_p3_sqlite_trial_receipt(
-            ROOT, ARTIFACT_ROOT, target=target)
+            ROOT, ARTIFACT_ROOT)
+    assert target.read_bytes() == before

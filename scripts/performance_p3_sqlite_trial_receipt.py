@@ -1,4 +1,4 @@
-"""Publish the append-only PERF-P3 SQLite trial receipt."""
+"""构建和发布 append-only 的 PERF-P3 SQLite 试验 receipt。"""
 from __future__ import annotations
 
 import argparse
@@ -99,10 +99,12 @@ EXPECTED_STABLE = {
 
 
 def _canonical_bytes(value: object) -> bytes:
+    """把对象编码为带单个末尾换行的规范 JSON 字节。"""
     return canonical_json_bytes(value) + b"\n"
 
 
 def _safe_relative(relative: str) -> PurePosixPath:
+    """核验 Git 外证据使用不可逃逸的 POSIX 相对路径。"""
     path = PurePosixPath(relative)
     if (not relative or "\\" in relative or path.is_absolute()
             or ".." in path.parts or ":" in path.parts[0]):
@@ -111,6 +113,7 @@ def _safe_relative(relative: str) -> PurePosixPath:
 
 
 def _identity(root: Path, relative: str) -> dict[str, object]:
+    """读取相对文件并返回路径、尺寸和 SHA-256 身份。"""
     payload = root.joinpath(*_safe_relative(relative).parts).read_bytes()
     return {
         "relative_path": relative,
@@ -120,6 +123,7 @@ def _identity(root: Path, relative: str) -> dict[str, object]:
 
 
 def _require_integer_tree(value: object) -> None:
+    """递归拒绝报告中的布尔、浮点和非文本映射键。"""
     if isinstance(value, (bool, float)):
         raise ValueError("P3 report contains bool or float")
     if isinstance(value, dict):
@@ -133,6 +137,7 @@ def _require_integer_tree(value: object) -> None:
 
 
 def _read_report(root: Path, relative: str) -> tuple[dict[str, Any], dict[str, object]]:
+    """严格回读一份规范报告并同时返回其文件身份。"""
     payload = root.joinpath(*_safe_relative(relative).parts).read_bytes()
     if not payload.endswith(b"\n") or payload.endswith(b"\n\n"):
         raise ValueError(f"P3 report newline is not canonical: {relative}")
@@ -147,6 +152,7 @@ def _read_report(root: Path, relative: str) -> tuple[dict[str, Any], dict[str, o
 
 
 def _validate_report(report: dict[str, Any], scale: int) -> None:
+    """核验单次试验报告的固定合同、规模和稳定结果。"""
     if set(report) != {
             "contract", "duration_ns", "metrics", "phase_semantics", "phases",
             "readiness_transition", "scale", "scenario", "schema_version", "stable",
@@ -206,12 +212,14 @@ def _validate_report(report: dict[str, Any], scale: int) -> None:
 
 
 def _median(values: list[int]) -> int:
+    """返回固定五个严格整数样本的中位数。"""
     if len(values) != REPETITIONS or any(type(value) is not int for value in values):
         raise ValueError("P3 median input drifted")
     return sorted(values)[REPETITIONS // 2]
 
 
 def _summary(scale: int, reports: list[dict[str, Any]]) -> dict[str, object]:
+    """汇总一个规模下五次报告的阶段与指标中位数。"""
     for key in EXPECTED_STABLE[scale]:
         if {report["stable"][key] for report in reports} != {
                 EXPECTED_STABLE[scale][key]}:
@@ -249,6 +257,7 @@ def _collect(
         *,
         require_trial_head: bool,
         ) -> dict[str, object]:
+    """严格收集固定目录中的报告、stderr、数据库和规模汇总。"""
     require_external_state_root(repository_root, artifact_root)
     if artifact_root.name != TRIAL_ROOT_NAME:
         raise ValueError("P3 artifact root name drifted")
@@ -293,6 +302,7 @@ def build_performance_p3_sqlite_trial_receipt(
         repository_root: str | Path,
         artifact_root: str | Path,
         ) -> dict[str, Any]:
+    """从固定外部试验原件构建 v1 receipt，不写入仓库。"""
     root = Path(repository_root).resolve()
     external = Path(artifact_root).resolve()
     collected = _collect(root, external, require_trial_head=True)
@@ -331,6 +341,7 @@ def build_performance_p3_sqlite_trial_receipt(
 
 
 def _validate_receipt(value: dict[str, Any]) -> None:
+    """核验 v1 receipt 的字段、身份、计数和整数树约束。"""
     required = {
         "artifact_kind", "artifact_version", "external_database_bindings",
         "external_report_bindings", "external_stderr_bindings", "format_version",
@@ -411,6 +422,7 @@ def read_performance_p3_sqlite_trial_receipt(
         verify_external: bool = True,
         verify_current_sources: bool = True,
         ) -> dict[str, Any]:
+    """规范回读 v1 receipt，并按选项核验外部原件和当前源码。"""
     root = Path(repository_root).resolve()
     target = Path(path)
     if not target.is_absolute():
@@ -446,6 +458,7 @@ def publish_performance_p3_sqlite_trial_receipt(
         *,
         target: str | Path = RECEIPT_PATH,
         ) -> dict[str, Any]:
+    """独占发布 v1 receipt，目标已存在时在重放前拒绝。"""
     root = Path(repository_root).resolve()
     destination = Path(target)
     if not destination.is_absolute():
@@ -467,6 +480,7 @@ def publish_performance_p3_sqlite_trial_receipt(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """解析命令行并构建或独占发布 PERF-P3 v1 receipt。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifact-root", type=Path, required=True)
     parser.add_argument("--publish", action="store_true")

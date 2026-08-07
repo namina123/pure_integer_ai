@@ -223,6 +223,7 @@ class W09InferenceRule:
             _record_key(item, where="inference Evidence")
 
     def to_dict(self) -> dict[str, object]:
+        """返回不含原文和标签的规范规则字段。"""
         return {
             "evidence_keys": [list(item) for item in self.evidence_keys],
             "operation_key": self.operation_key,
@@ -231,6 +232,31 @@ class W09InferenceRule:
             "selector_sha256": self.selector_sha256,
             "state": self.state,
         }
+
+    @classmethod
+    def from_dict(cls, value: object) -> "W09InferenceRule":
+        """从规范公开字段恢复一条规则并拒绝额外载荷。"""
+        if not isinstance(value, dict) or set(value) != {
+                "evidence_keys", "operation_key", "payload_kind",
+                "schema_sha256", "selector_sha256", "state"}:
+            raise W09InferenceError("inference rule artifact 字段非法")
+        evidence = value["evidence_keys"]
+        if not isinstance(evidence, list):
+            raise W09InferenceError("inference rule Evidence artifact 非列表")
+        try:
+            result = cls(
+                str(value["payload_kind"]),
+                str(value["selector_sha256"]),
+                str(value["state"]),
+                str(value["operation_key"]),
+                str(value["schema_sha256"]),
+                tuple(tuple(item) for item in evidence),
+            )
+        except (TypeError, ValueError) as error:
+            raise W09InferenceError("inference rule artifact 无法恢复") from error
+        if result.to_dict() != value:
+            raise W09InferenceError("inference rule artifact 规范回写漂移")
+        return result
 
 
 @dataclass(frozen=True)
@@ -275,7 +301,43 @@ class W09InferenceState:
         return value
 
     def sha256(self) -> str:
+        """返回完整可装载推理状态的规范 SHA-256。"""
         return _sha256(canonical_json_bytes(self.to_dict()))
+
+    @classmethod
+    def from_dict(cls, value: object) -> "W09InferenceState":
+        """从公开 artifact 恢复完整推理状态并逐字段规范回验。"""
+        if not isinstance(value, dict) or set(value) != {
+                "artifact_kind", "format_version", "interface_version",
+                "rules", "schema_by_kind", "state_key",
+                "training_evidence_count", "training_identity_sha256",
+                "training_record_count"}:
+            raise W09InferenceError("inference state artifact 字段非法")
+        if (value["artifact_kind"] != "PH2_W09_INFERENCE_STATE"
+                or value["format_version"] != 1):
+            raise W09InferenceError("inference state artifact 固定身份漂移")
+        rules = value["rules"]
+        schema = value["schema_by_kind"]
+        state_key = value["state_key"]
+        if (not isinstance(rules, list) or not isinstance(schema, list)
+                or not isinstance(state_key, list)):
+            raise W09InferenceError("inference state artifact 容器非法")
+        try:
+            result = cls(
+                str(value["interface_version"]),
+                tuple(W09InferenceRule.from_dict(item) for item in rules),
+                tuple((str(item[0]), tuple(str(part) for part in item[1]))
+                      for item in schema),
+                value["training_record_count"],
+                value["training_evidence_count"],
+                str(value["training_identity_sha256"]),
+                tuple(state_key),
+            )
+        except (IndexError, TypeError, ValueError) as error:
+            raise W09InferenceError("inference state artifact 无法恢复") from error
+        if result.to_dict() != value:
+            raise W09InferenceError("inference state artifact 规范回写漂移")
+        return result
 
 
 def _operation(evidence: object) -> str:
