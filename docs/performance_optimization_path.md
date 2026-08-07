@@ -110,3 +110,7 @@ class Rational:
 继续保留在 legacy baseline。嵌套 `SegmentRecord` 改为 slots 后，`SealedSegment`
 canonical SHA-256 仍为
 `f5a4f44527d919871d01e009763fbca049b363108ccc7e45d4f54804104a0312`。
+
+第二批生产变更提交为 `6c1c70b`，receipt v2 严格串接 v1，并记录两个接受对象、
+一个已撤回对象、两次废弃采样和有界验证。其状态仍只表示源码后继证据，
+不发布 readiness，也不启动 PW-00A。

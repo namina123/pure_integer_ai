@@ -29,6 +29,9 @@ ROOT = Path(__file__).resolve().parents[1]
 PUBLISHED_SHA256 = (
     "2b34bbed1c7dab67e0cadcfb0ff00f64fd28754e67d023c9e718f8633944d2d7"
 )
+PUBLISHED_BATCH2_SHA256 = (
+    "1047e03de245d89ce07a8e8b35119b1a38ebc79490ddb2b2e7d2239920e6733f"
+)
 
 
 def test_published_struct_layout_receipt_is_canonical_and_current() -> None:
@@ -36,6 +39,20 @@ def test_published_struct_layout_receipt_is_canonical_and_current() -> None:
     assert hashlib.sha256(target.read_bytes()).hexdigest() == PUBLISHED_SHA256
     value = read_struct_layout_successor_receipt(ROOT)
     assert value["status"] == "STRUCT_LAYOUT_SUCCESSOR_EVIDENCED"
+    assert value["readiness_transition"] == {
+        "LANGUAGE_READINESS_REPUBLISHED": 0,
+        "PW00A_STARTED": 0,
+    }
+
+
+def test_published_batch2_receipt_is_canonical_and_current() -> None:
+    target = ROOT / BATCH2_RECEIPT_PATH
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == (
+        PUBLISHED_BATCH2_SHA256
+    )
+    value = read_batch2_struct_layout_successor_receipt(ROOT)
+    assert value["status"] == "STRUCT_LAYOUT_SUCCESSOR_EVIDENCED"
+    assert value["prior_successor_receipt"]["sha256"] == PUBLISHED_SHA256
     assert value["readiness_transition"] == {
         "LANGUAGE_READINESS_REPUBLISHED": 0,
         "PW00A_STARTED": 0,
