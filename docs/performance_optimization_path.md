@@ -161,3 +161,14 @@ flush 为 clean，因此成功分支可直接清空 owner 字典并把聚合字�
 
 该变更提交为 `4930d57`，性能 receipt v4 严格串接 v3。v3 在后继源码上默认严格
 失效，只允许显式 historical 回读；v4 仍仅为本机方向性性能证据，不转移 readiness。
+
+`QuerySegmentHotSet.iter_range()` 的 record key 来自已经通过 `SegmentRecord` 不变量
+和当前 reader epoch 的结果，继续调用公共 `SegmentPageCache.get()` 会对 descriptor/key
+重复执行严格整数扫描。新增 cache owner 私有 `_get_validated()`；公共 `get()` 和
+pin/unpin 等外部入口保持原校验，只有该 query consumer 使用已验证 lookup。5,000
+records、11 轮 page-in+get+clear 交错中位由 85,376,300 降至 62,555,800 ns，约改善
+26.8%，不改变记录布局或 public validation。
+
+该变更提交为 `7cb4a3c`，性能 receipt v5 绑定 `query_hot_set.py` 与
+`segment_cache.py` 两个源码 identity，严格串接 v4；仍不重发 readiness，也不启动
+PW-00A。
