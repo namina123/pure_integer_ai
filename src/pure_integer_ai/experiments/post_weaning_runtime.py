@@ -32,6 +32,8 @@ from pure_integer_ai.crosscut.determinism.hasher import Hasher
 from pure_integer_ai.experiments.attractor_runtime import AttractorRuntime
 from pure_integer_ai.experiments.memory_hot_set_runtime import (
     MemoryHotSetRuntime,
+    memory_hot_set_runtimes,
+    memory_hot_sets_closed,
 )
 from pure_integer_ai.experiments.memory_generation_runtime import (
     MemoryAwareQuestionDialogueRuntime,
@@ -206,6 +208,15 @@ def post_weaning_component_state_key(ctx: TrainContext) -> tuple[int, ...]:
             raise PostWeaningStartupError(
                 f"PW-00 缺少承重 runtime {expected.__name__}")
         result.extend((tag, *_packed(component.state_key())))
+    hot_sets = memory_hot_set_runtimes(ctx)
+    if not hot_sets or ctx.memory_hot_set_runtime not in hot_sets:
+        raise PostWeaningStartupError("PW-00 主 K-04 owner 未进入逐空间注册表")
+    additional_hot_sets = tuple(
+        item for item in hot_sets
+        if item is not ctx.memory_hot_set_runtime
+    )
+    for ordinal, hot_set in enumerate(additional_hot_sets, start=1):
+        result.extend((20 + ordinal, *_packed(hot_set.state_key())))
     companion = read_intake.source_intake.companion
     if companion is not interact_intake.source_intake.companion:
         raise PostWeaningStartupError("双层 M-05 Companion 实例漂移")
@@ -541,6 +552,7 @@ class PostWeaningOperationRuntime:
             and work.active_generation_scope is None
             and work.attractor_state is None
             and hot.query_resources_closed()
+            and memory_hot_sets_closed(self.ctx)
         )
 
     def _close_query_resources(self) -> None:

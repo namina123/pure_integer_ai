@@ -197,9 +197,12 @@ class MemoryResolverRuntime:
             resolver: MemoryOverlayResolver,
             ) -> MemoryResolution:
         """保持原 Hypothesis/hot-set 路径，供全量和混合 request 复用。"""
-        if (resolver is self.resolver
-                and self._ctx.memory_hot_set_runtime is not None):
-            return self._ctx.memory_hot_set_runtime.resolve(compilation)
+        from pure_integer_ai.experiments.memory_hot_set_runtime import (
+            memory_hot_set_runtime_for,
+        )
+        hot_set = memory_hot_set_runtime_for(self._ctx, resolver)
+        if hot_set is not None:
+            return hot_set.resolve(compilation)
         return resolver.resolve(compilation)
 
     def clone_for_context(self, ctx: TrainContext) -> "MemoryResolverRuntime":

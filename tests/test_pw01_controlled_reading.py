@@ -35,6 +35,10 @@ from pure_integer_ai.experiments.post_weaning_runtime import (
 from pure_integer_ai.experiments.memory_maintenance_runtime import (
     install_memory_maintenance_runtime,
 )
+from pure_integer_ai.experiments.memory_hot_set_runtime import (
+    memory_hot_set_runtimes,
+    memory_hot_sets_closed,
+)
 from pure_integer_ai.experiments.pw01_controlled_reading import (
     PW01ControlledReadingParser,
     PW01_HYPOTHESIS_KIND,
@@ -160,6 +164,11 @@ def test_pw01_reading_causes_held_out_answer_and_survives_restart(tmp_path):
         ctx = make_train_context(backend, companion=True)
         prepare_facility_context(ctx)
         install_pw01_controlled_query(ctx)
+        hot_sets = memory_hot_set_runtimes(ctx)
+        assert len(hot_sets) == 2
+        assert ctx.memory_read_hot_set_runtime in hot_sets
+        assert ctx.memory_interact_hot_set_runtime in hot_sets
+        assert ctx.memory_hot_set_runtime is ctx.memory_interact_hot_set_runtime
         source = ctx.f01_source
         observation = ctx.f01_observation
         observation_ref = observation.event.object_ref
@@ -230,6 +239,10 @@ def test_pw01_reading_causes_held_out_answer_and_survives_restart(tmp_path):
 
         after = _question(ctx, source, observation)
         assert after.result.question.complete
+        assert memory_hot_sets_closed(ctx)
+        assert ctx.memory_read_hot_set_runtime.metrics() is not None
+        assert ctx.memory_interact_hot_set_runtime.metrics() is not None
+        assert ctx.memory_read_hot_set_runtime.metrics().page_in_records == 1
         assert {item.trace.source for item in after.result.sources} == {
             learned_source}
         use = _uses(ctx)[-1].event.payload
@@ -265,6 +278,7 @@ def test_pw01_reading_causes_held_out_answer_and_survives_restart(tmp_path):
         restored, source, _ = _restore_runtime(
             restored_backend, projection_key)
         install_pw01_controlled_query(restored)
+        assert len(memory_hot_set_runtimes(restored)) == 2
         restored.memory_read_aggregates.rebuild_dirty(access=_ACCESS)
         observation = _observation(restored, observation_ref)
         resumed = _question(restored, source, observation)

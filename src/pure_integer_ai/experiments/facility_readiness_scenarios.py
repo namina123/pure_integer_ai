@@ -145,8 +145,10 @@ from pure_integer_ai.experiments.memory_generation_runtime import (
 from pure_integer_ai.experiments.memory_hot_set_runtime import (
     MemoryCandidateProjectionManifest,
     MemoryCandidateProjectionPublisher,
+    MemoryHotSetRuntime,
     MemoryProjectionPublication,
     install_memory_hot_set_runtime,
+    memory_hot_set_runtimes,
 )
 from pure_integer_ai.experiments.memory_query_runtime import (
     install_memory_query_runtime,
@@ -563,23 +565,58 @@ def _batch_config() -> MemoryBatchRuntimeConfig:
     )
 
 
-def _publish_projection(ctx: Any, resolver: Any) -> MemoryCandidateProjectionManifest:
+def _publish_projection(
+        ctx: Any,
+        resolver: Any,
+        *,
+        namespace: int = 1,
+        hypothesis_kinds: tuple[tuple[int, ...], ...] = _KINDS,
+        ) -> MemoryCandidateProjectionManifest:
     """用小 segment 预算发布多页候选投影。"""
+    if type(namespace) is not int or namespace <= 0:
+        raise ValueError("memory projection namespace 必须是正严格整数")
     return MemoryCandidateProjectionPublisher(
         resolver,
         ctx.tiered_segment_store,
     ).publish(
-        _PROJECTION_KEY,
+        (_PROJECTION_KEY[0], namespace),
         access=_ACCESS,
-        hypothesis_kinds=_KINDS,
+        hypothesis_kinds=hypothesis_kinds,
         publication=MemoryProjectionPublication(
-            (922, 1),
+            (922, namespace),
             _COLD,
             (923, 1),
             _DEPENDENCIES,
             SegmentBudget(1, 1_000_000),
             1,
         ),
+    )
+
+
+def _install_additional_memory_hot_set(
+        ctx: Any,
+        resolver: Any,
+        *,
+        namespace: int,
+        hypothesis_kinds: tuple[tuple[int, ...], ...],
+        ) -> MemoryHotSetRuntime:
+    """用设施冻结预算为联邦中的一个附加 Memory 空间安装 K-04。"""
+    projection = _publish_projection(
+        ctx,
+        resolver,
+        namespace=namespace,
+        hypothesis_kinds=hypothesis_kinds,
+    )
+    return install_memory_hot_set_runtime(
+        ctx,
+        projection,
+        QueryHotSetPolicy(
+            SegmentBudget(4, 4_000_000),
+            SegmentBudget(1, 1_000_000),
+            _NoPrefetch(),
+            8,
+        ),
+        resolver=resolver,
     )
 
 
@@ -1146,13 +1183,31 @@ def _run_question_once(
 
 
 def _refresh_projection(ctx: Any) -> MemoryCandidateProjectionManifest:
-    """重建脏 aggregate 并发布与当前 Memory 一致的投影。"""
+    """重建脏 aggregate 并逐空间发布与当前联邦 Memory 一致的投影。"""
     ctx.memory_read_aggregates.rebuild_dirty(access=_ACCESS)
     ctx.memory_interact_aggregates.rebuild_dirty(access=_ACCESS)
-    projection = _publish_projection(
-        ctx, ctx.memory_resolver_runtime.resolver)
-    ctx.memory_hot_set_runtime.replace_projection(projection)
-    return projection
+    primary = ctx.memory_hot_set_runtime
+    if primary is None:
+        raise RuntimeError("refresh Memory projection 缺少主 K-04 runtime")
+    refreshed = None
+    additional_ordinal = 2
+    for hot_set in memory_hot_set_runtimes(ctx):
+        is_primary = hot_set is primary
+        namespace = 1 if is_primary else additional_ordinal
+        projection = _publish_projection(
+            ctx,
+            hot_set.resolver,
+            namespace=namespace,
+            hypothesis_kinds=hot_set.projection.hypothesis_kinds,
+        )
+        hot_set.replace_projection(projection)
+        if is_primary:
+            refreshed = projection
+        else:
+            additional_ordinal += 1
+    if refreshed is None:
+        raise RuntimeError("refresh Memory projection 未找到主 K-04 runtime")
+    return refreshed
 
 
 def _event_count(ctx: Any, event_kind: int) -> int:

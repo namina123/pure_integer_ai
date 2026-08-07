@@ -40,6 +40,7 @@ from pure_integer_ai.cognition.understanding.memory_intake import (
 from pure_integer_ai.experiments.facility_readiness_scenarios import (
     _ACCESS,
     _goals,
+    _install_additional_memory_hot_set,
     _instruction,
     _question_dialogue,
 )
@@ -214,7 +215,22 @@ def install_pw01_controlled_query(ctx: TrainContext) -> None:
         ctx.attractor_runtime.mapper,
         ctx.memory_read_events.memory_space_identity,
     )
-    federate_hypothesis_memory_runtimes(ctx, ctx.memory_read_aggregates)
+    resolver_runtime = federate_hypothesis_memory_runtimes(
+        ctx, ctx.memory_read_aggregates)
+    if ctx.memory_hot_set_runtime is not None:
+        read_resolvers = tuple(
+            item for item in resolver_runtime.resolvers
+            if item.aggregates is ctx.memory_read_aggregates
+        )
+        if len(read_resolvers) != 1:
+            raise RuntimeError("PW-01 联邦缺少唯一 reading resolver")
+        _install_additional_memory_hot_set(
+            ctx,
+            read_resolvers[0],
+            namespace=2,
+            hypothesis_kinds=(
+                ctx.memory_hot_set_runtime.projection.hypothesis_kinds),
+        )
     ctx.attractor_runtime.register_mapper_route(mapper)
 
 

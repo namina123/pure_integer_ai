@@ -13,7 +13,10 @@ from pure_integer_ai.cognition.shared.memory_hot_set import (
     memory_candidate_scan_range,
     visible_owner_keys,
 )
-from pure_integer_ai.cognition.shared.memory_event import MemoryObjectRef
+from pure_integer_ai.cognition.shared.memory_event import (
+    LIFECYCLE_ACTIVE,
+    MemoryObjectRef,
+)
 from pure_integer_ai.cognition.shared.memory_maintenance import (
     MemoryMaintenanceAssessment,
     MemoryPlacementHint,
@@ -959,8 +962,9 @@ class MemoryHotSetRuntime:
             raise TypeError("memory hot-set policy 类型错误")
         if ctx.memory_resolver_runtime is None:
             raise ValueError("安装 K-04 前必须先安装 M-07 runtime")
-        if ctx.memory_resolver_runtime.resolver is not resolver:
-            raise ValueError("K-04 与 M-07 未绑定同一 resolver")
+        if all(item is not resolver
+               for item in ctx.memory_resolver_runtime.resolvers):
+            raise ValueError("K-04 resolver 不属于当前 M-07 联邦")
         if ctx.tiered_segment_store is not store:
             raise ValueError("K-04 store 不是当前 TrainContext tiered store")
         if projection.memory_space != resolver.aggregates.event_log.memory_space_identity:
@@ -1152,9 +1156,16 @@ class MemoryHotSetRuntime:
             raise TypeError("memory hot-set clone ctx 类型错误")
         if ctx.memory_resolver_runtime is None or ctx.tiered_segment_store is None:
             raise ValueError("评测 clone 缺少 M-07 或 tiered store")
+        matches = tuple(
+            item for item in ctx.memory_resolver_runtime.resolvers
+            if (item.aggregates.event_log.memory_space_identity
+                == self.resolver.aggregates.event_log.memory_space_identity)
+        )
+        if len(matches) != 1:
+            raise ValueError("评测 clone 缺少唯一同空间 M-07 resolver")
         cloned = MemoryHotSetRuntime(
             ctx,
-            ctx.memory_resolver_runtime.resolver,
+            matches[0],
             ctx.tiered_segment_store,
             self.projection,
             self.policy,
@@ -1214,6 +1225,8 @@ class MemoryHotSetRuntime:
                         self.projection.projection_key, cached.record)
                     if bundle.hypothesis.hypothesis_kind != request.hypothesis_kind:
                         continue
+                    if bundle.aggregate.lifecycle_state != LIFECYCLE_ACTIVE:
+                        continue
                     if not any(matches_memory_filter(bundle, item)
                                for item in filters):
                         continue
@@ -1251,26 +1264,91 @@ class MemoryHotSetRuntime:
                 "Memory 候选投影已因 event/batch/forget epoch 变化失效")
 
 
+def memory_hot_set_runtimes(
+        ctx: TrainContext,
+        ) -> tuple[MemoryHotSetRuntime, ...]:
+    """返回按稳定 Memory 空间身份排序的全部 K-04 runtime。"""
+    if not isinstance(ctx, TrainContext):
+        raise TypeError("memory hot-set runtimes ctx 类型错误")
+    candidates = (
+        ctx.memory_read_hot_set_runtime,
+        ctx.memory_interact_hot_set_runtime,
+        ctx.memory_hot_set_runtime,
+    )
+    unique: dict[int, MemoryHotSetRuntime] = {}
+    for item in candidates:
+        if item is None:
+            continue
+        if not isinstance(item, MemoryHotSetRuntime):
+            raise TypeError("TrainContext K-04 槽位类型错误")
+        unique[id(item)] = item
+    return tuple(sorted(
+        unique.values(),
+        key=lambda item: (
+            item.resolver.aggregates.event_log.memory_space_identity.stable_key()),
+    ))
+
+
+def memory_hot_set_runtime_for(
+        ctx: TrainContext,
+        resolver: MemoryOverlayResolver,
+        ) -> MemoryHotSetRuntime | None:
+    """按 resolver 实例返回其独立 K-04 runtime，不跨 Memory 空间回退。"""
+    if not isinstance(resolver, MemoryOverlayResolver):
+        raise TypeError("memory hot-set lookup resolver 类型错误")
+    matches = tuple(
+        item for item in memory_hot_set_runtimes(ctx)
+        if item.resolver is resolver
+    )
+    if len(matches) > 1:
+        raise RuntimeError("同一 M-07 resolver 绑定了多个 K-04 runtime")
+    return None if not matches else matches[0]
+
+
+def memory_hot_sets_closed(ctx: TrainContext) -> bool:
+    """核验当前上下文全部逐空间 K-04 query 资源均已关闭。"""
+    return all(item.query_resources_closed()
+               for item in memory_hot_set_runtimes(ctx))
+
+
 def install_memory_hot_set_runtime(
         ctx: TrainContext,
         projection: MemoryCandidateProjectionManifest,
         policy: QueryHotSetPolicy,
+        *,
+        resolver: MemoryOverlayResolver | None = None,
         ) -> MemoryHotSetRuntime:
-    """在已安装 M-07/K-02 的 TrainContext 上安装唯一 K-04 runtime。"""
+    """在 M-07/K-02 上为一个明确 Memory 空间安装唯一 K-04 runtime。"""
     if not isinstance(ctx, TrainContext):
         raise TypeError("install memory hot-set ctx 类型错误")
-    if ctx.memory_hot_set_runtime is not None:
-        raise ValueError("TrainContext 已安装 Memory hot-set runtime")
     if ctx.memory_resolver_runtime is None or ctx.tiered_segment_store is None:
         raise ValueError("安装 K-04 前必须先安装 M-07 和 K-02 store")
+    selected = ctx.memory_resolver_runtime.resolver if resolver is None else resolver
+    if not isinstance(selected, MemoryOverlayResolver):
+        raise TypeError("install memory hot-set resolver 类型错误")
+    if all(item is not selected for item in ctx.memory_resolver_runtime.resolvers):
+        raise ValueError("install memory hot-set resolver 不属于当前 M-07 联邦")
+    if selected.aggregates is ctx.memory_read_aggregates:
+        owner_field = "memory_read_hot_set_runtime"
+    elif selected.aggregates is ctx.memory_interact_aggregates:
+        owner_field = "memory_interact_hot_set_runtime"
+    else:
+        raise ValueError("install memory hot-set resolver aggregate 不属于当前上下文")
+    if getattr(ctx, owner_field) is not None:
+        raise ValueError("该 Memory 空间已安装 hot-set runtime")
+    primary = selected is ctx.memory_resolver_runtime.resolver
+    if primary and ctx.memory_hot_set_runtime is not None:
+        raise ValueError("TrainContext 已安装主 Memory hot-set runtime")
     runtime = MemoryHotSetRuntime(
         ctx,
-        ctx.memory_resolver_runtime.resolver,
+        selected,
         ctx.tiered_segment_store,
         projection,
         policy,
     )
-    ctx.memory_hot_set_runtime = runtime
+    setattr(ctx, owner_field, runtime)
+    if primary:
+        ctx.memory_hot_set_runtime = runtime
     return runtime
 
 
@@ -1285,4 +1363,7 @@ __all__ = [
     "MemoryProjectionPublication",
     "MemoryProjectionSegment",
     "install_memory_hot_set_runtime",
+    "memory_hot_set_runtime_for",
+    "memory_hot_set_runtimes",
+    "memory_hot_sets_closed",
 ]

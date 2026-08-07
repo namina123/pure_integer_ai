@@ -410,13 +410,27 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
                 "M-07 resolver clone 缺少 M-06 query runtime")
         cloned.memory_resolver_runtime = (
             ctx.memory_resolver_runtime.clone_for_context(cloned))
-    if ctx.memory_hot_set_runtime is not None:
+    from pure_integer_ai.experiments.memory_hot_set_runtime import (
+        install_memory_hot_set_runtime,
+        memory_hot_set_runtimes,
+    )
+    source_hot_sets = memory_hot_set_runtimes(ctx)
+    if source_hot_sets:
         if (cloned.memory_resolver_runtime is None
                 or cloned.tiered_segment_store is None):
             raise EvaluationIsolationError(
                 "K-04 hot-set clone 缺少 M-07 resolver 或 K-02 store")
-        cloned.memory_hot_set_runtime = (
-            ctx.memory_hot_set_runtime.clone_for_context(cloned))
+        for source_hot_set in source_hot_sets:
+            cloned_hot_set = source_hot_set.clone_for_context(cloned)
+            installed = install_memory_hot_set_runtime(
+                cloned,
+                cloned_hot_set.projection,
+                cloned_hot_set.policy,
+                resolver=cloned_hot_set.resolver,
+            )
+            if installed.state_key() != source_hot_set.state_key():
+                raise EvaluationIsolationError(
+                    "K-04 hot-set clone 改变装配状态")
     if ctx.attractor_runtime is not None:
         if cloned.memory_resolver_runtime is None:
             raise EvaluationIsolationError(
@@ -688,9 +702,16 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         () if ctx.memory_resolver_runtime is None
         else ctx.memory_resolver_runtime.state_key()
     )
+    from pure_integer_ai.experiments.memory_hot_set_runtime import (
+        memory_hot_set_runtimes,
+    )
+    hot_set_states = tuple(
+        item.state_key() for item in memory_hot_set_runtimes(ctx))
     memory_hot_set_state = (
-        () if ctx.memory_hot_set_runtime is None
-        else ctx.memory_hot_set_runtime.state_key()
+        () if not hot_set_states
+        else hot_set_states[0] if len(hot_set_states) == 1
+        else tuple(part for state in hot_set_states
+                   for part in (len(state), *state))
     )
     attractor_state = (
         () if ctx.attractor_runtime is None

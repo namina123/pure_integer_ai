@@ -75,6 +75,8 @@ class TrainContext:
     memory_query_runtime: Any = None
     memory_resolver_runtime: Any = None
     memory_hot_set_runtime: Any = None
+    memory_read_hot_set_runtime: Any = None
+    memory_interact_hot_set_runtime: Any = None
     attractor_runtime: Any = None
     memory_use_runtime: Any = None
     cross_memory_use_runtime: Any = None
