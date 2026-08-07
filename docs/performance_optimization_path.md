@@ -129,3 +129,7 @@ stream、编码 bytearray，再调用 `len()`。
 非法输入异常类型均与实际编码交叉验证。`SegmentRecord.size_bytes()` 改用 framed
 直算后，同进程 5,000 条 cache cycle、11 轮交错中位改善约 7.4%，canonical bytes
 保持由原编码器产生。
+
+该算法变更提交为 `0bb9a43`，并由独立
+`performance_successor_receipt_v1.json` 串接结构体 receipt v2。性能 receipt 明确
+限定为本机方向性证据，保持 readiness 未重发、PW-00A 未启动。

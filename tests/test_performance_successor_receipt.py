@@ -1,6 +1,7 @@
 """整数长度直算性能 successor receipt 的身份与权限边界。"""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -19,6 +20,20 @@ from scripts.performance_successor_receipt import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PUBLISHED_SHA256 = (
+    "01ecdb29437d3ce7ac88e126cc7a4ccff206fc458290cf7ad65f80457d9ecb17"
+)
+
+
+def test_published_performance_receipt_is_canonical_and_current() -> None:
+    target = ROOT / RECEIPT_PATH
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == PUBLISHED_SHA256
+    value = read_performance_successor_receipt(ROOT)
+    assert value["status"] == "PERFORMANCE_SUCCESSOR_EVIDENCED"
+    assert value["readiness_transition"] == {
+        "LANGUAGE_READINESS_REPUBLISHED": 0,
+        "PW00A_STARTED": 0,
+    }
 
 
 def test_performance_receipt_builds_without_readiness_transfer(
