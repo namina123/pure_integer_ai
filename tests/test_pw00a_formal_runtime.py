@@ -14,6 +14,7 @@ from pure_integer_ai.cognition.shared.formal_post_weaning import (
 from pure_integer_ai.cognition.shared.post_weaning import PostWeaningIntakeRequest
 from pure_integer_ai.cognition.shared.types import WEANING_POST, WEANING_PRE
 from pure_integer_ai.experiments.pw00a_formal_runtime import (
+    AUTHORITY_RECEIPT_PATH,
     PW00AFormalRuntime,
     PW00AFormalStartupError,
 )
@@ -247,5 +248,22 @@ def test_pw00a_prepared_only_requires_explicit_abort(tmp_path: Path) -> None:
         assert tuple(
             item.event_kind for item in store.events(1)
         ) == (PW00A_EVENT_PREPARED, PW00A_EVENT_ABORTED)
+    finally:
+        backend.close()
+
+
+def test_pw00a_real_authority_reader_starts_formal_runtime() -> None:
+    """默认 reader 必须以公开 authority 与推理 artifact 完成一次真实装载。"""
+    backend, ctx, _, manifest, _, _, _ = _build_runtime(DictBackend())
+    authority_path = ROOT / AUTHORITY_RECEIPT_PATH
+    try:
+        request = _request(manifest, authority_path, run_id=1, epoch=1)
+        runtime = PW00AFormalRuntime.start(
+            ctx,
+            request,
+            repository_root=ROOT,
+        )
+        assert runtime.startup_report.status == PW00A_START_PUBLISHED
+        assert ctx.weaning_phase == WEANING_POST
     finally:
         backend.close()
