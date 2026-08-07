@@ -50,6 +50,12 @@ from pure_integer_ai.experiments.source_trust_runtime import (
 from pure_integer_ai.experiments.train_context import TrainContext
 from pure_integer_ai.storage.backend_capability import capability_profile
 from pure_integer_ai.storage.memory_event import MEMORY_EVENT_TABLE
+from pure_integer_ai.storage.segment_repository import (
+    SEGMENT_OBJECT_PART_TABLE,
+    SEGMENT_OBJECT_RESERVATION_TABLE,
+    SEGMENT_OBJECT_SEAL_TABLE,
+    SEGMENT_OBJECT_TOMBSTONE_TABLE,
+)
 from pure_integer_ai.storage.source_record import (
     SOURCE_RECORD_TABLE,
     SourceRecordStorage,
@@ -57,6 +63,15 @@ from pure_integer_ai.storage.source_record import (
 from pure_integer_ai.storage.spaces.companion import TEXT_ASSOC_TABLE
 from pure_integer_ai.storage.spaces.companion import CompanionSpace
 from pure_integer_ai.storage.spaces.registry import SpaceRegistry
+from pure_integer_ai.storage.write_guard import forbid_backend_table_writes
+
+
+_QUESTION_IMMUTABLE_TABLES = tuple(sorted((
+    SEGMENT_OBJECT_RESERVATION_TABLE,
+    SEGMENT_OBJECT_PART_TABLE,
+    SEGMENT_OBJECT_SEAL_TABLE,
+    SEGMENT_OBJECT_TOMBSTONE_TABLE,
+)))
 
 
 class PostWeaningStartupError(RuntimeError):
@@ -414,9 +429,15 @@ class PostWeaningOperationRuntime:
             raise TypeError("PW-00 question request 类型错误")
         self._require_operation_budget()
         before = self._snapshot()
-        recovery_state = self.ctx.backend.recovery_state_snapshot()
+        recovery_state = self.ctx.backend.recovery_state_snapshot(
+            excluded_tables=_QUESTION_IMMUTABLE_TABLES)
         try:
-            result = dialogue.run(request)
+            with forbid_backend_table_writes(_QUESTION_IMMUTABLE_TABLES):
+                result = dialogue.run(request)
+            if not self.ctx.backend.recovery_state_exclusions_unchanged(
+                    recovery_state):
+                raise PostWeaningRuntimeError(
+                    "question 调用改变了已写保护的 K-02 物理表")
             after = self._snapshot()
             report = self._report(
                 request.stable_key(),

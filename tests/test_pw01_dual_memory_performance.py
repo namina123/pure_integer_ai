@@ -159,3 +159,52 @@ def test_query_index_segments_never_cross_planner_group_boundary(
         query_index.validate_store(ctx.tiered_segment_store)
     finally:
         ctx.backend.close()
+
+
+def test_pw01_query_index_builder_generates_each_candidate_once(
+        tmp_path, monkeypatch):
+    """双入口索引发布不得为 exact/fallback 重复构造候选。"""
+    database = tmp_path / "pw01-index-single-pass.sqlite3"
+    ctx, _, _ = _prepare_fresh(database, use_query_index=True)
+    synthetic_calls = 0
+    payload_calls = 0
+    planner_calls = 0
+    original_synthetic = performance._synthetic_bundle
+    original_payload = performance.encode_memory_candidate_payload
+    try:
+        primary = _refresh_projection(ctx)
+        candidate_count = 64 - primary.record_count
+
+        def synthetic(bundle, ordinal):
+            nonlocal synthetic_calls
+            synthetic_calls += 1
+            return original_synthetic(bundle, ordinal)
+
+        def payload(bundle):
+            nonlocal payload_calls
+            payload_calls += 1
+            return original_payload(bundle)
+
+        planner = next(
+            item.score_provider
+            for item in ctx.memory_resolver_runtime.resolvers
+            if item.aggregates is ctx.memory_read_aggregates)
+        original_entries = type(planner).index_entries
+
+        def entries(self, bundle):
+            nonlocal planner_calls
+            planner_calls += 1
+            return original_entries(self, bundle)
+
+        monkeypatch.setattr(performance, "_synthetic_bundle", synthetic)
+        monkeypatch.setattr(
+            performance, "encode_memory_candidate_payload", payload)
+        monkeypatch.setattr(type(planner), "index_entries", entries)
+
+        query_index = _publish_synthetic_query_index(ctx, candidate_count)
+        assert query_index.candidate_count == candidate_count
+        assert synthetic_calls == candidate_count - 1
+        assert payload_calls == candidate_count
+        assert planner_calls == candidate_count
+    finally:
+        ctx.backend.close()

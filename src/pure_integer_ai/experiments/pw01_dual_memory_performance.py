@@ -418,7 +418,11 @@ def _publish_synthetic_query_index(
         ctx: TrainContext,
         candidate_count: int,
         ) -> MemoryQueryIndexProjectionManifest:
-    """为唯一 candidate 负载发布 exact/fallback 双入口查询索引。"""
+    """为唯一 candidate 负载发布 exact/fallback 双入口查询索引。
+
+    候选只构造和编码一次；两个索引入口分别保留独立 delta，避免
+    exact/fallback canonical range 交叉，同时消除旧实现的双遍生成成本。
+    """
     if type(candidate_count) is not int or candidate_count <= 0:
         raise ValueError("PW-01 query index candidate_count 必须是正严格整数")
     resolver = _read_resolver(ctx)
@@ -433,31 +437,36 @@ def _publish_synthetic_query_index(
         source_fence,
     )
     summaries: list[MemoryProjectionSegment] = []
-    delta = OpenHotDelta(
-        MEMORY_QUERY_PROJECTION_DESCRIPTOR_KEY,
-        _PERFORMANCE_VERSION_KEY,
-        _DEPENDENCIES,
-        SegmentBudget(
-            _PERFORMANCE_INDEX_SEGMENT_OBJECT_LIMIT,
-            16_000_000,
-        ),
-    )
+    deltas = [
+        OpenHotDelta(
+            MEMORY_QUERY_PROJECTION_DESCRIPTOR_KEY,
+            _PERFORMANCE_VERSION_KEY,
+            _DEPENDENCIES,
+            SegmentBudget(
+                _PERFORMANCE_INDEX_SEGMENT_OBJECT_LIMIT,
+                16_000_000,
+            ),
+        )
+        for _ in range(2)
+    ]
+    segment_ordinals = [0, 0]
 
-    def flush() -> None:
-        """封存并发布当前非空查询索引 delta。"""
-        nonlocal delta
+    def flush(entry_ordinal: int) -> None:
+        """封存并发布一个入口组当前非空的查询索引 delta。"""
+        delta = deltas[entry_ordinal]
         if delta.object_count == 0:
             return
-        ordinal = len(summaries) + 1
+        segment_ordinals[entry_ordinal] += 1
+        ordinal = segment_ordinals[entry_ordinal]
         segment = delta.seal(
-            (20260807, 96, candidate_count, ordinal),
+            (20260807, 96, candidate_count, entry_ordinal, ordinal),
             source_fence,
         )
         ctx.tiered_segment_store.publish_segment(
             segment,
             tier_key=_COLD,
-            manifest_key=(20260807, 97, candidate_count, ordinal),
-            migration_key=(20260807, 98, candidate_count, ordinal),
+            manifest_key=(20260807, 97, candidate_count, entry_ordinal, ordinal),
+            migration_key=(20260807, 98, candidate_count, entry_ordinal, ordinal),
         )
         delta.acknowledge(segment)
         summaries.append(MemoryProjectionSegment(
@@ -468,7 +477,7 @@ def _publish_synthetic_query_index(
             len(segment.records),
             segment.size_bytes,
         ))
-        delta = OpenHotDelta(
+        deltas[entry_ordinal] = OpenHotDelta(
             MEMORY_QUERY_PROJECTION_DESCRIPTOR_KEY,
             _PERFORMANCE_VERSION_KEY,
             _DEPENDENCIES,
@@ -479,34 +488,33 @@ def _publish_synthetic_query_index(
         )
 
     appended = 0
-    for entry_ordinal in (0, 1):
-        if entry_ordinal > 0:
-            flush()
-        for bundle in chain(
-                (target,),
-                (_synthetic_bundle(target, ordinal)
-                 for ordinal in range(1, candidate_count))):
-            entries = planner.index_entries(bundle)
-            if len(entries) != 2:
-                raise RuntimeError("PW-01 query index planner 入口数漂移")
-            entry = entries[entry_ordinal]
+    # exact 与 fallback 的范围必须分 delta；候选本身和 payload 只计算一次。
+    for ordinal in range(candidate_count):
+        bundle = target if ordinal == 0 else _synthetic_bundle(target, ordinal)
+        payload = encode_memory_candidate_payload(bundle)
+        entries = planner.index_entries(bundle)
+        if len(entries) != 2:
+            raise RuntimeError("PW-01 query index planner 入口数漂移")
+        for entry_ordinal, entry in enumerate(entries):
             record = SegmentRecord(
                 memory_query_index_record_key(
                     projection_key,
                     bundle.aggregate,
                     entry,
                 ),
-                encode_memory_candidate_payload(bundle),
+                payload,
             )
+            delta = deltas[entry_ordinal]
             try:
                 if not delta.append(record):
                     raise RuntimeError("PW-01 query index 出现重复记录身份")
             except SegmentBudgetExceeded:
-                flush()
-                if not delta.append(record):
+                flush(entry_ordinal)
+                if not deltas[entry_ordinal].append(record):
                     raise RuntimeError("PW-01 query index 出现跨段重复记录身份")
             appended += 1
-    flush()
+    flush(0)
+    flush(1)
     if appended != candidate_count * 2:
         raise RuntimeError("PW-01 query index 双入口记录数不闭合")
     current = ctx.tiered_segment_store.current_manifest()

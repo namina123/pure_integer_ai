@@ -10,6 +10,10 @@ from pure_integer_ai.storage.backend import (
     SQLiteBackend,
     TYPE_INT,
 )
+from pure_integer_ai.storage.write_guard import (
+    RuntimeWriteGuardError,
+    forbid_backend_table_writes,
+)
 
 
 _OWNER_COLUMNS = [
@@ -119,5 +123,59 @@ def test_owner_write_protection_round_trips_with_recovery_state(backend_type):
         with pytest.raises(CoreOwnerWriteProtectionError):
             backend.insert(
                 "owner_state", {"space_id": 1, "local_id": 1, "value": 10})
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("backend_type", (DictBackend, SQLiteBackend))
+def test_selective_recovery_snapshot_excludes_write_protected_table(
+        backend_type):
+    """被局部写保护的大表可不复制，其他表仍须精确回滚。"""
+    backend = _backend(backend_type)
+    try:
+        backend.insert(
+            "owner_state", {"space_id": 2, "local_id": 1, "value": 20})
+        backend.insert(
+            "global_identity_state", {"identity_id": 1, "value": 30})
+        state = backend.recovery_state_snapshot(
+            excluded_tables=("global_identity_state",))
+
+        assert "global_identity_state" not in state["tables"]
+        assert state["excluded_table_fences"] == (
+            ("global_identity_state", 1, 1),)
+        with forbid_backend_table_writes(("global_identity_state",)):
+            backend.update(
+                "owner_state", {"space_id": 2}, {"value": 21})
+            with pytest.raises(RuntimeWriteGuardError):
+                backend.insert(
+                    "global_identity_state", {"identity_id": 2, "value": 31})
+
+        assert backend.recovery_state_exclusions_unchanged(state)
+        backend.restore_recovery_state(state)
+        assert backend.select("owner_state", where=None) == [
+            {"space_id": 2, "local_id": 1, "value": 20},
+        ]
+        assert backend.select("global_identity_state", where=None) == [
+            {"identity_id": 1, "value": 30},
+        ]
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("backend_type", (DictBackend, SQLiteBackend))
+def test_selective_recovery_rejects_changed_excluded_table(backend_type):
+    """调用方漏加写保护时，等行数更新也不得伪造完整回滚。"""
+    backend = _backend(backend_type)
+    try:
+        backend.insert(
+            "global_identity_state", {"identity_id": 1, "value": 30})
+        state = backend.recovery_state_snapshot(
+            excluded_tables=("global_identity_state",))
+        backend.update(
+            "global_identity_state", {"identity_id": 1}, {"value": 31})
+
+        assert not backend.recovery_state_exclusions_unchanged(state)
+        with pytest.raises(RuntimeError, match="排除表"):
+            backend.restore_recovery_state(state)
     finally:
         backend.close()

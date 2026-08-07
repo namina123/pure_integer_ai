@@ -87,8 +87,18 @@ class StorageBackend(Protocol):
     def restore_owner_write_protection(self, state: tuple[int, ...]) -> None: ...
     def schema_snapshot(self) -> dict[str, dict[str, Any]]: ...
     def snapshot(self) -> dict[str, list[dict[str, Any]]]: ...
-    def load_snapshot(self, snap: dict[str, list[dict[str, Any]]]) -> None: ...
-    def recovery_state_snapshot(self) -> dict[str, Any]: ...
+    def load_snapshot(
+            self,
+            snap: dict[str, list[dict[str, Any]]],
+            *,
+            preserve_unspecified: bool = False,
+            ) -> None: ...
+    def recovery_state_snapshot(
+            self, *, excluded_tables: tuple[str, ...] = (),
+            ) -> dict[str, Any]: ...
+    def recovery_state_exclusions_unchanged(
+            self, state: dict[str, Any],
+            ) -> bool: ...
     def restore_recovery_state(self, state: dict[str, Any]) -> None: ...
     def commit(self) -> None: ...
     def close(self) -> None: ...
@@ -130,6 +140,8 @@ class _BaseBackend:
         self._isa_edge_gen: dict[int, int] = {}
         # PW-00A 显式启用；默认空集合保持既有训练和评测行为不变。
         self._protected_owner_space_ids: set[int] = set()
+        # 进程内逐表写代次；选择性恢复用它拒绝等行数 update 逃逸。
+        self._table_write_epochs: dict[str, int] = {}
 
     # -- 表元数据 --
     def register_table(self, table: str, columns: list[tuple[str, str]],
@@ -155,6 +167,7 @@ class _BaseBackend:
             "indexes": [tuple(index) for index in indexes],
             "recovery_key": tuple(recovery_key),
         }
+        self._table_write_epochs[table] = 0
         self._do_create_table(table, columns)
         for idx in indexes:
             self._do_ensure_index(table, idx, defer_indexes=defer_indexes)
@@ -257,6 +270,7 @@ class _BaseBackend:
             if telemetry is not None:
                 telemetry.record("insert", table, failed=True)
             raise
+        self._table_write_epochs[table] += 1
         if telemetry is not None:
             telemetry.record("insert", table, rows=1)
         # perf #1144：IS_A 拓扑版本 bump（ancestor_map cache O(1) 命中信号）。IS_A 拓扑仅经 insert 变
@@ -299,6 +313,8 @@ class _BaseBackend:
             if telemetry is not None:
                 telemetry.record("update", table, failed=True)
             raise
+        if affected:
+            self._table_write_epochs[table] += 1
         if telemetry is not None:
             telemetry.record("update", table, rows=affected)
         return affected
@@ -318,6 +334,8 @@ class _BaseBackend:
             if telemetry is not None:
                 telemetry.record("delete", table, failed=True)
             raise
+        if affected:
+            self._table_write_epochs[table] += 1
         if telemetry is not None:
             telemetry.record("delete", table, rows=affected)
         return affected
@@ -396,14 +414,42 @@ class _BaseBackend:
             raise ValueError("id_pool_floor space_id 必须为严格正整数")
         return self._id_pool.get(space_id, 0)
 
-    def recovery_state_snapshot(self) -> dict[str, Any]:
-        """捕获数据与运行时水位，用于恢复失败后精确回滚。"""
-        return {
-            "tables": self.snapshot(),
+    def recovery_state_snapshot(
+            self,
+            *,
+            excluded_tables: tuple[str, ...] = (),
+            ) -> dict[str, Any]:
+        """捕获数据与运行时水位；可排除调用期被显式写保护的大表。"""
+        if (not isinstance(excluded_tables, tuple)
+                or any(not isinstance(item, str) or not item
+                       for item in excluded_tables)
+                or len(set(excluded_tables)) != len(excluded_tables)):
+            raise ValueError("recovery excluded_tables 必须是唯一 str tuple")
+        excluded = tuple(sorted(excluded_tables))
+        unknown = tuple(item for item in excluded if item not in self._tables)
+        if unknown:
+            raise KeyError(f"recovery excluded_tables 含未注册表: {unknown}")
+        state = {
+            "tables": {
+                table: self._do_select(
+                    table, None, None, None, False, None)
+                for table in self._tables
+                if table not in excluded
+            },
             "id_pool": dict(self._id_pool),
             "isa_edge_gen": dict(self._isa_edge_gen),
             "protected_owner_space_ids": self.owner_write_protection_state(),
         }
+        if excluded:
+            state["excluded_table_fences"] = tuple(
+                (
+                    table,
+                    self._table_write_epochs[table],
+                    self._do_count(table, None),
+                )
+                for table in excluded
+            )
+        return state
 
     def restore_recovery_state(self, state: dict[str, Any]) -> None:
         """恢复加载前的数据、id 水位和 IS_A 拓扑代次。"""
@@ -413,14 +459,60 @@ class _BaseBackend:
         id_pool = state.get("id_pool")
         isa_edge_gen = state.get("isa_edge_gen")
         protected = state.get("protected_owner_space_ids", ())
+        excluded_fences = state.get("excluded_table_fences", ())
         if not isinstance(tables, dict):
             raise TypeError("recovery state.tables 必须是 dict")
         if not isinstance(id_pool, dict) or not isinstance(isa_edge_gen, dict):
             raise TypeError("recovery state 水位必须是 dict")
-        self.load_snapshot(tables)
+        self._require_excluded_tables_unchanged(excluded_fences)
+        self.load_snapshot(
+            tables,
+            preserve_unspecified=bool(excluded_fences),
+        )
         self._id_pool = dict(id_pool)
         self._isa_edge_gen = dict(isa_edge_gen)
         self.restore_owner_write_protection(tuple(protected))
+
+    def recovery_state_exclusions_unchanged(
+            self,
+            state: dict[str, Any],
+            ) -> bool:
+        """核验一次选择性恢复快照排除的表仍保持原行数。"""
+        if not isinstance(state, dict):
+            raise TypeError("recovery state 必须是 dict")
+        try:
+            self._require_excluded_tables_unchanged(
+                state.get("excluded_table_fences", ()))
+        except RuntimeError:
+            return False
+        return True
+
+    def _require_excluded_tables_unchanged(
+            self,
+            excluded_fences: tuple[tuple[str, int, int], ...],
+            ) -> None:
+        """拒绝恢复调用期发生变化、却没有进入快照的只读表。"""
+        if not isinstance(excluded_fences, tuple):
+            raise TypeError("recovery excluded_table_fences 必须是 tuple")
+        tables = []
+        for item in excluded_fences:
+            if (not isinstance(item, tuple)
+                    or len(item) != 3
+                    or not isinstance(item[0], str)
+                    or not item[0]
+                    or type(item[1]) is not int
+                    or item[1] < 0
+                    or type(item[2]) is not int
+                    or item[2] < 0):
+                raise ValueError("recovery excluded_table_fences 条目非法")
+            table, expected_epoch, expected_count = item
+            self._meta(table)
+            if (self._table_write_epochs[table] != expected_epoch
+                    or self._do_count(table, None) != expected_count):
+                raise RuntimeError(f"recovery 排除表在调用期发生变化: {table}")
+            tables.append(table)
+        if tuple(sorted(set(tables))) != tuple(tables):
+            raise ValueError("recovery excluded_table_fences 必须有序且唯一")
 
     def commit(self) -> None:
         pass
@@ -623,8 +715,21 @@ class DictBackend(_BaseBackend):
     def snapshot(self) -> dict[str, list[dict[str, Any]]]:
         return {t: [dict(r) for r in rows] for t, rows in self._data.items()}
 
-    def load_snapshot(self, snap: dict[str, list[dict[str, Any]]]) -> None:
-        self._data = {t: [dict(r) for r in rows] for t, rows in snap.items()}
+    def load_snapshot(
+            self,
+            snap: dict[str, list[dict[str, Any]]],
+            *,
+            preserve_unspecified: bool = False,
+            ) -> None:
+        if type(preserve_unspecified) is not bool:
+            raise TypeError("DictBackend preserve_unspecified 必须是 bool")
+        restored = {t: [dict(r) for r in rows] for t, rows in snap.items()}
+        if preserve_unspecified:
+            self._data.update(restored)
+        else:
+            self._data = restored
+        for table in restored:
+            self._table_write_epochs[table] += 1
         # _data 已换·旧桶引用指向旧行（已弃）→ 清已不存在的表 + 对仍存在表从新 _data rebuild 全索引
         for t in [t for t in self._idx if t not in self._data]:
             del self._idx[t]
@@ -782,7 +887,12 @@ class SQLiteBackend(_BaseBackend):
         return {t: self._do_select(t, None, None, None, False, None)
                 for t in self._tables}
 
-    def load_snapshot(self, snap: dict[str, list[dict[str, Any]]]) -> None:
+    def load_snapshot(
+            self,
+            snap: dict[str, list[dict[str, Any]]],
+            *,
+            preserve_unspecified: bool = False,
+            ) -> None:
         """从快照恢复（清空 + 重插·pre_flight rollback 用·同 DictBackend.load_snapshot 语义）。
 
         `with self._conn` 事务包裹（sqlite3 Connection 上下文·自动 commit 成功 / rollback 异常·partial
@@ -793,8 +903,12 @@ class SQLiteBackend(_BaseBackend):
 
         铁律：纯整数 / 确定性（snap 行序→重插 rowid 序）/ fail-loud（异常 ROLLBACK 抛·不留脏）。
         """
+        if type(preserve_unspecified) is not bool:
+            raise TypeError("SQLiteBackend preserve_unspecified 必须是 bool")
         with self._conn:   # 自动 commit（成功）/ rollback（异常）·事务原子
             for table, rows in snap.items():
                 self._do_delete(table, {})   # 清空（绕 discipline·trial 增量归零）
                 for row in rows:
                     self._do_insert(table, row)   # 重插（行序 = snap 序·rowid 递增确定）
+        for table in snap:
+            self._table_write_epochs[table] += 1

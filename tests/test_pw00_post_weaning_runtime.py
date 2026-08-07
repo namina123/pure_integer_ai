@@ -65,6 +65,9 @@ from pure_integer_ai.experiments.train_context import make_train_context
 from pure_integer_ai.storage.backend import DictBackend, SQLiteBackend
 from pure_integer_ai.storage.query_hot_set import QueryHotSetPolicy
 from pure_integer_ai.storage.sealed_segment import SegmentBudget
+from pure_integer_ai.storage.segment_repository import (
+    SEGMENT_OBJECT_PART_TABLE,
+)
 from pure_integer_ai.training.cursor import (
     CursorState,
     cursor_state_from_payload,
@@ -94,6 +97,7 @@ from tests.test_m08_memory_use import _append_observation
 from pure_integer_ai.cognition.shared.attractor_state import AttractorBudget
 from pure_integer_ai.cognition.shared.memory_overlay import MemoryAccessContext
 from pure_integer_ai.storage.source_record import SourceRecordRepository
+from pure_integer_ai.storage.write_guard import RuntimeWriteGuardError
 
 
 _ACCESS = MemoryAccessContext(1, 2, 3)
@@ -528,6 +532,64 @@ def test_pw00_question_uses_jg_caller_and_reports_closed_cold_pages(
             for item in run.result.question.generation.plan.layers
         ) <= 256
         assert len(run.result.stable_key()) <= 4096
+    finally:
+        if fixture is not None:
+            fixture.close()
+        backend.close()
+
+
+def test_pw00_sqlite_question_skips_full_segment_payload_snapshot(
+        monkeypatch):
+    """question 回滚快照不得全量读取大型 K-02 part 表。"""
+    backend, ctx, _, _, runtime, observation, _ = _build_runtime(
+        SQLiteBackend())
+    fixture = None
+    try:
+        source = _query_source(document_id=1)
+        fixture, dialogue = _question_dialogue(ctx, source, observation)
+        original_select = backend._do_select
+
+        def guarded_select(
+                table, where, where_gt, order_by, descending, limit):
+            if table == SEGMENT_OBJECT_PART_TABLE and where is None:
+                raise AssertionError("question 执行了 K-02 part 全表快照")
+            return original_select(
+                table, where, where_gt, order_by, descending, limit)
+
+        monkeypatch.setattr(backend, "_do_select", guarded_select)
+        run = runtime.run_question(dialogue, fixture.request)
+
+        assert run.result.question.complete
+        assert run.report.query_closed
+    finally:
+        if fixture is not None:
+            fixture.close()
+        backend.close()
+
+
+def test_pw00_question_blocks_segment_write_and_rolls_back_use(monkeypatch):
+    """被排除的 K-02 表若尝试写入，必须在首写前失败并撤销 Use。"""
+    backend, ctx, _, _, runtime, observation, _ = _build_runtime(
+        SQLiteBackend())
+    fixture = None
+    try:
+        source = _query_source(document_id=1)
+        fixture, dialogue = _question_dialogue(ctx, source, observation)
+        before = backend.recovery_state_snapshot()
+        original = dialogue.run
+
+        def write_segment_after_use(request):
+            result = original(request)
+            assert result.question.selection_commit.commits
+            backend.insert(SEGMENT_OBJECT_PART_TABLE, {})
+            return result
+
+        monkeypatch.setattr(dialogue, "run", write_segment_after_use)
+        with pytest.raises(RuntimeWriteGuardError, match="只读调用链"):
+            runtime.run_question(dialogue, fixture.request)
+
+        assert backend.recovery_state_snapshot() == before
+        assert runtime.reports()[-1].query_closed
     finally:
         if fixture is not None:
             fixture.close()
