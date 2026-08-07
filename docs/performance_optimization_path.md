@@ -139,3 +139,6 @@ stream、编码 bytearray，再调用 `len()`。
 `SegmentRecord` 调用，因为其字段已由 `__post_init__` 校验且 frozen+slots。相对上一
 公开版，同进程交错测量中单独 size 调用约改善 38.1%，5,000 条 cache cycle 本轮约
 改善 14.7%。这些仍是本机方向性数据，不能解释为跨平台固定比例。
+
+已验证长度核提交为 `b9c8170`，性能 receipt v2 严格串接 v1。v1 在当前源码上默认
+严格失效，只允许显式 historical 回读；v2 是当前源码证据，仍不转移 readiness。
