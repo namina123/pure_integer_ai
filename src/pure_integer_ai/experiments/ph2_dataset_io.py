@@ -201,6 +201,79 @@ def write_record_artifact(
     )
 
 
+def write_record_artifact_streaming(
+        records: Iterable[JsonlRecord],
+        root: str | Path,
+        spec: ArtifactWriteSpec) -> ArtifactFileIdentity:
+    """流式写入已按 stable key 排序的记录，不在内存中聚合 payload。"""
+    output_root = Path(root).resolve()
+    target = _safe_target(output_root, spec.relative_path)
+    if target.exists():
+        raise DatasetArtifactIOError("artifact 目标已存在，禁止覆盖")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary_handle = tempfile.NamedTemporaryFile(
+        prefix=f".{target.name}.building-",
+        dir=target.parent,
+        delete=False,
+    )
+    temporary = Path(temporary_handle.name)
+    temporary_handle.close()
+    content_digest = hashlib.sha256()
+    content_size = 0
+    count = 0
+    first_key: StableRecordKey | None = None
+    last_key: StableRecordKey | None = None
+    try:
+        with temporary.open("wb") as raw:
+            with gzip.GzipFile(
+                    filename="", mode="wb", fileobj=raw, mtime=0) as stream:
+                for item in records:
+                    if record_kind(item) != spec.record_kind:
+                        raise DatasetArtifactIOError(
+                            "streaming artifact 混入其他 record kind")
+                    if (spec.owner_kind == "anomaly"
+                            and (not isinstance(item, ObservationRecord)
+                                 or item.sample_role != "anomaly")):
+                        raise DatasetArtifactIOError(
+                            "anomalies/ 只能写 sample_role=anomaly")
+                    if (isinstance(item, ObservationRecord)
+                            and spec.split is not None
+                            and item.split != spec.split):
+                        raise DatasetArtifactIOError(
+                            "Observation split 与文件路径不一致")
+                    key = item.stable_key
+                    if last_key is not None and key <= last_key:
+                        raise DatasetArtifactIOError(
+                            "streaming artifact stable key 未严格递增")
+                    payload = canonical_json_line(item.to_dict())
+                    content_digest.update(payload)
+                    content_size += len(payload)
+                    stream.write(payload)
+                    if first_key is None:
+                        first_key = key
+                    last_key = key
+                    count += 1
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return ArtifactFileIdentity(
+        spec.record_kind,
+        spec.owner_kind,
+        spec.relative_path,
+        spec.split,
+        spec.license_partition,
+        count,
+        content_digest.hexdigest(),
+        _sha256_file(target),
+        content_size,
+        target.stat().st_size,
+        first_key,
+        last_key,
+        tuple(sorted(set(spec.source_cluster_keys))),
+    )
+
+
 def read_record_artifact(
         root: str | Path,
         identity: ArtifactFileIdentity) -> tuple[JsonlRecord, ...]:
@@ -318,4 +391,5 @@ __all__ = [
     "read_record_artifact",
     "write_artifact_manifest",
     "write_record_artifact",
+    "write_record_artifact_streaming",
 ]

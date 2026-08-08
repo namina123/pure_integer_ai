@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import sqlite3
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from pure_integer_ai.experiments.ph2_d03_contract_core import (
     D03ContractError,
@@ -563,6 +566,25 @@ class V2GenericTrainingResult:
                        where="v2 generic trainer input commitment")
 
 
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class V2TrainPackStream:
+    """可重复打开的单 pack train record 流，不持有完整 payload。"""
+
+    pack_key: tuple[int, ...]
+    records_factory: Callable[[], Iterable[dict[str, Any]]]
+
+    def __post_init__(self) -> None:
+        _key_tuple(self.pack_key, where="v2 train pack stream pack key")
+        if not callable(self.records_factory):
+            raise V2RegistryError("v2 train pack stream factory 不可调用")
+
+
+def _blob_key(value: tuple[int, ...]) -> bytes:
+    """把稳定键编码成 SQLite 可排序、不可变的 canonical BLOB。"""
+    return canonical_json_bytes(list(value))
+
+
 class V2GenericTrainer:
     """在 FT00 只做 variable-count、owner 和 canonical commitment 校验。"""
 
@@ -625,8 +647,163 @@ class V2GenericTrainer:
             hashlib.sha256(b"".join(encoded)).hexdigest(), 0, 0, 0,
         )
 
+    def validate_train_streams(
+            self,
+            plan: V2TrainPlan,
+            streams: Iterable[V2TrainPackStream],
+            ) -> V2GenericTrainingResult:
+        """流式验证多 pack train owner，只在临时 SQLite 保留最小校验状态。"""
+        if not isinstance(plan, V2TrainPlan):
+            raise V2RegistryError("v2 generic trainer plan 类型非法")
+        ordered = tuple(streams)
+        if (tuple(item.pack_key for item in ordered) != plan.pack_keys
+                or len(ordered) != len(plan.pack_keys)):
+            raise V2RegistryError("v2 generic trainer stream 未覆盖 plan")
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix="v2-train-preflight-", suffix=".sqlite3")
+        os.close(descriptor)
+        database: sqlite3.Connection | None = None
+        try:
+            database = sqlite3.connect(temporary_path)
+            database.execute("PRAGMA synchronous=FULL")
+            database.execute("PRAGMA temp_store=FILE")
+            database.executescript(
+                """
+                CREATE TABLE payloads(
+                    stable_key BLOB PRIMARY KEY,
+                    pack_key BLOB NOT NULL,
+                    kind TEXT NOT NULL,
+                    payload BLOB NOT NULL
+                );
+                CREATE TABLE sources(
+                    pack_key BLOB NOT NULL,
+                    stable_key BLOB NOT NULL,
+                    license_id TEXT NOT NULL,
+                    PRIMARY KEY(pack_key, stable_key)
+                );
+                CREATE TABLE observations(
+                    pack_key BLOB NOT NULL,
+                    stable_key BLOB NOT NULL,
+                    source_key BLOB NOT NULL,
+                    license_id TEXT NOT NULL,
+                    split TEXT NOT NULL,
+                    PRIMARY KEY(pack_key, stable_key)
+                );
+                CREATE TABLE teachers(
+                    pack_key BLOB NOT NULL,
+                    stable_key BLOB NOT NULL,
+                    observation_key BLOB NOT NULL,
+                    source_key BLOB NOT NULL,
+                    owner_key BLOB NOT NULL,
+                    PRIMARY KEY(pack_key, stable_key)
+                );
+                """
+            )
+            database.commit()
+            source_count = observation_count = teacher_count = 0
+            for stream in ordered:
+                pack_blob = _blob_key(stream.pack_key)
+                local_sources = local_observations = local_teachers = 0
+                local_owner: bytes | None = None
+                for raw in stream.records_factory():
+                    if not isinstance(raw, dict):
+                        raise V2RegistryError("v2 train stream record 类型非法")
+                    kind = raw.get("record_kind")
+                    if kind not in {"source_ref", "observation", "teacher_evidence"}:
+                        raise V2RegistryError(
+                            "v2 generic trainer stream 只接受 train owner records")
+                    if kind == "observation" and raw.get("split") != "train":
+                        raise V2RegistryError(
+                            "v2 generic trainer stream 只接受 train observation")
+                    try:
+                        typed = validate_v2_record(raw)
+                    except (DatasetContractError, D03ContractError) as error:
+                        raise V2RegistryError(
+                            "v2 generic trainer stream record 校验失败") from error
+                    stable = typed.stable_key.components
+                    payload = canonical_json_bytes(typed.to_dict())
+                    try:
+                        database.execute(
+                            "INSERT INTO payloads VALUES(?,?,?,?)",
+                            (_blob_key(stable), pack_blob, kind, payload),
+                        )
+                    except sqlite3.IntegrityError as error:
+                        raise V2RegistryError(
+                            "v2 generic trainer stream stable key 重复") from error
+                    if isinstance(typed, SourceRefRecord):
+                        database.execute(
+                            "INSERT INTO sources VALUES(?,?,?)",
+                            (pack_blob, _blob_key(stable), typed.license_id),
+                        )
+                        local_sources += 1
+                    elif isinstance(typed, ObservationRecord):
+                        database.execute(
+                            "INSERT INTO observations VALUES(?,?,?,?,?)",
+                            (pack_blob, _blob_key(stable),
+                             _blob_key(typed.source_ref_key.components),
+                             typed.license_partition, typed.split),
+                        )
+                        local_observations += 1
+                    elif isinstance(typed, TeacherEvidenceRecord):
+                        owner = _blob_key(typed.owner_key.components)
+                        if local_owner is None:
+                            local_owner = owner
+                        if local_owner != owner:
+                            raise V2RegistryError(
+                                "v2 generic trainer stream teacher owner 漂移")
+                        database.execute(
+                            "INSERT INTO teachers VALUES(?,?,?,?,?)",
+                            (pack_blob, _blob_key(stable),
+                             _blob_key(typed.observation_key.components),
+                             _blob_key(typed.source_ref_key.components), owner),
+                        )
+                        local_teachers += 1
+                if local_sources <= 0 or local_observations <= 0:
+                    raise V2RegistryError(
+                        "v2 generic trainer stream pack source/observation 为空")
+                missing_source = database.execute(
+                    "SELECT COUNT(*) FROM observations o LEFT JOIN sources s "
+                    "ON s.pack_key=o.pack_key AND s.stable_key=o.source_key "
+                    "WHERE s.stable_key IS NULL OR s.license_id<>o.license_id",
+                ).fetchone()[0]
+                missing_teacher = database.execute(
+                    "SELECT COUNT(*) FROM teachers t LEFT JOIN observations o "
+                    "ON o.pack_key=t.pack_key AND o.stable_key=t.observation_key "
+                    "WHERE o.stable_key IS NULL OR o.split<>'train' "
+                    "OR o.source_key<>t.source_key",
+                ).fetchone()[0]
+                if missing_source or missing_teacher:
+                    raise V2RegistryError(
+                        "v2 generic trainer stream source/evidence 引用缺失")
+                source_count += local_sources
+                observation_count += local_observations
+                teacher_count += local_teachers
+                database.commit()
+            if (source_count, observation_count, teacher_count) != (
+                    plan.source_ref_count, plan.observation_count,
+                    plan.teacher_evidence_count):
+                raise V2RegistryError(
+                    "v2 generic trainer stream count 与 plan 不一致")
+            digest = hashlib.sha256()
+            for (payload,) in database.execute(
+                    "SELECT payload FROM payloads ORDER BY payload"):
+                digest.update(payload)
+            database.close()
+            return V2GenericTrainingResult(
+                plan, source_count, observation_count, teacher_count,
+                digest.hexdigest(), 0, 0, 0,
+            )
+        finally:
+            if database is not None:
+                database.close()
+            try:
+                Path(temporary_path).unlink()
+            except FileNotFoundError:
+                pass
+
 
 __all__ = [
     "V2GenericTrainer", "V2GenericTrainingResult", "V2PackEntry",
     "V2PackRegistry", "V2RegistryError", "V2RegistrySnapshot", "V2TrainPlan",
+    "V2TrainPackStream",
 ]
