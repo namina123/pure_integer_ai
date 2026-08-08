@@ -378,6 +378,15 @@ def _blocks(path: Path) -> Iterator[tuple[list[tuple[int, str]], int]]:
         raise UdGsdsimpAdapterError("CoNLL-U 文件/UTF-8 损坏") from error
 
 
+def iter_ud_conllu_sentences(path: str | Path) -> Iterator[ConlluSentence]:
+    """流式返回严格校验的 sentence，供后继课程复用同一解析边界。"""
+    source = Path(path)
+    if not source.is_file():
+        raise UdGsdsimpAdapterError("CoNLL-U 文件不存在")
+    for block, _ in _blocks(source):
+        yield _parse_sentence_block(block)
+
+
 def scan_ud_conllu(
         path: str | Path,
         *,
@@ -460,6 +469,7 @@ __all__ = [
     "TAG",
     "UdConlluScanReport",
     "UdGsdsimpAdapterError",
+    "iter_ud_conllu_sentences",
     "parse_conllu_node_id",
     "parse_conllu_row",
     "scan_ud_conllu",
