@@ -16,7 +16,17 @@ from pure_integer_ai.experiments.ph2_d03_v2_w02_morphology_overlay import (
     W02MorphologyOverlayError,
     derive_w02_morphology_successor_from_candidate,
     load_w02_morphology_overlay_index,
+    run_w02_morphology_overlay_formal,
     run_w02_morphology_overlay_fixture,
+)
+from pure_integer_ai.experiments.ph2_d03_v2_w02_morphology_successor_contract import (
+    W02_MORPH_SUCCESSOR_GUARD_AVAILABLE,
+    publish_w02_morphology_successor_guard,
+    read_w02_morphology_successor_runtime_freeze,
+)
+from pure_integer_ai.experiments.ph2_d03_v2_w02_morphology_successor_publication import (
+    W02MorphologySuccessorPublicationError,
+    build_w02_morphology_successor_receipt,
 )
 from pure_integer_ai.experiments.ph2_d03_v2_w02_compiler import (
     _observation_record,
@@ -302,6 +312,9 @@ def test_overlay_is_canonical_for_workers_and_readback(tmp_path: Path) -> None:
     assert len({item.overlay_semantic_sha256 for item in results}) == 1
     assert len({item.artifact_manifest_sha256 for item in results}) == 1
     assert _tree_identity(candidate.artifact_path) == parent_before
+    with pytest.raises(W02MorphologySuccessorPublicationError, match="不是正式"):
+        build_w02_morphology_successor_receipt(
+            Path(__file__).resolve().parents[1], results[0].artifact_path)
 
 
 def test_overlay_restart_matches_clean_semantics(tmp_path: Path) -> None:
@@ -350,3 +363,28 @@ def test_overlay_resource_stop_never_publishes_manifest(tmp_path: Path) -> None:
             budget=W02MorphologyOverlayBudget(max_input_rows=1),
         )
     assert not tuple(root.rglob("morphology-overlay.artifact.json"))
+
+
+def test_formal_overlay_rejects_fixture_parent_before_guard_consumption(
+        tmp_path: Path) -> None:
+    _, candidate = _fixture(tmp_path / "parent")
+    repository = Path(__file__).resolve().parents[1]
+    freeze = read_w02_morphology_successor_runtime_freeze(repository)
+    formal_root = tmp_path / "formal-successor"
+    publish_w02_morphology_successor_guard(formal_root, freeze)
+    available = formal_root / Path(*W02_MORPH_SUCCESSOR_GUARD_AVAILABLE.split("/"))
+    before = available.read_bytes()
+    with pytest.raises(W02MorphologyOverlayError, match="不是正式零泄漏"):
+        run_w02_morphology_overlay_formal(
+            successor_root=formal_root,
+            candidate_artifact_root=candidate.artifact_path,
+            runtime_freeze_sha256=freeze.sha256(),
+            expected_parent_manifest_sha256=candidate.artifact_manifest_sha256,
+            expected_parent_semantic_sha256=candidate.candidate_semantic_sha256,
+            expected_guard_sha256=freeze.first_run_guard_sha256,
+            run_id=1,
+            requested_workers=1,
+            mode="fresh",
+            budget=freeze.resource_budget,
+        )
+    assert available.read_bytes() == before

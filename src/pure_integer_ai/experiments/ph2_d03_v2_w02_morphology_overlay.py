@@ -93,7 +93,8 @@ class W02MorphologyOverlayRunIdentity:
     def __post_init__(self) -> None:
         if (self.release_key != "PH2-D03-V2" or self.stage_key != "W-02"
                 or self.run_scope not in {
-                    "PUBLIC_SYNTHETIC_FIXTURE", "DEVELOPMENT_PREFLIGHT"}
+                    "PUBLIC_SYNTHETIC_FIXTURE", "DEVELOPMENT_PREFLIGHT",
+                    "FORMAL_SUCCESSOR_TRANSFORM"}
                 or self.operation_kind != W02_MORPH_OVERLAY_OPERATION
                 or self.successor_version != W02_MORPH_SUCCESSOR_VERSION):
             raise W02MorphologyOverlayError("overlay run identity 枚举漂移")
@@ -993,7 +994,8 @@ def _publish_manifest(
         "artifact_version": W02_MORPH_OVERLAY_VERSION,
         "candidate_writes": 0,
         "formal_private_evaluation_runs": 0,
-        "formal_successor_transform_runs": 0,
+        "formal_successor_transform_runs": (
+            1 if identity.run_scope == "FORMAL_SUCCESSOR_TRANSFORM" else 0),
         "formal_training_runs": 0,
         "input_row_count": input_row_count,
         "input_roots": ["PARENT_CANDIDATE_ARTIFACT"],
@@ -1128,6 +1130,100 @@ def run_w02_morphology_overlay_development(
         budget=budget,
         fault_after_shard=None,
     )
+
+
+def run_w02_morphology_overlay_formal(
+        *,
+        successor_root: str | Path,
+        candidate_artifact_root: str | Path,
+        runtime_freeze_sha256: str,
+        expected_parent_manifest_sha256: str,
+        expected_parent_semantic_sha256: str,
+        expected_guard_sha256: str,
+        run_id: int,
+        requested_workers: int,
+        mode: str,
+        budget: W02MorphologyOverlayBudget,
+        ) -> W02MorphologyOverlayRunResult:
+    """消费专属 guard 后执行唯一 formal successor transform。"""
+    if type(requested_workers) is not int or requested_workers not in (1, 2, 4):
+        raise W02MorphologyOverlayError("formal overlay workers 必须是 1/2/4")
+    if mode not in {"fresh", "resume"}:
+        raise W02MorphologyOverlayError("formal overlay 只允许 fresh/resume")
+    if not isinstance(budget, W02MorphologyOverlayBudget):
+        raise W02MorphologyOverlayError("formal overlay budget 类型错误")
+    for value in (
+            runtime_freeze_sha256, expected_parent_manifest_sha256,
+            expected_parent_semantic_sha256, expected_guard_sha256):
+        _sha256_text(value, where="formal overlay commitment")
+    root = Path(successor_root).resolve()
+    if not root.is_dir():
+        raise W02MorphologyOverlayError("formal successor root 缺失")
+    store, staging, final = _run_dirs(root, run_id)
+    if mode == "resume":
+        if staging.exists() or not final.is_dir():
+            raise W02MorphologyOverlayError("formal overlay resume 路径非法")
+        result = read_w02_morphology_overlay_artifact(
+            final, requested_workers=requested_workers)
+        identity = _identity_from_existing(final)
+        if (identity.run_scope != "FORMAL_SUCCESSOR_TRANSFORM"
+                or identity.runtime_freeze_sha256 != runtime_freeze_sha256
+                or identity.parent_candidate_manifest_sha256
+                != expected_parent_manifest_sha256
+                or identity.parent_candidate_semantic_sha256
+                != expected_parent_semantic_sha256):
+            raise W02MorphologyOverlayError("formal overlay resume identity 漂移")
+        from pure_integer_ai.experiments.ph2_d03_v2_w02_morphology_successor_contract import (
+            verify_w02_morphology_successor_consumed_guard,
+        )
+        verify_w02_morphology_successor_consumed_guard(
+            root,
+            expected_guard_sha256=expected_guard_sha256,
+            run_id=run_id,
+            run_identity_sha256=identity.sha256(),
+        )
+        return result
+    if staging.exists() or final.exists() or store.exists():
+        raise W02MorphologyOverlayError("fresh formal overlay store 已存在")
+    candidate = read_w02_candidate_artifact(candidate_artifact_root)
+    if (candidate.artifact_manifest_sha256 != expected_parent_manifest_sha256
+            or candidate.candidate_semantic_sha256
+            != expected_parent_semantic_sha256):
+        raise W02MorphologyOverlayError("formal overlay parent Candidate 漂移")
+    parent_manifest = read_canonical_object(
+        candidate.artifact_path / W02_CANDIDATE_MANIFEST_NAME)
+    if (parent_manifest.get("run_scope") != "FORMAL"
+            or parent_manifest.get("formal_training_runs") != 1
+            or parent_manifest.get("formal_private_evaluation_runs") != 0
+            or parent_manifest.get("private_payload_reads") != 0
+            or parent_manifest.get("teacher_calls") != 0):
+        raise W02MorphologyOverlayError("formal overlay parent 不是正式零泄漏 Candidate")
+    identity = W02MorphologyOverlayRunIdentity(
+        "PH2-D03-V2", "W-02", "FORMAL_SUCCESSOR_TRANSFORM",
+        W02_MORPH_OVERLAY_OPERATION, W02_MORPH_SUCCESSOR_VERSION,
+        runtime_freeze_sha256, expected_parent_manifest_sha256,
+        expected_parent_semantic_sha256, run_id)
+    from pure_integer_ai.experiments.ph2_d03_v2_w02_morphology_successor_contract import (
+        consume_w02_morphology_successor_guard,
+    )
+    consume_w02_morphology_successor_guard(
+        root,
+        expected_guard_sha256=expected_guard_sha256,
+        run_id=run_id,
+        run_identity_sha256=identity.sha256(),
+    )
+    store.mkdir()
+    staging.mkdir()
+    (staging / W02_MORPH_OVERLAY_SHARD_DIR).mkdir()
+    _run_state(staging, identity, "RUNNING")
+    meta = _write_input_spool(
+        staging / W02_MORPH_OVERLAY_SPOOL_NAME,
+        candidate.artifact_path, identity, budget)
+    return _execute_pipeline(
+        staging=staging, final=final, identity=identity,
+        expected_input_rows=int(meta["input_row_count"]),
+        requested_workers=requested_workers, mode=mode, budget=budget,
+        fault_after_shard=None)
 
 
 def _run_w02_morphology_overlay_nonformal(
@@ -1296,15 +1392,18 @@ def read_w02_morphology_overlay_artifact(
             or value["operation_kind"] != W02_MORPH_OVERLAY_OPERATION
             or value["status"] != "MORPHOLOGY_OVERLAY_SEALED"
             or value["run_scope"] not in {
-                "PUBLIC_SYNTHETIC_FIXTURE", "DEVELOPMENT_PREFLIGHT"}
+                "PUBLIC_SYNTHETIC_FIXTURE", "DEVELOPMENT_PREFLIGHT",
+                "FORMAL_SUCCESSOR_TRANSFORM"}
             or value["worker_counts_supported"] != [1, 2, 4]
             or value["logical_shard_count"] != W02_MORPH_OVERLAY_SHARD_COUNT
             or value["input_roots"] != ["PARENT_CANDIDATE_ARTIFACT"]
             or value["visible_splits"] != [
                 "train-derived-candidate-statistics"]
+            or value["formal_successor_transform_runs"] != (
+                1 if value["run_scope"] == "FORMAL_SUCCESSOR_TRANSFORM" else 0)
             or any(value[key] != 0 for key in (
                 "candidate_writes", "formal_private_evaluation_runs",
-                "formal_successor_transform_runs", "formal_training_runs",
+                "formal_training_runs",
                 "private_payload_reads", "teacher_calls"))
             or value["overlay_writes"] != 1):
         raise W02MorphologyOverlayError("overlay artifact 状态非法")
@@ -1386,4 +1485,5 @@ __all__ = [
     "read_w02_morphology_overlay_artifact",
     "run_w02_morphology_overlay_development",
     "run_w02_morphology_overlay_fixture",
+    "run_w02_morphology_overlay_formal",
 ]
