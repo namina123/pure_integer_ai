@@ -71,7 +71,7 @@ def _script_class(form: str) -> str:
     return "".join(sorted({unicodedata.category(char)[0] for char in form}))
 
 
-def _features(form: str) -> tuple[MorphologyFeature, ...]:
+def w02_morphology_features(form: str) -> tuple[MorphologyFeature, ...]:
     """返回固定六类局部特征，空字符串不得进入学习。"""
     if not isinstance(form, str) or not form:
         raise W02MorphologySuccessorError("morphology form 不得为空")
@@ -85,7 +85,7 @@ def _features(form: str) -> tuple[MorphologyFeature, ...]:
     )
 
 
-def _lemma_rule(form: str, lemma: str) -> str | None:
+def w02_morphology_lemma_rule(form: str, lemma: str) -> str | None:
     """只接受能从输入表层确定重建的 lemma 变换。"""
     if lemma == form:
         return "IDENTITY"
@@ -232,13 +232,9 @@ def learn_w02_morphology_successor(
             or type(max_logic_operations) is not int or max_logic_operations <= 0):
         raise W02MorphologySuccessorError("successor training budget 非法")
     dataset_keys: set[tuple[int, ...]] = set()
-    global_counts: Counter[MorphologyCombo] = Counter()
-    feature_counts: dict[MorphologyFeature, Counter[MorphologyCombo]] = {}
+    lexeme_counts: Counter[tuple[str, str, str, str]] = Counter()
     pair_count = 0
     morphology_count = 0
-    token_count = 0
-    max_form_length = 0
-    operations = 0
     for pair in pairs:
         if (not isinstance(pair, tuple) or len(pair) != 2
                 or not isinstance(pair[0], ObservationRecord)
@@ -250,7 +246,6 @@ def learn_w02_morphology_successor(
         pair_count += 1
         expected = evidence.typed_evidence.to_value()
         if "morphology" not in expected:
-            operations += 1
             continue
         delta = learn_w02_training_pair(observation, evidence)
         if delta.evidence_mode != W02_EVIDENCE_UD or not delta.lexemes:
@@ -258,34 +253,84 @@ def learn_w02_morphology_successor(
         dataset_keys.add(observation.dataset_key.components)
         morphology_count += 1
         for lexeme in delta.lexemes:
-            lemma_rule = _lemma_rule(lexeme.form, lexeme.lemma)
-            if lemma_rule is None:
-                operations += 1
-                continue
-            combo = (lemma_rule, lexeme.upos, lexeme.feats_json)
-            global_counts[combo] += 1
-            for feature in _features(lexeme.form):
-                feature_counts.setdefault(feature, Counter())[combo] += 1
-            token_count += 1
-            max_form_length = max(max_form_length, len(lexeme.form))
-            operations += len(lexeme.form) + len(W02_MORPH_FEATURE_KINDS) + 8
-        if operations > max_logic_operations:
-            raise W02MorphologySuccessorStop("successor training logic resource stop")
-    if pair_count <= 0 or morphology_count <= 0 or token_count <= 0:
+            lexeme_counts[
+                (lexeme.form, lexeme.lemma, lexeme.upos, lexeme.feats_json)
+            ] += 1
+    if pair_count <= 0 or morphology_count <= 0 or not lexeme_counts:
         raise W02MorphologySuccessorError("successor train Evidence 不闭合")
+    index = build_w02_morphology_successor_from_counts(
+        dataset_keys=tuple(sorted(dataset_keys)),
+        lexeme_counts=tuple(
+            (*key, count) for key, count in sorted(lexeme_counts.items())),
+        training_pair_count=pair_count,
+        morphology_observation_count=morphology_count,
+    )
+    if index.logic_operations > max_logic_operations:
+        raise W02MorphologySuccessorStop("successor training logic resource stop")
+    return index
+
+
+def build_w02_morphology_successor_from_counts(
+        *,
+        dataset_keys: tuple[tuple[int, ...], ...],
+        lexeme_counts: Iterable[tuple[str, str, str, str, int]],
+        training_pair_count: int,
+        morphology_observation_count: int,
+        ) -> W02MorphologySuccessorIndex:
+    """从已聚合 train 词形次数重建与逐 pair 学习相同的索引。"""
+    if (not isinstance(dataset_keys, tuple)
+            or tuple(sorted(set(dataset_keys))) != dataset_keys
+            or any(not key or any(type(item) is not int or item <= 0 for item in key)
+                   for key in dataset_keys)):
+        raise W02MorphologySuccessorError("successor aggregate dataset routes 非法")
+    if (type(training_pair_count) is not int or training_pair_count <= 0
+            or type(morphology_observation_count) is not int
+            or morphology_observation_count <= 0
+            or morphology_observation_count > training_pair_count):
+        raise W02MorphologySuccessorError("successor aggregate observation 计数非法")
+    global_counts: Counter[MorphologyCombo] = Counter()
+    feature_counts: dict[MorphologyFeature, Counter[MorphologyCombo]] = {}
+    seen_lexemes: set[tuple[str, str, str, str]] = set()
+    token_count = 0
+    max_form_length = 0
+    operations = training_pair_count - morphology_observation_count
+    for raw in lexeme_counts:
+        if (not isinstance(raw, tuple) or len(raw) != 5
+                or any(not isinstance(item, str) for item in raw[:4])
+                or not raw[0] or not raw[2] or not raw[3]
+                or type(raw[4]) is not int or raw[4] <= 0):
+            raise W02MorphologySuccessorError("successor aggregate lexeme row 非法")
+        form, lemma, upos, feats_json, support_count = raw
+        key = (form, lemma, upos, feats_json)
+        if key in seen_lexemes:
+            raise W02MorphologySuccessorError("successor aggregate lexeme row 重复")
+        seen_lexemes.add(key)
+        lemma_rule = w02_morphology_lemma_rule(form, lemma)
+        if lemma_rule is None:
+            operations += support_count
+            continue
+        combo = (lemma_rule, upos, feats_json)
+        global_counts[combo] += support_count
+        for feature in w02_morphology_features(form):
+            feature_counts.setdefault(feature, Counter())[combo] += support_count
+        token_count += support_count
+        max_form_length = max(max_form_length, len(form))
+        operations += support_count * (
+            len(form) + len(W02_MORPH_FEATURE_KINDS) + 8)
+    if not seen_lexemes or not global_counts or not feature_counts or token_count <= 0:
+        raise W02MorphologySuccessorError("successor aggregate lexeme 计数不闭合")
     frozen_global = dict(global_counts)
     frozen_features = {
         feature: dict(counts) for feature, counts in feature_counts.items()
     }
-    routes = tuple(sorted(dataset_keys))
-    rows = _semantic_rows(routes, frozen_global, frozen_features)
+    rows = _semantic_rows(dataset_keys, frozen_global, frozen_features)
     return W02MorphologySuccessorIndex(
-        routes,
+        dataset_keys,
         frozen_global,
         frozen_features,
         max_form_length,
-        pair_count,
-        morphology_count,
+        training_pair_count,
+        morphology_observation_count,
         token_count,
         operations,
         _hash_value(rows),
@@ -307,20 +352,21 @@ def _ranked_combos(
     if not isinstance(cache, W02MorphologyRankingCache):
         raise TypeError("successor ranking cache 类型错误")
     active = tuple(
-        feature for feature in _features(form) if feature[0] in enabled_features)
+        feature for feature in w02_morphology_features(form)
+        if feature[0] in enabled_features)
     pool: set[MorphologyCombo] = set()
     for feature in active:
         pool.update(index.feature_counts.get(feature, ()))
     if (len(pool) < W02_MORPH_MAX_CANDIDATES_PER_SPAN
             and enabled_features == W02_MORPH_DEFAULT_FEATURE_KINDS):
         fallback = tuple(
-            feature for feature in _features(form)
+            feature for feature in w02_morphology_features(form)
             if feature[0] not in enabled_features)
         for feature in fallback:
             pool.update(index.feature_counts.get(feature, ()))
             if len(pool) >= W02_MORPH_MAX_CANDIDATES_PER_SPAN:
                 break
-        active = tuple(_features(form))
+        active = tuple(w02_morphology_features(form))
     cache_key = (active, enabled_features)
     cached = cache.values.get(cache_key)
     if cached is not None:
@@ -433,6 +479,9 @@ __all__ = [
     "W02MorphologySuccessorPrediction",
     "W02MorphologyRankingCache",
     "W02MorphologySuccessorStop",
+    "build_w02_morphology_successor_from_counts",
     "learn_w02_morphology_successor",
     "predict_w02_morphology_successor",
+    "w02_morphology_features",
+    "w02_morphology_lemma_rule",
 ]

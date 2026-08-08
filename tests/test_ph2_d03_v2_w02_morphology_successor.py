@@ -10,6 +10,14 @@ from pure_integer_ai.experiments.ph2_d03_v2_w02_candidate_store import (
     open_w02_candidate_predictor,
     run_w02_candidate_fixture,
 )
+from pure_integer_ai.experiments.ph2_d03_contract_core import read_canonical_object
+from pure_integer_ai.experiments.ph2_d03_v2_w02_morphology_overlay import (
+    W02MorphologyOverlayBudget,
+    W02MorphologyOverlayError,
+    derive_w02_morphology_successor_from_candidate,
+    load_w02_morphology_overlay_index,
+    run_w02_morphology_overlay_fixture,
+)
 from pure_integer_ai.experiments.ph2_d03_v2_w02_compiler import (
     _observation_record,
     _owner_record,
@@ -236,3 +244,109 @@ def test_ranking_cache_cleanup_is_explicit(tmp_path: Path) -> None:
     assert cache.values
     cache.close()
     assert not cache.values
+
+
+def _tree_identity(root: Path):
+    return tuple(
+        (path.relative_to(root).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest())
+        for path in sorted(root.rglob("*")) if path.is_file()
+    )
+
+
+def test_sealed_candidate_rebuilds_exact_train_pair_index(tmp_path: Path) -> None:
+    pairs, candidate = _fixture(tmp_path)
+    expected = learn_w02_morphology_successor(pairs)
+    before = _tree_identity(candidate.artifact_path)
+    rebuilt = derive_w02_morphology_successor_from_candidate(
+        candidate.artifact_path)
+    assert rebuilt.semantic_rows() == expected.semantic_rows()
+    assert rebuilt.semantic_sha256 == expected.semantic_sha256
+    assert rebuilt.training_pair_count == expected.training_pair_count
+    assert rebuilt.logic_operations == expected.logic_operations
+    assert _tree_identity(candidate.artifact_path) == before
+
+
+def test_overlay_is_canonical_for_workers_and_readback(tmp_path: Path) -> None:
+    pairs, candidate = _fixture(tmp_path / "parent")
+    expected = learn_w02_morphology_successor(pairs)
+    parent_before = _tree_identity(candidate.artifact_path)
+    results = []
+    for workers in (1, 2, 4):
+        root = tmp_path / f"overlay-{workers}"
+        result = run_w02_morphology_overlay_fixture(
+            fixture_root=root,
+            candidate_artifact_root=candidate.artifact_path,
+            run_id=1,
+            requested_workers=workers,
+            mode="fresh",
+        )
+        results.append(result)
+        index = load_w02_morphology_overlay_index(result.artifact_path)
+        assert index.semantic_rows() == expected.semantic_rows()
+        manifest = read_canonical_object(
+            result.artifact_path / "morphology-overlay.artifact.json")
+        assert manifest["formal_successor_transform_runs"] == 0
+        assert manifest["formal_training_runs"] == 0
+        assert manifest["candidate_writes"] == 0
+        assert manifest["private_payload_reads"] == 0
+        before = _tree_identity(result.artifact_path)
+        resumed = run_w02_morphology_overlay_fixture(
+            fixture_root=root,
+            candidate_artifact_root=None,
+            run_id=1,
+            requested_workers=workers,
+            mode="resume",
+        )
+        assert resumed.overlay_semantic_sha256 == result.overlay_semantic_sha256
+        assert _tree_identity(result.artifact_path) == before
+    assert len({item.overlay_semantic_sha256 for item in results}) == 1
+    assert len({item.artifact_manifest_sha256 for item in results}) == 1
+    assert _tree_identity(candidate.artifact_path) == parent_before
+
+
+def test_overlay_restart_matches_clean_semantics(tmp_path: Path) -> None:
+    _, candidate = _fixture(tmp_path / "parent")
+    failed_root = tmp_path / "failed"
+    with pytest.raises(W02MorphologyOverlayError, match="injected overlay"):
+        run_w02_morphology_overlay_fixture(
+            fixture_root=failed_root,
+            candidate_artifact_root=candidate.artifact_path,
+            run_id=1,
+            requested_workers=4,
+            mode="fresh",
+            fault_after_shard=3,
+        )
+    assert not (
+        failed_root / "morphology-overlay-store" / "run-000001"
+        / "morphology-overlay.artifact.json").exists()
+    restarted = run_w02_morphology_overlay_fixture(
+        fixture_root=failed_root,
+        candidate_artifact_root=None,
+        run_id=1,
+        requested_workers=2,
+        mode="restart",
+    )
+    clean = run_w02_morphology_overlay_fixture(
+        fixture_root=tmp_path / "clean",
+        candidate_artifact_root=candidate.artifact_path,
+        run_id=1,
+        requested_workers=1,
+        mode="fresh",
+    )
+    assert restarted.overlay_semantic_sha256 == clean.overlay_semantic_sha256
+    assert restarted.logic_operations == clean.logic_operations
+
+
+def test_overlay_resource_stop_never_publishes_manifest(tmp_path: Path) -> None:
+    _, candidate = _fixture(tmp_path / "parent")
+    root = tmp_path / "stopped"
+    with pytest.raises(W02MorphologyOverlayError, match="input row resource stop"):
+        run_w02_morphology_overlay_fixture(
+            fixture_root=root,
+            candidate_artifact_root=candidate.artifact_path,
+            run_id=1,
+            requested_workers=1,
+            mode="fresh",
+            budget=W02MorphologyOverlayBudget(max_input_rows=1),
+        )
+    assert not tuple(root.rglob("morphology-overlay.artifact.json"))
