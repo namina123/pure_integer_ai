@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from pure_integer_ai.crosscut.determinism.fingerprint import (
@@ -54,6 +54,8 @@ class TypedGenerationExecution:
     preview: GenerationSurfacePreview | None = None
     surface: GenerationSurfacePlan | None = None
     rendered: RenderedSurface | None = None
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, default=())
 
     def __post_init__(self) -> None:
         if not isinstance(self.plan, GenerationPlan):
@@ -70,6 +72,7 @@ class TypedGenerationExecution:
                 raise ValueError("renderer 结果替换或重排了 surface Representation")
             if final.artifact not in (self.preview, self.surface):
                 raise ValueError("G-00 最终 layer 未保留本次 surface preview 或 plan")
+            object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
             return
         if self.surface is not None or self.rendered is not None:
             raise ValueError("失败 generation plan 不得伪造完整 surface 或渲染结果")
@@ -80,6 +83,7 @@ class TypedGenerationExecution:
                 raise ValueError("失败 surface preview 不是最终 layer 的实际 artifact")
         elif final.artifact is not None:
             raise ValueError("非 surface 失败不得遗留未分类 generation artifact")
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
 
     @property
     def complete(self) -> bool:
@@ -93,6 +97,12 @@ class TypedGenerationExecution:
 
     def stable_key(self) -> tuple[int, ...]:
         """返回计划、surface preview/plan 与渲染结果的内容引用键。"""
+        if not self._stable_key_cache:
+            raise RuntimeError("typed generation stable key 尚未构造")
+        return self._stable_key_cache
+
+    def _build_stable_key(self) -> tuple[int, ...]:
+        """在冻结构造完成时只计算一次完整内容引用键。"""
         result = [*_packed(integer_tuple_fingerprint(
             self.plan.stable_key(), domain="generation.execution.plan.v1"))]
         for artifact in (self.preview, self.surface, self.rendered):

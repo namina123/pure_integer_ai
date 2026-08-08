@@ -35,6 +35,7 @@ from pure_integer_ai.experiments.facility_readiness_scenarios import (
     _DEPENDENCIES,
     _NoPrefetch,
     _close_outer_lifecycle,
+    _complete_source,
     _observation,
     _post_weaning_manifest,
     _refresh_projection,
@@ -77,6 +78,7 @@ from pure_integer_ai.storage.sealed_segment import (
     SegmentBudgetExceeded,
     SegmentRecord,
 )
+from pure_integer_ai.storage.source_record import SourceRecordRepository
 
 
 PW01_PERFORMANCE_SCALES = (3_200, 12_800, 51_200)
@@ -84,7 +86,8 @@ _PERFORMANCE_VERSION_KEY = (20260807, 91, 1)
 _PERFORMANCE_BATCH_ID = 2026080791
 _PERFORMANCE_LINEAGE_ID = 91
 _PERFORMANCE_SEGMENT_OBJECT_LIMIT = 512
-_PERFORMANCE_INDEX_SEGMENT_OBJECT_LIMIT = 4_096
+# 冷查询只取有界 Top-K；小段限制整段反序列化的读取放大。
+_PERFORMANCE_INDEX_SEGMENT_OBJECT_LIMIT = 512
 
 
 # object-model: value; representation=struct; interop=pending
@@ -93,12 +96,19 @@ class PW01PerformanceMeasurement:
     """一次 fresh 或 restart 完整回答的纯整数物理测量。"""
 
     elapsed_ns: int
+    end_to_end_elapsed_ns: int
+    memory_resolve_elapsed_ns: int
+    dialogue_build_elapsed_ns: int
+    question_operation_elapsed_ns: int
+    generation_elapsed_ns: int
     considered_candidates: int
     partition_rows_scanned: int
     page_faults: int
     page_in_records: int
     cold_read_bytes: int
     rss_before_bytes: int
+    rss_after_memory_query_bytes: int
+    rss_memory_query_endpoint_max_bytes: int
     rss_after_bytes: int
     rss_process_peak_before_bytes: int
     rss_peak_bytes: int
@@ -113,22 +123,46 @@ class PW01PerformanceMeasurement:
                 raise ValueError(f"PW-01 performance {name} 必须是非负严格整数")
         if self.answer_complete != 1 or self.source_exact != 1:
             raise ValueError("PW-01 performance 不能记录不正确回答")
+        if self.end_to_end_elapsed_ns != (
+                self.dialogue_build_elapsed_ns
+                + self.question_operation_elapsed_ns):
+            raise ValueError("PW-01 performance 完整时延分账不闭合")
+        if self.elapsed_ns != self.question_operation_elapsed_ns:
+            raise ValueError("PW-01 elapsed 与 question operation 漂移")
+        if self.memory_resolve_elapsed_ns > self.question_operation_elapsed_ns:
+            raise ValueError("PW-01 Memory resolve 时延超过 question operation")
+        if self.generation_elapsed_ns > self.question_operation_elapsed_ns:
+            raise ValueError("PW-01 generation 时延超过 question operation")
         if self.rss_peak_bytes < max(
                 self.rss_before_bytes,
+                self.rss_after_memory_query_bytes,
+                self.rss_memory_query_endpoint_max_bytes,
                 self.rss_after_bytes,
                 self.rss_process_peak_before_bytes):
             raise ValueError("PW-01 performance 进程峰值工作集不闭合")
+        if self.rss_memory_query_endpoint_max_bytes != max(
+                self.rss_before_bytes,
+                self.rss_after_memory_query_bytes):
+            raise ValueError("PW-01 query RSS 端点上界不闭合")
 
     def as_dict(self) -> dict[str, int]:
         """返回可规范 JSON 发布的字段映射。"""
         return {
             "elapsed_ns": self.elapsed_ns,
+            "end_to_end_elapsed_ns": self.end_to_end_elapsed_ns,
+            "memory_resolve_elapsed_ns": self.memory_resolve_elapsed_ns,
+            "dialogue_build_elapsed_ns": self.dialogue_build_elapsed_ns,
+            "question_operation_elapsed_ns": self.question_operation_elapsed_ns,
+            "generation_elapsed_ns": self.generation_elapsed_ns,
             "considered_candidates": self.considered_candidates,
             "partition_rows_scanned": self.partition_rows_scanned,
             "page_faults": self.page_faults,
             "page_in_records": self.page_in_records,
             "cold_read_bytes": self.cold_read_bytes,
             "rss_before_bytes": self.rss_before_bytes,
+            "rss_after_memory_query_bytes": self.rss_after_memory_query_bytes,
+            "rss_memory_query_endpoint_max_bytes": (
+                self.rss_memory_query_endpoint_max_bytes),
             "rss_after_bytes": self.rss_after_bytes,
             "rss_process_peak_before_bytes": (
                 self.rss_process_peak_before_bytes),
@@ -147,6 +181,11 @@ class PW01PerformanceScalePoint:
     total_projection_records: int
     read_projection_records: int
     interact_projection_records: int
+    candidate_projection_build_elapsed_ns: int
+    query_index_build_elapsed_ns: int
+    build_rss_before_bytes: int
+    candidate_projection_rss_after_bytes: int
+    query_index_rss_after_bytes: int
     fresh: PW01PerformanceMeasurement
     restart: PW01PerformanceMeasurement
 
@@ -161,6 +200,25 @@ class PW01PerformanceScalePoint:
         if (self.read_projection_records + self.interact_projection_records
                 != self.total_projection_records):
             raise ValueError("PW-01 scale 双 Memory 记录分账不闭合")
+        for name, value in (
+                ("candidate_projection_build_elapsed_ns",
+                 self.candidate_projection_build_elapsed_ns),
+                ("query_index_build_elapsed_ns",
+                 self.query_index_build_elapsed_ns),
+                ("build_rss_before_bytes", self.build_rss_before_bytes),
+                ("candidate_projection_rss_after_bytes",
+                 self.candidate_projection_rss_after_bytes),
+                ("query_index_rss_after_bytes",
+                 self.query_index_rss_after_bytes)):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"PW-01 scale {name} 必须是非负严格整数")
+        if (self.candidate_projection_build_elapsed_ns <= 0
+                or min(
+                    self.build_rss_before_bytes,
+                    self.candidate_projection_rss_after_bytes,
+                    self.query_index_rss_after_bytes,
+                ) <= 0):
+            raise ValueError("PW-01 scale 构建时延或 RSS 端点未闭合")
         if (not isinstance(self.fresh, PW01PerformanceMeasurement)
                 or not isinstance(self.restart, PW01PerformanceMeasurement)):
             raise TypeError("PW-01 scale measurement 类型错误")
@@ -171,6 +229,13 @@ class PW01PerformanceScalePoint:
             "total_projection_records": self.total_projection_records,
             "read_projection_records": self.read_projection_records,
             "interact_projection_records": self.interact_projection_records,
+            "candidate_projection_build_elapsed_ns": (
+                self.candidate_projection_build_elapsed_ns),
+            "query_index_build_elapsed_ns": self.query_index_build_elapsed_ns,
+            "build_rss_before_bytes": self.build_rss_before_bytes,
+            "candidate_projection_rss_after_bytes": (
+                self.candidate_projection_rss_after_bytes),
+            "query_index_rss_after_bytes": self.query_index_rss_after_bytes,
             "fresh": self.fresh.as_dict(),
             "restart": self.restart.as_dict(),
         }
@@ -187,7 +252,7 @@ class PW01PerformanceReport:
 
     def __post_init__(self) -> None:
         """核验版本、规模顺序和点覆盖完全一致。"""
-        if self.schema_version != 2:
+        if self.schema_version != 4:
             raise ValueError("PW-01 performance report 版本未注册")
         if (not isinstance(self.scales, tuple)
                 or any(type(item) is not int or item <= 0
@@ -246,6 +311,37 @@ def _working_set_sample() -> tuple[int, int]:
             or type(peak) is not int or peak < current):
         raise RuntimeError("PW-01 performance 无法读取闭合的进程工作集")
     return current, peak
+
+
+# object-model: lifecycle; owner=measurement-call; cleanup=scope-end
+class _MeasuredGenerationExecutor:
+    """只在一次性能测量内代理 typed generator 并记录 execute 时延。"""
+
+    def __init__(
+            self,
+            delegate: Any,
+            clock_ns: Callable[[], int],
+            ) -> None:
+        """绑定原 executor 和同一 host monotonic clock。"""
+        if not callable(getattr(delegate, "execute", None)):
+            raise TypeError("PW-01 measured generator 缺少 execute")
+        if not callable(clock_ns):
+            raise TypeError("PW-01 measured generator clock 不可调用")
+        self.delegate = delegate
+        self.clock_ns = clock_ns
+        self.elapsed_ns: int | None = None
+
+    def execute(self, request: Any) -> Any:
+        """委托唯一一次 generation，并保存严格正整数时延。"""
+        if self.elapsed_ns is not None:
+            raise RuntimeError("PW-01 同次 question 重复调用 generator")
+        started = self.clock_ns()
+        result = self.delegate.execute(request)
+        elapsed = self.clock_ns() - started
+        if type(elapsed) is not int or elapsed <= 0:
+            raise RuntimeError("PW-01 generation clock 未返回正整数耗时")
+        self.elapsed_ns = elapsed
+        return result
 
 
 def _read_resolver(ctx: TrainContext) -> Any:
@@ -583,17 +679,66 @@ def _measure_answer(
     clock = HostMonotonicClock() if clock_ns is None else clock_ns
     if not callable(clock):
         raise TypeError("PW-01 performance clock_ns 必须可调用")
-    fixture, dialogue = build_pw01_question_dialogue(
-        ctx, source, observation)
+    fixture = None
+    original_generator = None
+    measured_generator = None
+    resolve_elapsed_values: list[int] = []
+    query_rss_values: list[int] = []
+
+    def record_resolve_elapsed(value: int) -> None:
+        """接收正式 question 内唯一一次 federated Memory resolver 时延。"""
+        if resolve_elapsed_values:
+            raise RuntimeError("PW-01 同次回答重复记录 Memory resolve")
+        if type(value) is not int or value <= 0:
+            raise ValueError("PW-01 Memory resolve elapsed 必须是正严格整数")
+        resolve_elapsed_values.append(value)
+        query_rss, _ = _working_set_sample()
+        query_rss_values.append(query_rss)
+
     try:
+        repository = SourceRecordRepository(ctx.backend)
+        for ordinal, trace in enumerate(
+                _target_bundle(ctx).source_traces, start=1):
+            _complete_source(repository, trace, ordinal)
+        dialogue_build_started = clock()
+        fixture, dialogue = build_pw01_question_dialogue(
+            ctx,
+            source,
+            observation,
+            source_records_ready=True,
+        )
+        dialogue_built = clock()
+        dialogue_build_elapsed = dialogue_built - dialogue_build_started
         _, manifest = _post_weaning_manifest(ctx, source)
+        original_generator = dialogue.runtime.generator
+        measured_generator = _MeasuredGenerationExecutor(
+            original_generator, clock)
+        dialogue.runtime.generator = measured_generator
         rss_before, process_peak_before = _working_set_sample()
-        started = clock()
-        operation = PostWeaningDryRunRuntime(
-            ctx, manifest).run_question(dialogue, fixture.request)
-        elapsed = clock() - started
+        operation_started = clock()
+        try:
+            with ctx.memory_resolver_runtime.measure_resolve(
+                    clock, record_resolve_elapsed):
+                operation = PostWeaningDryRunRuntime(
+                    ctx, manifest).run_question(dialogue, fixture.request)
+        finally:
+            dialogue.runtime.generator = original_generator
+        operation_finished = clock()
+        question_operation_elapsed = operation_finished - operation_started
+        end_to_end_elapsed = dialogue_build_elapsed + question_operation_elapsed
+        elapsed = question_operation_elapsed
         if type(elapsed) is not int or elapsed <= 0:
             raise RuntimeError("PW-01 performance clock 未返回正整数耗时")
+        if (type(dialogue_build_elapsed) is not int
+                or dialogue_build_elapsed <= 0
+                or type(question_operation_elapsed) is not int
+                or question_operation_elapsed <= 0):
+            raise RuntimeError("PW-01 performance phase clock 未闭合")
+        if (len(resolve_elapsed_values) != 1 or len(query_rss_values) != 1):
+            raise RuntimeError("PW-01 performance 缺少唯一正式 Memory resolve 测量")
+        if (measured_generator.elapsed_ns is None
+                or measured_generator.elapsed_ns <= 0):
+            raise RuntimeError("PW-01 performance 缺少 generation 时延")
         rss_after, process_peak_after = _working_set_sample()
         if process_peak_after < process_peak_before:
             raise RuntimeError("PW-01 performance 进程峰值工作集发生回退")
@@ -609,12 +754,19 @@ def _measure_answer(
             pw01_source(parser_version=1)})
         return PW01PerformanceMeasurement(
             elapsed,
+            end_to_end_elapsed,
+            resolve_elapsed_values[0],
+            dialogue_build_elapsed,
+            question_operation_elapsed,
+            measured_generator.elapsed_ns,
             sum(item for item in considered if item is not None),
             sum(item.page_in_records for item in metrics if item is not None),
             sum(item.page_faults for item in metrics if item is not None),
             sum(item.page_in_records for item in metrics if item is not None),
             sum(item.cold_read_bytes for item in metrics if item is not None),
             rss_before,
+            query_rss_values[0],
+            max(rss_before, query_rss_values[0]),
             rss_after,
             process_peak_before,
             process_peak_after,
@@ -623,7 +775,8 @@ def _measure_answer(
             exact,
         )
     finally:
-        fixture.close()
+        if fixture is not None:
+            fixture.close()
         _close_outer_lifecycle(ctx)
 
 
@@ -661,12 +814,14 @@ def _restore(
     read_projection = MemoryCandidateProjectionManifest.from_stable_key(
         read_projection_key)
     read_projection.validate_store(ctx.tiered_segment_store)
-    ctx.memory_read_hot_set_runtime.replace_projection(read_projection)
-    if query_index_key is not None:
+    if query_index_key is None:
+        ctx.memory_read_hot_set_runtime.replace_projection(read_projection)
+    else:
         query_index = MemoryQueryIndexProjectionManifest.from_stable_key(
             query_index_key)
         query_index.validate_store(ctx.tiered_segment_store)
-        ctx.memory_read_hot_set_runtime.replace_query_index(query_index)
+        ctx.memory_read_hot_set_runtime.replace_indexed_projection(
+            read_projection, query_index)
     return ctx, source, _observation(ctx, observation_ref)
 
 
@@ -697,15 +852,23 @@ def run_pw01_dual_memory_scale_curve(
             read_count = total_records - interact_count
             if read_count <= 0:
                 raise ValueError("PW-01 performance 总规模小于 interaction 投影")
+            build_rss_before, _ = _working_set_sample()
+            candidate_build_started = clock()
             read_projection = _publish_synthetic_read_projection(
                 ctx, read_count)
+            candidate_build_elapsed = clock() - candidate_build_started
+            candidate_rss_after, _ = _working_set_sample()
             ctx.memory_read_hot_set_runtime.replace_projection(read_projection)
             query_index = None
+            query_index_build_elapsed = 0
             if use_query_index:
+                index_build_started = clock()
                 query_index = _publish_synthetic_query_index(
                     ctx, read_count)
+                query_index_build_elapsed = clock() - index_build_started
                 ctx.memory_read_hot_set_runtime.replace_query_index(
                     query_index)
+            query_index_rss_after, _ = _working_set_sample()
             fresh = _measure_answer(
                 ctx, path, source, observation, clock_ns=clock)
 
@@ -730,10 +893,15 @@ def run_pw01_dual_memory_scale_curve(
                 total_records,
                 read_count,
                 interact_count,
+                candidate_build_elapsed,
+                query_index_build_elapsed,
+                build_rss_before,
+                candidate_rss_after,
+                query_index_rss_after,
                 fresh,
                 restart,
             ))
-        return PW01PerformanceReport(2, normalized, tuple(points))
+        return PW01PerformanceReport(4, normalized, tuple(points))
     finally:
         ctx.backend.close()
 

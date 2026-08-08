@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from pure_integer_ai.crosscut.determinism.fingerprint import (
@@ -268,6 +268,8 @@ class GenerationPostcheckRun:
     request: GenerationPostcheckRequest
     parsed: GenerationSurfaceParseResult
     report: VerificationReport
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, default=())
 
     def __post_init__(self) -> None:
         if not isinstance(self.protocol, GenerationPostcheckProtocol):
@@ -289,6 +291,7 @@ class GenerationPostcheckRun:
             if (result.applicability == APPLICABILITY_APPLICABLE
                     and not result.claim_keys):
                 raise ValueError("G-04 applicable 结果必须携带非空 claim")
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
 
     @property
     def complete(self) -> bool:
@@ -312,6 +315,12 @@ class GenerationPostcheckRun:
 
     def stable_key(self) -> tuple[int, ...]:
         """返回请求与 parse 内容引用、协议和六维 verdict。"""
+        if not self._stable_key_cache:
+            raise RuntimeError("postcheck stable key 尚未构造")
+        return self._stable_key_cache
+
+    def _build_stable_key(self) -> tuple[int, ...]:
+        """在冻结构造完成时只计算一次六维结果键。"""
         result = [
             len(self.protocol.bindings()),
             *_packed(integer_tuple_fingerprint(

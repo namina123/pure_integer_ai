@@ -19,6 +19,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--query-index", action="store_true")
+    parser.add_argument(
+        "--scale",
+        type=int,
+        action="append",
+        dest="scales",
+        help="只运行指定规模；可重复传入，省略时运行预注册三档",
+    )
     return parser
 
 
@@ -31,7 +38,10 @@ def main() -> int:
         raise FileExistsError(f"PW-01 performance report 已存在: {output}")
     report = run_pw01_dual_memory_scale_curve(
         database,
-        scales=PW01_PERFORMANCE_SCALES,
+        scales=(
+            PW01_PERFORMANCE_SCALES
+            if args.scales is None else tuple(args.scales)
+        ),
         use_query_index=args.query_index,
     )
     payload = canonical_json_bytes(report.as_dict())

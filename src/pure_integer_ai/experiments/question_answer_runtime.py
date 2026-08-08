@@ -6,7 +6,7 @@ runtime 只负责 route、查询执行、G-01 独立选择、G-00 至 G-03 执�
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from pure_integer_ai.crosscut.determinism.fingerprint import (
@@ -246,6 +246,8 @@ class QuestionAnswerRun:
     postcheck: GenerationPostcheckRun | None = None
     selection_commit: MemoryGenerationCommitReport | None = None
     outcome_commit: MemoryGenerationOutcomeReport | None = None
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, default=())
 
     def __post_init__(self) -> None:
         """核验 unsupported 与完整执行两种报告形态不能混合或缺段。"""
@@ -270,6 +272,7 @@ class QuestionAnswerRun:
                 raise ValueError("unsupported question run 不得携带 selection commit")
             if self.outcome_commit is not None:
                 raise ValueError("unsupported question run 不得携带 outcome commit")
+            object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
             return
         if any(item is None for item in fields):
             raise ValueError("已路由 question run 必须包含查询、选择和生成全段")
@@ -330,6 +333,7 @@ class QuestionAnswerRun:
                     self.postcheck.stable_key(),
                     domain="memory.generation.outcome.postcheck.v1"):
                 raise ValueError("question outcome 替换了同次 G-04 postcheck")
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
 
     @property
     def complete(self) -> bool:
@@ -340,6 +344,12 @@ class QuestionAnswerRun:
 
     def stable_key(self) -> tuple[int, ...]:
         """返回请求、状态、trace 和全部 typed 执行段的内容引用键。"""
+        if not self._stable_key_cache:
+            raise RuntimeError("question answer stable key 尚未构造")
+        return self._stable_key_cache
+
+    def _build_stable_key(self) -> tuple[int, ...]:
+        """在冻结构造完成时只计算一次完整问答结果键。"""
         result = [
             *_packed(integer_tuple_fingerprint(
                 self.request.stable_key(), domain="question.run.request.v1")),

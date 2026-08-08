@@ -6,7 +6,7 @@ policy 可以提出 answer、clarify、unknown、refuse 或 conflict，但共享
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
 from pure_integer_ai.crosscut.determinism.fingerprint import (
@@ -221,6 +221,8 @@ class AnswerContentSelection:
     selected_candidate_keys: tuple[tuple[int, ...], ...]
     selected_artifact_keys: tuple[tuple[int, ...], ...]
     trace: tuple[int, ...]
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, default=())
 
     def __post_init__(self) -> None:
         if not isinstance(self.request, GenerationPlanningRequest):
@@ -248,9 +250,16 @@ class AnswerContentSelection:
         _strict_int_tuple(self.trace, label="answer content selection trace")
         if not self.trace:
             raise ValueError("answer content selection trace 不能为空")
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
 
     def stable_key(self) -> tuple[int, ...]:
         """返回请求、协议、立场、采用项和 policy trace 的内容引用键。"""
+        if not self._stable_key_cache:
+            raise RuntimeError("answer content selection stable key 尚未构造")
+        return self._stable_key_cache
+
+    def _build_stable_key(self) -> tuple[int, ...]:
+        """在冻结构造完成时只计算一次完整内容键。"""
         result = [
             *_packed(integer_tuple_fingerprint(
                 self.request.stable_key(), domain="generation.selection.request.v1")),

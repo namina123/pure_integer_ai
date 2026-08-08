@@ -6,7 +6,7 @@ PR、路径、salience、surface 名称或旧生成序列，也不写图、Memor
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, Sequence
 
 from pure_integer_ai.crosscut.determinism.fingerprint import (
@@ -119,6 +119,8 @@ class GenerationCandidate:
     evidence: tuple[EvidenceRecord, ...]
     reasoning: ReasoningPlanResult | None = None
     memory_evidence: tuple[MemoryGenerationEvidence, ...] = ()
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, default=())
 
     def __post_init__(self) -> None:
         if not isinstance(self.proposition, BoundProposition):
@@ -199,6 +201,7 @@ class GenerationCandidate:
                 raise ValueError("generation candidate 未携带 reasoning 引用的全部 Evidence")
         object.__setattr__(self, "evidence", evidence)
         object.__setattr__(self, "memory_evidence", memory_evidence)
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
 
     @property
     def hypotheses(self) -> tuple:
@@ -223,6 +226,12 @@ class GenerationCandidate:
 
     def stable_key(self) -> tuple[int, ...]:
         """返回命题、状态、来源、scope、Evidence 和 reasoning 的完整候选键。"""
+        if not self._stable_key_cache:
+            raise RuntimeError("generation candidate stable key 尚未构造")
+        return self._stable_key_cache
+
+    def _build_stable_key(self) -> tuple[int, ...]:
+        """在候选冻结后只计算一次完整内容键。"""
         result = [
             *_packed(self.proposition.stable_key()),
             *self.state.stable_key(),
@@ -246,6 +255,10 @@ class GenerationPlanningRequest:
 
     goal: AnswerGenerationGoal
     candidates: tuple[GenerationCandidate, ...] = ()
+    _candidate_keys_cache: tuple[tuple[int, ...], ...] = field(
+        init=False, repr=False, compare=False, default=())
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, default=())
 
     def __post_init__(self) -> None:
         if not isinstance(self.goal, AnswerGenerationGoal):
@@ -263,19 +276,27 @@ class GenerationPlanningRequest:
         if len(set(keys)) != len(keys):
             raise ValueError("generation request 不得重复提交同一候选")
         object.__setattr__(self, "candidates", candidates)
+        object.__setattr__(self, "_candidate_keys_cache", keys)
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
 
     def candidate_keys(self) -> tuple[tuple[int, ...], ...]:
         """返回排序后的完整候选键，供逐层采用归因和主动核验。"""
-        return tuple(item.stable_key() for item in self.candidates)
+        return self._candidate_keys_cache
 
     def stable_key(self) -> tuple[int, ...]:
         """以内容引用返回目标和全部 typed 候选的确定性请求键。"""
+        if not self._stable_key_cache:
+            raise RuntimeError("generation request stable key 尚未构造")
+        return self._stable_key_cache
+
+    def _build_stable_key(self) -> tuple[int, ...]:
+        """在请求候选排序完成后只计算一次内容引用键。"""
         result = [*integer_tuple_fingerprint(
             self.goal.stable_key(), domain="generation.request.goal.v1"),
             len(self.candidates)]
-        for item in self.candidates:
+        for key in self._candidate_keys_cache:
             result.extend(_packed(integer_tuple_fingerprint(
-                item.stable_key(), domain="generation.request.candidate.v1")))
+                key, domain="generation.request.candidate.v1")))
         return tuple(result)
 
 
@@ -403,6 +424,8 @@ class GenerationLayerResult:
     payload: tuple[int, ...] = ()
     trace: tuple[int, ...] = ()
     artifact: Any = None
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, default=())
 
     def __post_init__(self) -> None:
         _require_instruction(self.layer, label="generation result layer")
@@ -438,9 +461,16 @@ class GenerationLayerResult:
             raise ValueError("未执行 generation layer 不得携带 artifact")
         object.__setattr__(self, "selected_candidate_keys", tuple(sorted(
             self.selected_candidate_keys)))
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
 
     def stable_key(self) -> tuple[int, ...]:
         """返回层身份及输入、采用项、载荷和 trace 的内容引用。"""
+        if not self._stable_key_cache:
+            raise RuntimeError("generation layer stable key 尚未构造")
+        return self._stable_key_cache
+
+    def _build_stable_key(self) -> tuple[int, ...]:
+        """在冻结构造完成时只计算一次内容键。"""
         result = [
             *_packed(self.layer.stable_key()),
             *_packed(self.outcome.stable_key()),
@@ -467,6 +497,8 @@ class GenerationPlan:
     request: GenerationPlanningRequest
     protocol: GenerationPlanProtocol
     layers: tuple[GenerationLayerResult, ...]
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, default=())
 
     def __post_init__(self) -> None:
         if not isinstance(self.request, GenerationPlanningRequest):
@@ -496,6 +528,7 @@ class GenerationPlan:
                 halted = True
             else:
                 raise ValueError("首个非完成 generation layer 只能是 failed")
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
 
     @property
     def complete(self) -> bool:
@@ -507,6 +540,12 @@ class GenerationPlan:
 
     def stable_key(self) -> tuple[int, ...]:
         """返回请求、协议和六层 typed 结果的 Merkle 式确定性键。"""
+        if not self._stable_key_cache:
+            raise RuntimeError("generation plan stable key 尚未构造")
+        return self._stable_key_cache
+
+    def _build_stable_key(self) -> tuple[int, ...]:
+        """在六层验证完成后只计算一次确定性键。"""
         result = [
             *_packed(integer_tuple_fingerprint(
                 self.request.stable_key(), domain="generation.plan.request.v1")),

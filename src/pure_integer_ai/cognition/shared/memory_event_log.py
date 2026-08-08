@@ -597,6 +597,32 @@ class MemoryEventLog:
                 "Memory 物理 timeline 水位与 timestamp 漂移")
         return expected
 
+    def physical_tail_is_fully_visible(
+            self,
+            after_seq: int,
+            *,
+            page_limit: int,
+            ) -> bool:
+        """有界分页核验水位后的物理事件均已进入当前正式可见视图。"""
+        if type(after_seq) is not int or after_seq < 0:
+            raise ValueError("Memory physical tail after_seq 必须是非负严格整数")
+        if type(page_limit) is not int or page_limit <= 0:
+            raise ValueError("Memory physical tail page_limit 必须是正严格整数")
+        cursor = after_seq
+        while True:
+            records = self._records.timeline_records_after(
+                self.memory_space_id,
+                cursor,
+                limit=page_limit,
+            )
+            if not records:
+                return True
+            if any(not self._record_visible(record) for record in records):
+                return False
+            cursor = records[-1].timeline_seq
+            if len(records) < page_limit:
+                return True
+
     def projection_state_key(self) -> tuple[int, ...]:
         """返回物理事件水位及 descriptor-scoped batch/forget 完整状态。"""
         watermark = self.physical_timeline_watermark()

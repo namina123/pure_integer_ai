@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pure_integer_ai.cognition.shared.attractor_state import (
     AttractorActivationProposal,
@@ -1119,22 +1119,57 @@ def _question_dialogue(
         *,
         target_index: int = 1,
         obligation_factory: Any = None,
+        memory_query_clock_ns: Callable[[], int] | None = None,
+        memory_query_elapsed_sink: Callable[[int], None] | None = None,
+        memory_resolve_elapsed_sink: Callable[[int], None] | None = None,
+        source_records_ready: bool = False,
         ) -> tuple[Any, Any]:
     """装配走 K-04、A-10、M-08、G-00..G-05 的完整 question caller。"""
+    if (memory_query_clock_ns is None) != (memory_query_elapsed_sink is None):
+        raise ValueError("question Memory query 计时器和接收器必须成对提供")
+    if (memory_resolve_elapsed_sink is not None
+            and memory_query_clock_ns is None):
+        raise ValueError("Memory resolver 计时必须复用 query clock")
+    if (memory_query_clock_ns is not None
+            and (not callable(memory_query_clock_ns)
+                 or not callable(memory_query_elapsed_sink)
+                 or (memory_resolve_elapsed_sink is not None
+                     and not callable(memory_resolve_elapsed_sink)))):
+        raise TypeError("question Memory query 计时设施必须可调用")
+    if type(source_records_ready) is not bool:
+        raise TypeError("question source_records_ready 必须是 bool")
+    if source_records_ready and memory_query_clock_ns is not None:
+        raise ValueError("SourceRecord 已就绪时不得执行预热 query 计时")
+    query_started = (
+        None if memory_query_clock_ns is None else memory_query_clock_ns())
     scope = _open_query(ctx, source)
     current = _current(ctx, source, scope)
-    compilation = ctx.memory_query_runtime.compile(current, access=_ACCESS)
-    resolution = ctx.memory_resolver_runtime.resolve(compilation)
     repository = SourceRecordRepository(ctx.backend)
-    traces = {
-        trace.source.stable_key(): trace
-        for candidate_set in resolution.sets
-        for candidate in candidate_set.candidates
-        for trace in candidate.memory_source_traces
-    }
-    for ordinal, trace in enumerate(
-            (traces[key] for key in sorted(traces)), start=1):
-        _complete_source(repository, trace, ordinal)
+    if not source_records_ready:
+        compilation = ctx.memory_query_runtime.compile(current, access=_ACCESS)
+        resolve_started = (
+            None if memory_query_clock_ns is None else memory_query_clock_ns())
+        resolution = ctx.memory_resolver_runtime.resolve(compilation)
+        if memory_query_clock_ns is not None:
+            resolved_at = memory_query_clock_ns()
+            resolve_elapsed = resolved_at - resolve_started
+            if type(resolve_elapsed) is not int or resolve_elapsed <= 0:
+                raise RuntimeError("question Memory resolver clock 未返回正严格整数")
+            if memory_resolve_elapsed_sink is not None:
+                memory_resolve_elapsed_sink(resolve_elapsed)
+            query_elapsed = resolved_at - query_started
+            if type(query_elapsed) is not int or query_elapsed <= 0:
+                raise RuntimeError("question Memory query clock 未返回正严格整数")
+            memory_query_elapsed_sink(query_elapsed)
+        traces = {
+            trace.source.stable_key(): trace
+            for candidate_set in resolution.sets
+            for candidate in candidate_set.candidates
+            for trace in candidate.memory_source_traces
+        }
+        for ordinal, trace in enumerate(
+                (traces[key] for key in sorted(traces)), start=1):
+            _complete_source(repository, trace, ordinal)
     goals = (
         _goals(source, scope)
         if obligation_factory is None

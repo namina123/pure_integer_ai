@@ -1,6 +1,9 @@
 """M-07 resolver 的 TrainContext 生命周期和 V-06 隔离装配。"""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from typing import Callable, Iterator
+
 from pure_integer_ai.cognition.shared.memory_aggregate import (
     MemoryHypothesisAggregateIndex,
 )
@@ -86,6 +89,8 @@ class MemoryResolverRuntime:
             raise TypeError("M-07 routes 必须是 tuple")
         for route in routes:
             self.register_route(route)
+        self._measurement_clock_ns: Callable[[], int] | None = None
+        self._measurement_sink: Callable[[int], None] | None = None
 
     @property
     def resolvers(self) -> tuple[MemoryOverlayResolver, ...]:
@@ -113,6 +118,25 @@ class MemoryResolverRuntime:
             compilation: MemoryQueryCompilation | FederatedMemoryQueryCompilation,
             ) -> MemoryResolution | FederatedMemoryResolution:
         """在活动 query scope 内执行只读仲裁，拒绝陈旧或跨上下文 compilation。"""
+        clock = self._measurement_clock_ns
+        if clock is None:
+            return self._resolve_unmeasured(compilation)
+        started = clock()
+        result = self._resolve_unmeasured(compilation)
+        elapsed = clock() - started
+        if type(elapsed) is not int or elapsed <= 0:
+            raise RuntimeError("M-07 measurement clock 未返回正严格整数")
+        sink = self._measurement_sink
+        if sink is None:
+            raise AssertionError("M-07 measurement sink 状态不完整")
+        sink(elapsed)
+        return result
+
+    def _resolve_unmeasured(
+            self,
+            compilation: MemoryQueryCompilation | FederatedMemoryQueryCompilation,
+            ) -> MemoryResolution | FederatedMemoryResolution:
+        """执行原始联邦仲裁，不在领域结果中写入宿主测量。"""
         if isinstance(compilation, FederatedMemoryQueryCompilation):
             active_scope = self._ctx.work_memory.active_query_scope
             if active_scope is None or compilation.current.scope != active_scope:
@@ -137,6 +161,26 @@ class MemoryResolverRuntime:
             raise TypeError("compilation 必须是 MemoryQueryCompilation")
         return self._resolve_single(
             compilation, self.resolver, allow_typed_routes=True)
+
+    @contextmanager
+    def measure_resolve(
+            self,
+            clock_ns: Callable[[], int],
+            sink: Callable[[int], None],
+            ) -> Iterator[None]:
+        """只在调用方作用域内测量一次或多次正式 resolve。"""
+        if not callable(clock_ns) or not callable(sink):
+            raise TypeError("M-07 measurement clock/sink 必须可调用")
+        if (self._measurement_clock_ns is not None
+                or self._measurement_sink is not None):
+            raise RuntimeError("M-07 measurement 不得嵌套")
+        self._measurement_clock_ns = clock_ns
+        self._measurement_sink = sink
+        try:
+            yield
+        finally:
+            self._measurement_clock_ns = None
+            self._measurement_sink = None
 
     def _resolve_single(
             self,

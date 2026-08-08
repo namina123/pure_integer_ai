@@ -1,6 +1,9 @@
 """F-00 answer 与 unknown response-act 的同次 G-04 复核测试。"""
 from __future__ import annotations
 
+import pickle
+from dataclasses import replace
+
 import pytest
 
 from pure_integer_ai.cognition.shared.hypothesis import EVIDENCE_SUPPORT
@@ -97,6 +100,11 @@ def test_f00_generation_runs_same_execution_through_g04(
         assert run.postcheck.request.execution is run.generation
         assert run.postcheck.report.read_only
         assert run.postcheck.complete
+        postcheck_key = run.postcheck.stable_key()
+        assert run.postcheck.stable_key() is postcheck_key
+        assert run.postcheck._build_stable_key() == postcheck_key
+        assert replace(run.postcheck).stable_key() == postcheck_key
+        assert pickle.loads(pickle.dumps(run.postcheck)).stable_key() == postcheck_key
         assert run.complete
         assert _rendered_text(fixture, run) == expected_text
         assert parser.calls == 1

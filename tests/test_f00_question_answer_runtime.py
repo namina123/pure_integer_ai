@@ -1,7 +1,8 @@
 """F-00 显式事实、unknown、冲突和 unsupported 首个真实生成纵切。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+import pickle
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -455,6 +456,31 @@ def test_f00_explicit_fact_reads_active_h00_evidence_and_generates_answer():
         assert run.selection.selected_candidate_keys
         assert _rendered_text(fixture, run) == "事实"
         assert fixture.ledger.state_key() == before
+    finally:
+        fixture.close()
+
+
+def test_f00_generation_stable_key_caches_preserve_value_semantics():
+    """缓存须与原算法、值克隆和序列化往返保持逐对象等价。"""
+    fixture = _fixture(EVIDENCE_SUPPORT)
+    try:
+        run = fixture.runtime.run(fixture.request)
+        cached_values = (
+            run.query_result.candidates[0],
+            run.selection,
+            run.generation.plan.request,
+            *run.generation.plan.layers,
+            run.generation.plan,
+            run.generation,
+            run,
+        )
+
+        for value in cached_values:
+            key = value.stable_key()
+            assert value.stable_key() is key
+            assert value._build_stable_key() == key
+            assert replace(value).stable_key() == key
+            assert pickle.loads(pickle.dumps(value)).stable_key() == key
     finally:
         fixture.close()
 

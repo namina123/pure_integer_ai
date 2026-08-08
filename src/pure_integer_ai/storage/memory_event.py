@@ -411,6 +411,45 @@ class MemoryEventRecordStore:
             self._by_hash[record.event_hash] = record
         return records[0]
 
+    def timeline_records_after(
+            self,
+            space_id: int,
+            after_seq: int,
+            *,
+            limit: int,
+            ) -> tuple[MemoryEventRecord, ...]:
+        """经物理时间线索引读取严格大于水位的一页 append-only 信封。"""
+        _strict_int(
+            space_id, where="MemoryEventRecordStore.space_id", positive=True)
+        _strict_int(
+            after_seq,
+            where="MemoryEventRecordStore.after_seq",
+            nonnegative=True,
+        )
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("Memory timeline page limit 必须是正严格整数")
+        records = tuple(MemoryEventRecord.from_row(row) for row in (
+            self.backend.select(
+                MEMORY_EVENT_TABLE,
+                {"space_id": space_id},
+                where_gt={"timeline_seq": after_seq},
+                order_by="timeline_seq",
+                limit=limit,
+            )
+        ))
+        previous = after_seq
+        for record in records:
+            if record.timeline_seq <= previous:
+                raise MemoryEventIntegrityError(
+                    "Memory timeline tail 未严格递增")
+            previous = record.timeline_seq
+            cached = self._by_hash.get(record.event_hash)
+            if cached is not None and cached != record:
+                raise MemoryEventIntegrityError(
+                    "Memory timeline tail 发现缓存后漂移")
+            self._by_hash[record.event_hash] = record
+        return records
+
     def rows_for_object(self, object_hash: int) -> tuple[MemoryEventRecord, ...]:
         """跨 Memory 空间读取某对象的全部事件信封，供引用完整性核验。"""
         _strict_int(

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from pure_integer_ai.cognition.shared.attractor_state import (
     AttractorActivationProposal,
@@ -246,6 +246,11 @@ def build_pw01_question_dialogue(
         ctx: TrainContext,
         source: SourceRef,
         observation: Any,
+        *,
+        memory_query_clock_ns: Callable[[], int] | None = None,
+        memory_query_elapsed_sink: Callable[[int], None] | None = None,
+        memory_resolve_elapsed_sink: Callable[[int], None] | None = None,
+        source_records_ready: bool = False,
         ) -> tuple[Any, Any]:
     """装配目标序位 3 的完整 Memory->Attractor->生成->Use 对话。"""
     return _question_dialogue(
@@ -254,6 +259,10 @@ def build_pw01_question_dialogue(
         observation,
         target_index=2,
         obligation_factory=pw01_obligations,
+        memory_query_clock_ns=memory_query_clock_ns,
+        memory_query_elapsed_sink=memory_query_elapsed_sink,
+        memory_resolve_elapsed_sink=memory_resolve_elapsed_sink,
+        source_records_ready=source_records_ready,
     )
 
 
