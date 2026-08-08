@@ -23,6 +23,11 @@ from pure_integer_ai.experiments.ph2_dataset_contract import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
 )
+from pure_integer_ai.experiments.artifact_verification_mode import (
+    ARCHIVE_IDENTITY_VERIFY,
+    CURRENT_HEAD_COMPATIBILITY_VERIFY,
+    require_artifact_verification_mode,
+)
 from pure_integer_ai.experiments.pw00a_authority import (
     RECEIPT_PATH as AUTHORITY_PATH,
     read_pw00a_formal_load_authority,
@@ -48,6 +53,10 @@ RUNNER_PATH = "scripts/publish_pw00a_formal_start_receipt.py"
 STATUS = "PW00A_FORMAL_RUNTIME_STARTED"
 RUN_ID = 2026080701
 PUBLISH_EPOCH = 1
+_ARCHIVE_RUNNER_SIZE_BYTES = 14203
+_ARCHIVE_RUNNER_SHA256 = (
+    "7d69b672930a509f8a88ba027e0033d39f0e634e6c5c56d3adf13074e2ff9fcc"
+)
 
 
 def _sha256(payload: bytes) -> str:
@@ -223,8 +232,13 @@ def _canonical_object(payload: bytes) -> dict[str, Any]:
     return value
 
 
-def _validate(value: dict[str, Any], root: Path) -> None:
+def _validate(
+        value: dict[str, Any],
+        root: Path,
+        verification_mode: str,
+        ) -> None:
     """核验正式启动状态、公开依赖、事件序列和运行边界。"""
+    mode = require_artifact_verification_mode(verification_mode)
     if set(value) != {
             "artifact_kind", "artifact_version", "authority",
             "formal_events", "format_version", "fresh_startup_key",
@@ -246,15 +260,29 @@ def _validate(value: dict[str, Any], root: Path) -> None:
             "LANGUAGE_READINESS": 1,
             "PW00A_STARTED": 1}:
         raise ValueError("PW00A start receipt readiness 漂移")
-    authority = read_pw00a_formal_load_authority(root)
+    authority = read_pw00a_formal_load_authority(
+        root,
+        verification_mode=mode,
+    )
     if value["implementation_commit"] != authority["head_commit"]:
         raise ValueError("PW00A start implementation commit 漂移")
     for field, path, status in (
             ("authority", AUTHORITY_PATH, "FORMAL_LOAD_AUTHORITY"),
-            ("inference_artifact", INFERENCE_PATH, "LOADABLE_INFERENCE_STATE"),
-            ("runner", RUNNER_PATH, "FORMAL_START_OWNER")):
+            ("inference_artifact", INFERENCE_PATH, "LOADABLE_INFERENCE_STATE")):
         if value[field] != _binding(root, path, status):
             raise ValueError(f"PW00A start {field} binding 漂移")
+    runner = value["runner"]
+    if mode == ARCHIVE_IDENTITY_VERIFY:
+        expected_runner = {
+            "relative_path": RUNNER_PATH,
+            "sha256": _ARCHIVE_RUNNER_SHA256,
+            "size_bytes": _ARCHIVE_RUNNER_SIZE_BYTES,
+            "status": "FORMAL_START_OWNER",
+        }
+    else:
+        expected_runner = _binding(root, RUNNER_PATH, "FORMAL_START_OWNER")
+    if runner != expected_runner:
+        raise ValueError("PW00A start runner binding 漂移")
     events = value["formal_events"]
     if (not isinstance(events, list) or len(events) != 2
             or tuple(item.get("event_kind") for item in events) != (
@@ -297,6 +325,7 @@ def read_formal_start_receipt(
         path: str | Path = RECEIPT_PATH,
         *,
         database_path: str | Path | None = None,
+        verification_mode: str = ARCHIVE_IDENTITY_VERIFY,
         ) -> dict[str, Any]:
     """严格回读公开 receipt，并可核验 Git 外 SQLite 原件。"""
     root = Path(repository_root).resolve()
@@ -304,7 +333,7 @@ def read_formal_start_receipt(
     if not target.is_absolute():
         target = root / Path(*str(target).replace("\\", "/").split("/"))
     value = _canonical_object(target.read_bytes())
-    _validate(value, root)
+    _validate(value, root, verification_mode)
     if (database_path is not None
             and _identity(Path(database_path).resolve()) != {
                 "sha256": value["runtime_database"]["sha256"],
@@ -335,7 +364,11 @@ def run_and_publish(
     except FileExistsError as error:
         raise ValueError("PW00A formal start receipt 已存在，禁止覆盖") from error
     restored = read_formal_start_receipt(
-        root, destination, database_path=database_path)
+        root,
+        destination,
+        database_path=database_path,
+        verification_mode=CURRENT_HEAD_COMPATIBILITY_VERIFY,
+    )
     if restored != value:
         raise ValueError("PW00A formal start receipt 回读漂移")
     return restored

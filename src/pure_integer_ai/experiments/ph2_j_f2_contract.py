@@ -11,6 +11,10 @@ import hashlib
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from pure_integer_ai.experiments.artifact_verification_mode import (
+    CURRENT_HEAD_COMPATIBILITY_VERIFY,
+    require_artifact_verification_mode,
+)
 from pure_integer_ai.experiments.j_f1_facility_receipt import (
     read_j_f1_facility_receipt,
 )
@@ -352,8 +356,16 @@ def _w09_blockers(value: dict[str, Any]) -> list[str]:
     return blockers
 
 
-def build_jf2_preflight(repository_root: str | Path) -> JF2PreflightReport:
-    """只读审计现有公开 receipt，并诚实列出 J-F2 尚未满足的依赖。"""
+def build_jf2_preflight(
+        repository_root: str | Path,
+        *,
+        verification_mode: str = CURRENT_HEAD_COMPATIBILITY_VERIFY,
+        ) -> JF2PreflightReport:
+    """按显式历史或当前语义只读审计 J-F2 公开依赖。"""
+    try:
+        mode = require_artifact_verification_mode(verification_mode)
+    except ValueError as error:
+        raise JF2PreflightError(str(error)) from error
     root = Path(repository_root).resolve()
     dependencies: list[JF2Dependency] = []
     blockers: set[str] = set()
@@ -388,7 +400,11 @@ def build_jf2_preflight(repository_root: str | Path) -> JF2PreflightReport:
     else:
         size_bytes, sha256 = j_f1_identity
         try:
-            read_j_f1_facility_receipt(root, verify_runtime=True)
+            read_j_f1_facility_receipt(
+                root,
+                verify_runtime=(mode == CURRENT_HEAD_COMPATIBILITY_VERIFY),
+                verification_mode=mode,
+            )
             j_f1_status = "PASS"
         except (OSError, RuntimeError, TypeError, ValueError):
             j_f1_status = "FAIL"
@@ -406,7 +422,11 @@ def build_jf2_preflight(repository_root: str | Path) -> JF2PreflightReport:
     else:
         size_bytes, sha256 = core_identity
         try:
-            read_core_artifact_manifest(root, CORE_ARTIFACT_PATH, verify_files=True)
+            read_core_artifact_manifest(
+                root,
+                CORE_ARTIFACT_PATH,
+                verify_files=(mode == CURRENT_HEAD_COMPATIBILITY_VERIFY),
+            )
             core_status = "PASS"
         except (OSError, RuntimeError, TypeError, ValueError, CoreArtifactManifestError):
             core_status = "FAIL"

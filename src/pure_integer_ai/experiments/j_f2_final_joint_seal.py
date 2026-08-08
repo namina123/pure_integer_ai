@@ -11,6 +11,10 @@ import hashlib
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from pure_integer_ai.experiments.artifact_verification_mode import (
+    CURRENT_HEAD_COMPATIBILITY_VERIFY,
+    require_artifact_verification_mode,
+)
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
@@ -403,10 +407,18 @@ def _build_w09_evidence(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_final_joint_seal(repository_root: str | Path) -> FinalJointSeal:
-    """执行只读最终合取，并构建尚未产生全局状态副作用的 seal 内容。"""
+def build_final_joint_seal(
+        repository_root: str | Path,
+        *,
+        verification_mode: str = CURRENT_HEAD_COMPATIBILITY_VERIFY,
+        ) -> FinalJointSeal:
+    """按显式历史或当前语义执行只读最终合取。"""
+    try:
+        mode = require_artifact_verification_mode(verification_mode)
+    except ValueError as error:
+        raise FinalJointSealError(str(error)) from error
     root = Path(repository_root).resolve()
-    preflight = build_jf2_preflight(root)
+    preflight = build_jf2_preflight(root, verification_mode=mode)
     if (preflight.status != "READY_FOR_FORMAL_SEAL" or preflight.blockers
             or preflight.language_capability_mastered != 1
             or preflight.language_readiness != 0
@@ -444,8 +456,15 @@ def build_final_joint_seal(repository_root: str | Path) -> FinalJointSeal:
 def read_final_joint_seal(
         repository_root: str | Path,
         path: str | Path = SEAL_PATH,
-        *, verify_dependencies: bool = True) -> FinalJointSeal:
+        *,
+        verify_dependencies: bool = True,
+        verification_mode: str = CURRENT_HEAD_COMPATIBILITY_VERIFY,
+        ) -> FinalJointSeal:
     """严格回读 canonical seal，并可重新执行全部公开依赖合取。"""
+    try:
+        mode = require_artifact_verification_mode(verification_mode)
+    except ValueError as error:
+        raise FinalJointSealError(str(error)) from error
     root = Path(repository_root).resolve()
     target = _resolve_target(root, path)
     payload = target.read_bytes()
@@ -488,7 +507,8 @@ def read_final_joint_seal(
     )
     if seal.canonical_bytes() != payload:
         raise FinalJointSealError("final seal canonical bytes 漂移")
-    if verify_dependencies and seal != build_final_joint_seal(root):
+    if (verify_dependencies
+            and seal != build_final_joint_seal(root, verification_mode=mode)):
         raise FinalJointSealError("final seal 公开依赖身份漂移")
     return seal
 

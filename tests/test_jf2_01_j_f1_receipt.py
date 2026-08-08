@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 
 import pure_integer_ai.experiments.j_f1_facility_receipt as receipt_contract
+from pure_integer_ai.experiments.artifact_verification_mode import (
+    ARCHIVE_IDENTITY_VERIFY,
+)
 from pure_integer_ai.experiments.j_f1_facility_receipt import (
     HISTORICAL_REPORT_SHA256,
     JF1FacilityReceipt,
@@ -85,6 +88,27 @@ def test_jf2_01_receipt_carries_complete_facility_and_honest_boundary(
     assert value["honest_boundary"][
         "facility_grants_language_readiness"] == 0
     assert value["honest_boundary"]["j_f2_final_seal_published"] == 0
+
+
+def test_jf2_01_published_archive_survives_successor_source_drift() -> None:
+    """历史 receipt 可验证身份，但 archive 模式不得重跑或授予当前权限。"""
+    restored = read_j_f1_facility_receipt(
+        ROOT,
+        verification_mode=ARCHIVE_IDENTITY_VERIFY,
+    )
+    assert restored.to_dict()["status"] == "FACILITY_EVIDENCED"
+    with pytest.raises(JF1ReceiptError, match="不得授予 live runtime authority"):
+        read_j_f1_facility_receipt(
+            ROOT,
+            verify_runtime=True,
+            verification_mode=ARCHIVE_IDENTITY_VERIFY,
+        )
+
+
+def test_jf2_01_current_head_cannot_reuse_published_archive() -> None:
+    """默认 current 模式必须拒绝后继源码复用历史 J-F1 authority。"""
+    with pytest.raises(JF1ReceiptError, match="implementation bytes 漂移"):
+        read_j_f1_facility_receipt(ROOT)
 
 
 def test_jf2_01_receipt_rejects_duplicate_publish_even_if_bytes_match(

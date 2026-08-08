@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from pure_integer_ai.experiments.artifact_verification_mode import (
+    CURRENT_HEAD_COMPATIBILITY_VERIFY,
+)
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_bytes
 from scripts.publish_pw00a_formal_start_receipt import (
     RECEIPT_PATH,
@@ -58,3 +61,12 @@ def test_pw00a_formal_start_receipt_rejects_rerun_and_tamper(
     target.write_bytes(canonical_json_bytes(changed) + b"\n")
     with pytest.raises(ValueError, match="readiness"):
         read_formal_start_receipt(ROOT, target)
+
+
+def test_pw00a_formal_start_current_mode_rejects_historical_authority() -> None:
+    """历史 start receipt 可审计，但不得给当前源码授予启动 authority。"""
+    with pytest.raises(RuntimeError, match="source leaf 漂移"):
+        read_formal_start_receipt(
+            ROOT,
+            verification_mode=CURRENT_HEAD_COMPATIBILITY_VERIFY,
+        )

@@ -18,6 +18,7 @@ from pure_integer_ai.experiments.pw00a_formal_runtime import (
     PW00AFormalRuntime,
     PW00AFormalStartupError,
 )
+from pure_integer_ai.experiments.pw00a_authority import PW00AAuthorityError
 from pure_integer_ai.experiments.pw00a_formal_transaction import (
     PW00A_EVENT_ABORTED,
     PW00A_EVENT_PREPARED,
@@ -252,18 +253,20 @@ def test_pw00a_prepared_only_requires_explicit_abort(tmp_path: Path) -> None:
         backend.close()
 
 
-def test_pw00a_real_authority_reader_starts_formal_runtime() -> None:
-    """默认 reader 必须以公开 authority 与推理 artifact 完成一次真实装载。"""
+def test_pw00a_real_authority_reader_rejects_successor_source_drift() -> None:
+    """默认 reader 必须拒绝当前源码复用历史 authority。"""
     backend, ctx, _, manifest, _, _, _ = _build_runtime(DictBackend())
     authority_path = ROOT / AUTHORITY_RECEIPT_PATH
     try:
         request = _request(manifest, authority_path, run_id=1, epoch=1)
-        runtime = PW00AFormalRuntime.start(
-            ctx,
-            request,
-            repository_root=ROOT,
-        )
-        assert runtime.startup_report.status == PW00A_START_PUBLISHED
-        assert ctx.weaning_phase == WEANING_POST
+        with pytest.raises(PW00AAuthorityError, match="source leaf 漂移"):
+            PW00AFormalRuntime.start(
+                ctx,
+                request,
+                repository_root=ROOT,
+            )
+        assert ctx.weaning_phase == WEANING_PRE
+        assert backend.owner_write_protection_state() == ()
+        assert PW00AFormalEventStore(backend).events(1) == ()
     finally:
         backend.close()

@@ -8,6 +8,9 @@ from types import SimpleNamespace
 import pytest
 
 import pure_integer_ai.experiments.j_f2_final_joint_seal as final_seal_module
+from pure_integer_ai.experiments.artifact_verification_mode import (
+    ARCHIVE_IDENTITY_VERIFY,
+)
 from pure_integer_ai.experiments.j_f2_final_joint_seal import (
     SEAL_PATH,
     FinalJointSeal,
@@ -46,6 +49,17 @@ def test_historical_seal_has_complete_joint_conjuncts(live_seal: FinalJointSeal)
     }
     assert read_final_joint_seal(
         ROOT, verify_dependencies=False) == live_seal
+    assert read_final_joint_seal(
+        ROOT,
+        verify_dependencies=True,
+        verification_mode=ARCHIVE_IDENTITY_VERIFY,
+    ) == live_seal
+
+
+def test_current_seal_reader_cannot_reauthorize_historical_closure() -> None:
+    """默认 current 验证必须因后继源码漂移保持 BLOCKED。"""
+    with pytest.raises(FinalJointSealError, match="未满足正式封存条件"):
+        read_final_joint_seal(ROOT, verify_dependencies=True)
 
 
 def test_canonical_readback_rejects_state_drift(
@@ -81,7 +95,10 @@ def test_reader_rejects_path_and_dependency_drift(
     value["dependency_bindings"][0]["sha256"] = "1" * 64
     target.write_bytes(canonical_json_bytes(value) + b"\n")
     monkeypatch.setattr(
-        final_seal_module, "build_final_joint_seal", lambda _root: live_seal)
+        final_seal_module,
+        "build_final_joint_seal",
+        lambda _root, **_kwargs: live_seal,
+    )
     with pytest.raises(FinalJointSealError, match="依赖身份漂移"):
         read_final_joint_seal(ROOT, target, verify_dependencies=True)
 
@@ -94,7 +111,10 @@ def test_build_fails_closed_when_preflight_is_blocked(
         language_capability_mastered=1, language_readiness=0,
         dependencies=live_seal.dependency_bindings)
     monkeypatch.setattr(
-        final_seal_module, "build_jf2_preflight", lambda _root: blocked)
+        final_seal_module,
+        "build_jf2_preflight",
+        lambda _root, **_kwargs: blocked,
+    )
     with pytest.raises(FinalJointSealError, match="未满足正式封存条件"):
         build_final_joint_seal(ROOT)
 

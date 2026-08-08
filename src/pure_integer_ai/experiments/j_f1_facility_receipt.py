@@ -10,6 +10,10 @@ import re
 from typing import Any
 import zlib
 
+from pure_integer_ai.experiments.artifact_verification_mode import (
+    CURRENT_HEAD_COMPATIBILITY_VERIFY,
+    require_artifact_verification_mode,
+)
 from pure_integer_ai.experiments.evaluation_protocol import (
     CanonicalIdentity,
     canonical_payload,
@@ -782,8 +786,15 @@ def read_j_f1_facility_receipt(
         *,
         receipt_path: str | Path | None = None,
         verify_runtime: bool = False,
+        verification_mode: str = CURRENT_HEAD_COMPATIBILITY_VERIFY,
         ) -> JF1FacilityReceipt:
-    """规范回读 receipt、implementation；可选重跑 production report 全绑定。"""
+    """规范回读历史身份，或严格核验当前 implementation/runtime。"""
+    try:
+        mode = require_artifact_verification_mode(verification_mode)
+    except ValueError as error:
+        raise JF1ReceiptError(str(error)) from error
+    if verify_runtime and mode != CURRENT_HEAD_COMPATIBILITY_VERIFY:
+        raise JF1ReceiptError("J-F1 archive identity 不得授予 live runtime authority")
     repository = Path(repository_root).resolve()
     target = (
         repository / Path(*PurePosixPath(J_F1_RECEIPT_RELATIVE_PATH).parts)
@@ -793,7 +804,8 @@ def read_j_f1_facility_receipt(
     if not target.is_file() or target.is_symlink():
         raise JF1ReceiptError("J-F1 receipt 缺失或为链接")
     receipt = JF1FacilityReceipt(target.read_bytes())
-    _verify_implementation_inventory(repository, receipt)
+    if mode == CURRENT_HEAD_COMPATIBILITY_VERIFY:
+        _verify_implementation_inventory(repository, receipt)
     if verify_runtime:
         live = build_j_f1_facility_receipt(repository)
         if live.canonical_bytes() != receipt.canonical_bytes():

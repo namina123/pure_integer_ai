@@ -7,6 +7,11 @@ from pathlib import Path, PurePosixPath
 import subprocess
 from typing import Any
 
+from pure_integer_ai.experiments.artifact_verification_mode import (
+    ARCHIVE_IDENTITY_VERIFY,
+    CURRENT_HEAD_COMPATIBILITY_VERIFY,
+    require_artifact_verification_mode,
+)
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     canonical_json_bytes,
     parse_canonical_json_bytes,
@@ -313,8 +318,26 @@ def build_pw00a_formal_load_authority(
     }
 
 
-def _validate(value: dict[str, Any], root: Path) -> None:
-    """无 Git 核验固定依赖、source leaf、修正记录和 readiness。"""
+def _source_drift_paths(value: dict[str, Any], root: Path) -> tuple[str, ...]:
+    """返回 authority 所绑定 source 与当前工作树之间的全部漂移路径。"""
+    return tuple(
+        item["relative_path"]
+        for item in value["source_bindings"]
+        if _identity(root, item["relative_path"])
+        != (item["current_size_bytes"], item["current_sha256"])
+    )
+
+
+def _validate(
+        value: dict[str, Any],
+        root: Path,
+        verification_mode: str,
+        ) -> None:
+    """核验固定结构，并按模式决定是否要求当前 source 兼容。"""
+    try:
+        mode = require_artifact_verification_mode(verification_mode)
+    except ValueError as error:
+        raise PW00AAuthorityError(str(error)) from error
     if set(value) != {
             "artifact_kind", "artifact_version", "dependency_bindings",
             "format_version", "head_commit", "parent_commit",
@@ -330,6 +353,10 @@ def _validate(value: dict[str, Any], root: Path) -> None:
             or value["receipt_self_excluded"] != 1
             or value["status"] != STATUS):
         raise PW00AAuthorityError("PW00A authority 固定身份漂移")
+    head_commit = value["head_commit"]
+    if (not isinstance(head_commit, str) or len(head_commit) != 40
+            or any(char not in "0123456789abcdef" for char in head_commit)):
+        raise PW00AAuthorityError("PW00A authority head commit 非法")
     if value["readiness_transition"] != {
             "LANGUAGE_CAPABILITY_MASTERED": 1,
             "LANGUAGE_READINESS_REPUBLISHED": 1,
@@ -369,11 +396,11 @@ def _validate(value: dict[str, Any], root: Path) -> None:
                 "change_kind", "current_sha256", "current_size_bytes",
                 "parent_sha256", "parent_size_bytes", "relative_path"}:
             raise PW00AAuthorityError("PW00A source binding 字段漂移")
-        path = item["relative_path"]
-        current = _identity(root, path)
-        if current != (item["current_size_bytes"], item["current_sha256"]):
-            raise PW00AAuthorityError(f"PW00A source leaf 漂移: {path}")
+        path = _relative(item["relative_path"], label="source")
         _strict_sha(item["current_sha256"], label=path)
+        if (type(item["current_size_bytes"]) is not int
+                or item["current_size_bytes"] <= 0):
+            raise PW00AAuthorityError("PW00A source current size 非法")
         if item["change_kind"] == "A":
             if item["parent_sha256"] is not None or item["parent_size_bytes"] != 0:
                 raise PW00AAuthorityError("PW00A added source parent 非空")
@@ -383,6 +410,11 @@ def _validate(value: dict[str, Any], root: Path) -> None:
                 raise PW00AAuthorityError("PW00A modified source parent size 非法")
         else:
             raise PW00AAuthorityError("PW00A source change kind 非法")
+    if mode == CURRENT_HEAD_COMPATIBILITY_VERIFY:
+        drift_paths = _source_drift_paths(value, root)
+        if drift_paths:
+            raise PW00AAuthorityError(
+                "PW00A source leaf 漂移: " + ", ".join(drift_paths))
     correction = value["v5_metadata_correction"]
     expected_correction = {
         "change_blob_sha256": _V5_CURRENT,
@@ -395,23 +427,42 @@ def _validate(value: dict[str, Any], root: Path) -> None:
         "relative_path": _V5_PATH,
         "status": "METADATA_TRUNCATION_CORRECTED_BY_GIT_BLOB",
     }
-    if correction != expected_correction or _identity(root, _V5_PATH)[1] != _V5_CURRENT:
+    if correction != expected_correction:
         raise PW00AAuthorityError("PW00A v5 metadata correction 漂移")
+    if (mode == CURRENT_HEAD_COMPATIBILITY_VERIFY
+            and _identity(root, _V5_PATH)[1] != _V5_CURRENT):
+        raise PW00AAuthorityError("PW00A v5 current leaf 漂移")
 
 
 def read_pw00a_formal_load_authority(
         repository_root: str | Path,
         path: str | Path = RECEIPT_PATH,
+        *,
+        verification_mode: str = CURRENT_HEAD_COMPATIBILITY_VERIFY,
         ) -> dict[str, Any]:
-    """不调用 Git，严格回读正式 runtime 可消费的 authority。"""
+    """不调用 Git，按显式历史或当前语义回读 authority。"""
     root = Path(repository_root).resolve()
     target = Path(path)
     if not target.is_absolute():
         target = root / Path(*str(target).replace("\\", "/").split("/"))
     payload = target.read_bytes()
     value = _canonical_object(payload, label="PW00A authority")
-    _validate(value, root)
+    _validate(value, root, verification_mode)
     return value
+
+
+def audit_pw00a_current_source_drift(
+        repository_root: str | Path,
+        path: str | Path = RECEIPT_PATH,
+        ) -> tuple[str, ...]:
+    """在 archive 身份成立后，结构化列出当前 HEAD 的 source 漂移。"""
+    root = Path(repository_root).resolve()
+    value = read_pw00a_formal_load_authority(
+        root,
+        path,
+        verification_mode=ARCHIVE_IDENTITY_VERIFY,
+    )
+    return _source_drift_paths(value, root)
 
 
 def publish_pw00a_formal_load_authority(
@@ -448,6 +499,9 @@ __all__ = [
     "RECEIPT_PATH",
     "STATUS",
     "PW00AAuthorityError",
+    "ARCHIVE_IDENTITY_VERIFY",
+    "CURRENT_HEAD_COMPATIBILITY_VERIFY",
+    "audit_pw00a_current_source_drift",
     "build_pw00a_formal_load_authority",
     "publish_pw00a_formal_load_authority",
     "read_pw00a_formal_load_authority",
