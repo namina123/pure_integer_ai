@@ -35,6 +35,13 @@ from pure_integer_ai.experiments.ph2_d03_v2_w02_morphology_successor_v2 import (
     predict_w02_morphology_successor_v2,
     w02_morphology_edge_rule,
 )
+from pure_integer_ai.experiments.ph2_d03_v2_w02_morphology_successor_v2_overlay import (
+    W02MorphologySuccessorV2OverlayBudget,
+    W02MorphologySuccessorV2OverlayError,
+    load_w02_morphology_successor_v2_overlay_index,
+    read_w02_morphology_successor_v2_overlay_artifact,
+    run_w02_morphology_successor_v2_overlay_fixture,
+)
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     EvaluatorLabelRecord,
     TeacherEvidenceRecord,
@@ -206,3 +213,77 @@ def test_v2_span_and_cache_resources_fail_closed(tmp_path: Path) -> None:
     assert cache.values
     cache.close()
     assert not cache.values
+
+
+def test_v2_overlay_workers_and_readback_are_canonical(tmp_path: Path) -> None:
+    candidate, overlay = _fixture(tmp_path / "parent")
+    results = []
+    for workers in (1, 2, 4):
+        result = run_w02_morphology_successor_v2_overlay_fixture(
+            fixture_root=tmp_path / f"v2-{workers}",
+            candidate_artifact_root=candidate.artifact_path,
+            v1_overlay_artifact_root=overlay.artifact_path,
+            run_id=1, requested_workers=workers, mode="fresh")
+        results.append(result)
+        index = load_w02_morphology_successor_v2_overlay_index(
+            result.artifact_path)
+        assert index.semantic_sha256 == result.semantic_sha256
+        assert index.accepted_lexeme_rows == 4
+        before = tuple(
+            (path.relative_to(result.artifact_path).as_posix(),
+             hashlib.sha256(path.read_bytes()).hexdigest())
+            for path in sorted(result.artifact_path.rglob("*")) if path.is_file())
+        resumed = read_w02_morphology_successor_v2_overlay_artifact(
+            result.artifact_path, requested_workers=workers)
+        after = tuple(
+            (path.relative_to(result.artifact_path).as_posix(),
+             hashlib.sha256(path.read_bytes()).hexdigest())
+            for path in sorted(result.artifact_path.rglob("*")) if path.is_file())
+        assert resumed.semantic_sha256 == result.semantic_sha256
+        assert after == before
+    assert len({result.semantic_sha256 for result in results}) == 1
+    assert len({result.artifact_manifest_sha256 for result in results}) == 1
+
+
+def test_v2_overlay_restart_and_resource_stop(tmp_path: Path) -> None:
+    candidate, overlay = _fixture(tmp_path / "parent")
+    failed_root = tmp_path / "failed"
+    with pytest.raises(W02MorphologySuccessorV2OverlayError, match="injected"):
+        run_w02_morphology_successor_v2_overlay_fixture(
+            fixture_root=failed_root,
+            candidate_artifact_root=candidate.artifact_path,
+            v1_overlay_artifact_root=overlay.artifact_path,
+            run_id=1, requested_workers=4, mode="fresh", fault_after_shard=3)
+    failed_delta = (
+        failed_root / "morphology-v2-overlay-store" / ".run-000001.staging"
+        / "shards" / "000.delta.jsonl.gz")
+    original_delta = failed_delta.read_bytes()
+    failed_delta.write_bytes(original_delta + b"corrupt")
+    with pytest.raises(
+            W02MorphologySuccessorV2OverlayError, match="shard transport"):
+        run_w02_morphology_successor_v2_overlay_fixture(
+            fixture_root=failed_root, candidate_artifact_root=None,
+            v1_overlay_artifact_root=None, run_id=1, requested_workers=2,
+            mode="restart")
+    failed_delta.write_bytes(original_delta)
+    restarted = run_w02_morphology_successor_v2_overlay_fixture(
+        fixture_root=failed_root, candidate_artifact_root=None,
+        v1_overlay_artifact_root=None, run_id=1, requested_workers=2,
+        mode="restart")
+    clean = run_w02_morphology_successor_v2_overlay_fixture(
+        fixture_root=tmp_path / "clean",
+        candidate_artifact_root=candidate.artifact_path,
+        v1_overlay_artifact_root=overlay.artifact_path,
+        run_id=1, requested_workers=1, mode="fresh")
+    assert restarted.semantic_sha256 == clean.semantic_sha256
+    assert restarted.artifact_manifest_sha256 == clean.artifact_manifest_sha256
+
+    stopped = tmp_path / "stopped"
+    with pytest.raises(W02MorphologySuccessorV2OverlayError, match="resource stop"):
+        run_w02_morphology_successor_v2_overlay_fixture(
+            fixture_root=stopped,
+            candidate_artifact_root=candidate.artifact_path,
+            v1_overlay_artifact_root=overlay.artifact_path,
+            run_id=1, requested_workers=1, mode="fresh",
+            budget=W02MorphologySuccessorV2OverlayBudget(max_rule_rows=1))
+    assert not tuple(stopped.rglob("morphology-v2-overlay.artifact.json"))
