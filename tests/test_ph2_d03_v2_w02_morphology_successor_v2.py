@@ -40,7 +40,17 @@ from pure_integer_ai.experiments.ph2_d03_v2_w02_morphology_successor_v2_overlay 
     W02MorphologySuccessorV2OverlayError,
     load_w02_morphology_successor_v2_overlay_index,
     read_w02_morphology_successor_v2_overlay_artifact,
+    run_w02_morphology_successor_v2_overlay_formal,
     run_w02_morphology_successor_v2_overlay_fixture,
+)
+from pure_integer_ai.experiments.ph2_d03_v2_w02_morphology_successor_v2_contract import (
+    W02_MORPH_V2_GUARD_AVAILABLE,
+    publish_w02_morphology_successor_v2_guard,
+    read_w02_morphology_successor_v2_runtime_freeze,
+)
+from pure_integer_ai.experiments.ph2_d03_v2_w02_morphology_successor_v2_publication import (
+    W02MorphologySuccessorV2PublicationError,
+    build_w02_morphology_successor_v2_receipt,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     EvaluatorLabelRecord,
@@ -287,3 +297,46 @@ def test_v2_overlay_restart_and_resource_stop(tmp_path: Path) -> None:
             run_id=1, requested_workers=1, mode="fresh",
             budget=W02MorphologySuccessorV2OverlayBudget(max_rule_rows=1))
     assert not tuple(stopped.rglob("morphology-v2-overlay.artifact.json"))
+
+
+def test_v2_formal_rejects_fixture_parents_before_guard_consumption(
+        tmp_path: Path) -> None:
+    candidate, overlay = _fixture(tmp_path / "parent")
+    repository = Path(__file__).resolve().parents[1]
+    freeze = read_w02_morphology_successor_v2_runtime_freeze(repository)
+    formal_root = tmp_path / "formal-v2"
+    publish_w02_morphology_successor_v2_guard(formal_root, freeze)
+    available = formal_root / Path(*W02_MORPH_V2_GUARD_AVAILABLE.split("/"))
+    before = available.read_bytes()
+    with pytest.raises(
+            W02MorphologySuccessorV2OverlayError, match="不是正式零泄漏"):
+        run_w02_morphology_successor_v2_overlay_formal(
+            successor_root=formal_root,
+            candidate_artifact_root=candidate.artifact_path,
+            v1_overlay_artifact_root=overlay.artifact_path,
+            runtime_freeze_sha256=freeze.sha256(),
+            expected_guard_sha256=freeze.first_run_guard_sha256,
+            expected_parent_candidate_manifest_sha256=(
+                candidate.artifact_manifest_sha256),
+            expected_parent_candidate_semantic_sha256=(
+                candidate.candidate_semantic_sha256),
+            expected_parent_v1_manifest_sha256=(
+                overlay.artifact_manifest_sha256),
+            expected_parent_v1_semantic_sha256=overlay.overlay_semantic_sha256,
+            run_id=1, requested_workers=1, mode="fresh",
+            budget=freeze.resource_budget)
+    assert available.read_bytes() == before
+
+
+def test_v2_development_artifact_cannot_publish_formal_receipt(
+        tmp_path: Path) -> None:
+    candidate, overlay = _fixture(tmp_path / "parent")
+    result = run_w02_morphology_successor_v2_overlay_fixture(
+        fixture_root=tmp_path / "development",
+        candidate_artifact_root=candidate.artifact_path,
+        v1_overlay_artifact_root=overlay.artifact_path,
+        run_id=1, requested_workers=1, mode="fresh")
+    with pytest.raises(
+            W02MorphologySuccessorV2PublicationError, match="不是正式"):
+        build_w02_morphology_successor_v2_receipt(
+            Path(__file__).resolve().parents[1], result.artifact_path)
