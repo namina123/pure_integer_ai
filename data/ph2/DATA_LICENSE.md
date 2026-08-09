@@ -89,6 +89,35 @@ License: https://creativecommons.org/licenses/by-sa/4.0/
 The dependency labels remain third-party annotations. They are not treated as
 authoritative project `Role` assignments or as Chinese logical truth.
 
+## UD Chinese CFL and HK blind-private source metadata
+
+`manifests/d03_v2/ph2_d03_v2_blind_private_source_extension_v1.json` is a
+project-authored, payload-free authorization record for an isolated W-02 blind
+private data owner. It pins Universal Dependencies r2.18 commits, Git blob
+identities, sizes, README evidence, and license evidence for Chinese-CFL and
+Chinese-HK. No `.conllu` content from either source is stored in public Git or
+read by the main development session.
+
+Chinese-CFL contains independently authored Simplified Chinese learner essays.
+Chinese-HK contains directly annotated Traditional Chinese student-film
+subtitles and Hong Kong legislative proceedings. Their new source identities
+were absent from the frozen parent schema used by the consumed earlier private
+family. Exact content/case/cluster exclusion against train, dev, and shadow is
+still mandatory inside the isolated owner session.
+
+SPDX-License-Identifier: CC-BY-SA-4.0
+
+Sources:
+
+- https://github.com/UniversalDependencies/UD_Chinese-CFL
+- https://github.com/UniversalDependencies/UD_Chinese-HK
+
+License: https://creativecommons.org/licenses/by-sa/4.0/
+
+This extension authorizes only the new blind-private owner. It does not add
+either source to Candidate training, development calibration, or shadow audit,
+and it does not authorize the main session to inspect the source payload.
+
 ## ConceptNet 5.7.0 evidence samples
 
 `conceptnet_5_7_0_cc_by_4_0_zh_v1.csv.sample` and
