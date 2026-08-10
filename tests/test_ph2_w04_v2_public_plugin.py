@@ -29,6 +29,15 @@ from pure_integer_ai.experiments.ph2_w04_v2_public_plugin import (
 from pure_integer_ai.experiments.ph2_w04_v2_public_preflight import (
     build_w04_v2_public_preflight,
 )
+from pure_integer_ai.experiments.ph2_w04_v2_public_query import (
+    run_w04_v2_public_query,
+    run_w04_v2_public_queries,
+)
+from pure_integer_ai.experiments.ph2_w04_v2_public_query_contract import (
+    W04_V2_PUBLIC_QUERY_GENERATION_NOT_RUN,
+    W04_V2_PUBLIC_QUERY_REASONING_NOT_RUN,
+    W04V2PublicQuery,
+)
 from pure_integer_ai.experiments.ph2_w04_v2_public_source import (
     W04V2PublicSourceError,
     build_w04_v2_public_evaluation_batch,
@@ -69,6 +78,24 @@ def public_preflight(public_payload):
     plugin = build_w04_v2_public_capability_plugin(REPOSITORY)
     return batch, plugin, build_w04_v2_public_preflight(
         REPOSITORY, batch, plugin)
+
+
+@pytest.fixture(scope="module")
+def public_query_results(public_payload):
+    batch = build_w04_v2_public_evaluation_batch(public_payload)
+    queries = {
+        "unique": W04V2PublicQuery("使得", "暴雨使得河水上涨。"),
+        "superseded": W04V2PublicQuery("导致", "暴雨导致河水上涨。"),
+        "conflict": W04V2PublicQuery(
+            "是", "他是老师；这里的“是”也可能只是引述中的字形。"),
+        "unknown": W04V2PublicQuery("未学习的原语表层"),
+    }
+    projected = run_w04_v2_public_queries(
+        batch, tuple(queries.values()))
+    results = dict(zip(queries, projected, strict=True))
+    results["unique_repeat"] = run_w04_v2_public_query(
+        batch, queries["unique"])
+    return batch, results
 
 
 def test_public_source_is_train_only_source_first_and_label_free(
@@ -195,3 +222,48 @@ def test_public_plugin_has_no_private_family_or_formal_guard_route() -> None:
     assert "w02_artifacts" not in source
     assert "run_evaluation_family_once" not in source
     assert "consume_guard" not in source
+
+
+def test_public_query_resolves_active_primitive_and_authorized_surface(
+        public_query_results) -> None:
+    """Exact public surface/context reaches primitive, reasoning and generation."""
+    batch, results = public_query_results
+    unique = results["unique"]
+
+    assert unique.status == "UNIQUE"
+    assert (unique.selected_primitive_registry,
+            unique.selected_primitive_kind) == ("relation", 4)
+    assert unique.reasoning_status == "AUTHORIZED"
+    assert unique.generation_status == "READY"
+    assert {item.surface for item in unique.generation_options} == {"使得"}
+    assert len(unique.candidates) == 1
+    assert unique.candidates[0].active == 1
+    assert unique.candidates[0].superseded == 0
+    assert all(item.source_commitment for item in unique.generation_options)
+    assert unique.source_binding_sha256 == batch.source_binding.sha256()
+    assert (unique.experimental, unique.formal_mastery_claim,
+            unique.w04_started) == (1, 0, 0)
+
+
+def test_public_query_exposes_unknown_without_reactivating_bad_candidates(
+        public_query_results) -> None:
+    """Superseded, refuted, conflict and absent surfaces remain non-authorized."""
+    _, results = public_query_results
+    superseded = results["superseded"]
+    conflict = results["conflict"]
+    unknown = results["unknown"]
+
+    assert superseded.status == conflict.status == unknown.status == "UNKNOWN"
+    assert len(superseded.candidates) == 2
+    assert {item.active for item in superseded.candidates} == {0}
+    assert {item.superseded for item in superseded.candidates} == {0, 1}
+    assert len(conflict.candidates) == 1
+    assert conflict.candidates[0].active == conflict.candidates[0].superseded == 0
+    assert unknown.candidates == ()
+    for result in (superseded, conflict, unknown):
+        assert result.reasoning_status == W04_V2_PUBLIC_QUERY_REASONING_NOT_RUN
+        assert result.generation_status == W04_V2_PUBLIC_QUERY_GENERATION_NOT_RUN
+        assert result.generation_options == ()
+        assert result.selected_primitive_registry is None
+        assert result.selected_primitive_kind is None
+    assert results["unique"].sha256() == results["unique_repeat"].sha256()
