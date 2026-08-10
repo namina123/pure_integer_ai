@@ -29,6 +29,15 @@ from pure_integer_ai.experiments.ph2_w05_v2_public_plugin import (
 from pure_integer_ai.experiments.ph2_w05_v2_public_preflight import (
     build_w05_v2_public_preflight,
 )
+from pure_integer_ai.experiments.ph2_w05_v2_public_query import (
+    run_w05_v2_public_queries,
+    run_w05_v2_public_query,
+)
+from pure_integer_ai.experiments.ph2_w05_v2_public_query_contract import (
+    W05_V2_PUBLIC_QUERY_GENERATION_NOT_RUN,
+    W05V2PublicQuery,
+    W05V2PublicQueryError,
+)
 from pure_integer_ai.experiments.ph2_w05_v2_public_source import (
     W05V2PublicSourceError,
     build_w05_v2_public_evaluation_batch,
@@ -74,6 +83,35 @@ def public_preflight(public_payload):
     plugin = build_w05_v2_public_capability_plugin(REPOSITORY)
     return batch, plugin, build_w05_v2_public_preflight(
         REPOSITORY, batch, plugin)
+
+
+@pytest.fixture(scope="module")
+def public_query_results(public_payload):
+    batch = build_w05_v2_public_evaluation_batch(public_payload)
+    queries = {
+        "support": W05V2PublicQuery("小猫追逐小鸟。"),
+        "scope": W05V2PublicQuery("老师说学生完成作业。"),
+        "restore": W05V2PublicQuery("小鸟停在树枝上。"),
+        "unknown": W05V2PublicQuery("未学习的来源化命题。"),
+    }
+    order = ("support", "scope", "restore", "unknown", "support")
+    projected = run_w05_v2_public_queries(
+        batch, tuple(queries[name] for name in order))
+    results = dict(zip(order[:4], projected[:4], strict=True))
+    results["support_repeat"] = projected[4]
+    refuted = next(
+        item for item in results["support"].candidates
+        if item.lifecycle_status == "REFUTED")
+    results["source_filtered_refuted"] = run_w05_v2_public_query(
+        batch,
+        W05V2PublicQuery(
+            "小猫追逐小鸟。", source_ref_key=refuted.source_ref_key),
+    )
+    results["generation_disabled"] = run_w05_v2_public_query(
+        batch,
+        W05V2PublicQuery("小猫追逐小鸟。", allow_generation=0),
+    )
+    return batch, results
 
 
 def test_public_source_is_train_only_source_first_and_label_free(
@@ -202,3 +240,118 @@ def test_public_plugin_has_no_private_family_or_formal_guard_route() -> None:
     assert "w02_artifacts" not in source
     assert "run_evaluation_family_once" not in source
     assert "consume_guard" not in source
+
+    query_source = (REPOSITORY / (
+        "src/pure_integer_ai/experiments/ph2_w05_v2_public_query.py"
+    )).read_text(encoding="utf-8")
+    assert "ph2_w05_evaluator" not in query_source
+    assert "ph2_w05_evaluator_family" not in query_source
+    assert "ph2_w05_evaluator_runtime" not in query_source
+    assert "ph2_w05_firewall" not in query_source
+    assert "run_evaluation_family_once" not in query_source
+    assert "consume_guard" not in query_source
+
+
+def test_public_query_projects_exact_source_bound_proposition_structure(
+        public_query_results) -> None:
+    """Active support is unique while same-surface ROLE_SWAP stays refuted."""
+    batch, results = public_query_results
+    result = results["support"]
+
+    assert result.status == "UNIQUE"
+    assert result.selected_reasoning_status == "AUTHORIZED"
+    assert result.generation_status == "READY"
+    assert len(result.candidates) == 2
+    active = next(
+        item for item in result.candidates if item.lifecycle_status == "ACTIVE")
+    refuted = next(
+        item for item in result.candidates if item.lifecycle_status == "REFUTED")
+    assert active.proposition_key == result.selected_proposition_key
+    assert (active.active, active.superseded) == (1, 0)
+    assert (active.understanding_status,
+            active.reasoning_status) == ("UNIQUE", "AUTHORIZED")
+    assert len(active.occurrences) == len(active.occurrence_order) == 3
+    assert len(active.role_bindings) == 2
+    assert active.source_anchor_key in active.occurrence_order
+    assert all(item.surface_fragment for item in active.occurrences)
+    assert all(item.identity_key for item in active.role_bindings)
+    assert (refuted.active, refuted.superseded) == (0, 0)
+    assert (refuted.understanding_status,
+            refuted.reasoning_status) == ("UNKNOWN", "REJECTED")
+    assert active.source_ref_key != refuted.source_ref_key
+    assert active.proposition_key != refuted.proposition_key
+    assert result.source_binding_sha256 == batch.source_binding.sha256()
+    assert result.record_commitment == batch.record_commitment
+    assert (result.experimental, result.formal_mastery_claim,
+            result.w05_started) == (1, 0, 0)
+
+    assert result.generation_options
+    assert {item.surface for item in result.generation_options} == {
+        "小猫追逐小鸟。"}
+    assert all(
+        item.target_proposition_key == active.proposition_key
+        and item.target_source_ref_key == active.source_ref_key
+        and item.target_source_commitment == active.source_commitment
+        for item in result.generation_options
+    )
+
+
+def test_public_query_keeps_conflict_superseded_and_unknown_non_authorized(
+        public_query_results) -> None:
+    """Scope conflict, omission replacement and absent data never reactivate."""
+    _, results = public_query_results
+    scope = results["scope"]
+    restore = results["restore"]
+    unknown = results["unknown"]
+    source_filtered = results["source_filtered_refuted"]
+
+    assert scope.status == "CONFLICT"
+    assert len(scope.candidates) == 1
+    assert scope.candidates[0].lifecycle_status == "CONFLICT"
+    assert (scope.candidates[0].understanding_status,
+            scope.candidates[0].reasoning_status) == ("CONFLICT", "CONFLICT")
+
+    assert restore.status == "UNIQUE"
+    assert {item.lifecycle_status for item in restore.candidates} == {
+        "ACTIVE", "SUPERSEDED"}
+    superseded = next(
+        item for item in restore.candidates
+        if item.lifecycle_status == "SUPERSEDED")
+    assert (superseded.active, superseded.superseded) == (0, 1)
+    assert superseded.reasoning_status == "SUPERSEDED"
+
+    assert unknown.status == "UNKNOWN"
+    assert unknown.candidates == ()
+    assert source_filtered.status == "UNKNOWN"
+    assert len(source_filtered.candidates) == 1
+    assert source_filtered.candidates[0].lifecycle_status == "REFUTED"
+
+    for result in (scope, unknown, source_filtered):
+        assert result.selected_proposition_key is None
+        assert result.selected_reasoning_status == "NOT_RUN"
+        assert (result.generation_status
+                == W05_V2_PUBLIC_QUERY_GENERATION_NOT_RUN)
+        assert result.generation_options == ()
+
+
+def test_public_query_is_label_free_repeatable_and_generation_gated(
+        public_query_results) -> None:
+    """Repeated projections are identical and no expected answer enters input."""
+    _, results = public_query_results
+    disabled = results["generation_disabled"]
+
+    assert results["support"].sha256() == results["support_repeat"].sha256()
+    assert disabled.status == "UNIQUE"
+    assert disabled.selected_reasoning_status == "AUTHORIZED"
+    assert (disabled.generation_status
+            == W05_V2_PUBLIC_QUERY_GENERATION_NOT_RUN)
+    assert disabled.generation_options == ()
+    assert "expected" not in str(results["support"].to_dict()).lower()
+    assert set(results["support"].query.to_dict()) == {
+        "allow_generation", "source_ref_key", "surface"}
+
+    with pytest.raises(W05V2PublicQueryError, match="SourceRef"):
+        W05V2PublicQuery("小猫追逐小鸟。", source_ref_key=(1, 2, 3))
+    with pytest.raises(W05V2PublicQueryError, match="SourceRef"):
+        W05V2PublicQuery(
+            "小猫追逐小鸟。", source_ref_key=(-1, *range(1, 11)))
