@@ -118,6 +118,35 @@ This extension authorizes only the new blind-private owner. It does not add
 either source to Candidate training, development calibration, or shadow audit,
 and it does not authorize the main session to inspect the source payload.
 
+## UD Classical Chinese Kyoto public morphology probe
+
+`manifests/d03_v2/stages/ph2_d03_v2_w02_morphology_successor_v4_public_probe_v1.json`
+is a payload-free aggregate report over the fixed r2.18 `train` and `dev`
+splits of Universal Dependencies Classical Chinese Kyoto. The bulk CoNLL-U
+files remain outside Git. The report retains their exact size and SHA-256,
+the upstream commit, source URL, license, integer learning counts, and disjoint
+public dev/shadow results. The upstream `test` split was not read by this
+public revision.
+
+SPDX-License-Identifier: CC-BY-SA-4.0
+
+Source: https://github.com/UniversalDependencies/UD_Classical_Chinese-Kyoto
+
+License: https://creativecommons.org/licenses/by-sa/4.0/
+
+The UD lemmas, UPOS, and FEATS remain third-party annotations rather than
+authoritative project truth. The public probe demonstrates a language-scoped
+morphology candidate capability; it does not establish W-02 runtime evidence,
+mastery, readiness, or permission to rerun any consumed private family.
+
+`manifests/d03_v2/ph2_d03_v2_w02_morphology_successor_v4_r6_source_feasibility_v1.json`
+contains metadata only for the independent TueCL r2.18 test source. It records
+100 sentences and 648 tokens from upstream `stats.xml` without reading the
+CoNLL-U payload. It does not authorize an R6 formal owner. A fresh isolated
+owner must still prove that 500 real, unique token-span cases can be formed
+without inflating sentence counts, collapsing source clusters, or weakening
+the five 100-case dimension gates.
+
 ## ConceptNet 5.7.0 evidence samples
 
 `conceptnet_5_7_0_cc_by_4_0_zh_v1.csv.sample` and
