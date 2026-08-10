@@ -139,6 +139,19 @@ def _generation_options(
     )
 
 
+def _generation_function_sha256(
+        option: W05V2PublicGenerationProjection,
+        ) -> str:
+    """忽略构造证据来源，只比较目标生成行为是否逐字段相同。"""
+    value = option.to_dict()
+    for key in (
+            "construction_source_commitment",
+            "construction_source_proposition_key",
+            "construction_source_ref_key"):
+        value.pop(key)
+    return _sha(value)
+
+
 def project_w03_w04_w05_question_answer(
         request: W03W04W05QuestionRequest,
         vertical: W03W04W05VerticalResult,
@@ -186,10 +199,19 @@ def project_w03_w04_w05_question_answer(
             != bridge.role_binding_keys):
         return _stop(request, "UNKNOWN", vertical, state_sha256)
     generation = _generation_options(vertical, candidate)
-    if len(generation) != 1:
+    if not generation:
         return _stop(
             request,
-            "CLARIFY" if len(generation) > 1 else "UNKNOWN",
+            "UNKNOWN",
+            vertical,
+            state_sha256,
+        )
+    functional_identities = {
+        _generation_function_sha256(item) for item in generation}
+    if len(functional_identities) != 1:
+        return _stop(
+            request,
+            "CLARIFY",
             vertical,
             state_sha256,
         )
@@ -217,7 +239,7 @@ def project_w03_w04_w05_question_answer(
             state_sha256,
         )
     occurrence = occurrences[0]
-    option = generation[0]
+    option = min(generation, key=lambda item: _sha(item.to_dict()))
     proof = W03W04W05AnswerProof(
         vertical.link.source_ref_key,
         candidate.source_ref_key,

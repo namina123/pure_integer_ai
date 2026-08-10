@@ -17,8 +17,8 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_vertical_contract import (
     W03W04W05VerticalQuery,
     W03W04W05VerticalResult,
 )
-from pure_integer_ai.experiments.ph2_w03_w04_w05_vertical_overlay import (
-    VERTICAL_OVERLAY_VALIDATION_SHA256,
+from pure_integer_ai.experiments.ph2_w03_w04_w05_vertical_overlay_registry import (
+    AUTHORIZED_VERTICAL_OVERLAY_VALIDATION_SHA256S,
 )
 from pure_integer_ai.experiments.ph2_w04_v2_public_source import (
     W04V2PublicEvaluationBatch,
@@ -79,7 +79,8 @@ def project_w03_w04_w05_vertical(
             or not isinstance(w03_w04, W03W04PublicBridgeResult)
             or not isinstance(w04_w05, W04W05PublicBridgeResult)):
         raise TypeError("vertical projection inputs are invalid")
-    if overlay_validation_sha256 != VERTICAL_OVERLAY_VALIDATION_SHA256:
+    if overlay_validation_sha256 not in (
+            AUTHORIZED_VERTICAL_OVERLAY_VALIDATION_SHA256S):
         raise W03W04W05VerticalError(
             "vertical projection is not bound to the frozen overlay")
     link = _join(w03_w04, w04_w05)

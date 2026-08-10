@@ -312,8 +312,9 @@ def read_authored_primitive_atomic_bridge_seeds(
             != _REQUIRED_PRIMITIVE_ROLES
             or not _REQUIRED_PRIMITIVE_TRAIN_PERTURBATIONS.issubset({
                 item.perturbation_kind for item in primitive_teacher})
-            or len(primitive_teacher) != 6
-            or len(atomic_teacher) != 6):
+            or len(primitive_teacher) < 6
+            or len(atomic_teacher) < 6
+            or len(primitive_teacher) != len(atomic_teacher)):
         raise AuthoredPrimitiveAtomicBridgeError(
             "bridge owner/family/role/train coverage 未闭合")
     return bound
