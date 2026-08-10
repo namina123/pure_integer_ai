@@ -33,6 +33,7 @@ from pure_integer_ai.experiments.ph2_w03_understanding import (
 )
 from pure_integer_ai.experiments.ph2_w03_v2_public_source import (
     W03V2PublicEvaluationBatch,
+    w03_v2_public_training_payload,
 )
 from pure_integer_ai.storage.backend import DictBackend
 
@@ -427,7 +428,7 @@ def run_w03_v2_public_queries(
             or any(not isinstance(item, W03V2PublicQuery)
                    for item in queries)):
         raise TypeError("public W-03 query batch inputs are invalid")
-    output = adapt_w03_training_payload(batch.training_payload())
+    output = adapt_w03_training_payload(w03_v2_public_training_payload(batch))
     backend = DictBackend()
     try:
         context = make_train_context(backend)

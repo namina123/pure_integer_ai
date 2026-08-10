@@ -1,7 +1,6 @@
 """Pure capability projections for the public-only W-03 V2 consumer."""
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 from typing import Any
 
@@ -17,8 +16,10 @@ from pure_integer_ai.experiments.ph2_d03_contract_core import (
 from pure_integer_ai.experiments.ph2_d03_v2_evaluator_contract import (
     V2_STAGE_EVALUATION_POLICIES,
 )
-from pure_integer_ai.experiments.ph2_evaluation_kernel.records import (
-    EvaluationKernelContractError,
+from pure_integer_ai.experiments.ph2_evaluation_public_plugin import (
+    EvaluationPublicCapabilityRun,
+    EvaluationPublicProbe,
+    build_evaluation_public_probe,
 )
 from pure_integer_ai.experiments.ph2_generation_choice_contract import (
     LosslessIntegerKey,
@@ -103,31 +104,8 @@ def _request(
     )
 
 
-# object-model: value; representation=struct; interop=pending
-@dataclass(frozen=True, slots=True)
-class W03V2PublicProbe:
-    key: str
-    status: str
-    evidence_sha256: str
-    operations: int
-
-    def __post_init__(self) -> None:
-        if (not isinstance(self.key, str) or not self.key
-                or self.status not in {"PASS", "FAIL", "NE", "BLOCKED"}
-                or not isinstance(self.evidence_sha256, str)
-                or len(self.evidence_sha256) != 64
-                or type(self.operations) is not int
-                or self.operations < 0):
-            raise EvaluationKernelContractError("W-03 public probe drifted")
-
-
-# object-model: value; representation=struct; interop=pending
-@dataclass(frozen=True, slots=True)
-class W03V2PublicCapabilityRun:
-    probes: tuple[W03V2PublicProbe, ...]
-    rollback_probe: W03V2PublicProbe
-    state_signature: str
-    operations: int
+W03V2PublicProbe = EvaluationPublicProbe
+W03V2PublicCapabilityRun = EvaluationPublicCapabilityRun
 
 
 def _probe(
@@ -138,18 +116,12 @@ def _probe(
         evidence: dict[str, int],
         operations: int,
         ) -> W03V2PublicProbe:
-    status = "PASS" if evaluated and passed else "FAIL" if evaluated else "NE"
-    return W03V2PublicProbe(
+    return build_evaluation_public_probe(
         key,
-        status,
-        _sha({
-            "evidence": evidence,
-            "evaluated": int(evaluated),
-            "passed": int(passed),
-            "result_key": key,
-            "status": status,
-        }),
-        operations,
+        evaluated=evaluated,
+        passed=passed,
+        evidence=evidence,
+        operations=operations,
     )
 
 

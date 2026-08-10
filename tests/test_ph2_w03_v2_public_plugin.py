@@ -42,6 +42,7 @@ from pure_integer_ai.experiments.ph2_w03_v2_public_source import (
     W03V2PublicSourceError,
     build_w03_v2_public_evaluation_batch,
     build_w03_v2_public_run_context,
+    w03_v2_public_training_payload,
 )
 
 
@@ -135,7 +136,7 @@ def test_public_source_adapter_is_exact_source_first_and_label_free(
                for item in batch.pairs)
     assert "EvaluatorLabelRecord" not in {
         type(item).__name__ for item in batch.records}
-    assert batch.training_payload() == W03TrainingPayload(
+    assert w03_v2_public_training_payload(batch) == W03TrainingPayload(
         tuple(item.record for item in batch.source_records),
         tuple(item.observation for item in batch.pairs),
         tuple(item.evidence for item in batch.pairs),
