@@ -32,6 +32,12 @@ from pure_integer_ai.experiments.ph2_w03_v2_public_plugin import (
 from pure_integer_ai.experiments.ph2_w03_v2_public_preflight import (
     build_w03_v2_public_preflight,
 )
+from pure_integer_ai.experiments.ph2_w03_v2_public_query import (
+    W03_V2_PUBLIC_QUERY_GENERATION_NOT_RUN,
+    W03V2PublicQuery,
+    run_w03_v2_public_query,
+    run_w03_v2_public_queries,
+)
 from pure_integer_ai.experiments.ph2_w03_v2_public_source import (
     W03V2PublicSourceError,
     build_w03_v2_public_evaluation_batch,
@@ -89,6 +95,27 @@ def public_preflight(public_payloads):
     plugin = build_w03_v2_public_capability_plugin(REPOSITORY)
     return batch, plugin, build_w03_v2_public_preflight(
         REPOSITORY, batch, plugin)
+
+
+@pytest.fixture(scope="module")
+def public_query_results(public_payloads):
+    batch = build_w03_v2_public_evaluation_batch(
+        public_payloads["combined"])
+    queries = {
+        "unique": W03V2PublicQuery(
+            "银行", "他去银行办理存款，并向柜员出示证件。"),
+        "ambiguous": W03V2PublicQuery(
+            "我也想起来了", "我也想起来了"),
+        "unknown": W03V2PublicQuery("不存在的公开词项"),
+        "clarify": W03V2PublicQuery("银行", "尚未学习的新银行语境。"),
+        "multi_surface": W03V2PublicQuery("把门打开", "把门打开"),
+    }
+    projected = run_w03_v2_public_queries(
+        batch, tuple(queries.values()))
+    results = dict(zip(queries, projected, strict=True))
+    results["unique_repeat"] = run_w03_v2_public_query(
+        batch, queries["unique"])
+    return batch, results
 
 
 def test_public_source_adapter_is_exact_source_first_and_label_free(
@@ -202,3 +229,57 @@ def test_public_plugin_has_no_private_family_or_formal_guard_route() -> None:
     assert "w02_artifacts" not in source
     assert "run_evaluation_family_once" not in source
     assert "consume_guard" not in source
+
+
+def test_public_query_projects_unique_ambiguous_unknown_and_clarify(
+        public_query_results) -> None:
+    """External surface/context queries expose W-03 states without prose rules."""
+    batch, results = public_query_results
+    unique = results["unique"]
+    ambiguous = results["ambiguous"]
+    unknown = results["unknown"]
+    clarify = results["clarify"]
+
+    assert unique.status == "UNIQUE"
+    assert unique.selected_sense_key is not None
+    assert unique.generation_status == "READY"
+    assert {item.surface for item in unique.generation_options} == {"银行"}
+    assert len(unique.candidates) == 1
+    assert unique.candidates[0].active == 1
+
+    assert ambiguous.status == "AMBIGUOUS"
+    assert ambiguous.clarify_required == 1
+    assert ambiguous.selected_sense_key is None
+    assert len(ambiguous.candidates) == 2
+    assert ambiguous.generation_status == (
+        W03_V2_PUBLIC_QUERY_GENERATION_NOT_RUN)
+
+    assert unknown.status == "UNKNOWN"
+    assert unknown.candidates == unknown.generation_options == ()
+    assert unknown.clarify_required == 0
+
+    assert clarify.status == "CLARIFY"
+    assert clarify.clarify_required == 1
+    assert len({item.concept_key for item in clarify.candidates}) > 1
+    assert clarify.generation_options == ()
+    assert all(item.source_commitment for item in clarify.candidates)
+    assert all(result.source_binding_sha256 == batch.source_binding.sha256()
+               for result in results.values())
+
+
+def test_public_query_returns_all_authorized_surfaces_and_is_deterministic(
+        public_query_results) -> None:
+    """Generation reads active projections and repeated query output is identical."""
+    _, results = public_query_results
+    multi = results["multi_surface"]
+
+    assert multi.status == "UNIQUE"
+    assert multi.generation_status == "READY"
+    assert {item.surface for item in multi.generation_options} == {
+        "把门打开", "把门再次打开",
+    }
+    assert len({item.sense_key for item in multi.generation_options}) == 2
+    assert all(item.source_ref_key for item in multi.generation_options)
+    assert multi.experimental == 1
+    assert multi.formal_mastery_claim == multi.w03_started == 0
+    assert results["unique"].sha256() == results["unique_repeat"].sha256()
