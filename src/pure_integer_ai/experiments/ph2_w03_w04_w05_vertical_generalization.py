@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 
 from pure_integer_ai.experiments.ph2_authored_primitive_atomic_bridge_course import (
     AuthoredPrimitiveAtomicBridgeBuild,
@@ -10,14 +9,12 @@ from pure_integer_ai.experiments.ph2_authored_primitive_atomic_bridge_course imp
 from pure_integer_ai.experiments.ph2_authored_semantic_primitive_bridge_course import (
     AuthoredSemanticPrimitiveBridgeBuild,
 )
-from pure_integer_ai.experiments.ph2_d03_contract_core import (
-    canonical_json_bytes,
-)
 from pure_integer_ai.experiments.ph2_w03_v2_public_source import (
     W03V2PublicEvaluationBatch,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_vertical_overlay_core import (
     build_vertical_overlay_projection,
+    vertical_overlay_validation_sha256,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_vertical_overlay_core_contract import (
     VerticalOverlayProjection,
@@ -64,10 +61,6 @@ class W03W04W05VerticalGeneralizationError(ValueError):
     """多来源纵向 overlay 的公开资料或冻结承诺发生漂移。"""
 
 
-def _sha(value: object) -> str:
-    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
-
-
 def _target_projection(
         projection: VerticalOverlayProjection,
         spec: VerticalOverlayTargetSpec,
@@ -77,41 +70,6 @@ def _target_projection(
         raise W03W04W05VerticalGeneralizationError(
             "generalization target projection is not unique")
     return values[0]
-
-
-def _validation_sha(projection: VerticalOverlayProjection) -> str:
-    return _sha({
-        "base_manifest_sha256": projection.base_manifest_sha256,
-        "base_sample_sha256": projection.base_sample_sha256,
-        "dependency_w04": [
-            item.to_dict()
-            for item in projection.dependency_w04_observations
-        ],
-        "donor_atomic_sha256": projection.donor_atomic_sha256,
-        "donor_manifest_sha256": projection.donor_manifest_sha256,
-        "donor_map_sha256": projection.donor_map_sha256,
-        "overlay_targets": [
-            {
-                "base_source": item.base_source.to_dict(),
-                "base_w03": item.base_w03_observation.to_dict(),
-                "base_w04": item.base_w04_observation.to_dict(),
-                "overlay_w05": item.overlay_w05_observation.to_dict(),
-                "overlay_w05_evidence": item.overlay_w05_evidence.to_dict(),
-                "spec": item.spec.to_dict(),
-            }
-            for item in projection.targets
-        ],
-        "policy": (
-            "MULTI_SOURCE_EXACT_EXTERNAL_PREREQUISITES_"
-            "NO_SURFACE_FALLBACK"
-        ),
-        "w03_source_binding_sha256": (
-            projection.w03_batch.source_binding.sha256()),
-        "w04_source_binding_sha256": (
-            projection.w04_batch.source_binding.sha256()),
-        "w05_source_binding_sha256": (
-            projection.w05_batch.source_binding.sha256()),
-    })
 
 
 # object-model: value; representation=struct; interop=pending
@@ -179,7 +137,7 @@ def build_w03_w04_w05_vertical_generalization_overlay(
     if actual != expected:
         raise W03W04W05VerticalGeneralizationError(
             "generalization course identity drifted")
-    validation_sha = _validation_sha(projection)
+    validation_sha = vertical_overlay_validation_sha256(projection)
     if (validation_sha
             != VERTICAL_GENERALIZATION_OVERLAY_VALIDATION_SHA256):
         raise W03W04W05VerticalGeneralizationError(

@@ -45,6 +45,46 @@ def _sha(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def vertical_overlay_validation_sha256(
+        projection: VerticalOverlayProjection,
+        ) -> str:
+    """不依赖阶段 facade，为多目标 overlay 形成规范验证摘要。"""
+    if not isinstance(projection, VerticalOverlayProjection):
+        raise TypeError("vertical overlay validation requires a projection")
+    return _sha({
+        "base_manifest_sha256": projection.base_manifest_sha256,
+        "base_sample_sha256": projection.base_sample_sha256,
+        "dependency_w04": [
+            item.to_dict()
+            for item in projection.dependency_w04_observations
+        ],
+        "donor_atomic_sha256": projection.donor_atomic_sha256,
+        "donor_manifest_sha256": projection.donor_manifest_sha256,
+        "donor_map_sha256": projection.donor_map_sha256,
+        "overlay_targets": [
+            {
+                "base_source": item.base_source.to_dict(),
+                "base_w03": item.base_w03_observation.to_dict(),
+                "base_w04": item.base_w04_observation.to_dict(),
+                "overlay_w05": item.overlay_w05_observation.to_dict(),
+                "overlay_w05_evidence": item.overlay_w05_evidence.to_dict(),
+                "spec": item.spec.to_dict(),
+            }
+            for item in projection.targets
+        ],
+        "policy": (
+            "MULTI_SOURCE_EXACT_EXTERNAL_PREREQUISITES_"
+            "NO_SURFACE_FALLBACK"
+        ),
+        "w03_source_binding_sha256": (
+            projection.w03_batch.source_binding.sha256()),
+        "w04_source_binding_sha256": (
+            projection.w04_batch.source_binding.sha256()),
+        "w05_source_binding_sha256": (
+            projection.w05_batch.source_binding.sha256()),
+    })
+
+
 def _records(build, kind: str) -> tuple[object, ...]:
     values = []
     for identity in build.manifest.files:
@@ -369,4 +409,5 @@ __all__ = [
     "VerticalOverlayTargetSpec",
     "W03W04W05VerticalOverlayCoreError",
     "build_vertical_overlay_projection",
+    "vertical_overlay_validation_sha256",
 ]
