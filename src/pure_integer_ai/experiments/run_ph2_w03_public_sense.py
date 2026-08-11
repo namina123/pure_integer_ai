@@ -24,6 +24,9 @@ from pure_integer_ai.experiments.ph2_w04_w05_source_bound_proposition import (
 from pure_integer_ai.experiments.ph2_w05_raw_definition_qa import (
     answer_w05_raw_definition_question,
 )
+from pure_integer_ai.experiments.ph2_w05_definition_rendering import (
+    render_w05_definition_answer,
+)
 from pure_integer_ai.experiments.ph2_w05_raw_definition_qa_contract import (
     W05RawDefinitionRequest,
 )
@@ -68,6 +71,13 @@ def _parser() -> argparse.ArgumentParser:
             "interpret surface as a raw definition question and answer only "
             "from a unique active source definition"),
     )
+    modes.add_argument(
+        "--display-definition",
+        action="store_true",
+        help=(
+            "render an already unique source definition with explicit "
+            "citation; unsupported or ambiguous markup fails closed"),
+    )
     return parser
 
 
@@ -80,7 +90,7 @@ def main(
     args = _parser().parse_args(argv)
     runtime = load_w03_public_sense_artifact()
     query = W03PublicSenseQuery(args.surface, args.context, args.language)
-    if args.definition:
+    if args.definition or args.display_definition:
         primitive_runtime = project_w03_public_sense_to_w04_primitives(runtime)
         proposition_runtime = (
             project_w04_primitives_to_w05_source_bound_propositions(
@@ -90,6 +100,8 @@ def main(
             W05RawDefinitionRequest(
                 args.surface, args.context, args.language),
         )
+        if args.display_definition:
+            result = render_w05_definition_answer(result)
     elif args.proposition:
         primitive_runtime = project_w03_public_sense_to_w04_primitives(runtime)
         result = query_w04_w05_source_bound_propositions(

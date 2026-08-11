@@ -98,13 +98,16 @@ pure-integer-sense "金星" --context "距离太阳第二近的行星"
 pure-integer-sense "金星" --primitive
 pure-integer-sense "金星" --proposition
 pure-integer-sense "什么是金星" --definition
+pure-integer-sense "什么是金星" --context "{{lb|zh|astronomy}} [[太陽系]]的第二顆[[行星]]，為[[類地行星]]" --display-definition
 ```
 
 Results retain traceable source information and distinguish unique, ambiguous, unknown, and unresolved cross-source conflict states. The current artifact covers only the frozen bounded public slice in this repository. A candidate is not a claim of definitive truth, and this probe is not an open-domain dictionary or broad-domain QA system.
 
 The explicit `--primitive` mode projects the same candidates as typed source claims. `--proposition` adds structured roles, source identity, and lifecycle information. Both modes mean only that a source defines, labels, or aliases a value; neither is a project-level adjudication of truth.
 
-The explicit `--definition` mode recognizes the general Chinese forms “什么是 X” and “X 是什么意思”. It returns source definition text only when both the sense and the active definition are unique. It refuses to select an answer for ambiguity, cross-source conflict, unknown terms, clarification cases, label-only or alias-only candidates, or multiple different definitions of one concept. Source text may still contain Wiktionary templates or link markup and is not rewritten without source support. All new modes are opt-in; the original output format is unchanged when no mode is selected.
+The explicit `--definition` mode recognizes the general Chinese forms “什么是 X” and “X 是什么意思”. It returns source definition text only when both the sense and the active definition are unique. It refuses to select an answer for ambiguity, cross-source conflict, unknown terms, clarification cases, label-only or alias-only candidates, or multiple different definitions of one concept.
+
+`--display-definition` applies a deterministic display projection only after that selection has produced one source definition. It retains the raw text, source, license, revision identity, and complete commitment chain. The current projection supports ordinary wiki links and `lb`/`label` domain labels. Unknown templates, nested or unbalanced structures, illegal escapes, ambiguous links, and non-unique sources preserve raw text and explicitly refuse rendering; they are not guessed, deleted, or polished by a language model. Every added mode is opt-in, so both the default output and the existing `--definition` output remain unchanged.
 
 ## Repository map
 
