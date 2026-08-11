@@ -12,6 +12,7 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_question_feature_catalog import
     RawQuestionFeatureCatalog,
     raw_question_feature_catalog,
     run_raw_question_feature_answer,
+    run_raw_question_feature_candidate_answer,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question import (
     build_raw_question_catalog,
@@ -342,11 +343,41 @@ def run_implicit_question_catalog_answer(
         request: RawQuestionRequest,
         ) -> RawQuestionAnswerResult:
     """前序阶段均未知时，只运行已学隐式构造目录。"""
+    return _run_implicit_question_catalog_answer(
+        bundle,
+        request,
+        bundle.catalog,
+    )
+
+
+def run_implicit_question_candidate_answer(
+        bundle: W03W04W05ImplicitQuestionBundle,
+        request: RawQuestionRequest,
+        candidate_constructions: tuple[RawQuestionConstruction, ...],
+        ) -> RawQuestionAnswerResult:
+    """只在已由不可变索引验证的隐式构式候选中执行 FT13。"""
+    if (not isinstance(candidate_constructions, tuple)
+            or not candidate_constructions
+            or any(not isinstance(item, RawQuestionConstruction)
+                   for item in candidate_constructions)):
+        raise TypeError("implicit question candidate inputs are invalid")
+    return _run_implicit_question_catalog_answer(
+        bundle,
+        request,
+        candidate_constructions,
+    )
+
+
+def _run_implicit_question_catalog_answer(
+        bundle: W03W04W05ImplicitQuestionBundle,
+        request: RawQuestionRequest,
+        candidate_constructions: tuple[RawQuestionConstruction, ...],
+        ) -> RawQuestionAnswerResult:
     if (not isinstance(bundle, W03W04W05ImplicitQuestionBundle)
             or not isinstance(request, RawQuestionRequest)):
         raise TypeError("implicit catalog inputs are invalid")
     matches = tuple(
-        item for item in bundle.catalog
+        item for item in candidate_constructions
         if item.question_surface == request.question_surface
         and (request.source_record_key is None
              or item.source_record_key == request.source_record_key)
@@ -364,7 +395,11 @@ def run_implicit_question_catalog_answer(
             bundle.explicit_catalog.w04_batch,
             bundle.explicit_catalog.w05_batch,
         )
-        return run_raw_question_feature_answer(implicit_catalog, request)
+        return run_raw_question_feature_candidate_answer(
+            implicit_catalog,
+            request,
+            candidate_constructions,
+        )
     if resolution == "AMBIGUOUS":
         return RawQuestionAnswerResult(
             request,
@@ -431,6 +466,44 @@ def continue_implicit_predicate_question_answer(
         predicate_result: RawQuestionPredicateAliasAnswerResult,
         ) -> RawQuestionImplicitPredicateAnswerResult:
     """从保留的 FT12 结果继续 FT13，不重复执行前序阶段。"""
+    return _continue_implicit_predicate_question_answer(
+        alias_bridge,
+        implicit_bundle,
+        request,
+        predicate_result,
+        None,
+    )
+
+
+def continue_implicit_predicate_question_candidate_answer(
+        alias_bridge: LearnedPredicateAliasBridge,
+        implicit_bundle: W03W04W05ImplicitQuestionBundle,
+        request: RawQuestionRequest,
+        predicate_result: RawQuestionPredicateAliasAnswerResult,
+        candidate_constructions: tuple[RawQuestionConstruction, ...],
+        ) -> RawQuestionImplicitPredicateAnswerResult:
+    """从 FT12 结果继续，只执行索引选出的隐式构式。"""
+    if (not isinstance(candidate_constructions, tuple)
+            or not candidate_constructions
+            or any(not isinstance(item, RawQuestionConstruction)
+                   for item in candidate_constructions)):
+        raise TypeError("implicit candidate continuation inputs are invalid")
+    return _continue_implicit_predicate_question_answer(
+        alias_bridge,
+        implicit_bundle,
+        request,
+        predicate_result,
+        candidate_constructions,
+    )
+
+
+def _continue_implicit_predicate_question_answer(
+        alias_bridge: LearnedPredicateAliasBridge,
+        implicit_bundle: W03W04W05ImplicitQuestionBundle,
+        request: RawQuestionRequest,
+        predicate_result: RawQuestionPredicateAliasAnswerResult,
+        candidate_constructions: tuple[RawQuestionConstruction, ...] | None,
+        ) -> RawQuestionImplicitPredicateAnswerResult:
     if (not isinstance(alias_bridge, LearnedPredicateAliasBridge)
             or not isinstance(
                 implicit_bundle, W03W04W05ImplicitQuestionBundle)
@@ -456,9 +529,14 @@ def continue_implicit_predicate_question_answer(
             predicate_result,
             None,
         )
-    implicit_result = run_implicit_question_catalog_answer(
-        implicit_bundle,
-        request,
+    implicit_result = (
+        run_implicit_question_catalog_answer(implicit_bundle, request)
+        if candidate_constructions is None
+        else run_implicit_question_candidate_answer(
+            implicit_bundle,
+            request,
+            candidate_constructions,
+        )
     )
     return RawQuestionImplicitPredicateAnswerResult(
         request,
@@ -481,8 +559,10 @@ __all__ = [
     "W03W04W05ImplicitQuestionBundle",
     "W03W04W05ImplicitQuestionError",
     "build_implicit_question_bundle",
+    "continue_implicit_predicate_question_candidate_answer",
     "continue_implicit_predicate_question_answer",
     "resolve_implicit_question_interpretations",
     "run_implicit_question_catalog_answer",
+    "run_implicit_question_candidate_answer",
     "run_implicit_predicate_question_answer",
 ]

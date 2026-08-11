@@ -13,6 +13,7 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_question_feature_catalog import
     RawQuestionFeatureCatalog,
     raw_question_feature_catalog,
     run_raw_question_feature_answer,
+    run_raw_question_feature_candidate_answer,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_alias_contract import (
     LearnedPredicateAliasBridge,
@@ -378,6 +379,52 @@ def continue_question_feature_predicate_alias_answer(
         exact_result: RawQuestionAnswerResult,
         ) -> RawQuestionPredicateAliasAnswerResult:
     """从已确认未知的 FT11 结果继续 FT12，避免再次扫描。"""
+    return _continue_question_feature_predicate_alias_answer(
+        bridge,
+        feature_catalog,
+        request,
+        exact_result,
+        feature_catalog.catalog,
+        feature_catalog.catalog,
+    )
+
+
+def continue_question_feature_predicate_alias_candidate_answer(
+        bridge: LearnedPredicateAliasBridge,
+        feature_catalog: RawQuestionFeatureCatalog,
+        request: RawQuestionRequest,
+        exact_result: RawQuestionAnswerResult,
+        candidate_constructions: tuple[RawQuestionConstruction, ...],
+        normalization_constructions: tuple[RawQuestionConstruction, ...],
+        ) -> RawQuestionPredicateAliasAnswerResult:
+    """只在索引候选中完成结构匹配与精确规范化。"""
+    if (not isinstance(candidate_constructions, tuple)
+            or not candidate_constructions
+            or any(not isinstance(item, RawQuestionConstruction)
+                   for item in candidate_constructions)
+            or not isinstance(normalization_constructions, tuple)
+            or not normalization_constructions
+            or any(not isinstance(item, RawQuestionConstruction)
+                   for item in normalization_constructions)):
+        raise TypeError("predicate alias candidate inputs are invalid")
+    return _continue_question_feature_predicate_alias_answer(
+        bridge,
+        feature_catalog,
+        request,
+        exact_result,
+        candidate_constructions,
+        normalization_constructions,
+    )
+
+
+def _continue_question_feature_predicate_alias_answer(
+        bridge: LearnedPredicateAliasBridge,
+        feature_catalog: RawQuestionFeatureCatalog,
+        request: RawQuestionRequest,
+        exact_result: RawQuestionAnswerResult,
+        candidate_constructions: tuple[RawQuestionConstruction, ...],
+        normalization_constructions: tuple[RawQuestionConstruction, ...],
+        ) -> RawQuestionPredicateAliasAnswerResult:
     if (not isinstance(bridge, LearnedPredicateAliasBridge)
             or not isinstance(feature_catalog, RawQuestionFeatureCatalog)
             or not isinstance(request, RawQuestionRequest)
@@ -395,7 +442,7 @@ def continue_question_feature_predicate_alias_answer(
     matches = tuple(sorted(
         (
             match
-            for construction in feature_catalog.catalog
+            for construction in candidate_constructions
             if (request.source_record_key is None
                 or construction.source_record_key
                 == request.source_record_key)
@@ -417,12 +464,13 @@ def continue_question_feature_predicate_alias_answer(
         return RawQuestionPredicateAliasAnswerResult(
             request, "CLARIFY", None, exact_result, matches, None, None)
     match = selected[0]
-    normalized = run_raw_question_feature_answer(
+    normalized = run_raw_question_feature_candidate_answer(
         feature_catalog,
         RawQuestionRequest(
             match.construction.question_surface,
             request.source_record_key,
         ),
+        normalization_constructions,
     )
     return RawQuestionPredicateAliasAnswerResult(
         request,
@@ -476,6 +524,7 @@ __all__ = [
     "PREDICATE_ALIAS_BRIDGE_SHA256",
     "PREDICATE_ALIAS_EXPRESSION_BOUNDARY",
     "build_learned_predicate_alias_bridge",
+    "continue_question_feature_predicate_alias_candidate_answer",
     "continue_question_feature_predicate_alias_answer",
     "resolve_learned_predicate_alias",
     "run_question_feature_predicate_alias_answer",

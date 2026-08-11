@@ -162,9 +162,42 @@ def run_raw_question_feature_answer(
     )
 
 
+def run_raw_question_feature_candidate_answer(
+        feature_catalog: RawQuestionFeatureCatalog,
+        request: RawQuestionRequest,
+        candidate_constructions: tuple[RawQuestionConstruction, ...],
+    ) -> RawQuestionAnswerResult:
+    """只在已由上游不可变索引验证的显式构式候选中执行 FT11。"""
+    if (not isinstance(feature_catalog, RawQuestionFeatureCatalog)
+            or not isinstance(request, RawQuestionRequest)
+            or not isinstance(candidate_constructions, tuple)
+            or any(not isinstance(item, RawQuestionConstruction)
+                   for item in candidate_constructions)):
+        raise TypeError("question feature candidate dispatch inputs are invalid")
+    if not candidate_constructions:
+        return RawQuestionAnswerResult(
+            request,
+            "UNKNOWN",
+            None,
+            (),
+            None,
+            None,
+        )
+    return run_raw_question_answer(
+        candidate_constructions,
+        feature_catalog.w03_batch,
+        feature_catalog.w04_batch,
+        feature_catalog.w05_batch,
+        request,
+        overlay_validation_sha256=(
+            feature_catalog.overlay_validation_sha256),
+    )
+
+
 __all__ = [
     "RawQuestionFeatureCatalog",
     "W03W04W05QuestionFeatureCatalogError",
     "raw_question_feature_catalog",
     "run_raw_question_feature_answer",
+    "run_raw_question_feature_candidate_answer",
 ]
