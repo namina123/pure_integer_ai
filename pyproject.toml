@@ -28,6 +28,7 @@ classifiers = [
 
 [project.scripts]
 pure-integer-qa = "pure_integer_ai.experiments.run_ph2_w03_w04_w05_sparse_qa:main"
+pure-integer-sense = "pure_integer_ai.experiments.run_ph2_w03_public_sense:main"
 
 [project.optional-dependencies]
 test = [
@@ -58,6 +59,7 @@ include = ["pure_integer_ai*"]
   "data/ph2/authored_vertical_question_three_role_implicit_actor_v1.jsonl.sample",
   "data/ph2/authored_vertical_question_three_role_implicit_location_v1.jsonl.sample",
   "data/ph2/authored_vertical_question_three_role_location_v1.jsonl.sample",
+  "data/ph2/w03_public_sense_runtime_v1.json",
 ]
 
 [tool.pytest.ini_options]

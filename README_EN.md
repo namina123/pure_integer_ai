@@ -88,6 +88,17 @@ pure-integer-qa --jsonl
 
 Each input object receives an immediate result record. A bad line emits a typed error without stopping later lines, and a final session probe is emitted when input ends.
 
+### Public-source sense probe
+
+`pure-integer-sense` queries sense candidates compiled from bounded public Wiktionary and Wikidata slices:
+
+```bash
+pure-integer-sense "首页"
+pure-integer-sense "金星" --context "距离太阳第二近的行星"
+```
+
+Results retain traceable source information and distinguish unique, ambiguous, unknown, and unresolved cross-source conflict states. The current artifact covers only the frozen bounded public slice in this repository. A candidate is not a claim of definitive truth, and this probe is not an open-domain dictionary or broad-domain QA system.
+
 ## Repository map
 
 - `src/pure_integer_ai/`: installable source package

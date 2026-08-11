@@ -289,6 +289,7 @@ def test_distribution_data_files_match_runtime_resource_contract() -> None:
     assert configured == (
         "data/ph2/sparse_qa_runtime_snapshot_v1.json",
         *PUBLIC_SPARSE_QA_SOURCE_ARTIFACTS,
+        "data/ph2/w03_public_sense_runtime_v1.json",
     )
 
 

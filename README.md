@@ -88,6 +88,17 @@ pure-integer-qa --jsonl
 
 每个输入对象会立即得到一个结果记录；坏行返回类型化错误并继续处理后续行，输入结束时再输出一条 session probe。
 
+### 公开来源词义探针
+
+`pure-integer-sense` 查询由公开 Wiktionary 与 Wikidata 切片编译的词义候选：
+
+```bash
+pure-integer-sense "首页"
+pure-integer-sense "金星" --context "距离太阳第二近的行星"
+```
+
+结果保留可回溯的来源信息，并明确区分唯一、多义、未知和未合并的来源冲突。当前 artifact 只覆盖仓库中冻结的有界公开切片；候选存在不等于项目宣称它是最终事实，也不代表已经具备开放域词典或广域问答能力。
+
 ## 仓库结构
 
 - `src/pure_integer_ai/`：可安装的主源码包
