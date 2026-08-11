@@ -10,7 +10,6 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_contract import (
     RawQuestionRequest,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_runtime import (
-    build_public_sparse_qa_runtime,
     run_sparse_qa_queries,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_session import (
@@ -18,6 +17,9 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_session import (
     finish_sparse_qa_session,
     iter_sparse_qa_jsonl_session,
     start_sparse_qa_session,
+)
+from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_snapshot import (
+    load_or_rebuild_public_sparse_qa_runtime,
 )
 
 
@@ -104,7 +106,7 @@ def main(
                 "--jsonl cannot be combined with a positional question, "
                 "--source-ref, --audit, or --repeat"
             )
-        runtime = build_public_sparse_qa_runtime()
+        runtime = load_or_rebuild_public_sparse_qa_runtime()
         state = start_sparse_qa_session(runtime)
         for record in iter_sparse_qa_jsonl_session(runtime, input_stream):
             _emit(record.to_dict(), output_stream)
@@ -115,7 +117,7 @@ def main(
         return 0
     if args.question is None:
         parser.error("question is required unless --jsonl is used")
-    runtime = build_public_sparse_qa_runtime()
+    runtime = load_or_rebuild_public_sparse_qa_runtime()
     request = RawQuestionRequest(args.question, args.source_ref)
     batch = run_sparse_qa_queries(
         runtime,

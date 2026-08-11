@@ -300,7 +300,7 @@ def test_cli_uses_one_runtime_and_hides_audit_by_default(
 
     monkeypatch.setattr(
         cli,
-        "build_public_sparse_qa_runtime",
+        "load_or_rebuild_public_sparse_qa_runtime",
         lambda: runtime,
     )
     construction = (
@@ -404,7 +404,8 @@ def test_jsonl_cli_builds_once_and_emits_final_probe(
         calls["build"] += 1
         return runtime
 
-    monkeypatch.setattr(cli, "build_public_sparse_qa_runtime", build_once)
+    monkeypatch.setattr(
+        cli, "load_or_rebuild_public_sparse_qa_runtime", build_once)
     construction = (
         runtime.dispatch_index.entries[0].entry.feature_catalog.catalog[0])
     input_stream = StringIO("\n".join((

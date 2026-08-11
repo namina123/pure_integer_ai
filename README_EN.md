@@ -76,6 +76,8 @@ pure-integer-qa "什么使得河水上涨？"
 
 The probe accepts a raw question and can optionally restrict it with `--source-ref 1,2,...`. It emits only the sparse short result by default; add `--audit` explicitly for complete audit traces. `--repeat N` runs warm queries on the same built runtime to check bit-identical repetition. This entry point demonstrates only the capabilities covered by the current public learned samples; it is not broad-domain QA or mature dialogue.
 
+Startup validates and loads the repository's typed canonical snapshot by default. If the snapshot is missing, damaged, or inconsistent with the public source identities, partial loading is rejected and the runtime is rebuilt in full.
+
 Use the long-lived JSONL mode to share one runtime build across different questions:
 
 ```bash
