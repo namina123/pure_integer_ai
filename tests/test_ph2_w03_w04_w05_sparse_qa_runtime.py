@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from io import StringIO
 import json
 from pathlib import Path
 
@@ -33,6 +34,10 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_runtime import (
     build_public_sparse_qa_runtime,
     run_sparse_qa_queries,
     run_sparse_qa_query,
+)
+from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_session import (
+    build_sparse_qa_session_probe,
+    iter_sparse_qa_jsonl_session,
 )
 
 
@@ -270,6 +275,112 @@ def test_cli_uses_one_runtime_and_hides_audit_by_default(
     assert audited["probe"]["created_audit_trace_count"] == 2
 
 
+def test_jsonl_session_orders_isolates_and_reuses_one_runtime(runtime) -> None:
+    entry = runtime.dispatch_index.entries[0].entry
+    exact = entry.feature_catalog.catalog[0]
+    implicit = entry.implicit_bundle.catalog[0]
+    lines = (
+        "\ufeff" + json.dumps(
+            {"question": exact.question_surface}, ensure_ascii=False),
+        "{not-json}",
+        json.dumps({
+            "question": implicit.question_surface,
+            "source_ref": list(implicit.source_record_key),
+            "audit": True,
+        }, ensure_ascii=False),
+        json.dumps({"question": exact.question_surface}, ensure_ascii=False),
+        json.dumps({"question": "未学习的公开问题？"}, ensure_ascii=False),
+    )
+    records = tuple(iter_sparse_qa_jsonl_session(runtime, lines))
+    assert tuple(item.line_ordinal for item in records) == tuple(range(5))
+    assert tuple(item.kind for item in records) == (
+        "RESULT", "ERROR", "RESULT", "RESULT", "RESULT")
+    assert records[1].error_code == "INVALID_JSON"
+    assert records[2].result is not None
+    assert records[2].result.audit_result is not None
+    assert records[4].result is not None
+    assert records[4].result.status == "UNKNOWN"
+    assert records[0].result is not None and records[3].result is not None
+    assert records[0].result.sha256() == records[3].result.sha256()
+
+    probe = build_sparse_qa_session_probe(runtime, records)
+    assert probe.runtime_build_count == 1
+    assert probe.input_line_count == 5
+    assert probe.query_count == 4
+    assert probe.error_count == 1
+    assert probe.audit_projection_count == 1
+    assert probe.created_audit_trace_count == 2
+    assert len(probe.record_commitment_sha256) == 64
+    assert len(probe.result_commitment_sha256) == 64
+
+
+def test_jsonl_session_rejects_bad_lines_without_querying(runtime) -> None:
+    lines = (
+        "",
+        "[]",
+        json.dumps({"question": "合法？", "extra": 1}, ensure_ascii=False),
+        json.dumps({"question": " 非规范？"}, ensure_ascii=False),
+        json.dumps({"question": "合法？", "source_ref": [True]}),
+        json.dumps({"question": "合法？", "audit": 1}),
+    )
+    records = tuple(iter_sparse_qa_jsonl_session(runtime, lines))
+    assert tuple(item.error_code for item in records) == (
+        "EMPTY_LINE",
+        "INVALID_FIELDS",
+        "INVALID_FIELDS",
+        "INVALID_QUESTION",
+        "INVALID_SOURCE_REF",
+        "INVALID_AUDIT",
+    )
+    probe = build_sparse_qa_session_probe(runtime, records)
+    assert probe.query_count == 0
+    assert probe.error_count == len(lines)
+    assert probe.audit_projection_count == 0
+    assert probe.created_sparse_trace_count == 0
+
+
+def test_jsonl_cli_builds_once_and_emits_final_probe(
+        runtime, monkeypatch) -> None:
+    from pure_integer_ai.experiments import (
+        run_ph2_w03_w04_w05_sparse_qa as cli,
+    )
+
+    calls = {"build": 0}
+
+    def build_once():
+        calls["build"] += 1
+        return runtime
+
+    monkeypatch.setattr(cli, "build_public_sparse_qa_runtime", build_once)
+    construction = (
+        runtime.dispatch_index.entries[0].entry.feature_catalog.catalog[0])
+    input_stream = StringIO("\n".join((
+        json.dumps(
+            {"question": construction.question_surface},
+            ensure_ascii=False,
+        ),
+        "not-json",
+        json.dumps(
+            {"question": construction.question_surface},
+            ensure_ascii=False,
+        ),
+    )))
+    output_stream = StringIO()
+    assert cli.main(
+        ["--jsonl"], stdin=input_stream, stdout=output_stream) == 0
+    values = tuple(
+        json.loads(item) for item in output_stream.getvalue().splitlines())
+    assert calls == {"build": 1}
+    assert tuple(item["kind"] for item in values[:-1]) == (
+        "RESULT", "ERROR", "RESULT")
+    assert values[-1]["kind"] == "SESSION_PROBE"
+    assert values[-1]["probe"]["runtime_build_count"] == 1
+    assert values[-1]["probe"]["query_count"] == 2
+    assert values[-1]["probe"]["error_count"] == 1
+    assert values[0]["result_sha256"] == values[2]["result_sha256"]
+    assert len(values[-1]["probe"]["record_commitment_sha256"]) == 64
+
+
 def test_runtime_contains_no_question_or_answer_dispatch_table() -> None:
     root = Path(__file__).resolve().parents[1]
     sources = "\n".join(
@@ -279,6 +390,8 @@ def test_runtime_contains_no_question_or_answer_dispatch_table() -> None:
             "ph2_w03_w04_w05_sparse_qa_runtime.py",
             "src/pure_integer_ai/experiments/"
             "run_ph2_w03_w04_w05_sparse_qa.py",
+            "src/pure_integer_ai/experiments/"
+            "ph2_w03_w04_w05_sparse_qa_session.py",
         )
     )
     for value in (
