@@ -63,7 +63,7 @@ def _matches_alias_frame(
     )
 
 
-def _merge_candidates(
+def merge_indexed_question_construction_candidates(
         values: tuple[RawQuestionConstructionCandidateSet, ...],
         ) -> tuple[RawQuestionConstructionCandidateSet, ...]:
     grouped: dict[str, dict[str, RawQuestionConstruction]] = {}
@@ -85,7 +85,7 @@ def _posting_candidates(
         source_record_key: tuple[int, ...] | None,
         ) -> tuple[RawQuestionConstructionCandidateSet, ...]:
     if source_record_key is None:
-        return _merge_candidates(tuple(
+        return merge_indexed_question_construction_candidates(tuple(
             candidate
             for posting in postings
             for candidate in posting.candidates
@@ -102,6 +102,64 @@ def _posting_candidates(
     return postings[posting_ordinal].candidates
 
 
+def lookup_indexed_question_feature_direct_constructions(
+        index: RawQuestionConstructionIndex,
+        phase: str,
+        request: RawQuestionRequest,
+        ) -> tuple[RawQuestionConstructionCandidateSet, ...]:
+    """只查询精确表层投递行，不访问 alias frame。"""
+    if (not isinstance(index, RawQuestionConstructionIndex)
+            or not isinstance(request, RawQuestionRequest)):
+        raise TypeError("indexed direct construction lookup inputs are invalid")
+    rows = index.rows_at(phase)
+    row_ordinal = bisect_left(
+        rows,
+        request.question_surface,
+        key=lambda item: item.question_surface,
+    )
+    if (row_ordinal >= len(rows)
+            or rows[row_ordinal].question_surface
+            != request.question_surface):
+        return ()
+    return _posting_candidates(
+        rows[row_ordinal].postings,
+        request.source_record_key,
+    )
+
+
+def lookup_indexed_question_feature_alias_frame_constructions(
+        index: RawQuestionConstructionIndex,
+        request: RawQuestionRequest,
+        frame_ordinals: tuple[int, ...] | None = None,
+        ) -> tuple[RawQuestionConstructionCandidateSet, ...]:
+    """只在给定 alias frame ordinal 中执行既有结构匹配。"""
+    if (not isinstance(index, RawQuestionConstructionIndex)
+            or not isinstance(request, RawQuestionRequest)):
+        raise TypeError("indexed alias frame lookup inputs are invalid")
+    if frame_ordinals is None:
+        ordinals = tuple(range(len(index.alias_frame_rows)))
+    else:
+        if (not isinstance(frame_ordinals, tuple)
+                or any(type(item) is not int for item in frame_ordinals)
+                or frame_ordinals != tuple(sorted(set(frame_ordinals)))
+                or any(item < 0 or item >= len(index.alias_frame_rows)
+                       for item in frame_ordinals)):
+            raise W03W04W05QuestionConstructionIndexError(
+                "alias frame ordinals are not canonical")
+        ordinals = frame_ordinals
+    structural = tuple(
+        candidate
+        for ordinal in ordinals
+        for row in (index.alias_frame_rows[ordinal],)
+        if _matches_alias_frame(row, request.question_surface)
+        for candidate in _posting_candidates(
+            row.postings,
+            request.source_record_key,
+        )
+    )
+    return merge_indexed_question_construction_candidates(structural)
+
+
 def lookup_indexed_question_feature_constructions(
         index: RawQuestionConstructionIndex,
         phase: str,
@@ -111,32 +169,19 @@ def lookup_indexed_question_feature_constructions(
     if (not isinstance(index, RawQuestionConstructionIndex)
             or not isinstance(request, RawQuestionRequest)):
         raise TypeError("indexed construction lookup inputs are invalid")
-    rows = index.rows_at(phase)
-    row_ordinal = bisect_left(
-        rows,
-        request.question_surface,
-        key=lambda item: item.question_surface,
+    direct = lookup_indexed_question_feature_direct_constructions(
+        index,
+        phase,
+        request,
     )
-    direct = ()
-    if (row_ordinal < len(rows)
-            and rows[row_ordinal].question_surface
-            == request.question_surface):
-        direct = _posting_candidates(
-            rows[row_ordinal].postings,
-            request.source_record_key,
-        )
     if phase != "ALIAS":
         return direct
-    structural = tuple(
-        candidate
-        for row in index.alias_frame_rows
-        if _matches_alias_frame(row, request.question_surface)
-        for candidate in _posting_candidates(
-            row.postings,
-            request.source_record_key,
-        )
+    structural = lookup_indexed_question_feature_alias_frame_constructions(
+        index,
+        request,
     )
-    return _merge_candidates((*direct, *structural))
+    return merge_indexed_question_construction_candidates(
+        (*direct, *structural))
 
 
 def indexed_question_feature_candidate_counts(
@@ -170,11 +215,13 @@ def _normalization_candidates(
         entry_sha256: str,
         request: RawQuestionRequest,
         alias_candidates: tuple[RawQuestionConstruction, ...],
+        candidate_source: object,
+        candidate_lookup,
         ) -> tuple[RawQuestionConstruction, ...]:
     values = {}
     for construction in alias_candidates:
-        exact = lookup_indexed_question_feature_constructions(
-            index,
+        exact = candidate_lookup(
+            candidate_source,
             "EXACT",
             RawQuestionRequest(
                 construction.question_surface,
@@ -196,12 +243,28 @@ def run_indexed_question_construction_registry_answer(
         request: RawQuestionRequest,
         ) -> RawQuestionFeatureRegistryAnswerResult:
     """只执行注册项内构式候选，同时保留完整 FT16 轨迹。"""
+    return run_indexed_question_construction_registry_answer_with_lookup(
+        index,
+        request,
+        index,
+        lookup_indexed_question_feature_constructions,
+    )
+
+
+def run_indexed_question_construction_registry_answer_with_lookup(
+        index: RawQuestionConstructionIndex,
+        request: RawQuestionRequest,
+        candidate_source: object,
+        candidate_lookup,
+        ) -> RawQuestionFeatureRegistryAnswerResult:
+    """复用 FT18 三阶段运行时，但由调用方提供候选发现。"""
     if (not isinstance(index, RawQuestionConstructionIndex)
-            or not isinstance(request, RawQuestionRequest)):
+            or not isinstance(request, RawQuestionRequest)
+            or not callable(candidate_lookup)):
         raise TypeError("indexed construction dispatch inputs are invalid")
     registry = index.registry
-    candidates = _by_entry(lookup_indexed_question_feature_constructions(
-        index, "EXACT", request))
+    candidates = _by_entry(candidate_lookup(
+        candidate_source, "EXACT", request))
     traces = tuple(
         RawQuestionFeatureDispatchTrace(
             entry.sha256(),
@@ -220,8 +283,8 @@ def run_indexed_question_construction_registry_answer(
     if decision is not None:
         return decision
 
-    candidates = _by_entry(lookup_indexed_question_feature_constructions(
-        index, "ALIAS", request))
+    candidates = _by_entry(candidate_lookup(
+        candidate_source, "ALIAS", request))
     traces = tuple(
         RawQuestionFeatureDispatchTrace(
             entry.sha256(),
@@ -237,6 +300,8 @@ def run_indexed_question_construction_registry_answer(
                     entry.sha256(),
                     request,
                     candidates[entry.sha256()],
+                    candidate_source,
+                    candidate_lookup,
                 ),
             ) if entry.sha256() in candidates else _unknown_alias(
                 request, prior.exact_result),
@@ -249,8 +314,8 @@ def run_indexed_question_construction_registry_answer(
     if decision is not None:
         return decision
 
-    candidates = _by_entry(lookup_indexed_question_feature_constructions(
-        index, "IMPLICIT", request))
+    candidates = _by_entry(candidate_lookup(
+        candidate_source, "IMPLICIT", request))
     traces = tuple(
         RawQuestionFeatureDispatchTrace(
             entry.sha256(),
@@ -295,6 +360,10 @@ __all__ = [
     "W03W04W05QuestionConstructionIndexError",
     "build_raw_question_construction_index",
     "indexed_question_feature_candidate_counts",
+    "lookup_indexed_question_feature_alias_frame_constructions",
     "lookup_indexed_question_feature_constructions",
+    "lookup_indexed_question_feature_direct_constructions",
+    "merge_indexed_question_construction_candidates",
     "run_indexed_question_construction_registry_answer",
+    "run_indexed_question_construction_registry_answer_with_lookup",
 ]

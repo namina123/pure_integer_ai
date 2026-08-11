@@ -75,9 +75,9 @@ def _compile_overlay(root, semantic, primitive_map, atomic, builder):
     return builder(base, donor)
 
 
-@pytest.fixture(scope="module")
-def construction_index(tmp_path_factory):
-    two_root = tmp_path_factory.mktemp("ft18_two_role")
+def build_construction_index_fixture(tmp_path_factory, stage="ft18"):
+    """Build the shared two-entry public registry for indexed tests."""
+    two_root = tmp_path_factory.mktemp(f"{stage}_two_role")
     two_overlay = _compile_overlay(
         two_root,
         "authored_semantic_primitive_bridge_generalization_v1.jsonl.sample",
@@ -101,7 +101,7 @@ def construction_index(tmp_path_factory):
         ),
     )
 
-    three_root = tmp_path_factory.mktemp("ft18_three_role")
+    three_root = tmp_path_factory.mktemp(f"{stage}_three_role")
     three_overlay = _compile_overlay(
         three_root,
         "authored_semantic_primitive_bridge_three_role_v1.jsonl.sample",
@@ -133,6 +133,11 @@ def construction_index(tmp_path_factory):
         two_entry,
         three_entry,
     )
+
+
+@pytest.fixture(scope="module")
+def construction_index(tmp_path_factory):
+    return build_construction_index_fixture(tmp_path_factory)
 
 
 def _learned_alias_surface(entry, construction):
