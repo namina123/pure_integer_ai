@@ -7,7 +7,7 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_question_alias_frame_anchor imp
     lookup_indexed_alias_frame_anchor_constructions,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_question_construction_index import (
-    lookup_indexed_alias_normalization_constructions,
+    reuse_indexed_alias_normalization_constructions,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_question_feature_catalog import (
     run_raw_question_feature_candidate_answer,
@@ -87,7 +87,6 @@ def run_sparse_question_dispatch(
             or not isinstance(request, RawQuestionRequest)):
         raise TypeError("sparse question dispatch inputs are invalid")
     candidate_source = index.anchor_index
-    construction_index = candidate_source.construction_index
     visits: list[RawQuestionSparsePhaseVisit] = []
     traces: dict[str, RawQuestionFeatureDispatchTrace] = {}
 
@@ -139,13 +138,9 @@ def run_sparse_question_dispatch(
             request,
             exact_result,
             candidate.constructions,
-            lookup_indexed_alias_normalization_constructions(
-                construction_index,
-                row.entry_sha256,
+            reuse_indexed_alias_normalization_constructions(
                 request,
-                candidate.constructions,
-                candidate_source,
-                lookup_indexed_alias_frame_anchor_constructions,
+                candidate,
             ),
         )
         trace = RawQuestionFeatureDispatchTrace(

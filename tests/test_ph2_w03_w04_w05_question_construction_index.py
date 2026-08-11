@@ -17,8 +17,11 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_question_construction_index imp
     QUESTION_CONSTRUCTION_INDEX_SHA256,
     build_raw_question_construction_index,
     indexed_question_feature_candidate_counts,
+    lookup_indexed_alias_normalization_constructions,
     lookup_indexed_question_feature_constructions,
+    reuse_indexed_alias_normalization_constructions,
     run_indexed_question_construction_registry_answer,
+    run_indexed_question_construction_registry_answer_with_lookup,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_question_feature_catalog import (
     raw_question_feature_catalog,
@@ -424,6 +427,135 @@ def test_actual_execution_narrows_entries_and_internal_constructions(
         assert all(value < len(two_entry.feature_catalog.catalog) for value in calls)
 
 
+def test_alias_normalization_reuses_candidates_without_exact_relookup(
+        construction_index) -> None:
+    index, two_entry, _ = construction_index
+    construction = two_entry.feature_catalog.catalog[0]
+    cases = (
+        (
+            RawQuestionRequest(
+                _learned_alias_surface(two_entry, construction),
+                construction.source_record_key,
+            ),
+            "ANSWER",
+            ("EXACT", "ALIAS"),
+        ),
+        (
+            RawQuestionRequest(
+                _unlearned_alias_surface(construction),
+                construction.source_record_key,
+            ),
+            "UNKNOWN",
+            ("EXACT", "ALIAS", "IMPLICIT"),
+        ),
+    )
+    for request, status, expected_phases in cases:
+        phases = []
+
+        def lookup(source, phase, current_request):
+            phases.append(phase)
+            return lookup_indexed_question_feature_constructions(
+                source, phase, current_request)
+
+        result = run_indexed_question_construction_registry_answer_with_lookup(
+            index,
+            request,
+            index,
+            lookup,
+        )
+        assert result.status == status
+        assert tuple(phases) == expected_phases
+        assert phases.count("EXACT") == 1
+
+    alias_request = cases[0][0]
+    alias_candidate = _candidate(
+        index,
+        "ALIAS",
+        alias_request,
+        two_entry.sha256(),
+    )
+
+    def forbidden_lookup(*args, **kwargs):
+        raise AssertionError("alias normalization performed an exact relookup")
+
+    assert lookup_indexed_alias_normalization_constructions(
+        index,
+        two_entry.sha256(),
+        alias_request,
+        alias_candidate.constructions,
+        index,
+        forbidden_lookup,
+    ) == alias_candidate.normalization_constructions
+
+
+def test_alias_candidates_are_exact_catalog_owned_and_source_compatible(
+        construction_index) -> None:
+    index, _, _ = construction_index
+    exact_by_entry = {
+        entry.sha256(): {
+            item.sha256(): item for item in entry.feature_catalog.catalog
+        }
+        for entry in index.registry.entries
+    }
+    for rows in (index.alias_rows, index.alias_frame_rows):
+        for row in rows:
+            for posting in row.postings:
+                for candidate in posting.candidates:
+                    assert all(
+                        exact_by_entry[candidate.entry_sha256][item.sha256()]
+                        == item
+                        for item in candidate.constructions
+                    )
+                    assert all(
+                        item.source_record_key == posting.source_record_key
+                        for item in candidate.constructions
+                    )
+                    request = RawQuestionRequest(
+                        row.question_surface
+                        if hasattr(row, "question_surface")
+                        else f"{row.prefix_surface}替代{row.suffix_surface}",
+                        posting.source_record_key,
+                    )
+                    target_surfaces = {
+                        item.question_surface
+                        for item in candidate.constructions
+                    }
+                    expected_normalizations = tuple(sorted(
+                        (
+                            item
+                            for item in exact_by_entry[
+                                candidate.entry_sha256].values()
+                            if item.source_record_key
+                            == posting.source_record_key
+                            and item.question_surface in target_surfaces
+                        ),
+                        key=lambda item: item.sha256(),
+                    ))
+                    assert candidate.normalization_constructions == (
+                        expected_normalizations)
+                    assert reuse_indexed_alias_normalization_constructions(
+                        request, candidate) == expected_normalizations
+
+    row = index.alias_rows[0]
+    posting = row.postings[0]
+    bad_posting = replace(
+        posting,
+        source_record_key=(
+            *posting.source_record_key[:-1],
+            posting.source_record_key[-1] + 1,
+        ),
+    )
+    bad_row = replace(
+        row,
+        postings=tuple(sorted(
+            (bad_posting, *row.postings[1:]),
+            key=lambda item: item.source_record_key,
+        )),
+    )
+    with pytest.raises(ValueError, match="escaped its SourceRef"):
+        replace(index, alias_rows=(bad_row, *index.alias_rows[1:]))
+
+
 def test_same_surface_ambiguity_and_overlapping_entries_match_ft16(
         construction_index) -> None:
     index, two_entry, three_entry = construction_index
@@ -464,6 +596,15 @@ def test_same_surface_ambiguity_and_overlapping_entries_match_ft16(
         for trace in collision_result.traces
         if trace.entry_sha256 == collision_entry.sha256()
     )) == 2
+    collision_alias = _assert_scan_equal(
+        collision_index,
+        RawQuestionRequest(
+            _learned_alias_surface(two_entry, shared),
+            shared.source_record_key,
+        ),
+    )
+    assert collision_alias.status == "CLARIFY"
+    assert collision_alias.decisive_phase == "ALIAS"
 
     projected_catalog = replace(two_entry.feature_catalog, catalog=(shared,))
     projected_entry = RawQuestionFeatureRegistryEntry(

@@ -222,6 +222,36 @@ def test_actual_structural_match_visits_only_anchor_intersection(
         expected_counts[2])
 
 
+def test_ft19_alias_normalization_performs_no_exact_relookup(
+        anchor_index, monkeypatch) -> None:
+    from pure_integer_ai.experiments import (
+        ph2_w03_w04_w05_question_alias_frame_anchor as runtime,
+    )
+
+    index, two_entry, _ = anchor_index
+    construction = two_entry.feature_catalog.catalog[0]
+    request = RawQuestionRequest(
+        _learned_alias_surface(two_entry, construction),
+        construction.source_record_key,
+    )
+    phases = []
+    original = runtime.lookup_indexed_alias_frame_anchor_constructions
+
+    def probe(candidate_index, phase, current_request):
+        phases.append(phase)
+        return original(candidate_index, phase, current_request)
+
+    monkeypatch.setattr(
+        runtime,
+        "lookup_indexed_alias_frame_anchor_constructions",
+        probe,
+    )
+    result = runtime.run_indexed_alias_frame_anchor_registry_answer(
+        index, request)
+    assert result.status == "ANSWER"
+    assert tuple(phases) == ("EXACT", "ALIAS")
+
+
 def test_source_scope_can_only_reduce_visited_frames(anchor_index) -> None:
     index, two_entry, _ = anchor_index
     construction = two_entry.feature_catalog.catalog[0]

@@ -1,7 +1,7 @@
 """从 FT17 注册项索引派生 FT18 构式候选索引。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 
 from pure_integer_ai.experiments.ph2_d03_contract_core import (
@@ -79,6 +79,9 @@ class RawQuestionConstructionCandidateSet:
 
     entry_sha256: str
     constructions: tuple[RawQuestionConstruction, ...]
+    alias_normalization_constructions: tuple[
+        RawQuestionConstruction, ...
+    ] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         _sha256(self.entry_sha256, where="construction candidate entry")
@@ -93,10 +96,36 @@ class RawQuestionConstructionCandidateSet:
                 or len(set(identities)) != len(identities)):
             raise W03W04W05QuestionConstructionIndexError(
                 "construction candidate identities are not canonical")
+        normalizations = self.alias_normalization_constructions
+        if not isinstance(normalizations, tuple):
+            raise W03W04W05QuestionConstructionIndexError(
+                "alias normalization constructions are invalid")
+        if normalizations:
+            if (any(not isinstance(item, RawQuestionConstruction)
+                           for item in normalizations)):
+                raise W03W04W05QuestionConstructionIndexError(
+                    "alias normalization constructions are invalid")
+            normalization_sha256s = tuple(
+                item.sha256() for item in normalizations)
+            if (normalization_sha256s
+                    != tuple(sorted(normalization_sha256s))
+                    or len(set(normalization_sha256s))
+                    != len(normalization_sha256s)):
+                raise W03W04W05QuestionConstructionIndexError(
+                    "alias normalization constructions are not canonical")
 
     @property
     def construction_sha256s(self) -> tuple[str, ...]:
         return tuple(item.sha256() for item in self.constructions)
+
+    @property
+    def normalization_constructions(self) -> tuple[RawQuestionConstruction, ...]:
+        """返回由冻结 exact catalog 确定性派生的同表层闭包。"""
+        return (
+            self.alias_normalization_constructions
+            if self.alias_normalization_constructions
+            else self.constructions
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -264,6 +293,32 @@ def _validate_rows(
                     allowed[item.entry_sha256])):
             raise W03W04W05QuestionConstructionIndexError(
                 f"construction {phase} index escaped its learned catalog")
+    for row in rows:
+        for posting in row.postings:
+            for candidate in posting.candidates:
+                if any(
+                        construction.source_record_key
+                        != posting.source_record_key
+                        for construction in candidate.constructions):
+                    raise W03W04W05QuestionConstructionIndexError(
+                        f"construction {phase} index escaped its SourceRef")
+
+
+def _expected_alias_normalizations(
+        constructions: tuple[RawQuestionConstruction, ...],
+        catalog: dict[
+            tuple[tuple[int, ...], str],
+            tuple[RawQuestionConstruction, ...],
+        ],
+        ) -> tuple[RawQuestionConstruction, ...]:
+    values = {
+        item.sha256(): item
+        for construction in constructions
+        for item in catalog[
+            (construction.source_record_key, construction.question_surface)
+        ]
+    }
+    return tuple(values[key] for key in sorted(values))
 
 
 # object-model: value; representation=struct; interop=pending
@@ -291,6 +346,11 @@ class RawQuestionConstructionIndex:
                 item.sha256() for item in entry.implicit_bundle.catalog}
             for entry in self.registry.entries
         }
+        explicit_catalogs = {
+            entry.sha256(): _group_explicit_catalog(
+                entry.feature_catalog.catalog)
+            for entry in self.registry.entries
+        }
         _validate_rows(self.exact_rows, phase="EXACT", allowed=explicit)
         _validate_rows(self.alias_rows, phase="ALIAS", allowed=explicit)
         _validate_rows(self.implicit_rows, phase="IMPLICIT", allowed=implicit)
@@ -313,6 +373,24 @@ class RawQuestionConstructionIndex:
                         explicit[item.entry_sha256])):
                 raise W03W04W05QuestionConstructionIndexError(
                     "construction alias frame escaped its learned catalog")
+        for row in self.alias_frame_rows:
+            for posting in row.postings:
+                for candidate in posting.candidates:
+                    if any(
+                            construction.source_record_key
+                            != posting.source_record_key
+                            for construction in candidate.constructions):
+                        raise W03W04W05QuestionConstructionIndexError(
+                            "construction alias frame escaped its SourceRef")
+        for rows in (self.alias_rows, self.alias_frame_rows):
+            for item in _candidate_sets(rows):
+                expected = _expected_alias_normalizations(
+                    item.constructions,
+                    explicit_catalogs[item.entry_sha256],
+                )
+                if item.normalization_constructions != expected:
+                    raise W03W04W05QuestionConstructionIndexError(
+                        "alias normalization closure drifted")
         _sha256(self.identity_sha256, where="question construction index")
         if self.identity_sha256 != self.sha256():
             raise W03W04W05QuestionConstructionIndexError(
@@ -376,16 +454,52 @@ def _record(
             construction.sha256()] = construction
 
 
+def _group_explicit_catalog(
+        catalog: tuple[RawQuestionConstruction, ...],
+        ) -> dict[
+            tuple[tuple[int, ...], str],
+            tuple[RawQuestionConstruction, ...],
+        ]:
+    values = {}
+    for construction in catalog:
+        values.setdefault(
+            (
+                construction.source_record_key,
+                construction.question_surface,
+            ),
+            {},
+        )[construction.sha256()] = construction
+    return {
+        key: tuple(items[identity] for identity in sorted(items))
+        for key, items in values.items()
+    }
+
+
 def _candidate_tuple(
         by_entry: dict[str, dict[str, RawQuestionConstruction]],
+        normalization_catalogs: dict[
+            str,
+            dict[
+                tuple[tuple[int, ...], str],
+                tuple[RawQuestionConstruction, ...],
+            ],
+        ] | None = None,
         ) -> tuple[RawQuestionConstructionCandidateSet, ...]:
-    return tuple(
-        RawQuestionConstructionCandidateSet(
+    candidates = []
+    for entry_sha, value in sorted(by_entry.items()):
+        constructions = tuple(value[key] for key in sorted(value))
+        normalizations = ()
+        if normalization_catalogs is not None:
+            normalizations = _expected_alias_normalizations(
+                constructions,
+                normalization_catalogs[entry_sha],
+            )
+        candidates.append(RawQuestionConstructionCandidateSet(
             entry_sha,
-            tuple(value[key] for key in sorted(value)),
-        )
-        for entry_sha, value in sorted(by_entry.items())
-    )
+            constructions,
+            normalizations,
+        ))
+    return tuple(candidates)
 
 
 def _postings(
@@ -393,31 +507,41 @@ def _postings(
             tuple[int, ...],
             dict[str, dict[str, RawQuestionConstruction]],
         ],
+        normalization_catalogs=None,
         ) -> tuple[RawQuestionConstructionIndexPosting, ...]:
     return tuple(
         RawQuestionConstructionIndexPosting(
             source,
-            _candidate_tuple(by_entry),
+            _candidate_tuple(by_entry, normalization_catalogs),
         )
         for source, by_entry in sorted(by_source.items())
     )
 
 
-def _rows(values) -> tuple[RawQuestionConstructionIndexRow, ...]:
+def _rows(
+        values,
+        normalization_catalogs=None,
+        ) -> tuple[RawQuestionConstructionIndexRow, ...]:
     return tuple(
-        RawQuestionConstructionIndexRow(surface, _postings(by_source))
+        RawQuestionConstructionIndexRow(
+            surface,
+            _postings(by_source, normalization_catalogs),
+        )
         for surface, by_source in sorted(values.items())
     )
 
 
-def _alias_frame_rows(values) -> tuple[RawQuestionConstructionAliasFrameRow, ...]:
+def _alias_frame_rows(
+        values,
+        normalization_catalogs=None,
+        ) -> tuple[RawQuestionConstructionAliasFrameRow, ...]:
     return tuple(
         RawQuestionConstructionAliasFrameRow(
             frame[0],
             frame[1],
             frame[2],
             frame[3],
-            _postings(by_source),
+            _postings(by_source, normalization_catalogs),
         )
         for frame, by_source in sorted(values.items())
     )
@@ -443,6 +567,10 @@ def build_raw_question_construction_index(
     alias = {}
     alias_frames = {}
     implicit = {}
+    normalization_catalogs = {
+        entry.sha256(): _group_explicit_catalog(entry.feature_catalog.catalog)
+        for entry in feature_index.registry.entries
+    }
     for entry in feature_index.registry.entries:
         entry_sha = entry.sha256()
         for construction in entry.feature_catalog.catalog:
@@ -502,8 +630,8 @@ def build_raw_question_construction_index(
                 construction=construction,
             )
     exact_rows = _rows(exact)
-    alias_rows = _rows(alias)
-    frame_rows = _alias_frame_rows(alias_frames)
+    alias_rows = _rows(alias, normalization_catalogs)
+    frame_rows = _alias_frame_rows(alias_frames, normalization_catalogs)
     implicit_rows = _rows(implicit)
     payload = {
         "alias_frame_rows": [item.to_dict() for item in frame_rows],

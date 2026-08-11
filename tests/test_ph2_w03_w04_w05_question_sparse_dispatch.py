@@ -240,6 +240,35 @@ def test_unlearned_alias_source_scope_and_repetition_preserve_audit(
     )
 
 
+def test_sparse_alias_normalization_performs_no_exact_relookup(
+        sparse_index, monkeypatch) -> None:
+    from pure_integer_ai.experiments import (
+        ph2_w03_w04_w05_question_sparse_dispatch as runtime,
+    )
+
+    index, two_entry, _ = sparse_index
+    construction = two_entry.feature_catalog.catalog[0]
+    request = RawQuestionRequest(
+        _learned_alias_surface(two_entry, construction),
+        construction.source_record_key,
+    )
+    phases = []
+    original = runtime.lookup_indexed_alias_frame_anchor_constructions
+
+    def probe(candidate_index, phase, current_request):
+        phases.append(phase)
+        return original(candidate_index, phase, current_request)
+
+    monkeypatch.setattr(
+        runtime,
+        "lookup_indexed_alias_frame_anchor_constructions",
+        probe,
+    )
+    record = runtime.run_sparse_question_dispatch(index, request)
+    assert record.decision.status == "ANSWER"
+    assert tuple(phases) == ("EXACT", "ALIAS")
+
+
 def test_same_surface_ambiguity_and_overlapping_entries_stay_global(
         sparse_index) -> None:
     _, two_entry, three_entry = sparse_index

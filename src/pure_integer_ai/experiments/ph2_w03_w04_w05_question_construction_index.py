@@ -67,14 +67,25 @@ def merge_indexed_question_construction_candidates(
         values: tuple[RawQuestionConstructionCandidateSet, ...],
         ) -> tuple[RawQuestionConstructionCandidateSet, ...]:
     grouped: dict[str, dict[str, RawQuestionConstruction]] = {}
+    normalization_grouped: dict[
+        str, dict[str, RawQuestionConstruction]
+    ] = {}
     for value in values:
         target = grouped.setdefault(value.entry_sha256, {})
         for construction in value.constructions:
             target[construction.sha256()] = construction
+        normalization_target = normalization_grouped.setdefault(
+            value.entry_sha256, {})
+        for construction in value.normalization_constructions:
+            normalization_target[construction.sha256()] = construction
     return tuple(
         RawQuestionConstructionCandidateSet(
             entry_sha,
             tuple(by_sha[key] for key in sorted(by_sha)),
+            tuple(
+                normalization_grouped[entry_sha][key]
+                for key in sorted(normalization_grouped[entry_sha])
+            ),
         )
         for entry_sha, by_sha in sorted(grouped.items())
     )
@@ -203,11 +214,28 @@ def indexed_question_feature_candidate_counts(
 
 def _by_entry(
         values: tuple[RawQuestionConstructionCandidateSet, ...],
-        ) -> dict[str, tuple[RawQuestionConstruction, ...]]:
+        ) -> dict[str, RawQuestionConstructionCandidateSet]:
     return {
-        item.entry_sha256: item.constructions
+        item.entry_sha256: item
         for item in values
     }
+
+
+def reuse_indexed_alias_normalization_constructions(
+        request: RawQuestionRequest,
+        candidate: RawQuestionConstructionCandidateSet,
+        ) -> tuple[RawQuestionConstruction, ...]:
+    """复用已由不可变索引闭锁到同 entry/SourceRef 的 alias 候选。"""
+    if (not isinstance(request, RawQuestionRequest)
+            or not isinstance(candidate, RawQuestionConstructionCandidateSet)):
+        raise TypeError("alias normalization candidate inputs are invalid")
+    if (request.source_record_key is not None
+            and any(
+                item.source_record_key != request.source_record_key
+                for item in candidate.normalization_constructions)):
+        raise W03W04W05QuestionConstructionIndexError(
+            "alias normalization escaped its SourceRef")
+    return candidate.normalization_constructions
 
 
 def lookup_indexed_alias_normalization_constructions(
@@ -215,27 +243,48 @@ def lookup_indexed_alias_normalization_constructions(
         entry_sha256: str,
         request: RawQuestionRequest,
         alias_candidates: tuple[RawQuestionConstruction, ...],
-        candidate_source: object,
-        candidate_lookup,
+        candidate_source: object | None = None,
+        candidate_lookup=None,
         ) -> tuple[RawQuestionConstruction, ...]:
-    values = {}
-    for construction in alias_candidates:
-        exact = candidate_lookup(
-            candidate_source,
-            "EXACT",
-            RawQuestionRequest(
-                construction.question_surface,
-                request.source_record_key,
-            ),
-        )
-        for item in exact:
-            if item.entry_sha256 == entry_sha256:
-                for candidate in item.constructions:
-                    values[candidate.sha256()] = candidate
-    if not values:
+    """兼容 FT20 前入口；不再执行 canonical request 或 exact relookup。"""
+    if not isinstance(index, RawQuestionConstructionIndex):
+        raise TypeError("alias normalization index is invalid")
+    ordinal = bisect_left(
+        index.registry.entries,
+        entry_sha256,
+        key=lambda item: item.sha256(),
+    )
+    if (ordinal >= len(index.registry.entries)
+            or index.registry.entries[ordinal].sha256() != entry_sha256):
         raise W03W04W05QuestionConstructionIndexError(
-            "alias normalization lost its exact construction")
-    return tuple(values[key] for key in sorted(values))
+            "alias normalization entry is not indexed")
+    allowed = {
+        item.sha256(): item
+        for item in index.registry.entries[ordinal].feature_catalog.catalog
+    }
+    if (not isinstance(alias_candidates, tuple)
+            or not alias_candidates
+            or any(
+                item.sha256() not in allowed or allowed[item.sha256()] != item
+                for item in alias_candidates)):
+        raise W03W04W05QuestionConstructionIndexError(
+            "alias normalization escaped its exact catalog")
+    surfaces = {item.question_surface for item in alias_candidates}
+    normalizations = tuple(
+        item
+        for identity, item in sorted(allowed.items())
+        if item.question_surface in surfaces
+        and (request.source_record_key is None
+             or item.source_record_key == request.source_record_key)
+    )
+    return reuse_indexed_alias_normalization_constructions(
+        request,
+        RawQuestionConstructionCandidateSet(
+            entry_sha256,
+            alias_candidates,
+            normalizations,
+        ),
+    )
 
 
 def run_indexed_question_construction_registry_answer(
@@ -271,7 +320,7 @@ def run_indexed_question_construction_registry_answer_with_lookup(
             run_raw_question_feature_candidate_answer(
                 entry.feature_catalog,
                 request,
-                candidates[entry.sha256()],
+                candidates[entry.sha256()].constructions,
             ) if entry.sha256() in candidates else _unknown_exact(request),
             None,
             None,
@@ -294,14 +343,10 @@ def run_indexed_question_construction_registry_answer_with_lookup(
                 entry.feature_catalog,
                 request,
                 prior.exact_result,
-                candidates[entry.sha256()],
-                lookup_indexed_alias_normalization_constructions(
-                    index,
-                    entry.sha256(),
+                candidates[entry.sha256()].constructions,
+                reuse_indexed_alias_normalization_constructions(
                     request,
                     candidates[entry.sha256()],
-                    candidate_source,
-                    candidate_lookup,
                 ),
             ) if entry.sha256() in candidates else _unknown_alias(
                 request, prior.exact_result),
@@ -326,7 +371,7 @@ def run_indexed_question_construction_registry_answer_with_lookup(
                 entry.implicit_bundle,
                 request,
                 prior.alias_result,
-                candidates[entry.sha256()],
+                candidates[entry.sha256()].constructions,
             ) if entry.sha256() in candidates else _unknown_implicit(
                 request, prior.alias_result),
         )
@@ -365,6 +410,7 @@ __all__ = [
     "lookup_indexed_question_feature_constructions",
     "lookup_indexed_question_feature_direct_constructions",
     "merge_indexed_question_construction_candidates",
+    "reuse_indexed_alias_normalization_constructions",
     "run_indexed_question_construction_registry_answer",
     "run_indexed_question_construction_registry_answer_with_lookup",
 ]
