@@ -73,11 +73,16 @@ def _batch_projection(batch: EvaluationPublicBatch) -> dict[str, object]:
     }
 
 
-def _public_state_sha256(
+def public_w03_w04_w05_state_sha256(
         w03_batch: W03V2PublicEvaluationBatch,
         w04_batch: W04V2PublicEvaluationBatch,
         w05_batch: W05V2PublicEvaluationBatch,
         ) -> str:
+    """Commit the complete immutable public state consumed by one answer."""
+    if (not isinstance(w03_batch, EvaluationPublicBatch)
+            or not isinstance(w04_batch, EvaluationPublicBatch)
+            or not isinstance(w05_batch, EvaluationPublicBatch)):
+        raise TypeError("vertical question public state inputs are invalid")
     return _sha({
         "w03": _batch_projection(w03_batch),
         "w04": _batch_projection(w04_batch),
@@ -286,7 +291,8 @@ def run_w03_w04_w05_question_answer(
             or not isinstance(w05_batch, EvaluationPublicBatch)
             or not isinstance(request, W03W04W05QuestionRequest)):
         raise TypeError("vertical question answer run inputs are invalid")
-    before = _public_state_sha256(w03_batch, w04_batch, w05_batch)
+    before = public_w03_w04_w05_state_sha256(
+        w03_batch, w04_batch, w05_batch)
     vertical = run_w03_w04_w05_vertical_query(
         w03_batch,
         w04_batch,
@@ -294,7 +300,8 @@ def run_w03_w04_w05_question_answer(
         request.vertical_query,
         overlay_validation_sha256=overlay_validation_sha256,
     )
-    after = _public_state_sha256(w03_batch, w04_batch, w05_batch)
+    after = public_w03_w04_w05_state_sha256(
+        w03_batch, w04_batch, w05_batch)
     if before != after:
         raise W03W04W05QuestionAnswerError(
             "vertical question changed learned public state")
@@ -309,6 +316,7 @@ __all__ = [
     "W03_W04_W05_QUESTION_ANSWER_RESULT_SHA256",
     "W03_W04_W05_QUESTION_REQUEST_SHA256",
     "W03_W04_W05_QUESTION_STATE_SHA256",
+    "public_w03_w04_w05_state_sha256",
     "project_w03_w04_w05_question_answer",
     "run_w03_w04_w05_question_answer",
 ]

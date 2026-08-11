@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 from io import StringIO
 import json
 from pathlib import Path
 
 import pytest
 
+from pure_integer_ai.experiments.ph2_d03_contract_core import (
+    canonical_json_bytes,
+)
 from pure_integer_ai.experiments.ph2_w03_w04_w05_question_alias_frame_anchor import (
     build_raw_question_alias_frame_anchor_index,
 )
@@ -23,6 +27,8 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_question_feature_registry impor
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_question_sparse_dispatch import (
     build_raw_question_sparse_dispatch_index,
+    project_sparse_question_dispatch_audit,
+    run_sparse_question_dispatch,
     run_sparse_question_dispatch_registry_answer,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_contract import (
@@ -102,6 +108,53 @@ def test_public_runtime_build_is_frozen_and_counted_once(runtime) -> None:
         "sparse_dispatch_sha256": (
             "0ba334b34b0863d588103460a800fa3b2de0256fe788c95ec622bef325d3066c"),
     }
+    assert tuple(
+        item.public_state_sha256
+        for item in runtime.entry_public_state_memo
+    ) == (
+        "0ef1ebb330a327ee815411615573550be9917fc216fc7b33cfc31cbe1e12a76b",
+        "e75bfb439cad7c9fd2dc4375b86ce12f5a1fc8bb308d149cb40e3f0ce9cf6937",
+    )
+
+
+def test_all_learned_query_identities_remain_frozen(runtime) -> None:
+    memo = tuple(
+        (item.entry_sha256, item.public_state_sha256)
+        for item in runtime.entry_public_state_memo
+    )
+    requests = []
+    for row in runtime.dispatch_index.entries:
+        entry = row.entry
+        requests.extend(
+            ("EXACT", RawQuestionRequest(item.question_surface))
+            for item in entry.feature_catalog.catalog
+        )
+        requests.extend(
+            ("ALIAS", RawQuestionRequest(_learned_alias_surface(entry, item)))
+            for item in entry.feature_catalog.catalog
+        )
+        requests.extend(
+            ("IMPLICIT", RawQuestionRequest(item.question_surface))
+            for item in entry.implicit_bundle.catalog
+        )
+    assert len(requests) == 24
+    values = []
+    for phase, request in requests:
+        direct_record = run_sparse_question_dispatch(
+            runtime.dispatch_index,
+            request,
+            public_state_sha256s=memo,
+        )
+        direct_audit = project_sparse_question_dispatch_audit(
+            runtime.dispatch_index, direct_record)
+        values.append({
+            "audit_sha256": direct_audit.sha256(),
+            "execution_record_sha256": direct_record.sha256(),
+            "phase": phase,
+            "request_sha256": request.sha256(),
+        })
+    assert hashlib.sha256(canonical_json_bytes(values)).hexdigest() == (
+        "2857eec09479acf33b6fb23fe0129b63735a5ba15b053babebe27abc8ac3b000")
 
 
 def test_exact_alias_implicit_unknown_and_resolved_source(runtime) -> None:

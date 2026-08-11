@@ -81,11 +81,28 @@ def _record(
 def run_sparse_question_dispatch(
         index: RawQuestionSparseDispatchIndex,
         request: RawQuestionRequest,
+        *,
+        public_state_sha256s: tuple[tuple[str, str], ...] | None = None,
         ) -> RawQuestionSparseExecutionRecord:
     """只执行各阶段 candidate entries，不创建非候选 UNKNOWN 轨迹。"""
     if (not isinstance(index, RawQuestionSparseDispatchIndex)
             or not isinstance(request, RawQuestionRequest)):
         raise TypeError("sparse question dispatch inputs are invalid")
+    if public_state_sha256s is None:
+        state_by_entry: dict[str, str] = {}
+    else:
+        expected_entries = tuple(item.entry_sha256 for item in index.entries)
+        if (not isinstance(public_state_sha256s, tuple)
+                or any(not isinstance(item, tuple) or len(item) != 2
+                       or any(not isinstance(value, str) or len(value) != 64
+                              or any(character not in "0123456789abcdef"
+                                     for character in value)
+                              for value in item)
+                       for item in public_state_sha256s)
+                or tuple(item[0] for item in public_state_sha256s)
+                != expected_entries):
+            raise TypeError("sparse question public-state memo is invalid")
+        state_by_entry = dict(public_state_sha256s)
     candidate_source = index.anchor_index
     visits: list[RawQuestionSparsePhaseVisit] = []
     traces: dict[str, RawQuestionFeatureDispatchTrace] = {}
@@ -106,6 +123,7 @@ def run_sparse_question_dispatch(
                 row.entry.feature_catalog,
                 request,
                 candidate.constructions,
+                state_sha256=state_by_entry.get(row.entry_sha256),
             ),
             None,
             None,
@@ -142,6 +160,7 @@ def run_sparse_question_dispatch(
                 request,
                 candidate,
             ),
+            state_sha256=state_by_entry.get(row.entry_sha256),
         )
         trace = RawQuestionFeatureDispatchTrace(
             row.entry_sha256,
@@ -182,6 +201,7 @@ def run_sparse_question_dispatch(
             request,
             alias_result,
             candidate.constructions,
+            state_sha256=state_by_entry.get(row.entry_sha256),
         )
         trace = RawQuestionFeatureDispatchTrace(
             row.entry_sha256,

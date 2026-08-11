@@ -37,6 +37,9 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_question_feature_registry impor
     RawQuestionFeatureRegistryEntry,
     build_raw_question_feature_registry,
 )
+from pure_integer_ai.experiments.ph2_w03_w04_w05_question_answer import (
+    public_w03_w04_w05_state_sha256,
+)
 from pure_integer_ai.experiments.ph2_w03_w04_w05_question_sparse_dispatch import (
     QUESTION_SPARSE_DISPATCH_SHA256,
     build_raw_question_sparse_dispatch_index,
@@ -67,6 +70,7 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_runtime_contract impo
     SPARSE_QA_RUNTIME_EXPRESSION_BOUNDARY,
     SPARSE_QA_RUNTIME_SHA256,
     SparseQAFrozenIdentities,
+    SparseQAEntryPublicStateMemo,
     SparseQAQueryBatch,
     SparseQAQueryProbe,
     SparseQAResult,
@@ -201,6 +205,20 @@ def assemble_sparse_qa_runtime(
         len(construction.implicit_rows),
         len(dispatch_index.entries),
     )
+    memo = tuple(sorted(
+        (
+            SparseQAEntryPublicStateMemo(
+                entry.sha256(),
+                public_w03_w04_w05_state_sha256(
+                    entry.feature_catalog.w03_batch,
+                    entry.feature_catalog.w04_batch,
+                    entry.feature_catalog.w05_batch,
+                ),
+            )
+            for entry in registry.entries
+        ),
+        key=lambda item: item.entry_sha256,
+    ))
     payload = {
         "build_probe": probe.to_dict(),
         "experimental": 1,
@@ -215,7 +233,13 @@ def assemble_sparse_qa_runtime(
         "w05_started": 0,
     }
     identity = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
-    value = SparseQARuntime(dispatch_index, identities, probe, identity)
+    value = SparseQARuntime(
+        dispatch_index,
+        identities,
+        probe,
+        identity,
+        memo,
+    )
     if (expected_identity_sha256 is not None
             and value.identity_sha256 != expected_identity_sha256):
         raise W03W04W05SparseQARuntimeError(
@@ -289,7 +313,14 @@ def run_sparse_qa_query(
             or not isinstance(request, RawQuestionRequest)
             or type(audit) is not bool):
         raise TypeError("FT22 sparse QA query inputs are invalid")
-    record = run_sparse_question_dispatch(runtime.dispatch_index, request)
+    record = run_sparse_question_dispatch(
+        runtime.dispatch_index,
+        request,
+        public_state_sha256s=tuple(
+            (item.entry_sha256, item.public_state_sha256)
+            for item in runtime.entry_public_state_memo
+        ),
+    )
     raw_result = _selected_raw_result(record)
     source = None
     if raw_result is not None:
@@ -358,6 +389,7 @@ __all__ = [
     "REPOSITORY",
     "SPARSE_QA_RUNTIME_SHA256",
     "SparseQAFrozenIdentities",
+    "SparseQAEntryPublicStateMemo",
     "SparseQAQueryBatch",
     "SparseQAQueryProbe",
     "SparseQAResult",

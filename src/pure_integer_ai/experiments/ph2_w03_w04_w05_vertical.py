@@ -4,8 +4,12 @@ from __future__ import annotations
 from pure_integer_ai.experiments.ph2_w03_v2_public_source import (
     W03V2PublicEvaluationBatch,
 )
+from pure_integer_ai.experiments.ph2_w03_v2_public_query import (
+    W03V2PublicQuery,
+    run_w03_v2_public_queries,
+)
 from pure_integer_ai.experiments.ph2_w03_w04_public_bridge import (
-    run_w03_w04_public_bridge_query,
+    project_w03_w04_public_bridge,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_public_bridge_contract import (
     W03W04PublicBridgeQuery,
@@ -23,8 +27,14 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_vertical_overlay_registry impor
 from pure_integer_ai.experiments.ph2_w04_v2_public_source import (
     W04V2PublicEvaluationBatch,
 )
+from pure_integer_ai.experiments.ph2_w04_v2_public_query import (
+    run_w04_v2_public_queries,
+)
+from pure_integer_ai.experiments.ph2_w04_v2_public_query_contract import (
+    W04V2PublicQuery,
+)
 from pure_integer_ai.experiments.ph2_w04_w05_public_bridge import (
-    run_w04_w05_public_bridge_query,
+    project_w04_w05_public_bridge,
 )
 from pure_integer_ai.experiments.ph2_w04_w05_public_bridge_contract import (
     W04W05PublicBridgeQuery,
@@ -32,6 +42,12 @@ from pure_integer_ai.experiments.ph2_w04_w05_public_bridge_contract import (
 )
 from pure_integer_ai.experiments.ph2_w05_v2_public_source import (
     W05V2PublicEvaluationBatch,
+)
+from pure_integer_ai.experiments.ph2_w05_v2_public_query import (
+    run_w05_v2_public_queries,
+)
+from pure_integer_ai.experiments.ph2_w05_v2_public_query_contract import (
+    W05V2PublicQuery,
 )
 
 
@@ -108,41 +124,87 @@ def run_w03_w04_w05_vertical_query(
         *,
         overlay_validation_sha256: str,
         ) -> W03W04W05VerticalResult:
-    """Run both adjacent public bridges and require their exact W-04 join."""
+    """Run one vertical query through the identity-compatible batch path."""
     if (not isinstance(w03_batch, W03V2PublicEvaluationBatch)
             or not isinstance(w04_batch, W04V2PublicEvaluationBatch)
             or not isinstance(w05_batch, W05V2PublicEvaluationBatch)
             or not isinstance(query, W03W04W05VerticalQuery)):
         raise TypeError("vertical query inputs are invalid")
-    w03_w04 = run_w03_w04_public_bridge_query(
+    return run_w03_w04_w05_vertical_queries(
         w03_batch,
         w04_batch,
-        W03W04PublicBridgeQuery(
+        w05_batch,
+        (query,),
+        overlay_validation_sha256=overlay_validation_sha256,
+    )[0]
+
+
+def run_w03_w04_w05_vertical_queries(
+        w03_batch: W03V2PublicEvaluationBatch,
+        w04_batch: W04V2PublicEvaluationBatch,
+        w05_batch: W05V2PublicEvaluationBatch,
+        queries: tuple[W03W04W05VerticalQuery, ...],
+        *,
+        overlay_validation_sha256: str,
+        ) -> tuple[W03W04W05VerticalResult, ...]:
+    """Load each learned stage once and preserve singleton request identities."""
+    if (not isinstance(w03_batch, W03V2PublicEvaluationBatch)
+            or not isinstance(w04_batch, W04V2PublicEvaluationBatch)
+            or not isinstance(w05_batch, W05V2PublicEvaluationBatch)
+            or not isinstance(queries, tuple) or not queries
+            or any(not isinstance(item, W03W04W05VerticalQuery)
+                   for item in queries)):
+        raise TypeError("vertical query batch inputs are invalid")
+    w03_queries = tuple(W03V2PublicQuery(
+        item.surface,
+        item.context_text,
+        item.language,
+        0,
+    ) for item in queries)
+    w04_queries = tuple(W04V2PublicQuery(
+        item.surface,
+        item.context_text,
+        item.allow_generation,
+    ) for item in queries)
+    w05_queries = tuple(W05V2PublicQuery(
+        item.proposition_surface,
+        allow_generation=item.allow_generation,
+    ) for item in queries)
+    w03_results = run_w03_v2_public_queries(w03_batch, w03_queries)
+    w04_results = run_w04_v2_public_queries(w04_batch, w04_queries)
+    w05_results = run_w05_v2_public_queries(
+        w05_batch,
+        w05_queries,
+        request_ordinals=(1,) * len(queries),
+    )
+    values = []
+    for query, w03, w04, w05 in zip(
+            queries, w03_results, w04_results, w05_results, strict=True):
+        w03_w04_query = W03W04PublicBridgeQuery(
             query.surface,
             query.context_text,
             query.language,
             query.allow_generation,
-        ),
-    )
-    w04_w05 = run_w04_w05_public_bridge_query(
-        w04_batch,
-        w05_batch,
-        W04W05PublicBridgeQuery(
+        )
+        w04_w05_query = W04W05PublicBridgeQuery(
             query.surface,
             query.context_text,
             query.proposition_surface,
             query.allow_generation,
-        ),
-    )
-    return project_w03_w04_w05_vertical(
-        query,
-        w03_w04,
-        w04_w05,
-        overlay_validation_sha256=overlay_validation_sha256,
-    )
+        )
+        values.append(project_w03_w04_w05_vertical(
+            query,
+            project_w03_w04_public_bridge(
+                w03_batch, w04_batch, w03_w04_query, w03, w04),
+            project_w04_w05_public_bridge(
+                w04_batch, w05_batch, w04_w05_query, w04, w05),
+            overlay_validation_sha256=overlay_validation_sha256,
+        ))
+    return tuple(values)
 
 
 __all__ = [
     "project_w03_w04_w05_vertical",
+    "run_w03_w04_w05_vertical_queries",
     "run_w03_w04_w05_vertical_query",
 ]

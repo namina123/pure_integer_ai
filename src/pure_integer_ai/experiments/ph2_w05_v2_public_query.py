@@ -382,13 +382,24 @@ def run_w05_v2_public_query(
 def run_w05_v2_public_queries(
         batch: W05V2PublicEvaluationBatch,
         queries: tuple[W05V2PublicQuery, ...],
+        *,
+        request_ordinals: tuple[int, ...] | None = None,
         ) -> tuple[W05V2PublicQueryResult, ...]:
     """只装载一次已学习 W-05 图并运行有界只读批次。"""
     if (not isinstance(batch, W05V2PublicEvaluationBatch)
             or not isinstance(queries, tuple) or not queries
             or any(not isinstance(item, W05V2PublicQuery)
-                   for item in queries)):
+                   for item in queries)
+            or (request_ordinals is not None
+                and (not isinstance(request_ordinals, tuple)
+                     or len(request_ordinals) != len(queries)
+                     or any(type(item) is not int or item <= 0
+                            for item in request_ordinals)))):
         raise TypeError("public W-05 query batch inputs are invalid")
+    ordinals = (
+        tuple(range(1, len(queries) + 1))
+        if request_ordinals is None else request_ordinals
+    )
     output = adapt_w05_training_payload(
         w05_v2_public_training_payload(batch))
     backend = DictBackend()
@@ -403,7 +414,7 @@ def run_w05_v2_public_queries(
                 record_commitment=batch.record_commitment,
                 request_ordinal=ordinal,
             )
-            for ordinal, query in enumerate(queries, start=1)
+            for ordinal, query in zip(ordinals, queries, strict=True)
         )
         after = _state_signature(runtime)
         if before != after:

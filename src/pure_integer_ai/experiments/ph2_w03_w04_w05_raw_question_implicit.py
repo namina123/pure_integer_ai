@@ -354,6 +354,8 @@ def run_implicit_question_candidate_answer(
         bundle: W03W04W05ImplicitQuestionBundle,
         request: RawQuestionRequest,
         candidate_constructions: tuple[RawQuestionConstruction, ...],
+        *,
+        state_sha256: str | None = None,
         ) -> RawQuestionAnswerResult:
     """只在已由不可变索引验证的隐式构式候选中执行 FT13。"""
     if (not isinstance(candidate_constructions, tuple)
@@ -365,6 +367,7 @@ def run_implicit_question_candidate_answer(
         bundle,
         request,
         candidate_constructions,
+        state_sha256=state_sha256,
     )
 
 
@@ -372,6 +375,8 @@ def _run_implicit_question_catalog_answer(
         bundle: W03W04W05ImplicitQuestionBundle,
         request: RawQuestionRequest,
         candidate_constructions: tuple[RawQuestionConstruction, ...],
+        *,
+        state_sha256: str | None = None,
         ) -> RawQuestionAnswerResult:
     if (not isinstance(bundle, W03W04W05ImplicitQuestionBundle)
             or not isinstance(request, RawQuestionRequest)):
@@ -399,6 +404,7 @@ def _run_implicit_question_catalog_answer(
             implicit_catalog,
             request,
             candidate_constructions,
+            state_sha256=state_sha256,
         )
     if resolution == "AMBIGUOUS":
         return RawQuestionAnswerResult(
@@ -420,7 +426,11 @@ def _run_implicit_question_catalog_answer(
         bundle.explicit_catalog.w04_batch,
         bundle.explicit_catalog.w05_batch,
     )
-    return run_raw_question_feature_answer(selected_catalog, request)
+    return run_raw_question_feature_answer(
+        selected_catalog,
+        request,
+        state_sha256=state_sha256,
+    )
 
 
 def run_implicit_predicate_question_answer(
@@ -481,6 +491,8 @@ def continue_implicit_predicate_question_candidate_answer(
         request: RawQuestionRequest,
         predicate_result: RawQuestionPredicateAliasAnswerResult,
         candidate_constructions: tuple[RawQuestionConstruction, ...],
+        *,
+        state_sha256: str | None = None,
         ) -> RawQuestionImplicitPredicateAnswerResult:
     """从 FT12 结果继续，只执行索引选出的隐式构式。"""
     if (not isinstance(candidate_constructions, tuple)
@@ -494,6 +506,7 @@ def continue_implicit_predicate_question_candidate_answer(
         request,
         predicate_result,
         candidate_constructions,
+        state_sha256=state_sha256,
     )
 
 
@@ -503,6 +516,8 @@ def _continue_implicit_predicate_question_answer(
         request: RawQuestionRequest,
         predicate_result: RawQuestionPredicateAliasAnswerResult,
         candidate_constructions: tuple[RawQuestionConstruction, ...] | None,
+        *,
+        state_sha256: str | None = None,
         ) -> RawQuestionImplicitPredicateAnswerResult:
     if (not isinstance(alias_bridge, LearnedPredicateAliasBridge)
             or not isinstance(
@@ -536,6 +551,7 @@ def _continue_implicit_predicate_question_answer(
             implicit_bundle,
             request,
             candidate_constructions,
+            state_sha256=state_sha256,
         )
     )
     return RawQuestionImplicitPredicateAnswerResult(

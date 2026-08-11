@@ -17,7 +17,7 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_contract import (
     RawQuestionPattern,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_vertical import (
-    run_w03_w04_w05_vertical_query,
+    run_w03_w04_w05_vertical_queries,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_vertical_contract import (
     W03W04W05VerticalQuery,
@@ -60,19 +60,18 @@ def _sha(value: object) -> str:
 def _vertical_results(
         overlay: W03W04W05VerticalGeneralizationOverlay,
         ) -> tuple[W03W04W05VerticalResult, ...]:
-    results = tuple(
-        run_w03_w04_w05_vertical_query(
-            overlay.w03_batch,
-            overlay.w04_batch,
-            overlay.w05_batch,
-            W03W04W05VerticalQuery(
-                spec.surface,
-                spec.context,
-                spec.proposition_surface,
-            ),
-            overlay_validation_sha256=overlay.validation_sha256,
+    results = run_w03_w04_w05_vertical_queries(
+        overlay.w03_batch,
+        overlay.w04_batch,
+        overlay.w05_batch,
+        tuple(W03W04W05VerticalQuery(
+            spec.surface,
+            spec.context,
+            spec.proposition_surface,
         )
         for spec in VERTICAL_GENERALIZATION_TARGETS
+        ),
+        overlay_validation_sha256=overlay.validation_sha256,
     )
     if (tuple(item.sha256() for item in results)
             != RAW_QUESTION_GENERALIZATION_VERTICAL_SHA256S

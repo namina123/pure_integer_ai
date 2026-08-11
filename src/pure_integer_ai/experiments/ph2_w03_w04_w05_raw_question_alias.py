@@ -396,6 +396,8 @@ def continue_question_feature_predicate_alias_candidate_answer(
         exact_result: RawQuestionAnswerResult,
         candidate_constructions: tuple[RawQuestionConstruction, ...],
         normalization_constructions: tuple[RawQuestionConstruction, ...],
+        *,
+        state_sha256: str | None = None,
         ) -> RawQuestionPredicateAliasAnswerResult:
     """只在索引候选中完成结构匹配与精确规范化。"""
     if (not isinstance(candidate_constructions, tuple)
@@ -414,6 +416,7 @@ def continue_question_feature_predicate_alias_candidate_answer(
         exact_result,
         candidate_constructions,
         normalization_constructions,
+        state_sha256=state_sha256,
     )
 
 
@@ -424,6 +427,8 @@ def _continue_question_feature_predicate_alias_answer(
         exact_result: RawQuestionAnswerResult,
         candidate_constructions: tuple[RawQuestionConstruction, ...],
         normalization_constructions: tuple[RawQuestionConstruction, ...],
+        *,
+        state_sha256: str | None = None,
         ) -> RawQuestionPredicateAliasAnswerResult:
     if (not isinstance(bridge, LearnedPredicateAliasBridge)
             or not isinstance(feature_catalog, RawQuestionFeatureCatalog)
@@ -471,6 +476,7 @@ def _continue_question_feature_predicate_alias_answer(
             request.source_record_key,
         ),
         normalization_constructions,
+        state_sha256=state_sha256,
     )
     return RawQuestionPredicateAliasAnswerResult(
         request,

@@ -171,6 +171,19 @@ class SparseQARuntimeBuildProbe:
 
 # object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
+class SparseQAEntryPublicStateMemo:
+    """Identity-neutral answer-state commitment for one registry entry."""
+
+    entry_sha256: str
+    public_state_sha256: str
+
+    def __post_init__(self) -> None:
+        _sha256(self.entry_sha256, where="FT24A memo entry")
+        _sha256(self.public_state_sha256, where="FT24A public state")
+
+
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
 class SparseQARuntime:
     """One immutable public learned runtime built for repeated queries."""
 
@@ -178,6 +191,7 @@ class SparseQARuntime:
     frozen_identities: SparseQAFrozenIdentities
     build_probe: SparseQARuntimeBuildProbe
     identity_sha256: str
+    entry_public_state_memo: tuple[SparseQAEntryPublicStateMemo, ...] = ()
     experimental: int = 1
     formal_mastery_claim: int = 0
     w03_started: int = 0
@@ -190,7 +204,10 @@ class SparseQARuntime:
                 or not isinstance(
                     self.frozen_identities, SparseQAFrozenIdentities)
                 or not isinstance(
-                    self.build_probe, SparseQARuntimeBuildProbe)):
+                    self.build_probe, SparseQARuntimeBuildProbe)
+                or not isinstance(self.entry_public_state_memo, tuple)
+                or any(not isinstance(item, SparseQAEntryPublicStateMemo)
+                       for item in self.entry_public_state_memo)):
             raise TypeError("FT22 runtime inputs are invalid")
         construction = self.dispatch_index.anchor_index.construction_index
         feature = construction.feature_index
@@ -210,6 +227,13 @@ class SparseQARuntime:
                 != len(self.dispatch_index.entries)):
             raise W03W04W05SparseQARuntimeError(
                 "FT22 build probe escaped the assembled runtime")
+        entry_sha256s = tuple(item.sha256() for item in registry.entries)
+        memo_entry_sha256s = tuple(
+            item.entry_sha256 for item in self.entry_public_state_memo)
+        if (memo_entry_sha256s != tuple(sorted(entry_sha256s))
+                or len(memo_entry_sha256s) != len(entry_sha256s)):
+            raise W03W04W05SparseQARuntimeError(
+                "FT24A public-state memo escaped registry ownership")
         _sha256(self.identity_sha256, where="FT22 runtime")
         if self.identity_sha256 != self.sha256():
             raise W03W04W05SparseQARuntimeError(
@@ -441,6 +465,7 @@ __all__ = [
     "SPARSE_QA_RUNTIME_EXPRESSION_BOUNDARY",
     "SPARSE_QA_RUNTIME_SHA256",
     "SparseQAFrozenIdentities",
+    "SparseQAEntryPublicStateMemo",
     "SparseQAQueryBatch",
     "SparseQAQueryProbe",
     "SparseQAResult",

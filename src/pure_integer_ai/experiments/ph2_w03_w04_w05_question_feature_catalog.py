@@ -146,6 +146,8 @@ def raw_question_feature_catalog(
 def run_raw_question_feature_answer(
         feature_catalog: RawQuestionFeatureCatalog,
         request: RawQuestionRequest,
+        *,
+        state_sha256: str | None = None,
     ) -> RawQuestionAnswerResult:
     """通过共享目录分派精确的已学构造匹配。"""
     if (not isinstance(feature_catalog, RawQuestionFeatureCatalog)
@@ -159,6 +161,7 @@ def run_raw_question_feature_answer(
         request,
         overlay_validation_sha256=(
             feature_catalog.overlay_validation_sha256),
+        state_sha256=state_sha256,
     )
 
 
@@ -166,6 +169,8 @@ def run_raw_question_feature_candidate_answer(
         feature_catalog: RawQuestionFeatureCatalog,
         request: RawQuestionRequest,
         candidate_constructions: tuple[RawQuestionConstruction, ...],
+        *,
+        state_sha256: str | None = None,
     ) -> RawQuestionAnswerResult:
     """只在已由上游不可变索引验证的显式构式候选中执行 FT11。"""
     if (not isinstance(feature_catalog, RawQuestionFeatureCatalog)
@@ -191,6 +196,7 @@ def run_raw_question_feature_candidate_answer(
         request,
         overlay_validation_sha256=(
             feature_catalog.overlay_validation_sha256),
+        state_sha256=state_sha256,
     )
 
 

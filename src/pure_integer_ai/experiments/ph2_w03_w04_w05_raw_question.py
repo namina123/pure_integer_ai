@@ -16,6 +16,7 @@ from pure_integer_ai.experiments.ph2_w03_v2_public_source import (
     W03V2PublicEvaluationBatch,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_question_answer import (
+    project_w03_w04_w05_question_answer,
     run_w03_w04_w05_question_answer,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_question_answer_contract import (
@@ -319,6 +320,7 @@ def run_raw_question_answer(
         request: RawQuestionRequest,
         *,
         overlay_validation_sha256: str,
+        state_sha256: str | None = None,
         ) -> RawQuestionAnswerResult:
     """匹配已学问题构造；唯一时只调用 FT09，绝不复制回答逻辑。"""
     if (not isinstance(catalog, tuple) or not catalog
@@ -327,7 +329,10 @@ def run_raw_question_answer(
             or not isinstance(w03_batch, EvaluationPublicBatch)
             or not isinstance(w04_batch, EvaluationPublicBatch)
             or not isinstance(w05_batch, EvaluationPublicBatch)
-            or not isinstance(request, RawQuestionRequest)):
+            or not isinstance(request, RawQuestionRequest)
+            or (state_sha256 is not None
+                and (not isinstance(state_sha256, str)
+                     or len(state_sha256) != 64))):
         raise TypeError("raw question run inputs are invalid")
     identities = tuple(item.sha256() for item in catalog)
     if identities != tuple(sorted(identities)) or len(set(identities)) != len(
@@ -354,17 +359,26 @@ def run_raw_question_answer(
             None,
         )
     selected = matches[0]
-    typed = run_w03_w04_w05_question_answer(
-        w03_batch,
-        w04_batch,
-        w05_batch,
-        W03W04W05QuestionRequest(
-            request.question_surface,
-            selected.vertical_result.query,
-            (selected.target_role_key,),
-            request.source_record_key,
-        ),
-        overlay_validation_sha256=overlay_validation_sha256,
+    typed_request = W03W04W05QuestionRequest(
+        request.question_surface,
+        selected.vertical_result.query,
+        (selected.target_role_key,),
+        request.source_record_key,
+    )
+    typed = (
+        run_w03_w04_w05_question_answer(
+            w03_batch,
+            w04_batch,
+            w05_batch,
+            typed_request,
+            overlay_validation_sha256=overlay_validation_sha256,
+        )
+        if state_sha256 is None else
+        project_w03_w04_w05_question_answer(
+            typed_request,
+            selected.vertical_result,
+            state_sha256=state_sha256,
+        )
     )
     return RawQuestionAnswerResult(
         request,

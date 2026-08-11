@@ -137,6 +137,20 @@ def test_public_source_is_train_only_source_first_and_label_free(
     )
 
 
+def test_public_query_batch_can_preserve_singleton_request_identity(
+        public_payload) -> None:
+    batch = build_w05_v2_public_evaluation_batch(public_payload)
+    query = W05V2PublicQuery("小猫追逐小鸟。")
+    singleton = run_w05_v2_public_query(batch, query)
+    repeated = run_w05_v2_public_queries(
+        batch,
+        (query, query),
+        request_ordinals=(1, 1),
+    )
+    assert tuple(item.to_dict() for item in repeated) == (
+        singleton.to_dict(), singleton.to_dict())
+
+
 def test_public_plugin_closes_all_nine_p0_p2_conjuncts(
         public_preflight) -> None:
     """Current W-05 runtime learns and consumes exact public structures."""
