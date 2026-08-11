@@ -30,7 +30,7 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_implicit import (
 )
 
 
-def _project_decisive_phase(
+def project_raw_question_feature_registry_phase(
         registry: RawQuestionFeatureRegistry,
         request: RawQuestionRequest,
         traces: tuple[RawQuestionFeatureDispatchTrace, ...],
@@ -95,7 +95,8 @@ def run_raw_question_feature_registry_answer(
         )
         for entry in registry.entries
     )
-    decision = _project_decisive_phase(registry, request, traces, "EXACT")
+    decision = project_raw_question_feature_registry_phase(
+        registry, request, traces, "EXACT")
     if decision is not None:
         return decision
 
@@ -112,7 +113,8 @@ def run_raw_question_feature_registry_answer(
         )
         for entry, prior in zip(registry.entries, traces)
     )
-    decision = _project_decisive_phase(registry, request, traces, "ALIAS")
+    decision = project_raw_question_feature_registry_phase(
+        registry, request, traces, "ALIAS")
     if decision is not None:
         return decision
 
@@ -134,7 +136,7 @@ def run_raw_question_feature_registry_answer(
         )
         for entry, prior in zip(registry.entries, traces)
     )
-    decision = _project_decisive_phase(
+    decision = project_raw_question_feature_registry_phase(
         registry, request, traces, "IMPLICIT")
     if decision is not None:
         return decision
@@ -162,6 +164,7 @@ __all__ = [
     "RawQuestionFeatureRegistryEntry",
     "W03W04W05QuestionFeatureRegistryError",
     "build_raw_question_feature_registry",
+    "project_raw_question_feature_registry_phase",
     "resolve_question_feature_interpretations",
     "run_raw_question_feature_registry_answer",
 ]

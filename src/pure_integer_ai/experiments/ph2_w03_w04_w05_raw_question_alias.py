@@ -24,6 +24,7 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_alias_contract imp
     W03W04W05RawQuestionAliasError,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_contract import (
+    RawQuestionAnswerResult,
     RawQuestionConstruction,
     RawQuestionRequest,
 )
@@ -362,6 +363,35 @@ def run_question_feature_predicate_alias_answer(
     if exact.status != "UNKNOWN":
         return RawQuestionPredicateAliasAnswerResult(
             request, exact.status, exact.answer_surface, exact, (), None, None)
+    return continue_question_feature_predicate_alias_answer(
+        bridge,
+        feature_catalog,
+        request,
+        exact,
+    )
+
+
+def continue_question_feature_predicate_alias_answer(
+        bridge: LearnedPredicateAliasBridge,
+        feature_catalog: RawQuestionFeatureCatalog,
+        request: RawQuestionRequest,
+        exact_result: RawQuestionAnswerResult,
+        ) -> RawQuestionPredicateAliasAnswerResult:
+    """从已确认未知的 FT11 结果继续 FT12，避免再次扫描。"""
+    if (not isinstance(bridge, LearnedPredicateAliasBridge)
+            or not isinstance(feature_catalog, RawQuestionFeatureCatalog)
+            or not isinstance(request, RawQuestionRequest)
+            or not isinstance(exact_result, RawQuestionAnswerResult)):
+        raise TypeError("predicate alias continuation inputs are invalid")
+    if (bridge.overlay_validation_sha256
+            != feature_catalog.overlay_validation_sha256
+            or bridge.raw_question_bundle_sha256
+            != feature_catalog.bundle_identity_sha256):
+        raise W03W04W05RawQuestionAliasError(
+            "predicate alias bridge escaped its feature catalog")
+    if exact_result.request != request or exact_result.status != "UNKNOWN":
+        raise W03W04W05RawQuestionAliasError(
+            "predicate alias continuation requires the same UNKNOWN exact result")
     matches = tuple(sorted(
         (
             match
@@ -378,14 +408,14 @@ def run_question_feature_predicate_alias_answer(
     ))
     if any(item.resolution.status == "AMBIGUOUS" for item in matches):
         return RawQuestionPredicateAliasAnswerResult(
-            request, "CLARIFY", None, exact, matches, None, None)
+            request, "CLARIFY", None, exact_result, matches, None, None)
     selected = tuple(item for item in matches if item.selected)
     if not selected:
         return RawQuestionPredicateAliasAnswerResult(
-            request, "UNKNOWN", None, exact, matches, None, None)
+            request, "UNKNOWN", None, exact_result, matches, None, None)
     if len(selected) > 1:
         return RawQuestionPredicateAliasAnswerResult(
-            request, "CLARIFY", None, exact, matches, None, None)
+            request, "CLARIFY", None, exact_result, matches, None, None)
     match = selected[0]
     normalized = run_raw_question_feature_answer(
         feature_catalog,
@@ -398,7 +428,7 @@ def run_question_feature_predicate_alias_answer(
         request,
         normalized.status,
         normalized.answer_surface,
-        exact,
+        exact_result,
         matches,
         match,
         normalized,
@@ -446,6 +476,7 @@ __all__ = [
     "PREDICATE_ALIAS_BRIDGE_SHA256",
     "PREDICATE_ALIAS_EXPRESSION_BOUNDARY",
     "build_learned_predicate_alias_bridge",
+    "continue_question_feature_predicate_alias_answer",
     "resolve_learned_predicate_alias",
     "run_question_feature_predicate_alias_answer",
     "run_raw_question_predicate_alias_answer",

@@ -337,10 +337,14 @@ def build_implicit_question_bundle(
     return value
 
 
-def _run_implicit_catalog(
+def run_implicit_question_catalog_answer(
         bundle: W03W04W05ImplicitQuestionBundle,
         request: RawQuestionRequest,
         ) -> RawQuestionAnswerResult:
+    """前序阶段均未知时，只运行已学隐式构造目录。"""
+    if (not isinstance(bundle, W03W04W05ImplicitQuestionBundle)
+            or not isinstance(request, RawQuestionRequest)):
+        raise TypeError("implicit catalog inputs are invalid")
     matches = tuple(
         item for item in bundle.catalog
         if item.question_surface == request.question_surface
@@ -412,6 +416,38 @@ def run_implicit_predicate_question_answer(
         explicit,
         request,
     )
+    return continue_implicit_predicate_question_answer(
+        alias_bridge,
+        implicit_bundle,
+        request,
+        predicate_result,
+    )
+
+
+def continue_implicit_predicate_question_answer(
+        alias_bridge: LearnedPredicateAliasBridge,
+        implicit_bundle: W03W04W05ImplicitQuestionBundle,
+        request: RawQuestionRequest,
+        predicate_result: RawQuestionPredicateAliasAnswerResult,
+        ) -> RawQuestionImplicitPredicateAnswerResult:
+    """从保留的 FT12 结果继续 FT13，不重复执行前序阶段。"""
+    if (not isinstance(alias_bridge, LearnedPredicateAliasBridge)
+            or not isinstance(
+                implicit_bundle, W03W04W05ImplicitQuestionBundle)
+            or not isinstance(request, RawQuestionRequest)
+            or not isinstance(
+                predicate_result, RawQuestionPredicateAliasAnswerResult)):
+        raise TypeError("implicit continuation inputs are invalid")
+    if predicate_result.request != request:
+        raise W03W04W05ImplicitQuestionError(
+            "implicit continuation escaped its predicate request")
+    explicit = implicit_bundle.explicit_catalog
+    if (alias_bridge.overlay_validation_sha256
+            != explicit.overlay_validation_sha256
+            or alias_bridge.raw_question_bundle_sha256
+            != explicit.bundle_identity_sha256):
+        raise W03W04W05ImplicitQuestionError(
+            "implicit continuation escaped its learned catalog")
     if predicate_result.status != "UNKNOWN":
         return RawQuestionImplicitPredicateAnswerResult(
             request,
@@ -420,7 +456,7 @@ def run_implicit_predicate_question_answer(
             predicate_result,
             None,
         )
-    implicit_result = _run_implicit_catalog(
+    implicit_result = run_implicit_question_catalog_answer(
         implicit_bundle,
         request,
     )
@@ -445,6 +481,8 @@ __all__ = [
     "W03W04W05ImplicitQuestionBundle",
     "W03W04W05ImplicitQuestionError",
     "build_implicit_question_bundle",
+    "continue_implicit_predicate_question_answer",
     "resolve_implicit_question_interpretations",
+    "run_implicit_question_catalog_answer",
     "run_implicit_predicate_question_answer",
 ]
