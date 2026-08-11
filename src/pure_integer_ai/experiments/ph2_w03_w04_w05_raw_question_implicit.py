@@ -8,13 +8,17 @@ from pathlib import Path
 from pure_integer_ai.experiments.ph2_d03_contract_core import (
     canonical_json_bytes,
 )
+from pure_integer_ai.experiments.ph2_w03_w04_w05_question_feature_catalog import (
+    RawQuestionFeatureCatalog,
+    raw_question_feature_catalog,
+    run_raw_question_feature_answer,
+)
 from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question import (
     build_raw_question_catalog,
     compile_raw_question_pattern,
-    run_raw_question_answer,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_alias import (
-    run_raw_question_predicate_alias_answer,
+    run_question_feature_predicate_alias_answer,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_alias_contract import (
     LearnedPredicateAliasBridge,
@@ -26,9 +30,6 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_contract import (
     RawQuestionConstruction,
     RawQuestionPattern,
     RawQuestionRequest,
-)
-from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_generalization import (
-    W03W04W05RawQuestionGeneralization,
 )
 
 
@@ -146,22 +147,23 @@ def resolve_implicit_question_interpretations(
 
 
 def _identity_payload(
-        explicit_bundle: W03W04W05RawQuestionGeneralization,
+        explicit_catalog: RawQuestionFeatureCatalog,
         patterns: tuple[RawQuestionPattern, ...],
         catalog: tuple[RawQuestionConstruction, ...],
         ) -> dict[str, object]:
     return {
         "catalog": [item.to_dict() for item in catalog],
-        "explicit_bundle_sha256": explicit_bundle.identity_sha256,
+        "explicit_bundle_sha256": (
+            explicit_catalog.bundle_identity_sha256),
         "expression_boundary": [
             {"capability": key, "status": status}
             for key, status in IMPLICIT_QUESTION_EXPRESSION_BOUNDARY
         ],
         "overlay_validation_sha256": (
-            explicit_bundle.overlay.validation_sha256),
+            explicit_catalog.overlay_validation_sha256),
         "patterns": [item.to_dict() for item in patterns],
         "vertical_result_sha256s": [
-            item.sha256() for item in explicit_bundle.vertical_results
+            item.sha256() for item in explicit_catalog.vertical_results
         ],
     }
 
@@ -171,14 +173,13 @@ def _identity_payload(
 class W03W04W05ImplicitQuestionBundle:
     """两个隐式构造交叉应用到两个来源绑定 Proposition 的目录。"""
 
-    explicit_bundle: W03W04W05RawQuestionGeneralization
+    explicit_catalog: RawQuestionFeatureCatalog
     patterns: tuple[RawQuestionPattern, ...]
     catalog: tuple[RawQuestionConstruction, ...]
     identity_sha256: str
 
     def __post_init__(self) -> None:
-        if (not isinstance(
-                self.explicit_bundle, W03W04W05RawQuestionGeneralization)
+        if (not isinstance(self.explicit_catalog, RawQuestionFeatureCatalog)
                 or len(self.patterns) != 2
                 or any(not isinstance(item, RawQuestionPattern)
                        for item in self.patterns)
@@ -212,7 +213,7 @@ class W03W04W05ImplicitQuestionBundle:
 
     def to_dict(self) -> dict[str, object]:
         return _identity_payload(
-            self.explicit_bundle,
+            self.explicit_catalog,
             self.patterns,
             self.catalog,
         )
@@ -288,28 +289,30 @@ class RawQuestionImplicitPredicateAnswerResult:
 
 
 def build_implicit_question_bundle(
-        explicit_bundle: W03W04W05RawQuestionGeneralization,
+        explicit_source: object,
         reason_sample_path: str | Path,
         result_sample_path: str | Path,
+        *,
+        expected_reason_sample_sha256: str = (
+            IMPLICIT_QUESTION_REASON_SAMPLE_SHA256),
+        expected_result_sample_sha256: str = (
+            IMPLICIT_QUESTION_RESULT_SAMPLE_SHA256),
+        expected_identity_sha256: str = IMPLICIT_QUESTION_BUNDLE_SHA256,
         ) -> W03W04W05ImplicitQuestionBundle:
     """学习两个无谓词表层的结构并形成双构造、双内容目录。"""
-    if not isinstance(
-            explicit_bundle, W03W04W05RawQuestionGeneralization):
-        raise TypeError("implicit question parent bundle is invalid")
-    verticals = explicit_bundle.vertical_results
+    explicit_catalog = raw_question_feature_catalog(explicit_source)
+    verticals = explicit_catalog.vertical_results
     patterns = tuple(sorted(
         (
             compile_raw_question_pattern(
                 reason_sample_path,
                 verticals[0],
-                expected_sample_sha256=(
-                    IMPLICIT_QUESTION_REASON_SAMPLE_SHA256),
+                expected_sample_sha256=expected_reason_sample_sha256,
             ),
             compile_raw_question_pattern(
                 result_sample_path,
                 verticals[1],
-                expected_sample_sha256=(
-                    IMPLICIT_QUESTION_RESULT_SAMPLE_SHA256),
+                expected_sample_sha256=expected_result_sample_sha256,
             ),
         ),
         key=RawQuestionPattern.sha256,
@@ -321,14 +324,14 @@ def build_implicit_question_bundle(
         raise W03W04W05ImplicitQuestionError(
             "implicit sample compiled an explicit predicate")
     catalog = build_raw_question_catalog(patterns, verticals)
-    identity = _sha(_identity_payload(explicit_bundle, patterns, catalog))
+    identity = _sha(_identity_payload(explicit_catalog, patterns, catalog))
     value = W03W04W05ImplicitQuestionBundle(
-        explicit_bundle,
+        explicit_catalog,
         patterns,
         catalog,
         identity,
     )
-    if identity != IMPLICIT_QUESTION_BUNDLE_SHA256:
+    if identity != expected_identity_sha256:
         raise W03W04W05ImplicitQuestionError(
             "implicit question bundle identity drifted")
     return value
@@ -336,12 +339,7 @@ def build_implicit_question_bundle(
 
 def _run_implicit_catalog(
         bundle: W03W04W05ImplicitQuestionBundle,
-        w03_batch,
-        w04_batch,
-        w05_batch,
         request: RawQuestionRequest,
-        *,
-        overlay_validation_sha256: str,
         ) -> RawQuestionAnswerResult:
     matches = tuple(
         item for item in bundle.catalog
@@ -352,14 +350,17 @@ def _run_implicit_catalog(
     resolution = resolve_implicit_question_interpretations(tuple(
         _interpretation_key(item) for item in matches))
     if resolution == "MISSING":
-        return run_raw_question_answer(
+        implicit_catalog = RawQuestionFeatureCatalog(
+            bundle.explicit_catalog.bundle_identity_sha256,
+            bundle.explicit_catalog.overlay_validation_sha256,
+            bundle.explicit_catalog.vertical_results,
+            bundle.patterns,
             bundle.catalog,
-            w03_batch,
-            w04_batch,
-            w05_batch,
-            request,
-            overlay_validation_sha256=overlay_validation_sha256,
+            bundle.explicit_catalog.w03_batch,
+            bundle.explicit_catalog.w04_batch,
+            bundle.explicit_catalog.w05_batch,
         )
+        return run_raw_question_feature_answer(implicit_catalog, request)
     if resolution == "AMBIGUOUS":
         return RawQuestionAnswerResult(
             request,
@@ -370,14 +371,17 @@ def _run_implicit_catalog(
             None,
         )
     selected = min(matches, key=RawQuestionConstruction.sha256)
-    return run_raw_question_answer(
+    selected_catalog = RawQuestionFeatureCatalog(
+        bundle.explicit_catalog.bundle_identity_sha256,
+        bundle.explicit_catalog.overlay_validation_sha256,
+        (selected.vertical_result,),
+        (selected.pattern,),
         (selected,),
-        w03_batch,
-        w04_batch,
-        w05_batch,
-        request,
-        overlay_validation_sha256=overlay_validation_sha256,
+        bundle.explicit_catalog.w03_batch,
+        bundle.explicit_catalog.w04_batch,
+        bundle.explicit_catalog.w05_batch,
     )
+    return run_raw_question_feature_answer(selected_catalog, request)
 
 
 def run_implicit_predicate_question_answer(
@@ -396,15 +400,17 @@ def run_implicit_predicate_question_answer(
                 implicit_bundle, W03W04W05ImplicitQuestionBundle)
             or not isinstance(request, RawQuestionRequest)):
         raise TypeError("implicit predicate question inputs are invalid")
-    explicit = implicit_bundle.explicit_bundle
-    predicate_result = run_raw_question_predicate_alias_answer(
+    explicit = implicit_bundle.explicit_catalog
+    if ((w03_batch, w04_batch, w05_batch)
+            != (explicit.w03_batch, explicit.w04_batch, explicit.w05_batch)
+            or overlay_validation_sha256
+            != explicit.overlay_validation_sha256):
+        raise W03W04W05ImplicitQuestionError(
+            "implicit runtime escaped its feature catalog")
+    predicate_result = run_question_feature_predicate_alias_answer(
         alias_bridge,
-        explicit.catalog,
-        w03_batch,
-        w04_batch,
-        w05_batch,
+        explicit,
         request,
-        overlay_validation_sha256=overlay_validation_sha256,
     )
     if predicate_result.status != "UNKNOWN":
         return RawQuestionImplicitPredicateAnswerResult(
@@ -416,11 +422,7 @@ def run_implicit_predicate_question_answer(
         )
     implicit_result = _run_implicit_catalog(
         implicit_bundle,
-        w03_batch,
-        w04_batch,
-        w05_batch,
         request,
-        overlay_validation_sha256=overlay_validation_sha256,
     )
     return RawQuestionImplicitPredicateAnswerResult(
         request,

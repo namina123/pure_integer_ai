@@ -9,8 +9,10 @@ from pure_integer_ai.experiments.ph2_d03_contract_core import (
 from pure_integer_ai.experiments.ph2_evaluation_public_source import (
     EvaluationPublicBatch,
 )
-from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question import (
-    run_raw_question_answer,
+from pure_integer_ai.experiments.ph2_w03_w04_w05_question_feature_catalog import (
+    RawQuestionFeatureCatalog,
+    raw_question_feature_catalog,
+    run_raw_question_feature_answer,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_alias_contract import (
     LearnedPredicateAliasBridge,
@@ -24,12 +26,6 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_alias_contract imp
 from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_contract import (
     RawQuestionConstruction,
     RawQuestionRequest,
-)
-from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_generalization import (
-    W03W04W05RawQuestionGeneralization,
-)
-from pure_integer_ai.experiments.ph2_w03_w04_w05_vertical_generalization import (
-    W03W04W05VerticalGeneralizationOverlay,
 )
 
 
@@ -88,14 +84,14 @@ def _one_predicate_surface(
 
 
 def _route_for_vertical(
-        overlay: W03W04W05VerticalGeneralizationOverlay,
+        feature_catalog: RawQuestionFeatureCatalog,
         vertical,
         ) -> LearnedPredicateAliasRoute:
     if vertical.link is None:
         raise W03W04W05RawQuestionAliasError(
             "predicate alias route requires a vertical link")
-    w03_pairs = _pair_by_key(overlay.w03_batch)
-    w04_pairs = _pair_by_key(overlay.w04_batch)
+    w03_pairs = _pair_by_key(feature_catalog.w03_batch)
+    w04_pairs = _pair_by_key(feature_catalog.w04_batch)
     current_w04 = w04_pairs.get(vertical.link.w04_observation_key)
     if current_w04 is None or current_w04.observation.supersedes_key is None:
         raise W03W04W05RawQuestionAliasError(
@@ -176,8 +172,8 @@ def _route_for_vertical(
             or occurrence[0].surface_fragment != predicate_surface):
         raise W03W04W05RawQuestionAliasError(
             "predicate replacement did not reach the Proposition occurrence")
-    old_sources = _source_by_key(overlay.w03_batch)
-    new_sources = _source_by_key(overlay.w04_batch)
+    old_sources = _source_by_key(feature_catalog.w03_batch)
+    new_sources = _source_by_key(feature_catalog.w04_batch)
     alias_source = old_sources.get(previous_w03.observation.source_ref_key)
     predicate_source = new_sources.get(current_w04.observation.source_ref_key)
     if alias_source is None or predicate_source is None:
@@ -212,38 +208,42 @@ def _route_for_vertical(
 
 
 def build_learned_predicate_alias_bridge(
-        overlay: W03W04W05VerticalGeneralizationOverlay,
-        bundle: W03W04W05RawQuestionGeneralization,
+        source: object,
+        bundle: object | None = None,
+        *,
+        expected_identity_sha256: str = PREDICATE_ALIAS_BRIDGE_SHA256,
         ) -> LearnedPredicateAliasBridge:
-    """Recover two-source lexical replacement routes from public learned records."""
-    if (not isinstance(overlay, W03W04W05VerticalGeneralizationOverlay)
-            or not isinstance(bundle, W03W04W05RawQuestionGeneralization)):
-        raise TypeError("predicate alias bridge inputs are invalid")
-    if bundle.overlay != overlay:
-        raise W03W04W05RawQuestionAliasError(
-            "predicate alias bridge inputs escaped one overlay")
+    """Recover lexical replacement routes from any shared question catalog."""
+    feature_catalog = raw_question_feature_catalog(
+        source if bundle is None else bundle,
+        expected_overlay=None if bundle is None else source,
+    )
     routes = tuple(sorted(
-        (_route_for_vertical(overlay, item)
-         for item in bundle.vertical_results),
+        (_route_for_vertical(feature_catalog, item)
+         for item in feature_catalog.vertical_results),
         key=LearnedPredicateAliasRoute.sha256,
     ))
     value = {
-        "overlay_validation_sha256": overlay.validation_sha256,
-        "raw_question_bundle_sha256": bundle.identity_sha256,
+        "overlay_validation_sha256": (
+            feature_catalog.overlay_validation_sha256),
+        "raw_question_bundle_sha256": (
+            feature_catalog.bundle_identity_sha256),
         "routes": [item.to_dict() for item in routes],
-        "w03_source_binding_sha256": overlay.w03_batch.source_binding.sha256(),
-        "w04_source_binding_sha256": overlay.w04_batch.source_binding.sha256(),
+        "w03_source_binding_sha256": (
+            feature_catalog.w03_batch.source_binding.sha256()),
+        "w04_source_binding_sha256": (
+            feature_catalog.w04_batch.source_binding.sha256()),
     }
     identity = _sha(value)
     bridge = LearnedPredicateAliasBridge(
-        overlay.validation_sha256,
-        bundle.identity_sha256,
-        overlay.w03_batch.source_binding.sha256(),
-        overlay.w04_batch.source_binding.sha256(),
+        feature_catalog.overlay_validation_sha256,
+        feature_catalog.bundle_identity_sha256,
+        feature_catalog.w03_batch.source_binding.sha256(),
+        feature_catalog.w04_batch.source_binding.sha256(),
         routes,
         identity,
     )
-    if identity != PREDICATE_ALIAS_BRIDGE_SHA256:
+    if identity != expected_identity_sha256:
         raise W03W04W05RawQuestionAliasError(
             "predicate alias bridge commitment drifted")
     return bridge
@@ -342,35 +342,30 @@ def _alias_match(
         construction, alias_surface, resolution, aligned)
 
 
-def run_raw_question_predicate_alias_answer(
+def run_question_feature_predicate_alias_answer(
         bridge: LearnedPredicateAliasBridge,
-        catalog: tuple[RawQuestionConstruction, ...],
-        w03_batch,
-        w04_batch,
-        w05_batch,
+        feature_catalog: RawQuestionFeatureCatalog,
         request: RawQuestionRequest,
-        *,
-        overlay_validation_sha256: str,
         ) -> RawQuestionPredicateAliasAnswerResult:
     """Preserve FT11 exact matching, then rewrite only a learned predicate slot."""
     if (not isinstance(bridge, LearnedPredicateAliasBridge)
+            or not isinstance(feature_catalog, RawQuestionFeatureCatalog)
             or not isinstance(request, RawQuestionRequest)):
         raise TypeError("predicate alias raw question inputs are invalid")
-    exact = run_raw_question_answer(
-        catalog,
-        w03_batch,
-        w04_batch,
-        w05_batch,
-        request,
-        overlay_validation_sha256=overlay_validation_sha256,
-    )
+    if (bridge.overlay_validation_sha256
+            != feature_catalog.overlay_validation_sha256
+            or bridge.raw_question_bundle_sha256
+            != feature_catalog.bundle_identity_sha256):
+        raise W03W04W05RawQuestionAliasError(
+            "predicate alias bridge escaped its feature catalog")
+    exact = run_raw_question_feature_answer(feature_catalog, request)
     if exact.status != "UNKNOWN":
         return RawQuestionPredicateAliasAnswerResult(
             request, exact.status, exact.answer_surface, exact, (), None, None)
     matches = tuple(sorted(
         (
             match
-            for construction in catalog
+            for construction in feature_catalog.catalog
             if (request.source_record_key is None
                 or construction.source_record_key
                 == request.source_record_key)
@@ -392,16 +387,12 @@ def run_raw_question_predicate_alias_answer(
         return RawQuestionPredicateAliasAnswerResult(
             request, "CLARIFY", None, exact, matches, None, None)
     match = selected[0]
-    normalized = run_raw_question_answer(
-        catalog,
-        w03_batch,
-        w04_batch,
-        w05_batch,
+    normalized = run_raw_question_feature_answer(
+        feature_catalog,
         RawQuestionRequest(
             match.construction.question_surface,
             request.source_record_key,
         ),
-        overlay_validation_sha256=overlay_validation_sha256,
     )
     return RawQuestionPredicateAliasAnswerResult(
         request,
@@ -414,11 +405,48 @@ def run_raw_question_predicate_alias_answer(
     )
 
 
+def run_raw_question_predicate_alias_answer(
+        bridge: LearnedPredicateAliasBridge,
+        catalog: tuple[RawQuestionConstruction, ...],
+        w03_batch,
+        w04_batch,
+        w05_batch,
+        request: RawQuestionRequest,
+        *,
+        overlay_validation_sha256: str,
+        ) -> RawQuestionPredicateAliasAnswerResult:
+    """Compatibility facade for callers that still pass six runtime parts."""
+    vertical_by_sha = {
+        item.vertical_result.sha256(): item.vertical_result
+        for item in catalog
+    }
+    pattern_by_sha = {
+        item.pattern.sha256(): item.pattern
+        for item in catalog
+    }
+    feature_catalog = RawQuestionFeatureCatalog(
+        bridge.raw_question_bundle_sha256,
+        overlay_validation_sha256,
+        tuple(vertical_by_sha[key] for key in sorted(vertical_by_sha)),
+        tuple(pattern_by_sha[key] for key in sorted(pattern_by_sha)),
+        catalog,
+        w03_batch,
+        w04_batch,
+        w05_batch,
+    )
+    return run_question_feature_predicate_alias_answer(
+        bridge,
+        feature_catalog,
+        request,
+    )
+
+
 __all__ = [
     "PREDICATE_ALIAS_ANSWER_SHA256S",
     "PREDICATE_ALIAS_BRIDGE_SHA256",
     "PREDICATE_ALIAS_EXPRESSION_BOUNDARY",
     "build_learned_predicate_alias_bridge",
     "resolve_learned_predicate_alias",
+    "run_question_feature_predicate_alias_answer",
     "run_raw_question_predicate_alias_answer",
 ]
