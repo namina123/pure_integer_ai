@@ -210,7 +210,7 @@ def _by_entry(
     }
 
 
-def _normalization_candidates(
+def lookup_indexed_alias_normalization_constructions(
         index: RawQuestionConstructionIndex,
         entry_sha256: str,
         request: RawQuestionRequest,
@@ -295,7 +295,7 @@ def run_indexed_question_construction_registry_answer_with_lookup(
                 request,
                 prior.exact_result,
                 candidates[entry.sha256()],
-                _normalization_candidates(
+                lookup_indexed_alias_normalization_constructions(
                     index,
                     entry.sha256(),
                     request,
@@ -361,6 +361,7 @@ __all__ = [
     "build_raw_question_construction_index",
     "indexed_question_feature_candidate_counts",
     "lookup_indexed_question_feature_alias_frame_constructions",
+    "lookup_indexed_alias_normalization_constructions",
     "lookup_indexed_question_feature_constructions",
     "lookup_indexed_question_feature_direct_constructions",
     "merge_indexed_question_construction_candidates",
