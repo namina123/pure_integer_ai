@@ -96,10 +96,15 @@ pure-integer-qa --jsonl
 pure-integer-sense "首页"
 pure-integer-sense "金星" --context "距离太阳第二近的行星"
 pure-integer-sense "金星" --primitive
+pure-integer-sense "金星" --proposition
+pure-integer-sense "什么是金星" --definition
 ```
 
 结果保留可回溯的来源信息，并明确区分唯一、多义、未知和未合并的来源冲突。当前 artifact 只覆盖仓库中冻结的有界公开切片；候选存在不等于项目宣称它是最终事实，也不代表已经具备开放域词典或广域问答能力。
-显式 `--primitive` 会把同一候选投影为 W-04 来源声明 primitive，保留 sense、concept、Observation、完整 SourceRef、revision 与 supersede 身份；其含义始终是“该来源如此定义、标注或列为别名”，不是项目对内容真值的最终裁定。未加该参数时，原有输出格式保持不变。
+
+显式 `--primitive` 会把同一候选投影为类型化来源声明；`--proposition` 进一步给出带结构角色、来源和生命周期的命题投影。两者的含义始终是“该来源如此定义、标注或列为别名”，不是项目对内容真值的最终裁定。
+
+显式 `--definition` 识别“什么是 X”和“X 是什么意思”两类通用中文问式。它只在词义和活动来源定义都唯一时返回来源中的定义原文；多义、跨来源冲突、未知、需要澄清、只有标签或别名、以及同一概念存在多个不同定义时都会拒绝选择。当前结果仍可能保留 Wiktionary 模板或链接标记，不进行未经来源支持的改写。所有新增模式均为显式选择，未加参数时原有输出格式保持不变。
 
 ## 仓库结构
 

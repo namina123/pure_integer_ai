@@ -96,10 +96,15 @@ Each input object receives an immediate result record. A bad line emits a typed 
 pure-integer-sense "首页"
 pure-integer-sense "金星" --context "距离太阳第二近的行星"
 pure-integer-sense "金星" --primitive
+pure-integer-sense "金星" --proposition
+pure-integer-sense "什么是金星" --definition
 ```
 
 Results retain traceable source information and distinguish unique, ambiguous, unknown, and unresolved cross-source conflict states. The current artifact covers only the frozen bounded public slice in this repository. A candidate is not a claim of definitive truth, and this probe is not an open-domain dictionary or broad-domain QA system.
-The explicit `--primitive` mode projects the same candidates as W-04 source-claim primitives while retaining sense, concept, Observation, complete SourceRef, revision, and supersede identities. Each primitive means only that its source defines, labels, or aliases the value; it is not a project-level adjudication of truth. Without this flag, the existing output format is unchanged.
+
+The explicit `--primitive` mode projects the same candidates as typed source claims. `--proposition` adds structured roles, source identity, and lifecycle information. Both modes mean only that a source defines, labels, or aliases a value; neither is a project-level adjudication of truth.
+
+The explicit `--definition` mode recognizes the general Chinese forms “什么是 X” and “X 是什么意思”. It returns source definition text only when both the sense and the active definition are unique. It refuses to select an answer for ambiguity, cross-source conflict, unknown terms, clarification cases, label-only or alias-only candidates, or multiple different definitions of one concept. Source text may still contain Wiktionary templates or link markup and is not rewritten without source support. All new modes are opt-in; the original output format is unchanged when no mode is selected.
 
 ## Repository map
 

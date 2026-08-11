@@ -17,6 +17,16 @@ from pure_integer_ai.experiments.ph2_w03_w04_source_bound_primitive import (
     project_w03_public_sense_to_w04_primitives,
     query_w03_w04_source_bound_primitives,
 )
+from pure_integer_ai.experiments.ph2_w04_w05_source_bound_proposition import (
+    project_w04_primitives_to_w05_source_bound_propositions,
+    query_w04_w05_source_bound_propositions,
+)
+from pure_integer_ai.experiments.ph2_w05_raw_definition_qa import (
+    answer_w05_raw_definition_question,
+)
+from pure_integer_ai.experiments.ph2_w05_raw_definition_qa_contract import (
+    W05RawDefinitionRequest,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -36,12 +46,27 @@ def _parser() -> argparse.ArgumentParser:
         default="zh",
         help="base language or explicit language variant",
     )
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--primitive",
         action="store_true",
         help=(
             "project matching senses as source-asserted W-04 primitives; "
             "does not adjudicate them as facts"),
+    )
+    modes.add_argument(
+        "--proposition",
+        action="store_true",
+        help=(
+            "project matching primitives as source-bound W-05 typed "
+            "propositions; authorizes only the source claim"),
+    )
+    modes.add_argument(
+        "--definition",
+        action="store_true",
+        help=(
+            "interpret surface as a raw definition question and answer only "
+            "from a unique active source definition"),
     )
     return parser
 
@@ -54,9 +79,25 @@ def main(
     """加载一次 compact artifact，执行一次查询并输出规范 JSON。"""
     args = _parser().parse_args(argv)
     runtime = load_w03_public_sense_artifact()
-    query = W03PublicSenseQuery(
-        args.surface, args.context, args.language)
-    if args.primitive:
+    query = W03PublicSenseQuery(args.surface, args.context, args.language)
+    if args.definition:
+        primitive_runtime = project_w03_public_sense_to_w04_primitives(runtime)
+        proposition_runtime = (
+            project_w04_primitives_to_w05_source_bound_propositions(
+                primitive_runtime))
+        result = answer_w05_raw_definition_question(
+            proposition_runtime,
+            W05RawDefinitionRequest(
+                args.surface, args.context, args.language),
+        )
+    elif args.proposition:
+        primitive_runtime = project_w03_public_sense_to_w04_primitives(runtime)
+        result = query_w04_w05_source_bound_propositions(
+            project_w04_primitives_to_w05_source_bound_propositions(
+                primitive_runtime),
+            query,
+        )
+    elif args.primitive:
         result = query_w03_w04_source_bound_primitives(
             project_w03_public_sense_to_w04_primitives(runtime), query)
     else:
