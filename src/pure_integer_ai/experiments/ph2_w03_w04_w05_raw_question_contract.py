@@ -148,8 +148,8 @@ class RawQuestionPattern:
                 "question pattern segments drifted")
         kinds = tuple(item.kind for item in self.segments)
         if (kinds.count("VARIABLE") != 1
-                or kinds.count("PREDICATE") != 1
-                or kinds.count("BOUNDARY") != 1
+                or kinds.count("PREDICATE") > 1
+                or kinds.count("BOUNDARY") < 1
                 or kinds.count("ROLE_FILLER") < 1):
             raise W03W04W05RawQuestionError(
                 "question pattern lacks required structural segments")

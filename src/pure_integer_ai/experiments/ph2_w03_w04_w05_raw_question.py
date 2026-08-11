@@ -116,10 +116,12 @@ def instantiate_raw_question_construction(
     if len(bindings) != role_count:
         raise W03W04W05RawQuestionError(
             "raw question pattern role count does not apply")
+    predicate_required = any(
+        item.kind == "PREDICATE" for item in pattern.segments)
     predicate = tuple(
         item for item in candidate.occurrences
         if item.identity_key == vertical.link.predicate_occurrence_key)
-    if len(predicate) != 1:
+    if predicate_required and len(predicate) != 1:
         raise W03W04W05RawQuestionError(
             "raw question predicate occurrence is unavailable")
     segments = []
