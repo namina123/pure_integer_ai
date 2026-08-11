@@ -95,9 +95,11 @@ pure-integer-qa --jsonl
 ```bash
 pure-integer-sense "首页"
 pure-integer-sense "金星" --context "距离太阳第二近的行星"
+pure-integer-sense "金星" --primitive
 ```
 
 结果保留可回溯的来源信息，并明确区分唯一、多义、未知和未合并的来源冲突。当前 artifact 只覆盖仓库中冻结的有界公开切片；候选存在不等于项目宣称它是最终事实，也不代表已经具备开放域词典或广域问答能力。
+显式 `--primitive` 会把同一候选投影为 W-04 来源声明 primitive，保留 sense、concept、Observation、完整 SourceRef、revision 与 supersede 身份；其含义始终是“该来源如此定义、标注或列为别名”，不是项目对内容真值的最终裁定。未加该参数时，原有输出格式保持不变。
 
 ## 仓库结构
 

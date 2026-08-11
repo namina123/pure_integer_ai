@@ -95,9 +95,11 @@ Each input object receives an immediate result record. A bad line emits a typed 
 ```bash
 pure-integer-sense "首页"
 pure-integer-sense "金星" --context "距离太阳第二近的行星"
+pure-integer-sense "金星" --primitive
 ```
 
 Results retain traceable source information and distinguish unique, ambiguous, unknown, and unresolved cross-source conflict states. The current artifact covers only the frozen bounded public slice in this repository. A candidate is not a claim of definitive truth, and this probe is not an open-domain dictionary or broad-domain QA system.
+The explicit `--primitive` mode projects the same candidates as W-04 source-claim primitives while retaining sense, concept, Observation, complete SourceRef, revision, and supersede identities. Each primitive means only that its source defines, labels, or aliases the value; it is not a project-level adjudication of truth. Without this flag, the existing output format is unchanged.
 
 ## Repository map
 
