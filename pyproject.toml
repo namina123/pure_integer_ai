@@ -17,6 +17,7 @@ dependencies = [
   "lxml==6.1.1",
   "markdown-it-py==4.2.0",
 ]
+
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Intended Audience :: Science/Research",
@@ -24,6 +25,9 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+
+[project.scripts]
+pure-integer-qa = "pure_integer_ai.experiments.run_ph2_w03_w04_w05_sparse_qa:main"
 
 [project.optional-dependencies]
 test = [

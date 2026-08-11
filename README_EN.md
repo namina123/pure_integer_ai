@@ -66,6 +66,16 @@ python -m pytest -q
 
 Run all commands from the repository root. CPython 3.11 and later are supported, with public CI coverage on Linux and Windows. Files under `data/*.sample` are publicly distributable format examples; builds and tests do not depend on private material or archived projects.
 
+### Experimental short-answer probe
+
+After installation, query the experimental learned result built from the current public samples:
+
+```bash
+pure-integer-qa "什么使得河水上涨？"
+```
+
+The probe accepts a raw question and can optionally restrict it with `--source-ref 1,2,...`. It emits only the sparse short result by default; add `--audit` explicitly for complete audit traces. `--repeat N` runs warm queries on the same built runtime to check bit-identical repetition. This entry point demonstrates only the capabilities covered by the current public learned samples; it is not broad-domain QA or mature dialogue.
+
 ## Repository map
 
 - `src/pure_integer_ai/`: installable source package

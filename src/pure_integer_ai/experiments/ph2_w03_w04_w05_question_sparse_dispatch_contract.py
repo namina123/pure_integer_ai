@@ -481,6 +481,23 @@ class RawQuestionSparseDispatchProbe:
             raise W03W04W05QuestionSparseDispatchError(
                 "sparse probe trace counts diverged")
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "created_alias_result_count": self.created_alias_result_count,
+            "created_dispatch_trace_count": (
+                self.created_dispatch_trace_count),
+            "created_exact_result_count": self.created_exact_result_count,
+            "created_implicit_result_count": (
+                self.created_implicit_result_count),
+            "phase_candidate_construction_counts": list(
+                self.phase_candidate_construction_counts),
+            "phase_candidate_entry_counts": list(
+                self.phase_candidate_entry_counts),
+            "projected_trace_count": self.projected_trace_count,
+            "sparse_trace_count": self.sparse_trace_count,
+            "visited_entry_sha256s": list(self.visited_entry_sha256s),
+        }
+
 
 __all__ = [
     "QUESTION_SPARSE_DISPATCH_EXPRESSION_BOUNDARY",
