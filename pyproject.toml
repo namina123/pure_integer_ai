@@ -41,6 +41,25 @@ package-dir = { "" = "src" }
 where = ["src"]
 include = ["pure_integer_ai*"]
 
+[tool.setuptools.data-files]
+"share/pure_integer_ai/data/ph2" = [
+  "data/ph2/sparse_qa_runtime_snapshot_v1.json",
+  "data/ph2/authored_primitive_atomic_bridge_map_generalization_v1.jsonl.sample",
+  "data/ph2/authored_primitive_atomic_bridge_map_three_role_v1.jsonl.sample",
+  "data/ph2/authored_primitive_atomic_bridge_seed_generalization_v1.jsonl.sample",
+  "data/ph2/authored_primitive_atomic_bridge_seed_three_role_v1.jsonl.sample",
+  "data/ph2/authored_semantic_primitive_bridge_generalization_v1.jsonl.sample",
+  "data/ph2/authored_semantic_primitive_bridge_three_role_v1.jsonl.sample",
+  "data/ph2/authored_vertical_question_cause_generalization_v1.jsonl.sample",
+  "data/ph2/authored_vertical_question_effect_generalization_v1.jsonl.sample",
+  "data/ph2/authored_vertical_question_implicit_reason_v1.jsonl.sample",
+  "data/ph2/authored_vertical_question_implicit_result_v1.jsonl.sample",
+  "data/ph2/authored_vertical_question_three_role_actor_v1.jsonl.sample",
+  "data/ph2/authored_vertical_question_three_role_implicit_actor_v1.jsonl.sample",
+  "data/ph2/authored_vertical_question_three_role_implicit_location_v1.jsonl.sample",
+  "data/ph2/authored_vertical_question_three_role_location_v1.jsonl.sample",
+]
+
 [tool.pytest.ini_options]
 minversion = "9.0"
 testpaths = ["tests"]

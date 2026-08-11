@@ -5,6 +5,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+import tomllib
 
 import pytest
 
@@ -29,6 +30,7 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_session import (
 from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_snapshot import (
     PUBLIC_SPARSE_QA_RUNTIME_SNAPSHOT,
     PUBLIC_SPARSE_QA_SOURCE_ARTIFACTS,
+    PUBLIC_SPARSE_QA_SOURCE_ARTIFACT_SHA256S,
     SPARSE_QA_RUNTIME_SNAPSHOT_SCHEMA_VERSION,
     SPARSE_QA_RUNTIME_SNAPSHOT_VALUE_TYPES_SHA256,
     SparseQARuntimeSnapshotError,
@@ -93,6 +95,7 @@ def test_snapshot_envelope_inventory_and_idempotent_bytes(
     assert snapshot_value["value_type_inventory_sha256"] == (
         SPARSE_QA_RUNTIME_SNAPSHOT_VALUE_TYPES_SHA256)
     assert len(PUBLIC_SPARSE_QA_SOURCE_ARTIFACTS) == 14
+    assert len(PUBLIC_SPARSE_QA_SOURCE_ARTIFACT_SHA256S) == 14
     target = write_public_sparse_qa_runtime_snapshot(
         runtime, tmp_path / "snapshot.json")
     assert target.read_bytes() == PUBLIC_SPARSE_QA_RUNTIME_SNAPSHOT.read_bytes()
@@ -237,8 +240,8 @@ def test_missing_or_invalid_snapshot_explicitly_rebuilds(
 
     calls = []
 
-    def rebuild(work_root):
-        calls.append(work_root)
+    def rebuild(work_root, *, data_root):
+        calls.append((work_root, Path(data_root)))
         return runtime
 
     monkeypatch.setattr(snapshot, "build_public_sparse_qa_runtime", rebuild)
@@ -246,14 +249,47 @@ def test_missing_or_invalid_snapshot_explicitly_rebuilds(
     restored = load_or_rebuild_public_sparse_qa_runtime(
         tmp_path / "missing.json", work_root=work_root)
     assert restored is runtime
-    assert calls == [work_root]
+    expected = (work_root, snapshot.REPOSITORY / "data/ph2")
+    assert calls == [expected]
 
     invalid = tmp_path / "invalid.json"
     invalid.write_bytes(b"{}\n")
     restored = load_or_rebuild_public_sparse_qa_runtime(
         invalid, work_root=work_root)
     assert restored is runtime
-    assert calls == [work_root, work_root]
+    assert calls == [expected, expected]
+
+
+def test_snapshot_rebuild_refuses_incomplete_distribution_resources(
+        tmp_path, monkeypatch) -> None:
+    from pure_integer_ai.experiments import (
+        ph2_w03_w04_w05_sparse_qa_snapshot as snapshot,
+    )
+
+    calls = []
+
+    def rebuild(work_root, *, data_root):
+        calls.append((work_root, data_root))
+        raise AssertionError("incomplete resources must not rebuild")
+
+    monkeypatch.setattr(snapshot, "build_public_sparse_qa_runtime", rebuild)
+    with pytest.raises(
+            SparseQARuntimeSnapshotError,
+            match="complete frozen rebuild resources are unavailable"):
+        load_or_rebuild_public_sparse_qa_runtime(
+            repository=tmp_path / "empty-distribution")
+    assert calls == []
+
+
+def test_distribution_data_files_match_runtime_resource_contract() -> None:
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    configured = tuple(
+        pyproject["tool"]["setuptools"]["data-files"]
+        ["share/pure_integer_ai/data/ph2"])
+    assert configured == (
+        "data/ph2/sparse_qa_runtime_snapshot_v1.json",
+        *PUBLIC_SPARSE_QA_SOURCE_ARTIFACTS,
+    )
 
 
 def test_snapshot_implementation_forbids_unsafe_object_cache_formats() -> None:

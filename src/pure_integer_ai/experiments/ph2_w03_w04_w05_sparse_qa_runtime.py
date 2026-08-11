@@ -92,26 +92,28 @@ PUBLIC_DATA = REPOSITORY / "data/ph2"
 
 def _compile_overlay(
         root: Path,
+        public_data: Path,
         semantic_sample: str,
         primitive_map_sample: str,
         atomic_sample: str,
         builder,
         ):
     base = compile_authored_semantic_primitive_bridge_course(
-        PUBLIC_DATA / semantic_sample,
+        public_data / semantic_sample,
         root / "base",
     )
     donor = compile_authored_primitive_atomic_bridge_course(
-        PUBLIC_DATA / primitive_map_sample,
-        PUBLIC_DATA / atomic_sample,
+        public_data / primitive_map_sample,
+        public_data / atomic_sample,
         root / "donor",
     )
     return builder(base, donor)
 
 
-def _build_public_registry(work_root: Path):
+def _build_public_registry(work_root: Path, public_data: Path):
     two_overlay = _compile_overlay(
         work_root / "two_role",
+        public_data,
         "authored_semantic_primitive_bridge_generalization_v1.jsonl.sample",
         "authored_primitive_atomic_bridge_map_generalization_v1.jsonl.sample",
         "authored_primitive_atomic_bridge_seed_generalization_v1.jsonl.sample",
@@ -119,9 +121,9 @@ def _build_public_registry(work_root: Path):
     )
     two_explicit = build_raw_question_generalization(
         two_overlay,
-        PUBLIC_DATA / (
+        public_data / (
             "authored_vertical_question_cause_generalization_v1.jsonl.sample"),
-        PUBLIC_DATA / (
+        public_data / (
             "authored_vertical_question_effect_generalization_v1.jsonl.sample"),
     )
     two_catalog = raw_question_feature_catalog(two_explicit)
@@ -130,15 +132,16 @@ def _build_public_registry(work_root: Path):
         build_learned_predicate_alias_bridge(two_catalog),
         build_implicit_question_bundle(
             two_catalog,
-            PUBLIC_DATA / (
+            public_data / (
                 "authored_vertical_question_implicit_reason_v1.jsonl.sample"),
-            PUBLIC_DATA / (
+            public_data / (
                 "authored_vertical_question_implicit_result_v1.jsonl.sample"),
         ),
     )
 
     three_overlay = _compile_overlay(
         work_root / "three_role",
+        public_data,
         "authored_semantic_primitive_bridge_three_role_v1.jsonl.sample",
         "authored_primitive_atomic_bridge_map_three_role_v1.jsonl.sample",
         "authored_primitive_atomic_bridge_seed_three_role_v1.jsonl.sample",
@@ -146,16 +149,16 @@ def _build_public_registry(work_root: Path):
     )
     three_explicit = build_three_role_question_bundle(
         three_overlay,
-        PUBLIC_DATA / (
+        public_data / (
             "authored_vertical_question_three_role_actor_v1.jsonl.sample"),
-        PUBLIC_DATA / (
+        public_data / (
             "authored_vertical_question_three_role_location_v1.jsonl.sample"),
     )
     three_composition = build_three_role_question_feature_composition(
         three_explicit,
-        PUBLIC_DATA / (
+        public_data / (
             "authored_vertical_question_three_role_implicit_actor_v1.jsonl.sample"),
-        PUBLIC_DATA / (
+        public_data / (
             "authored_vertical_question_three_role_implicit_location_v1.jsonl.sample"),
     )
     three_entry = RawQuestionFeatureRegistryEntry(
@@ -247,8 +250,11 @@ def assemble_sparse_qa_runtime(
     return value
 
 
-def _build_public_sparse_qa_runtime(work_root: Path) -> SparseQARuntime:
-    registry = _build_public_registry(work_root)
+def _build_public_sparse_qa_runtime(
+        work_root: Path,
+        public_data: Path,
+        ) -> SparseQARuntime:
+    registry = _build_public_registry(work_root, public_data)
     feature = build_raw_question_feature_index(
         registry,
         expected_identity_sha256=QUESTION_FEATURE_INDEX_SHA256,
@@ -273,14 +279,18 @@ def _build_public_sparse_qa_runtime(work_root: Path) -> SparseQARuntime:
 
 def build_public_sparse_qa_runtime(
         work_root: str | Path | None = None,
+        *,
+        data_root: str | Path = PUBLIC_DATA,
         ) -> SparseQARuntime:
     """Build the frozen public runtime once; temporary artifacts stay outside Git."""
+    public_data = Path(data_root)
     if work_root is None:
         with TemporaryDirectory(prefix="pure_integer_ai_ft22_") as temporary:
-            return _build_public_sparse_qa_runtime(Path(temporary))
+            return _build_public_sparse_qa_runtime(
+                Path(temporary), public_data)
     root = Path(work_root)
     root.mkdir(parents=True, exist_ok=True)
-    return _build_public_sparse_qa_runtime(root)
+    return _build_public_sparse_qa_runtime(root, public_data)
 
 
 def _selected_raw_result(record) -> RawQuestionAnswerResult | None:

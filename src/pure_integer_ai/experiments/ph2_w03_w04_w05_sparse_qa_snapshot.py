@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import fields, is_dataclass
 import hashlib
 from pathlib import Path
+import sysconfig
 
 from pure_integer_ai.experiments import ph2_dataset_core
 from pure_integer_ai.experiments import ph2_dataset_owner_records
@@ -57,6 +58,7 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_runtime import (
 REPOSITORY = Path(__file__).resolve().parents[3]
 PUBLIC_SPARSE_QA_RUNTIME_SNAPSHOT = (
     REPOSITORY / "data/ph2/sparse_qa_runtime_snapshot_v1.json")
+PUBLIC_SPARSE_QA_DISTRIBUTION_SUBDIRECTORY = Path("share/pure_integer_ai")
 SPARSE_QA_RUNTIME_SNAPSHOT_FORMAT = (
     "PURE_INTEGER_AI_PUBLIC_SPARSE_QA_RUNTIME_SNAPSHOT")
 SPARSE_QA_RUNTIME_SNAPSHOT_SCHEMA_VERSION = 1
@@ -90,6 +92,22 @@ PUBLIC_SPARSE_QA_SOURCE_ARTIFACTS = tuple(sorted((
     "data/ph2/authored_vertical_question_three_role_implicit_location_v1.jsonl.sample",
     "data/ph2/authored_vertical_question_three_role_location_v1.jsonl.sample",
 )))
+PUBLIC_SPARSE_QA_SOURCE_ARTIFACT_SHA256S = (
+    "2156bf4a45bf1b26e6a06973363dca4ba4d411e1a89615c4f7c3c4f37ac9a54b",
+    "319e828f06a67104398e08514e96191adf963ff858f58297ac351a625ac2cbe4",
+    "6cb072f139206044d9fc09922839979065e20e912830f0e5cf0a95c7886c6d9b",
+    "73fe807061351c4493e65cb409854337887bc23a3aff610c902b27eebd1993cb",
+    "dcf4b9a33d8ca0a526c568dd0105301271316fe352cb9abccbd81f21cc8f6e96",
+    "7978cce4cc91f0967319a5b837d06a88e0326b5f391c66aa004ea1bb594e23a4",
+    "dd70024336d9dd6a493d7e36bce93f908512b75ae57ef050eddfdf9324b2aa5f",
+    "b3b71546de9dc46b243ef2299b4be1b06fa6c58c5f183794c846cdef1f91d897",
+    "be32062c4ba221d2c1f81dae540fa31425fa7ab55e3c3765c6d0aec1b09e0fd8",
+    "378bdc58a4b57d2a31e4d35a60e299cbc4a1f174229454efb60fbe7bb1f60f0d",
+    "9b3e8fc8fbd3687d95857f7e69bff49be370df0456c6a7d98454a7dba2c14ed0",
+    "266b2a273442e0e896bc9cea270ada2c66565d9bc85dacc2d9202c598be94679",
+    "d6113523b89a62941ee76d7d832e64c7076afe0eee02d0380883634ef6179837",
+    "5a9b094da5202733998562f83e59c1aa14fbea751f20c09a01cf386e1ff85c95",
+)
 
 
 # object-model: exception
@@ -233,6 +251,73 @@ def public_sparse_qa_source_artifact_identities(
             "sha256": _sha256_path(path),
         })
     return values
+
+
+def _expected_public_sparse_qa_source_artifact_identities(
+        ) -> list[dict[str, str]]:
+    return [
+        {"path": relative, "sha256": sha256}
+        for relative, sha256 in zip(
+            PUBLIC_SPARSE_QA_SOURCE_ARTIFACTS,
+            PUBLIC_SPARSE_QA_SOURCE_ARTIFACT_SHA256S,
+            strict=True,
+        )
+    ]
+
+
+def _public_sparse_qa_rebuild_resources_match(repository: Path) -> bool:
+    try:
+        return public_sparse_qa_source_artifact_identities(repository) == (
+            _expected_public_sparse_qa_source_artifact_identities())
+    except SparseQARuntimeSnapshotError:
+        return False
+
+
+def _installed_public_sparse_qa_resource_roots() -> tuple[Path, ...]:
+    data_roots: list[Path] = []
+    current = sysconfig.get_path("data")
+    if current:
+        data_roots.append(Path(current))
+    for scheme in sysconfig.get_scheme_names():
+        if not scheme.endswith("_user"):
+            continue
+        try:
+            value = sysconfig.get_path("data", scheme=scheme)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if value:
+            data_roots.append(Path(value))
+    roots = []
+    seen = set()
+    for data_root in data_roots:
+        root = (data_root / PUBLIC_SPARSE_QA_DISTRIBUTION_SUBDIRECTORY).resolve()
+        if root not in seen:
+            seen.add(root)
+            roots.append(root)
+    return tuple(roots)
+
+
+def _default_public_sparse_qa_resource_root() -> Path:
+    for root in (REPOSITORY, *_installed_public_sparse_qa_resource_roots()):
+        if _public_sparse_qa_rebuild_resources_match(root):
+            return root
+    return REPOSITORY
+
+
+def _resolve_public_sparse_qa_runtime_resources(
+        path: str | Path | None,
+        repository: str | Path | None,
+        ) -> tuple[Path, Path]:
+    if repository is None:
+        root = (
+            REPOSITORY if path is not None
+            else _default_public_sparse_qa_resource_root())
+    else:
+        root = Path(repository).resolve()
+    source = (
+        root / "data/ph2/sparse_qa_runtime_snapshot_v1.json"
+        if path is None else Path(path))
+    return source, root
 
 
 def _encode_value_graph(root: RawQuestionFeatureRegistry) -> dict[str, object]:
@@ -476,13 +561,14 @@ def write_public_sparse_qa_runtime_snapshot(
 
 
 def load_public_sparse_qa_runtime_snapshot(
-        path: str | Path = PUBLIC_SPARSE_QA_RUNTIME_SNAPSHOT,
+        path: str | Path | None = None,
         *,
-        repository: str | Path = REPOSITORY,
+        repository: str | Path | None = None,
         ) -> SparseQARuntime:
     """Fail closed unless the complete typed snapshot and all parents match."""
     try:
-        source = Path(path)
+        source, resource_root = _resolve_public_sparse_qa_runtime_resources(
+            path, repository)
         if (not source.is_file()
                 or not 1 < source.stat().st_size
                 <= SPARSE_QA_RUNTIME_SNAPSHOT_MAX_BYTES):
@@ -531,8 +617,11 @@ def load_public_sparse_qa_runtime_snapshot(
                 != SPARSE_QA_RUNTIME_SNAPSHOT_VALUE_TYPES_SHA256):
             raise SparseQARuntimeSnapshotError(
                 "FT24B value type inventory drifted")
-        if (envelope["source_artifacts"]
-                != public_sparse_qa_source_artifact_identities(repository)):
+        actual_source_artifacts = public_sparse_qa_source_artifact_identities(
+            resource_root)
+        if (actual_source_artifacts
+                != _expected_public_sparse_qa_source_artifact_identities()
+                or envelope["source_artifacts"] != actual_source_artifacts):
             raise SparseQARuntimeSnapshotError(
                 "FT24B public source artifact identities drifted")
         payload = envelope["payload"]
@@ -558,22 +647,38 @@ def load_public_sparse_qa_runtime_snapshot(
 
 
 def load_or_rebuild_public_sparse_qa_runtime(
-        path: str | Path = PUBLIC_SPARSE_QA_RUNTIME_SNAPSHOT,
+        path: str | Path | None = None,
         *,
-        repository: str | Path = REPOSITORY,
+        repository: str | Path | None = None,
         work_root: str | Path | None = None,
         ) -> SparseQARuntime:
     """Load the complete snapshot or explicitly perform one clean rebuild."""
+    source, resource_root = _resolve_public_sparse_qa_runtime_resources(
+        path, repository)
     try:
         return load_public_sparse_qa_runtime_snapshot(
-            path, repository=repository)
-    except SparseQARuntimeSnapshotError:
-        return build_public_sparse_qa_runtime(work_root)
+            source, repository=resource_root)
+    except SparseQARuntimeSnapshotError as snapshot_error:
+        if not _public_sparse_qa_rebuild_resources_match(resource_root):
+            raise SparseQARuntimeSnapshotError(
+                "FT24B snapshot failed and complete frozen rebuild "
+                "resources are unavailable") from snapshot_error
+        try:
+            return build_public_sparse_qa_runtime(
+                work_root,
+                data_root=resource_root / "data/ph2",
+            )
+        except Exception as rebuild_error:
+            raise SparseQARuntimeSnapshotError(
+                "FT24B snapshot failed and its complete rebuild failed") from (
+                    rebuild_error)
 
 
 __all__ = [
     "PUBLIC_SPARSE_QA_RUNTIME_SNAPSHOT",
+    "PUBLIC_SPARSE_QA_DISTRIBUTION_SUBDIRECTORY",
     "PUBLIC_SPARSE_QA_SOURCE_ARTIFACTS",
+    "PUBLIC_SPARSE_QA_SOURCE_ARTIFACT_SHA256S",
     "SPARSE_QA_RUNTIME_SNAPSHOT_BOUNDARY",
     "SPARSE_QA_RUNTIME_SNAPSHOT_FORMAT",
     "SPARSE_QA_RUNTIME_SNAPSHOT_MAX_BYTES",
