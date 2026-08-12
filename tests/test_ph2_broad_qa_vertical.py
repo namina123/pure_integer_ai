@@ -97,6 +97,36 @@ def _fixture(tmp_path: Path) -> tuple[BroadQaSelectionManifest, Path]:
     return manifest, xml
 
 
+def _many_page_fixture(
+        tmp_path: Path,
+        page_count: int,
+        ) -> tuple[BroadQaSelectionManifest, Path]:
+    """构造每页独占 block 的多 shard 小型来源。"""
+    compressed = []
+    selected = []
+    cursor = 0
+    for ordinal in range(1, page_count + 1):
+        title = f"扇入页面{ordinal:02d}"
+        payload = bz2.compress(_page(
+            ordinal, title,
+            f"{title}包含足够长的来源约束事实内容，用于验证有界合并。"))
+        start = cursor
+        cursor += len(payload)
+        compressed.append(payload)
+        selected.append(BroadQaSelectedPage(
+            ordinal, f"{ordinal:064x}", title,
+            hashlib.sha256(title.encode("utf-8")).hexdigest(),
+            ordinal, ordinal, start, cursor,
+        ))
+    xml = tmp_path / "many.xml.bz2"
+    xml.write_bytes(b"".join(compressed))
+    return BroadQaSelectionManifest(
+        "ZHWIKIPEDIA_20260701", "synthetic-many", "a" * 64,
+        "b" * 64, "c" * 40, "d" * 64, xml.stat().st_size,
+        page_count, page_count, tuple(selected),
+    ), xml
+
+
 def test_selection_manifest_round_trip_is_canonical_and_tamper_evident(
         tmp_path: Path) -> None:
     """选择只绑定 index 坐标，规范字节可回读并拒绝字段漂移。"""
@@ -354,7 +384,16 @@ def test_sharded_fresh_resume_and_worker_outputs_are_bit_identical(
         manifest, xml_path=xml, database_path=direct,
         accepted_page_limit=3, worker_count=1)
     assert resumed_report["posting_merge_strategy"] == (
-        "DIRECT_SEGMENT_KWAY_V1")
+        "BOUNDED_SEGMENT_KWAY_V1")
+    assert resumed_report["posting_merge_fan_in"] == 32
+    assert resumed_report["publication_schema_cookie"] == 11
+    assert resumed_report["temporary_merge_segment_count"] == 0
+    assert resumed_report["temporary_merge_database_bytes"] == 0
+    connection = sqlite3.connect(str(resumed))
+    try:
+        assert connection.execute("PRAGMA schema_version").fetchone() == (11,)
+    finally:
+        connection.close()
     for database in (fresh, direct):
         connection = sqlite3.connect(str(database))
         try:
@@ -380,6 +419,34 @@ def test_sharded_fresh_resume_and_worker_outputs_are_bit_identical(
     assert "李冰" in result.answer
 
 
+def test_sharded_posting_merge_bounds_fan_in_above_32_segments(
+        tmp_path: Path) -> None:
+    """33 个 segment 必须分轮合并，并清理全部临时数据库。"""
+    manifest, xml = _many_page_fixture(tmp_path, 33)
+    root = tmp_path / "fan-in-shards"
+    database = tmp_path / "fan-in.sqlite3"
+    report = build_broad_qa_sharded_index(
+        manifest,
+        xml_path=xml,
+        shard_root=root,
+        database_path=database,
+        accepted_page_count=33,
+        max_blocks_per_shard=1,
+        worker_count=4,
+    )
+    assert report["status"] == "COMPLETE"
+    assert report["posting_merge_fan_in"] == 32
+    assert report["temporary_merge_segment_count"] == 1
+    assert report["temporary_merge_database_bytes"] > 0
+    assert not tuple(tmp_path.glob("fan-in.sqlite3.merge-*"))
+    connection = sqlite3.connect(str(database))
+    try:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == (
+            "ok",)
+        assert connection.execute(
+            "SELECT count(*) FROM document").fetchone() == (33,)
+    finally:
+        connection.close()
 def test_sharded_stage_budgets_resume_and_share_projection_across_targets(
         tmp_path: Path) -> None:
     """projection/posting 可分别限额恢复，2/3 页目标不得互相占用 segment。"""
@@ -671,6 +738,15 @@ def test_public_20k_receipt_is_canonical_and_explicitly_bounded() -> None:
     assert value["term_count"] == 3_608_002
     assert value["database_bytes"] == 251_494_400
     assert len(value["database_sha256"]) == 64
+    optimization = value["publication_optimization"]
+    assert optimization["posting_merge_strategy"] == (
+        "BOUNDED_SEGMENT_KWAY_V1")
+    assert optimization["posting_merge_fan_in"] == 32
+    assert optimization["temporary_merge_segment_count"] == 9
+    assert optimization["total_elapsed_reduction_ppm"] == 355_006
+    assert optimization["posting_stage_reduction_ppm"] == 335_286
+    assert optimization["bit_identical_database_sha256"] == value[
+        "database_sha256"]
     assert value["citation_probe"]["scope"] == (
         "DEVELOPMENT_VERTICAL_PROBE_NOT_HELD_OUT")
     assert value["citation_probe"]["citation_audit_failure_count"] == 0

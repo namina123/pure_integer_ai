@@ -13,7 +13,11 @@
 
 公开固定问题集仍是 24 问开发探针，永久范围为 `DEVELOPMENT_VERTICAL_PROBE_NOT_HELD_OUT`，不是独立 held-out。20k 运行结果为 `22 ANSWER / 1 UNKNOWN / 1 CLARIFY`，22 个引用的冻结源重建审计失败数为 0；与已公开 10k 运行逐题答案和状态无变化。
 
-该结果证明的是来源约束的稀疏检索、证据抽取、拒答/澄清和可审计发布链在更大索引上的一次真实运行。它不证明通用问答、自由生成、长会话、开放域语义学习、永久记忆或断奶。20k 的 posting 外排合并和 SQLite 发布耗时仍是当前主要性能热点，后续会单独优化。
+该结果证明的是来源约束的稀疏检索、证据抽取、拒答/澄清和可审计发布链在更大索引上的一次真实运行。它不证明通用问答、自由生成、长会话、开放域语义学习、永久记忆或断奶。
+
+## 性能压缩
+
+同一组 282 个 sealed posting segment 的 publication 基线为 840.972 秒，其中 posting 临时复制和合并为 787.665 秒。改为固定 32 扇入的多轮 k-way merge 后，publication 为 542.421 秒，缩短 35.501%；posting 阶段为 523.571 秒，缩短 33.529%。进程峰值工作集从 443,523,072 bytes 降至 432,046,080 bytes。优化使用 9 个可删除临时 merge segment，并通过格式 V1 schema cookie 保持最终数据库 SHA-256 逐字节不变。全量 resume 时逐库复核 projection/posting SHA 与 SQLite integrity 的约 10 分钟成本仍是下一性能热点。
 
 ## 复核入口
 

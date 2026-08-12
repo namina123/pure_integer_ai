@@ -9,6 +9,7 @@ import heapq
 import json
 from pathlib import Path
 import sqlite3
+import tempfile
 import time
 
 from pure_integer_ai.experiments.ph2_broad_qa_contract import (
@@ -37,6 +38,10 @@ PLAN_KIND = "PH2_BROAD_QA_SHARD_PLAN_V2"
 PROJECTION_RECEIPT_KIND = "PH2_BROAD_QA_PROJECTION_SHARD_RECEIPT_V1"
 POSTING_RECEIPT_KIND = "PH2_BROAD_QA_POSTING_SHARD_RECEIPT_V1"
 PUBLICATION_RECEIPT_KIND = "PH2_BROAD_QA_SHARDED_PUBLICATION_RECEIPT_V1"
+POSTING_MERGE_FAN_IN = 32
+# 格式 V1 的历史发布流程建删临时表后固定为该 schema cookie。
+PUBLICATION_SCHEMA_COOKIE_V1 = 11
+POSTING_MERGE_STRATEGY = "BOUNDED_SEGMENT_KWAY_V1"
 
 
 # object-model: exception
@@ -328,7 +333,11 @@ def _build_projection_shard(
     database.parent.mkdir(parents=True, exist_ok=True)
     started_ns = time.perf_counter_ns()
     rss_before_bytes, peak_before_bytes = _memory_sample()
-    connection = sqlite3.connect(str(partial))
+    try:
+        connection = sqlite3.connect(str(partial))
+    except sqlite3.Error as error:
+        raise BroadQaShardedError(
+            f"projection partial 无法创建: {partial}") from error
     eligible = 0
     projected = 0
     passage_count = 0
@@ -698,7 +707,7 @@ def _copy_projection(
         projection: Path,
         *,
         cutoff_ordinal: int,
-        ) -> tuple[int, int]:
+        ) -> tuple[int, int, int]:
     """以稳定行序把 cutoff 内文档和段落复制到最终数据库。"""
     source = sqlite3.connect(
         f"file:{projection.as_posix()}?mode=ro", uri=True)
@@ -722,11 +731,11 @@ def _copy_projection(
     return document_count, passage_count
 
 
-def _merge_posting_segments(
+def _merge_posting_sources(
         target: sqlite3.Connection,
         segments: tuple[tuple[int, Path], ...],
         ) -> int:
-    """直接对已排序局部 segment 做 term/shard 稳定 k-way merge。"""
+    """对有界数量的已排序 segment 做 term/source 稳定 k-way merge。"""
     sources: list[sqlite3.Connection] = []
     cursors: list[object] = []
     heap: list[tuple[str, int, int, bytes, int]] = []
@@ -778,6 +787,65 @@ def _merge_posting_segments(
             source.close()
 
 
+def _write_merged_posting_segment(
+        path: Path,
+        segments: tuple[tuple[int, Path], ...],
+        ) -> int:
+    """把一轮有界合并写成按 term 排序的临时 SQLite segment。"""
+    partial = path.with_suffix(path.suffix + ".partial")
+    if path.exists() or partial.exists():
+        raise BroadQaShardedError("merge 临时 segment 已存在")
+    try:
+        connection = sqlite3.connect(str(partial))
+    except sqlite3.Error as error:
+        raise BroadQaShardedError(
+            f"merge partial 无法创建: {partial}") from error
+    try:
+        connection.execute(
+            "CREATE TABLE posting(term TEXT PRIMARY KEY, "
+            "document_frequency INTEGER NOT NULL, "
+            "passage_deltas BLOB NOT NULL)")
+        count = _merge_posting_sources(connection, segments)
+        connection.commit()
+    finally:
+        connection.close()
+    partial.replace(path)
+    return count
+
+
+def _merge_posting_segments(
+        target: sqlite3.Connection,
+        segments: tuple[tuple[int, Path], ...],
+        *,
+        work_dir: Path,
+        ) -> tuple[int, int]:
+    """以固定扇入多轮合并，限制同时打开的 segment 数量。"""
+    pending = list(segments)
+    round_index = 0
+    temporary_count = 0
+    temporary_bytes = 0
+    while len(pending) > POSTING_MERGE_FAN_IN:
+        next_pending = []
+        for batch_index in range(0, len(pending), POSTING_MERGE_FAN_IN):
+            batch = tuple(pending[batch_index:batch_index + POSTING_MERGE_FAN_IN])
+            if len(batch) == 1:
+                next_pending.append(batch[0])
+                continue
+            path = work_dir / (
+                f"round-{round_index:02d}-{batch_index // POSTING_MERGE_FAN_IN:04d}.sqlite3")
+            _write_merged_posting_segment(path, batch)
+            next_pending.append((batch[0][0], path))
+            temporary_count += 1
+            temporary_bytes += path.stat().st_size
+        pending = next_pending
+        round_index += 1
+    return (
+        _merge_posting_sources(target, tuple(pending)),
+        temporary_count,
+        temporary_bytes,
+    )
+
+
 def _publish_final_database(
         selection: BroadQaSelectionManifest,
         specs: tuple[BroadQaShardSpec, ...],
@@ -808,7 +876,11 @@ def _publish_final_database(
     database.parent.mkdir(parents=True, exist_ok=True)
     started_ns = time.perf_counter_ns()
     rss_before_bytes, peak_before_bytes = _memory_sample()
-    connection = sqlite3.connect(str(partial))
+    try:
+        connection = sqlite3.connect(str(partial))
+    except sqlite3.Error as error:
+        raise BroadQaShardedError(
+            f"publication partial 无法创建: {partial}") from error
     document_count = 0
     passage_count = 0
     document_merge_elapsed_ns = 0
@@ -859,13 +931,20 @@ def _publish_final_database(
         if document_count != accepted_page_count:
             raise BroadQaShardedError("final document count 漂移")
         posting_merge_started_ns = time.perf_counter_ns()
-        term_count = _merge_posting_segments(
-            connection,
-            tuple(
-                (spec.shard_id, _posting_paths(target_root, spec.shard_id)[0])
-                for spec in specs
-            ),
+        source_segments = tuple(
+            (spec.shard_id, _posting_paths(target_root, spec.shard_id)[0])
+            for spec in specs
         )
+        with tempfile.TemporaryDirectory(
+                prefix=f"{database.name}.merge-",
+                dir=str(database.parent)) as merge_directory:
+            (term_count, temporary_merge_segment_count,
+             temporary_merge_database_bytes) = (
+                _merge_posting_segments(
+                    connection,
+                    source_segments,
+                    work_dir=Path(merge_directory),
+                ))
         posting_merge_elapsed_ns = max(
             1, time.perf_counter_ns() - posting_merge_started_ns)
         metadata = {
@@ -883,6 +962,8 @@ def _publish_final_database(
         finalize_started_ns = time.perf_counter_ns()
         connection.commit()
         connection.execute("VACUUM")
+        connection.execute(
+            f"PRAGMA schema_version={PUBLICATION_SCHEMA_COOKIE_V1}")
         finalize_elapsed_ns = max(
             1, time.perf_counter_ns() - finalize_started_ns)
     finally:
@@ -903,7 +984,11 @@ def _publish_final_database(
         "plan_sha256": plan_sha256,
         "posting_merge_elapsed_ns": posting_merge_elapsed_ns,
         "posting_part_copy_elapsed_ns": posting_part_copy_elapsed_ns,
-        "posting_merge_strategy": "DIRECT_SEGMENT_KWAY_V1",
+        "posting_merge_strategy": POSTING_MERGE_STRATEGY,
+        "publication_schema_cookie": PUBLICATION_SCHEMA_COOKIE_V1,
+        "posting_merge_fan_in": POSTING_MERGE_FAN_IN,
+        "temporary_merge_segment_count": temporary_merge_segment_count,
+        "temporary_merge_database_bytes": temporary_merge_database_bytes,
         "process_peak_working_set_bytes": max(
             peak_before_bytes, peak_after_bytes),
         "rss_after_bytes": rss_after_bytes,
