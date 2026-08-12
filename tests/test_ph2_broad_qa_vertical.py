@@ -349,6 +349,28 @@ def test_sharded_fresh_resume_and_worker_outputs_are_bit_identical(
     )
     assert resumed_report["database_sha256"] == fresh_report["database_sha256"]
     assert resumed.read_bytes() == fresh.read_bytes()
+    direct = tmp_path / "direct.sqlite3"
+    direct_report = build_broad_qa_index(
+        manifest, xml_path=xml, database_path=direct,
+        accepted_page_limit=3, worker_count=1)
+    assert resumed_report["posting_merge_strategy"] == (
+        "DIRECT_SEGMENT_KWAY_V1")
+    for database in (fresh, direct):
+        connection = sqlite3.connect(str(database))
+        try:
+            assert connection.execute(
+                "SELECT count(*) FROM document").fetchone() == (3,)
+            assert connection.execute(
+                "SELECT count(*) FROM passage").fetchone() == (
+                    connection.execute(
+                        "SELECT cast(value AS INTEGER) FROM metadata "
+                        "WHERE key='passage_count'").fetchone()[0],)
+            result = query_broad_qa(
+                connection, "谁主持修建都江堰用于防洪？")
+            assert result.status == "ANSWER"
+            assert "李冰" in result.answer
+        finally:
+            connection.close()
     connection = sqlite3.connect(str(resumed))
     try:
         result = query_broad_qa(connection, "谁主持修建都江堰用于防洪？")

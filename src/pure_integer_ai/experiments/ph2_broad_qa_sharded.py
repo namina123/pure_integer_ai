@@ -722,25 +722,60 @@ def _copy_projection(
     return document_count, passage_count
 
 
-def _copy_posting_parts(
+def _merge_posting_segments(
         target: sqlite3.Connection,
-        segment: Path,
-        *,
-        shard_id: int,
-        ) -> None:
-    """把局部 posting payload 复制到最终库的外排合并表。"""
-    source = sqlite3.connect(
-        f"file:{segment.as_posix()}?mode=ro", uri=True)
+        segments: tuple[tuple[int, Path], ...],
+        ) -> int:
+    """直接对已排序局部 segment 做 term/shard 稳定 k-way merge。"""
+    sources: list[sqlite3.Connection] = []
+    cursors: list[object] = []
+    heap: list[tuple[str, int, int, bytes, int]] = []
     try:
-        for term, frequency, payload in source.execute(
+        for cursor_index, (shard_id, segment) in enumerate(segments):
+            source = sqlite3.connect(
+                f"file:{segment.as_posix()}?mode=ro", uri=True)
+            sources.append(source)
+            cursor = source.execute(
                 "SELECT term,document_frequency,passage_deltas "
-                "FROM posting ORDER BY term"):
+                "FROM posting ORDER BY term")
+            cursors.append(cursor)
+            row = cursor.fetchone()
+            if row is not None:
+                term, frequency, payload = row
+                heapq.heappush(
+                    heap, (term, shard_id, frequency, payload, cursor_index))
+        term_count = 0
+        while heap:
+            term = heap[0][0]
+            restored: list[int] = []
+            expected_frequency = 0
+            while heap and heap[0][0] == term:
+                _, shard_id, frequency, payload, cursor_index = heapq.heappop(
+                    heap)
+                values = _restore(payload)
+                if len(values) != frequency:
+                    raise BroadQaShardedError(
+                        "posting segment frequency 漂移")
+                expected_frequency += frequency
+                restored.extend(values)
+                row = cursors[cursor_index].fetchone()
+                if row is not None:
+                    next_term, next_frequency, next_payload = row
+                    heapq.heappush(
+                        heap, (next_term, shard_id, next_frequency,
+                               next_payload, cursor_index))
+            restored.sort()
+            if len(restored) != expected_frequency:
+                raise BroadQaShardedError("merged posting frequency 漂移")
             target.execute(
-                "INSERT INTO posting_part VALUES(?,?,?,?)",
-                (term, shard_id, frequency, payload),
+                "INSERT INTO posting VALUES(?,?,?)",
+                (term, len(restored), encode_integer_tuple(_delta(restored))),
             )
+            term_count += 1
+        return term_count
     finally:
-        source.close()
+        for source in sources:
+            source.close()
 
 
 def _publish_final_database(
@@ -808,12 +843,6 @@ def _publish_final_database(
                 document_frequency INTEGER NOT NULL,
                 passage_deltas BLOB NOT NULL
             );
-            CREATE TABLE posting_part(
-                term TEXT NOT NULL,
-                shard_id INTEGER NOT NULL,
-                document_frequency INTEGER NOT NULL,
-                passage_deltas BLOB NOT NULL
-            );
             CREATE INDEX passage_doc ON passage(doc_id, ordinal);
             CREATE INDEX document_title ON document(title);
         """)
@@ -826,44 +855,19 @@ def _publish_final_database(
                 1, time.perf_counter_ns() - phase_started_ns)
             document_count += docs
             passage_count += passages
-            segment, _ = _posting_paths(target_root, spec.shard_id)
-            phase_started_ns = time.perf_counter_ns()
-            _copy_posting_parts(
-                connection, segment, shard_id=spec.shard_id)
-            posting_part_copy_elapsed_ns += max(
-                1, time.perf_counter_ns() - phase_started_ns)
+            # segment 只在合并阶段按 term page-in，不复制进临时总表。
         if document_count != accepted_page_count:
             raise BroadQaShardedError("final document count 漂移")
-        connection.execute(
-            "CREATE INDEX posting_part_order ON posting_part(term,shard_id)")
         posting_merge_started_ns = time.perf_counter_ns()
-        term_count = 0
-        rows = connection.execute("""
-            SELECT term,shard_id,document_frequency,passage_deltas
-            FROM posting_part ORDER BY term,shard_id
-        """)
-        for term, group in groupby(rows, key=lambda item: item[0]):
-            restored = []
-            expected_frequency = 0
-            for _, _, frequency, payload in group:
-                values = _restore(payload)
-                if len(values) != frequency:
-                    raise BroadQaShardedError(
-                        "posting segment frequency 漂移")
-                expected_frequency += frequency
-                restored.extend(values)
-            restored.sort()
-            if len(restored) != expected_frequency:
-                raise BroadQaShardedError("merged posting frequency 漂移")
-            connection.execute(
-                "INSERT INTO posting VALUES(?,?,?)",
-                (term, len(restored), encode_integer_tuple(_delta(restored))),
-            )
-            term_count += 1
+        term_count = _merge_posting_segments(
+            connection,
+            tuple(
+                (spec.shard_id, _posting_paths(target_root, spec.shard_id)[0])
+                for spec in specs
+            ),
+        )
         posting_merge_elapsed_ns = max(
             1, time.perf_counter_ns() - posting_merge_started_ns)
-        connection.execute("DROP INDEX posting_part_order")
-        connection.execute("DROP TABLE posting_part")
         metadata = {
             "accepted_page_count": str(accepted_page_count),
             "index_schema_version": str(INDEX_SCHEMA_VERSION),
@@ -899,6 +903,7 @@ def _publish_final_database(
         "plan_sha256": plan_sha256,
         "posting_merge_elapsed_ns": posting_merge_elapsed_ns,
         "posting_part_copy_elapsed_ns": posting_part_copy_elapsed_ns,
+        "posting_merge_strategy": "DIRECT_SEGMENT_KWAY_V1",
         "process_peak_working_set_bytes": max(
             peak_before_bytes, peak_after_bytes),
         "rss_after_bytes": rss_after_bytes,
