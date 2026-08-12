@@ -281,11 +281,16 @@ def test_distribution_contains_only_compact_artifact_not_source_raw() -> None:
     configured = tuple(
         pyproject["tool"]["setuptools"]["data-files"]
         ["share/pure_integer_ai/data/ph2"])
-    assert configured[-1] == "data/ph2/w03_public_sense_runtime_v1.json"
+    assert configured[-2:] == (
+        "data/ph2/w03_public_sense_runtime_v1.json",
+        "data/ph2/w03_public_sense_runtime_v2.json",
+    )
     assert not any(
         "ph2_ft26_dataset_artifacts" in item
+        or "ph2_ft30_dataset_artifacts" in item
         or "multistream.xml" in item
         or "pinned_v2" in item
+        or "census" in item
         for item in configured)
 
 

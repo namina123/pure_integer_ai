@@ -99,6 +99,7 @@ pure-integer-sense "金星" --primitive
 pure-integer-sense "金星" --proposition
 pure-integer-sense "什么是金星" --definition
 pure-integer-sense "什么是金星" --context "{{lb|zh|astronomy}} [[太陽系]]的第二顆[[行星]]，為[[類地行星]]" --display-definition
+pure-integer-sense "蘇維埃社會主義共和國聯盟" --artifact-version v2
 ```
 
 结果保留可回溯的来源信息，并明确区分唯一、多义、未知和未合并的来源冲突。当前 artifact 只覆盖仓库中冻结的有界公开切片；候选存在不等于项目宣称它是最终事实，也不代表已经具备开放域词典或广域问答能力。
@@ -108,6 +109,8 @@ pure-integer-sense "什么是金星" --context "{{lb|zh|astronomy}} [[太陽系]
 显式 `--definition` 识别“什么是 X”和“X 是什么意思”两类通用中文问式。它只在词义和活动来源定义都唯一时返回来源中的定义原文；多义、跨来源冲突、未知、需要澄清、只有标签或别名、以及同一概念存在多个不同定义时都会拒绝选择。
 
 `--display-definition` 只对上述已经选定的单一来源定义做确定性展示投影，同时保留原始文本、来源、许可、修订身份和完整承诺链。当前仅支持普通 wiki 链接及 `lb`/`label` 领域标签；未知模板、嵌套或不平衡结构、非法转义、歧义链接和非唯一来源会保留 raw 并明确拒绝渲染，不会猜测、删改或调用语言模型润色。所有新增模式均为显式选择，未加参数及原 `--definition` 的输出格式保持不变。
+
+`--artifact-version v2` 显式选择基于同一公开 Wiktionary 快照、按标题长度分层和稳定哈希抽取的扩展 artifact。默认仍为冻结的 `v1`；`v2` 不按定义是否易于解析来重选词条，并保留无定义、非中文定义、redirect 和未知模板的公开审计记录。它扩大的是有来源约束的实验性覆盖，不代表已经成为完整词典或开放域问答系统。
 
 ## 仓库结构
 

@@ -21,6 +21,10 @@ from pure_integer_ai.experiments.ph2_mediawiki_snapshot import (
 from pure_integer_ai.experiments.ph2_source_pack_contract import (
     SourceObservationSeed,
 )
+from pure_integer_ai.experiments.ph2_w03_public_definition_selection_v2 import (
+    FT30PublicDefinitionSelectionManifest,
+    FT30SelectedTitle,
+)
 
 
 # object-model: exception
@@ -297,8 +301,213 @@ def targeted_mediawiki_source_seeds(
     return tuple(seeds)
 
 
+def _selected_pages_from_blocks(
+        xml_path: Path,
+        selected: tuple[FT30SelectedTitle, ...],
+        ) -> dict[tuple[int, str], tuple[ET.Element, int, int]]:
+    """只解压 manifest 命中的 block，并恢复所选 page 元素。"""
+    blocks: dict[tuple[int, int], tuple[ET.Element, ...]] = {}
+    with xml_path.open("rb") as stream:
+        for start, end in sorted({
+                (item.compressed_block_offset,
+                 item.compressed_block_end_offset)
+                for item in selected}):
+            if end > xml_path.stat().st_size:
+                raise TargetedMediaWikiSourceError(
+                    "FT30 compressed block 超出 XML 边界")
+            stream.seek(start)
+            compressed = stream.read(end - start)
+            if len(compressed) != end - start:
+                raise TargetedMediaWikiSourceError(
+                    "FT30 compressed block 读取不完整")
+            try:
+                payload = bz2.decompress(compressed)
+            except OSError as error:
+                raise TargetedMediaWikiSourceError(
+                    "FT30 目标 block 解压失败") from error
+            blocks[(start, end)] = _block_pages(payload)
+    result: dict[tuple[int, str], tuple[ET.Element, int, int]] = {}
+    for target in selected:
+        block_key = (
+            target.compressed_block_offset,
+            target.compressed_block_end_offset,
+        )
+        matches = []
+        for page in blocks[block_key]:
+            page_ids = tuple(
+                element for element in page
+                if _local_name(element.tag) == "id")
+            titles = tuple(
+                element for element in page
+                if _local_name(element.tag) == "title")
+            if (len(page_ids) == len(titles) == 1
+                    and page_ids[0].text == str(target.page_id)
+                    and titles[0].text == target.title):
+                matches.append(page)
+        if len(matches) != 1:
+            raise TargetedMediaWikiSourceError(
+                "FT30 block 未唯一恢复 manifest 目标页")
+        key = target.page_id, target.title
+        if key in result:
+            raise TargetedMediaWikiSourceError("FT30 目标页重复")
+        result[key] = (matches[0], *block_key)
+    return result
+
+
+def targeted_mediawiki_source_seeds_from_selection_v2(
+        manifest: MediaWikiDumpSnapshotManifest,
+        selection: FT30PublicDefinitionSelectionManifest,
+        *,
+        raw_root: str | Path,
+        selection_manifest_relative_path: str,
+        selection_manifest_sha256: str,
+        split: str = "train",
+        max_text_bytes_per_page: int = 2 * 1024 * 1024,
+        max_templates_per_page: int = 4096,
+        max_template_depth: int = 64,
+        ) -> tuple[SourceObservationSeed, ...]:
+    """按冻结 v2 坐标直接读 block，禁止在正式构建中重扫 index。"""
+    if (not isinstance(manifest, MediaWikiDumpSnapshotManifest)
+            or not isinstance(
+                selection, FT30PublicDefinitionSelectionManifest)):
+        raise TypeError("FT30 MediaWiki manifest/selection 类型错误")
+    if (selection.source_key != manifest.source_key
+            or selection.snapshot_id != manifest.snapshot_id):
+        raise TargetedMediaWikiSourceError("FT30 selection/snapshot 身份漂移")
+    if split not in {"train", "dev", "held_out"}:
+        raise TargetedMediaWikiSourceError("FT30 目标 split 非法")
+    for name, value in (
+            ("max_text_bytes_per_page", max_text_bytes_per_page),
+            ("max_templates_per_page", max_templates_per_page),
+            ("max_template_depth", max_template_depth)):
+        if type(value) is not int or value <= 0:
+            raise TargetedMediaWikiSourceError(f"FT30 {name} 非正整数")
+    raw = Path(raw_root).resolve()
+    xml_file = _raw_file(manifest, "XML")
+    index_file = _raw_file(manifest, "INDEX")
+    xml_path = _safe_raw_path(raw, xml_file.raw_relative_path)
+    index_path = _safe_raw_path(raw, index_file.raw_relative_path)
+    if (xml_path.stat().st_size != xml_file.compressed_size_bytes
+            or index_path.stat().st_size != index_file.compressed_size_bytes
+            or selection.index_raw_relative_path
+            != index_file.raw_relative_path
+            or selection.index_compressed_size_bytes
+            != index_file.compressed_size_bytes
+            or selection.index_local_sha256 != index_file.local_sha256
+            or selection.index_upstream_sha1 != index_file.upstream_sha1):
+        raise TargetedMediaWikiSourceError("FT30 raw/selection identity 漂移")
+    pages = _selected_pages_from_blocks(
+        xml_path, selection.selected_titles)
+    budget = MediaWikiScanBudget(
+        max_pages=len(selection.selected_titles),
+        max_xml_events=len(selection.selected_titles) * 2048,
+        max_text_bytes_per_page=max_text_bytes_per_page,
+        max_templates_per_page=max_templates_per_page,
+        max_template_depth=max_template_depth,
+    )
+    seeds = []
+    for ordinal, target in enumerate(selection.selected_titles, start=1):
+        page, block_start, block_end = pages[(target.page_id, target.title)]
+        try:
+            record = parse_mediawiki_page(
+                page,
+                source_key=manifest.source_key,
+                extract_templates=True,
+                budget=budget,
+            )
+        except MediaWikiPageError as error:
+            raise TargetedMediaWikiSourceError(
+                f"FT30 目标页解析失败: {error.code}") from error
+        text = _page_text(page)
+        length = _length_bucket(record.text_size_bytes)
+        axes = {
+            "code_switch": "UNASSESSED",
+            "dialect": "UNASSESSED",
+            "domain": "lexicon",
+            "era": manifest.dump_date,
+            "genre": "dictionary_entry",
+            "language": "zh",
+            "length": length,
+            "register": "UNASSESSED",
+            "script_orthography": "ZH_WIKIMEDIA_RAW",
+            "source": manifest.source_key,
+            "source_document_cluster": f"page:{record.page_id}",
+            "title_length_stratum": target.stratum,
+        }
+        contributor = record.contributor.to_value()
+        raw_observation = {
+            "contributor": contributor,
+            "page_id": record.page_id,
+            "redirect_title": record.redirect_title,
+            "revision_id": record.revision_id,
+            "text": text,
+            "timestamp": record.timestamp,
+            "title": record.title,
+        }
+        source_span = {
+            "compressed_block_end_offset": block_end,
+            "compressed_block_offset": block_start,
+            "compressed_raw_relative_path": xml_file.raw_relative_path,
+            "contributor": contributor,
+            "index_line_number": target.index_line_number,
+            "index_local_sha256": index_file.local_sha256,
+            "index_raw_relative_path": index_file.raw_relative_path,
+            "namespace_id": record.namespace_id,
+            "page_id": record.page_id,
+            "revision_id": record.revision_id,
+            "selection_manifest_relative_path": (
+                selection_manifest_relative_path),
+            "selection_manifest_sha256": selection_manifest_sha256,
+            "selection_sha256": target.selection_sha256,
+            "text_sha256": record.text_sha256,
+            "timestamp": record.timestamp,
+            "title_length": target.title_length,
+            "title_length_stratum": target.stratum,
+            "title_sha256": target.title_sha256,
+        }
+        seeds.append(SourceObservationSeed(
+            f"page-{record.page_id}-revision-{record.revision_id}",
+            split,
+            "zh",
+            "mediawiki-raw-wikitext",
+            (
+                f"{xml_file.raw_relative_path}#page={record.page_id}"
+                f";revision={record.revision_id}"
+            ),
+            "sha1:" + xml_file.upstream_sha1,
+            xml_file.local_sha256,
+            CanonicalJsonObject.from_value(source_span),
+            CanonicalJsonObject.from_value(raw_observation),
+            CanonicalJsonObject.from_value(axes),
+            ("page", record.page_id),
+            ("text", record.text_sha256),
+            ("page", record.page_id, record.revision_id),
+            (
+                "page", record.page_id,
+                "redirect" if record.redirect_title else "article",
+                "lexicon",
+            ),
+            (
+                "page", record.page_id,
+                "length", length,
+                "line_count", text.count("\n") + 1,
+                "template_count", len(record.templates),
+            ),
+            tuple(
+                value
+                for key in sorted(axes)
+                for value in (key, axes[key])
+            ),
+            "support" if split == "train" else "read_only_probe",
+            "NONE",
+            ordinal,
+        ))
+    return tuple(seeds)
+
+
 __all__ = [
     "TargetedMediaWikiSourceError",
     "targeted_mediawiki_source_seeds",
+    "targeted_mediawiki_source_seeds_from_selection_v2",
     "verify_targeted_mediawiki_raw_identities",
 ]

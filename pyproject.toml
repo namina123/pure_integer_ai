@@ -60,6 +60,7 @@ include = ["pure_integer_ai*"]
   "data/ph2/authored_vertical_question_three_role_implicit_location_v1.jsonl.sample",
   "data/ph2/authored_vertical_question_three_role_location_v1.jsonl.sample",
   "data/ph2/w03_public_sense_runtime_v1.json",
+  "data/ph2/w03_public_sense_runtime_v2.json",
 ]
 
 [tool.pytest.ini_options]

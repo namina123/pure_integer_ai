@@ -49,6 +49,12 @@ def _parser() -> argparse.ArgumentParser:
         default="zh",
         help="base language or explicit language variant",
     )
+    parser.add_argument(
+        "--artifact-version",
+        choices=("v1", "v2"),
+        default="v1",
+        help="explicit compact public-sense artifact version",
+    )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(
         "--primitive",
@@ -88,7 +94,8 @@ def main(
         ) -> int:
     """加载一次 compact artifact，执行一次查询并输出规范 JSON。"""
     args = _parser().parse_args(argv)
-    runtime = load_w03_public_sense_artifact()
+    runtime = load_w03_public_sense_artifact(
+        artifact_version=args.artifact_version)
     query = W03PublicSenseQuery(args.surface, args.context, args.language)
     if args.definition or args.display_definition:
         primitive_runtime = project_w03_public_sense_to_w04_primitives(runtime)

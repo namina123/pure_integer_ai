@@ -274,3 +274,26 @@ coverage ledger records zero D-03 publication, W-01 start, formal training,
 teacher calls, learning-state writes, mastered claims, and readiness claims.
 Pack publication and compiler success do not assert that any language
 capability has been learned.
+
+## FT30 Wiktionary public-definition v2 slice
+
+`manifests/ft30_w03_public_definition_selection_v2.json`,
+`manifests/ft30_w03_public_definition_census_v2.json`,
+`w03_public_sense_runtime_v2.json`, and the source pack below
+`ph2_ft30_dataset_artifacts/public_definition_source_v2` form one bounded
+derived slice of the 2026-07-01 Chinese Wiktionary snapshot.
+
+SPDX-License-Identifier: CC-BY-SA-4.0
+
+Source: https://dumps.wikimedia.org/zhwiktionary/20260701/
+
+License: https://creativecommons.org/licenses/by-sa/4.0/
+
+The selection is fixed by snapshot identity, title-length strata, and stable
+title hashing rather than parsing outcome. Source records retain page title,
+page id, revision id, revision timestamp, contributor metadata, source URL,
+license, and attribution. The compact runtime and census repeat the required
+page/revision/contributor attribution for each included derived definition or
+redirect, so their records remain attributable without the bulk dump. These
+source definitions are external observations and are not project-adjudicated
+truth, mastery evidence, or an open-domain capability claim.

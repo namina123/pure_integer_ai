@@ -31,6 +31,12 @@ PUBLIC_W03_SENSE_ARTIFACT = (
 PUBLIC_W03_SENSE_DISTRIBUTION_SUBDIRECTORY = Path("share/pure_integer_ai")
 PUBLIC_W03_SENSE_ARTIFACT_SHA256 = (
     "7e0e1ae1b4c7bb334d9581c887f880949c5a43c64ca68aad4a9e05a6206e3792")
+PUBLIC_W03_SENSE_ARTIFACT_V2_RELATIVE_PATH = Path(
+    "data/ph2/w03_public_sense_runtime_v2.json")
+PUBLIC_W03_SENSE_ARTIFACT_V2 = (
+    REPOSITORY / PUBLIC_W03_SENSE_ARTIFACT_V2_RELATIVE_PATH)
+PUBLIC_W03_SENSE_ARTIFACT_V2_SHA256 = (
+    "db3200d42004cc1fdcf03cbd5872e37a7437872b688fae79c322eb0eff70946a")
 
 
 # object-model: exception
@@ -75,10 +81,34 @@ def _installed_resource_roots() -> tuple[Path, ...]:
     return tuple(values)
 
 
-def _candidate_artifact_paths() -> tuple[Path, ...]:
+def _artifact_identity(
+        artifact_version: str,
+        ) -> tuple[Path, Path, str, int]:
+    """返回显式版本的 checkout 路径、相对路径、SHA 与 envelope 版本。"""
+    if artifact_version == "v1":
+        return (
+            PUBLIC_W03_SENSE_ARTIFACT,
+            PUBLIC_W03_SENSE_ARTIFACT_RELATIVE_PATH,
+            PUBLIC_W03_SENSE_ARTIFACT_SHA256,
+            W03_PUBLIC_SENSE_ARTIFACT_VERSION,
+        )
+    if artifact_version == "v2":
+        return (
+            PUBLIC_W03_SENSE_ARTIFACT_V2,
+            PUBLIC_W03_SENSE_ARTIFACT_V2_RELATIVE_PATH,
+            PUBLIC_W03_SENSE_ARTIFACT_V2_SHA256,
+            2,
+        )
+    raise W03PublicSenseRuntimeError(
+        "public sense artifact version 非法")
+
+
+def _candidate_artifact_paths(
+        relative_path: Path = PUBLIC_W03_SENSE_ARTIFACT_RELATIVE_PATH,
+        ) -> tuple[Path, ...]:
     """返回 source checkout 与安装 data scheme 中的 artifact 候选。"""
     return tuple(
-        root / PUBLIC_W03_SENSE_ARTIFACT_RELATIVE_PATH
+        root / relative_path
         for root in (REPOSITORY, *_installed_resource_roots())
     )
 
@@ -124,12 +154,17 @@ class W03PublicSenseRuntime:
 
 def load_w03_public_sense_artifact(
         path: str | Path | None = None,
+        *,
+        artifact_version: str = "v1",
         ) -> W03PublicSenseRuntime:
     """严格恢复 canonical artifact，缺失或任一 commitment 漂移即拒绝。"""
+    default_path, relative_path, expected_sha256, envelope_version = (
+        _artifact_identity(artifact_version))
     if path is None:
         source = next(
-            (item for item in _candidate_artifact_paths() if item.is_file()),
-            PUBLIC_W03_SENSE_ARTIFACT,
+            (item for item in _candidate_artifact_paths(relative_path)
+             if item.is_file()),
+            default_path,
         )
     else:
         source = Path(path).resolve()
@@ -143,7 +178,7 @@ def load_w03_public_sense_artifact(
         raise W03PublicSenseRuntimeError(
             "public sense artifact 大小或终止换行非法")
     actual_sha256 = hashlib.sha256(raw).hexdigest()
-    if actual_sha256 != PUBLIC_W03_SENSE_ARTIFACT_SHA256:
+    if actual_sha256 != expected_sha256:
         raise W03PublicSenseRuntimeError(
             "public sense artifact canonical SHA 漂移")
     try:
@@ -161,7 +196,7 @@ def load_w03_public_sense_artifact(
     ), where="public sense envelope")
     if (envelope["format"] != W03_PUBLIC_SENSE_FORMAT
             or envelope["schema_version"] != W03_PUBLIC_SENSE_SCHEMA_VERSION
-            or envelope["artifact_version"] != W03_PUBLIC_SENSE_ARTIFACT_VERSION
+            or envelope["artifact_version"] != envelope_version
             or (
                 envelope["experimental"],
                 envelope["formal_mastery_claim"],
@@ -331,6 +366,9 @@ __all__ = [
     "PUBLIC_W03_SENSE_ARTIFACT",
     "PUBLIC_W03_SENSE_ARTIFACT_RELATIVE_PATH",
     "PUBLIC_W03_SENSE_ARTIFACT_SHA256",
+    "PUBLIC_W03_SENSE_ARTIFACT_V2",
+    "PUBLIC_W03_SENSE_ARTIFACT_V2_RELATIVE_PATH",
+    "PUBLIC_W03_SENSE_ARTIFACT_V2_SHA256",
     "PUBLIC_W03_SENSE_DISTRIBUTION_SUBDIRECTORY",
     "W03PublicSenseRuntime",
     "W03PublicSenseRuntimeError",
