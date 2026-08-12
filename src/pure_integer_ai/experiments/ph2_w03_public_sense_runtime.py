@@ -37,6 +37,12 @@ PUBLIC_W03_SENSE_ARTIFACT_V2 = (
     REPOSITORY / PUBLIC_W03_SENSE_ARTIFACT_V2_RELATIVE_PATH)
 PUBLIC_W03_SENSE_ARTIFACT_V2_SHA256 = (
     "db3200d42004cc1fdcf03cbd5872e37a7437872b688fae79c322eb0eff70946a")
+PUBLIC_W03_SENSE_ARTIFACT_V3_RELATIVE_PATH = Path(
+    "data/ph2/w03_public_sense_runtime_v3.json")
+PUBLIC_W03_SENSE_ARTIFACT_V3 = (
+    REPOSITORY / PUBLIC_W03_SENSE_ARTIFACT_V3_RELATIVE_PATH)
+PUBLIC_W03_SENSE_ARTIFACT_V3_SHA256 = (
+    "304cc1e6674df856e5c75eefab663e15aab85045f08b603d6650e9ad87a4ff1d")
 
 
 # object-model: exception
@@ -98,6 +104,13 @@ def _artifact_identity(
             PUBLIC_W03_SENSE_ARTIFACT_V2_RELATIVE_PATH,
             PUBLIC_W03_SENSE_ARTIFACT_V2_SHA256,
             2,
+        )
+    if artifact_version == "v3":
+        return (
+            PUBLIC_W03_SENSE_ARTIFACT_V3,
+            PUBLIC_W03_SENSE_ARTIFACT_V3_RELATIVE_PATH,
+            PUBLIC_W03_SENSE_ARTIFACT_V3_SHA256,
+            3,
         )
     raise W03PublicSenseRuntimeError(
         "public sense artifact version 非法")

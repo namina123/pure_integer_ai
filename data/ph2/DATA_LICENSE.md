@@ -297,3 +297,25 @@ page/revision/contributor attribution for each included derived definition or
 redirect, so their records remain attributable without the bulk dump. These
 source definitions are external observations and are not project-adjudicated
 truth, mastery evidence, or an open-domain capability claim.
+
+## FT31 Wiktionary public-definition v3 slice
+
+`manifests/ft31_w03_public_definition_selection_v3.json`,
+`manifests/ft31_w03_public_definition_census_v3.json`,
+`w03_public_sense_runtime_v3.json`, and the source pack below
+`ph2_ft31_dataset_artifacts/public_definition_source_v3` form a second bounded
+derived slice of the 2026-07-01 Chinese Wiktionary snapshot.
+
+SPDX-License-Identifier: CC-BY-SA-4.0
+
+Source: https://dumps.wikimedia.org/zhwiktionary/20260701/
+
+License: https://creativecommons.org/licenses/by-sa/4.0/
+
+The v3 selection excludes all v1 and v2 titles before ranking, then selects 64
+titles from each frozen title-length stratum by the same snapshot/title hash.
+Every derived definition and redirect retains page, revision, contributor,
+license, URL, and attribution identity. The census records unsupported markup
+and template-frequency evidence without treating frequency as authorization to
+guess template semantics. These records remain external observations, not
+project-adjudicated truth, training mastery, or an open-domain capability claim.

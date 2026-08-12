@@ -289,8 +289,13 @@ def _source_pack_identity(
     )
 
 
-def _base_artifact(path: Path, expected_sha256: str) -> W03PublicSenseArtifact:
-    """严格回读冻结 v1 artifact payload，不经 runtime 默认路径。"""
+def _base_artifact(
+        path: Path,
+        expected_sha256: str,
+        *,
+        expected_artifact_version: int = 1,
+        ) -> W03PublicSenseArtifact:
+    """严格回读冻结 artifact payload，不经 runtime 默认路径。"""
     if _sha256_path(path) != expected_sha256:
         raise W03PublicDefinitionCompilerV2Error("FT30 base artifact SHA 漂移")
     try:
@@ -299,7 +304,7 @@ def _base_artifact(path: Path, expected_sha256: str) -> W03PublicSenseArtifact:
         raise W03PublicDefinitionCompilerV2Error(
             "FT30 base artifact 不可读") from error
     if (not isinstance(value, dict)
-            or value.get("artifact_version") != 1
+            or value.get("artifact_version") != expected_artifact_version
             or value.get("format") != W03_PUBLIC_SENSE_FORMAT
             or hashlib.sha256(canonical_json_bytes(value.get("payload"))).hexdigest()
             != value.get("payload_sha256")):
@@ -311,6 +316,8 @@ def _base_artifact(path: Path, expected_sha256: str) -> W03PublicSenseArtifact:
 def _base_definition_rendering_baseline(
         artifact: W03PublicSenseArtifact,
         artifact_sha256: str,
+        *,
+        expected_counts: dict[str, int] | None = None,
         ) -> tuple[dict[str, object], ...]:
     """冻结 v1 的逐定义 FT28/FT29 查询与渲染身份。"""
     sense_runtime = W03PublicSenseRuntime(artifact, artifact_sha256)
@@ -360,11 +367,15 @@ def _base_definition_rendering_baseline(
         outcome: sum(item["display_outcome"] == outcome for item in values)
         for outcome in {item["display_outcome"] for item in values}
     }
-    if counts != {
+    required_counts = (
+        {
             "DISPLAY": 7,
             "NO_SOURCE_ANSWER": 2,
             "UNKNOWN_TEMPLATE": 3,
-            }:
+        }
+        if expected_counts is None else expected_counts
+    )
+    if counts != required_counts:
         raise W03PublicDefinitionCompilerV2Error(
             "FT30 base 7/3/2 definition rendering 基线漂移")
     return tuple(values)
