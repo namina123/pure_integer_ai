@@ -30,7 +30,7 @@ Every contribution helps keep the code, tests, research record, and paper open t
 - **Structure induction**: shared structures are extracted from alignable samples instead of storing only surface text.
 - **Constructive verification**: executable results, inverse transformations, migrations, and recovery paths are checked independently.
 - **Auditable boundaries**: implemented mechanisms, experimental abilities, and open research questions are stated separately.
-- **Lightweight runtime**: the main package uses only the Python standard library and can be studied on an ordinary personal computer.
+- **Runs on ordinary hardware**: dependencies remain bounded, and the current indexes and probes can be built, run, and audited on a personal computer.
 
 ## What it is for
 
@@ -53,6 +53,10 @@ The project is an actively developed research prototype. The public repository n
 - the paper PDF, LaTeX sources, references, and permanent DOI archive information.
 
 Current research focuses include runtime efficiency, long text and long-term context, formal training material, user interaction, and generalization and reliability in real semantic settings. Public tests describe the verified engineering scope; they do not imply that these open questions are solved.
+
+The repository now also contains its first real-source Chinese broad factual QA vertical slice. It deterministically selects and indexes 10,000 main-namespace, non-redirect pages from a frozen Chinese Wikipedia snapshot, accepts questions that are not stored in an answer table, and attaches page, revision, contributor, raw evidence span/hash, and license identity to every `ANSWER`. A fixed 24-question development probe produced `22 ANSWER / 1 UNKNOWN / 1 CLARIFY`; all 22 citations passed reconstruction from the frozen source. Warm p95 was 245 ms over 72 queries, and separate-process cold p95 was 1.501 s over 24 queries.
+
+This is a development-tuned 10k slice, not an independent held-out result, general QA, or language weaning. The 100k minimum scale, separate 200-question dev/300-question held-out sets, checkpointed shards, and external merge remain under construction. See the [10k development preview](docs/broad_qa_10k_preview.md) for the contract, reproduction path, and limits.
 
 ## Quick start
 
@@ -87,6 +91,19 @@ pure-integer-qa --jsonl
 ```
 
 Each input object receives an immediate result record. A bad line emits a typed error without stopping later lines, and a final session probe is emitted when input ends.
+
+### Source-bound broad-QA development preview
+
+`pure-integer-broad-qa` selects pages from a frozen Chinese Wikipedia multistream snapshot, builds a compact integer index, and runs source-bound queries:
+
+```bash
+pure-integer-broad-qa query \
+  --run-root <run-root> \
+  --database <run-root>/indexes/broad-qa.sqlite3 \
+  "矮寨大桥何时建成通车？"
+```
+
+Building requires the XML and index files pinned by the snapshot manifest from the official Wikimedia URLs. The repository does not commit the 3.5 GB source dump or the 135 MB development index. The public fixed questions and path-independent runner are `data/ph2/broad_qa_dev_questions_v1.json` and `scripts/run_broad_qa_dev_probe.py`. This path currently performs sparse retrieval and source-bound extraction without an LLM; it is not free-form generation, mature dialogue, or completed open-domain semantic learning.
 
 ### Public-source sense probe
 
@@ -143,7 +160,7 @@ Reproducible bug reports, design discussions, and pull requests are welcome thro
 
 ## Open-source license
 
-Original code and documentation in this repository are released under the [MIT License](LICENSE). Any person or organization may use, copy, modify, merge, publish, distribute, sublicense, or sell copies under its terms. The project has no separate commercial license, revenue threshold, field-of-use restriction, registration process, prior approval, rights assignment, or additional agreement. `LICENSE` is the sole licensing text.
+Original code and documentation in this repository are released under the [MIT License](LICENSE). Any person or organization may use, copy, modify, merge, publish, distribute, sublicense, or sell copies under its terms. The project has no separate commercial license, revenue threshold, field-of-use restriction, registration process, prior approval, rights assignment, or additional agreement. `LICENSE` is the sole licensing text for original repository content. Dependencies and external data retain their own licenses: the broad-QA path uses WikiTextParser under GPLv3, the OpenCC Python implementation under Apache-2.0, and Wikipedia-derived content under CC BY-SA 4.0. See the [third-party license boundary](docs/third_party_licenses.md).
 
 ## Contact
 
