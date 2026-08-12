@@ -257,7 +257,9 @@ def test_distribution_adds_only_the_compact_v3_artifact() -> None:
     configured = tuple(
         pyproject["tool"]["setuptools"]["data-files"]
         ["share/pure_integer_ai/data/ph2"])
-    assert configured[-3:] == (
+    v1_index = configured.index(
+        "data/ph2/w03_public_sense_runtime_v1.json")
+    assert configured[v1_index:v1_index + 3] == (
         "data/ph2/w03_public_sense_runtime_v1.json",
         "data/ph2/w03_public_sense_runtime_v2.json",
         "data/ph2/w03_public_sense_runtime_v3.json",

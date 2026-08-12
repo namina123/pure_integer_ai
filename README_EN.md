@@ -101,6 +101,7 @@ pure-integer-sense "什么是金星" --definition
 pure-integer-sense "什么是金星" --context "{{lb|zh|astronomy}} [[太陽系]]的第二顆[[行星]]，為[[類地行星]]" --display-definition
 pure-integer-sense "蘇維埃社會主義共和國聯盟" --artifact-version v2
 pure-integer-sense "敗仗" --artifact-version v3
+pure-integer-sense "亠" --artifact-version v4
 ```
 
 Results retain traceable source information and distinguish unique, ambiguous, unknown, and unresolved cross-source conflict states. The current artifact covers only the frozen bounded public slice in this repository. A candidate is not a claim of definitive truth, and this probe is not an open-domain dictionary or broad-domain QA system.
@@ -114,6 +115,8 @@ The explicit `--definition` mode recognizes the general Chinese forms “什么�
 `--artifact-version v2` explicitly selects an expanded artifact sampled from the same public Wiktionary snapshot by title-length strata and stable title hashing. The frozen `v1` remains the default. The v2 selection is not revised according to parsing success, and its public audit retains pages with no definition, non-Chinese definitions, redirects, and unsupported templates. This expands bounded, source-constrained experimental coverage; it does not make the probe a complete dictionary or an open-domain QA system.
 
 `--artifact-version v3` applies the same public rule to 256 titles not used by `v1` or `v2`. Its census retains every selected page and definition result and counts unknown templates in real Chinese definitions across independent pages, revisions, and occurrences. Meeting the frequency threshold does not authorize a renderer without separate public specification evidence. The default version and existing artifact bytes remain unchanged.
+
+`--artifact-version v4` selects another 512 titles from the same 2026-07-01 Wiktionary snapshot after excluding all 293 titles already used by `v1`, `v2`, and `v3`. Selection depends only on the frozen snapshot, title-length strata, and stable hashing; parsing then reads only the selected multistream blocks. The public census records every selected page, definition, failure state, and template frequency while inheriting the public specification decisions: `place` remains blocked and `zh-div` remains unauthorized for rendering. v4 expands attributable, auditable experimental sense coverage; it is not training, truth adjudication, or an open-domain capability claim.
 
 ## Repository map
 

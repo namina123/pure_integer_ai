@@ -342,3 +342,31 @@ experimental and unclosed specification/dependency graph, while `zh-div` is
 not authorized because its output branches on current page and live target
 existence/redirect state. Frequency evidence alone grants no implementation or
 capability authority.
+
+## FT33 Wiktionary public-definition v4 slice
+
+`manifests/ft33_w03_public_definition_selection_v4.json`,
+`manifests/ft33_w03_public_definition_census_v4.json`,
+`w03_public_sense_runtime_v4.json`, and the source pack below
+`ph2_ft33_dataset_artifacts/public_definition_source_v4` form a third bounded
+derived slice of the 2026-07-01 Chinese Wiktionary snapshot.
+
+SPDX-License-Identifier: CC-BY-SA-4.0
+
+Source: https://dumps.wikimedia.org/zhwiktionary/20260701/
+
+License: https://creativecommons.org/licenses/by-sa/4.0/
+
+The v4 selector strictly recovers the v1, v2, and v3 selection manifests,
+recomputes their complete 293-title exclusion set, and then selects 128 new
+titles from each frozen title-length stratum by the same snapshot/title hash.
+Only the selected multistream blocks are parsed after selection. Every derived
+definition and redirect retains page, revision, contributor, license, URL, and
+attribution identity.
+
+The census inherits the FT32 public review without changing it: `place` remains
+blocked and `zh-div` remains unauthorized for deterministic rendering. Higher
+frequency in the larger slice cannot authorize either renderer. The source
+pack and compact artifact are public reproducibility records and experimental
+source-bound observations; they do not assert training, mastery, readiness,
+project-adjudicated truth, or open-domain capability.

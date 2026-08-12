@@ -281,7 +281,9 @@ def test_distribution_contains_only_compact_artifact_not_source_raw() -> None:
     configured = tuple(
         pyproject["tool"]["setuptools"]["data-files"]
         ["share/pure_integer_ai/data/ph2"])
-    assert configured[-3:-1] == (
+    v1_index = configured.index(
+        "data/ph2/w03_public_sense_runtime_v1.json")
+    assert configured[v1_index:v1_index + 2] == (
         "data/ph2/w03_public_sense_runtime_v1.json",
         "data/ph2/w03_public_sense_runtime_v2.json",
     )

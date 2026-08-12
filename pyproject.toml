@@ -62,6 +62,7 @@ include = ["pure_integer_ai*"]
   "data/ph2/w03_public_sense_runtime_v1.json",
   "data/ph2/w03_public_sense_runtime_v2.json",
   "data/ph2/w03_public_sense_runtime_v3.json",
+  "data/ph2/w03_public_sense_runtime_v4.json",
 ]
 
 [tool.pytest.ini_options]

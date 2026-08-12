@@ -51,7 +51,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--artifact-version",
-        choices=("v1", "v2", "v3"),
+        choices=("v1", "v2", "v3", "v4"),
         default="v1",
         help="explicit compact public-sense artifact version",
     )

@@ -28,6 +28,9 @@ from pure_integer_ai.experiments.ph2_w03_public_definition_selection_v2 import (
 from pure_integer_ai.experiments.ph2_w03_public_definition_selection_v3 import (
     FT31PublicDefinitionSelectionManifest,
 )
+from pure_integer_ai.experiments.ph2_w03_public_definition_selection_v4 import (
+    FT33PublicDefinitionSelectionManifest,
+)
 
 
 # object-model: exception
@@ -361,7 +364,8 @@ def targeted_mediawiki_source_seeds_from_selection_v2(
         manifest: MediaWikiDumpSnapshotManifest,
         selection: (
             FT30PublicDefinitionSelectionManifest
-            | FT31PublicDefinitionSelectionManifest),
+            | FT31PublicDefinitionSelectionManifest
+            | FT33PublicDefinitionSelectionManifest),
         *,
         raw_root: str | Path,
         selection_manifest_relative_path: str,
@@ -375,7 +379,8 @@ def targeted_mediawiki_source_seeds_from_selection_v2(
     if (not isinstance(manifest, MediaWikiDumpSnapshotManifest)
             or not isinstance(selection, (
                 FT30PublicDefinitionSelectionManifest,
-                FT31PublicDefinitionSelectionManifest))):
+                FT31PublicDefinitionSelectionManifest,
+                FT33PublicDefinitionSelectionManifest))):
         raise TypeError("FT30 MediaWiki manifest/selection 类型错误")
     if (selection.source_key != manifest.source_key
             or selection.snapshot_id != manifest.snapshot_id):

@@ -101,6 +101,7 @@ pure-integer-sense "什么是金星" --definition
 pure-integer-sense "什么是金星" --context "{{lb|zh|astronomy}} [[太陽系]]的第二顆[[行星]]，為[[類地行星]]" --display-definition
 pure-integer-sense "蘇維埃社會主義共和國聯盟" --artifact-version v2
 pure-integer-sense "敗仗" --artifact-version v3
+pure-integer-sense "亠" --artifact-version v4
 ```
 
 结果保留可回溯的来源信息，并明确区分唯一、多义、未知和未合并的来源冲突。当前 artifact 只覆盖仓库中冻结的有界公开切片；候选存在不等于项目宣称它是最终事实，也不代表已经具备开放域词典或广域问答能力。
@@ -114,6 +115,8 @@ pure-integer-sense "敗仗" --artifact-version v3
 `--artifact-version v2` 显式选择基于同一公开 Wiktionary 快照、按标题长度分层和稳定哈希抽取的扩展 artifact。默认仍为冻结的 `v1`；`v2` 不按定义是否易于解析来重选词条，并保留无定义、非中文定义、redirect 和未知模板的公开审计记录。它扩大的是有来源约束的实验性覆盖，不代表已经成为完整词典或开放域问答系统。
 
 `--artifact-version v3` 在相同公开规则下进一步选择 256 个未被 `v1`/`v2` 使用的标题。对应 census 保留全部页面与定义结果，并把中文真实定义中的未知模板按独立页面、修订和出现次数统计；频率达到门槛仍不会自动授权 renderer，必须另有公开规范证据。默认版本和已有 artifact 字节保持不变。
+
+`--artifact-version v4` 再从同一 2026-07-01 Wiktionary 快照中选择 512 个标题，并在排序前排除 `v1`/`v2`/`v3` 已使用的全部 293 个标题。选择只由冻结快照、标题长度分层和稳定哈希决定；解析器随后只读取命中的 multistream block。公开 census 记录全部选中页面、定义、失败状态和模板频率，并继承公开规范审查结论：`place` 仍被阻塞，`zh-div` 仍未获 renderer 授权。`v4` 扩大的是可归属、可审计的实验性词义覆盖，不是训练、事实裁定或开放域能力声明。
 
 ## 仓库结构
 
