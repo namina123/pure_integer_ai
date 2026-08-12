@@ -304,6 +304,13 @@ def query_broad_qa(
             None, None, metadata["snapshot_id"], metadata["license_id"],
             len(rows), document_count,
         )
+    # 没有页面标题锚点时，关系词共现不足以证明回答对象，必须拒答。
+    if _title_span(slot_free_question, best[6]) is None:
+        return BroadQaResult(
+            "UNKNOWN", question, None, None, None, None, None, None, None,
+            None, None, metadata["snapshot_id"], metadata["license_id"],
+            len(rows), document_count,
+        )
     sentence_question = slot_free_question
     span = _title_span(sentence_question, best[6])
     if span is not None:

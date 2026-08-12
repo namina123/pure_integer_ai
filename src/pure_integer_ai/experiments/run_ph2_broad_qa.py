@@ -14,7 +14,11 @@ from pure_integer_ai.experiments.ph2_broad_qa_index import (
     build_broad_qa_index,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_query import query_broad_qa
+from pure_integer_ai.experiments.ph2_broad_qa_sharded import (
+    build_broad_qa_sharded_index,
+)
 from pure_integer_ai.experiments.ph2_broad_qa_selection import (
+    derive_broad_qa_selection_prefix,
     build_broad_qa_selection,
     profile_broad_qa_selection,
     read_broad_qa_selection,
@@ -60,7 +64,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build or query the source-bound broad QA preview.")
     subcommands = parser.add_subparsers(dest="command", required=True)
-    for name in ("select", "build"):
+    for name in ("select", "prefix", "build", "build-sharded"):
         command = subcommands.add_parser(name)
         command.add_argument("--run-root", type=_work_path, required=True)
         command.add_argument(
@@ -69,12 +73,27 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--selection", type=_work_path, required=True)
         command.add_argument(
             "--candidate-count", type=_positive, required=True)
-        if name == "build":
+        if name == "prefix":
+            command.add_argument(
+                "--parent-selection", type=_work_path, required=True)
+        if name in {"build", "build-sharded"}:
             command.add_argument("--xml", type=_work_path, required=True)
             command.add_argument("--database", type=_work_path, required=True)
             command.add_argument("--page-count", type=_positive, required=True)
             command.add_argument(
                 "--workers", type=_worker_count, default=1)
+            if name == "build-sharded":
+                command.add_argument("--shard-root", type=_work_path, required=True)
+                command.add_argument(
+                    "--max-blocks-per-shard", type=_positive, default=512)
+                command.add_argument(
+                    "--max-new-projection-shards", type=_positive)
+                command.add_argument(
+                    "--max-new-posting-shards", type=_positive)
+                command.add_argument(
+                    "--no-publish", action="store_true")
+                command.add_argument(
+                    "--discard-unsealed", action="store_true")
     query = subcommands.add_parser("query")
     query.add_argument("--run-root", type=_work_path, required=True)
     query.add_argument("--database", type=_work_path, required=True)
@@ -89,10 +108,15 @@ def _validate_run_paths(args: argparse.Namespace) -> None:
         raise SystemExit("run-root must be an existing directory")
     if args.command == "query":
         names = ("database",)
-    elif args.command == "select":
+    elif args.command in {"select", "prefix"}:
         names = ("index", "selection")
-    else:
+        if args.command == "prefix":
+            names = names + ("parent_selection",)
+    elif args.command == "build":
         names = ("index", "xml", "selection", "database")
+    else:
+        names = (
+            "index", "xml", "selection", "database", "shard_root")
     for name in names:
         path = getattr(args, name).resolve()
         if not path.is_relative_to(root):
@@ -130,7 +154,15 @@ def main(
     snapshot_sha256 = hashlib.sha256(snapshot_bytes).hexdigest()
     selection_started_ns = time.perf_counter_ns()
     selection_reused = int(args.selection.exists())
-    if selection_reused:
+    if args.command == "prefix":
+        parent = read_broad_qa_selection(args.parent_selection)
+        if args.candidate_count > parent.requested_page_count:
+            raise SystemExit("prefix count cannot exceed parent selection")
+        selection = derive_broad_qa_selection_prefix(
+            parent, requested_page_count=args.candidate_count)
+        write_broad_qa_selection(selection, args.selection)
+        selection_reused = 0
+    elif selection_reused:
         selection = read_broad_qa_selection(args.selection)
         xml_identity = next(
             item for item in snapshot.raw_files if item.role == "XML")
@@ -154,7 +186,7 @@ def main(
     selection_elapsed_ns = max(
         1, time.perf_counter_ns() - selection_started_ns)
     selection_profile = profile_broad_qa_selection(selection)
-    if args.command == "select":
+    if args.command in {"select", "prefix"}:
         _emit({
             **selection_profile,
             "selection_elapsed_ns": selection_elapsed_ns,
@@ -163,13 +195,28 @@ def main(
         return 0
     if args.page_count > args.candidate_count:
         raise SystemExit("page-count cannot exceed candidate-count")
-    report = build_broad_qa_index(
-        selection,
-        xml_path=args.xml,
-        database_path=args.database,
-        accepted_page_limit=args.page_count,
-        worker_count=args.workers,
-    )
+    if args.command == "build":
+        report = build_broad_qa_index(
+            selection,
+            xml_path=args.xml,
+            database_path=args.database,
+            accepted_page_limit=args.page_count,
+            worker_count=args.workers,
+        )
+    else:
+        report = build_broad_qa_sharded_index(
+            selection,
+            xml_path=args.xml,
+            shard_root=args.shard_root,
+            database_path=args.database,
+            accepted_page_count=args.page_count,
+            max_blocks_per_shard=args.max_blocks_per_shard,
+            worker_count=args.workers,
+            max_new_projection_shards=args.max_new_projection_shards,
+            max_new_posting_shards=args.max_new_posting_shards,
+            publish=not args.no_publish,
+            discard_unsealed=args.discard_unsealed,
+        )
     report["selection_elapsed_ns"] = selection_elapsed_ns
     report["selection_reused"] = selection_reused
     report["selection_profile"] = selection_profile

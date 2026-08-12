@@ -54,9 +54,9 @@ PIDSLCA 目前适合作为研究和工程验证基础：
 
 当前研究重点包括运行效率、长文本与长期上下文、正式训练资料、用户交互，以及真实语义环境中的泛化和可靠性。公开测试反映工程实现的验证范围，不代表这些开放问题已经解决。
 
-项目现在还公开了首个真实来源的中文广域事实问答纵切：从冻结的中文 Wikipedia 快照稳定选择并索引 10,000 个主空间非重定向页面，接受未写入答案表的原始问题，并为每个 `ANSWER` 返回页面、修订、贡献者、原始证据 span/hash 和许可身份。固定的 24 问开发探针得到 `22 ANSWER / 1 UNKNOWN / 1 CLARIFY`，22 条引用从冻结原文重建后全部通过；72 次 warm query 的 p95 为 245 ms，24 次独立进程 cold query 的 p95 为 1.501 s。
+项目现在还公开了真实来源的中文广域事实问答纵切：从冻结的中文 Wikipedia 快照稳定选择 100,000 个候选页面，并在不按可答性重选的前提下完成 20,000 个 accepted 页面、109,006 个段落和 3,608,002 个稀疏特征的紧凑索引。每个 `ANSWER` 返回页面、修订、贡献者、原始证据 span/hash 和许可身份；固定的 24 问开发探针得到 `22 ANSWER / 1 UNKNOWN / 1 CLARIFY`，22 条引用从冻结原文重建后全部通过。20k 索引为 251,494,400 bytes，SHA-256 为 `e18db72b090dfdfd96aac23c74a5ad0751afe17c2dcfb02fc91f1213b0f7c4da`。
 
-这仍是经过开发调试的 10k 纵切，不是独立 held-out，也不是通用问答或断奶结果。七日最低规模 100k、独立 200 问 dev/300 问 held-out、分片恢复和外排合并仍在施工。详细合同、复跑方式和诚实边界见[10k 开发预览](docs/broad_qa_10k_preview.md)。
+这是来源约束的抽取式开发预览，不是独立 held-out、自由生成、通用问答或断奶结果。分片恢复、posting 外排合并和 receipt-last 发布已经真实运行；下一步优先冻结独立 `200` 问 dev 与 `300` 问 held-out，并以 profile 修复 posting merge 热点。详细合同、复跑方式和诚实边界见[20k 开发预览](docs/broad_qa_20k_preview.md)。
 
 ## 快速开始
 
@@ -103,7 +103,7 @@ pure-integer-broad-qa query \
   "矮寨大桥何时建成通车？"
 ```
 
-构建需要从官方 Wikimedia 地址取得 snapshot manifest 中固定的 XML 和 index 文件；仓库不提交 3.5 GB 原始 dump 或 135 MB 开发索引。公开的固定问题与路径无关探针位于 `data/ph2/broad_qa_dev_questions_v1.json` 和 `scripts/run_broad_qa_dev_probe.py`。此入口目前只做稀疏检索与来源约束抽取，不调用 LLM，也不代表自由生成、成熟对话或开放域语义学习已经完成。
+构建需要从官方 Wikimedia 地址取得 snapshot manifest 中固定的 XML 和 index 文件；仓库不提交 3.5 GB 原始 dump 或 20k SQLite。公开的固定问题与路径无关探针位于 `data/ph2/broad_qa_dev_questions_v1.json` 和 `scripts/run_broad_qa_dev_probe.py`。此入口目前只做稀疏检索与来源约束抽取，不调用 LLM，也不代表自由生成、成熟对话或开放域语义学习已经完成。
 
 ### 公开来源词义探针
 

@@ -156,6 +156,36 @@ def read_broad_qa_selection(path: str | Path) -> BroadQaSelectionManifest:
         raise BroadQaSelectionError("broad QA selection 不可读") from error
 
 
+def derive_broad_qa_selection_prefix(
+        parent: BroadQaSelectionManifest,
+        *,
+        requested_page_count: int,
+        ) -> BroadQaSelectionManifest:
+    """从已封存稳定 selection 取排名前缀，不重扫 index 或读取正文。"""
+    if not isinstance(parent, BroadQaSelectionManifest):
+        raise TypeError("broad QA parent selection manifest 类型错误")
+    if (type(requested_page_count) is not int
+            or requested_page_count <= 0
+            or requested_page_count > parent.requested_page_count):
+        raise BroadQaSelectionError("broad QA prefix count 非法")
+    pages = parent.selected_pages[:requested_page_count]
+    if tuple(item.ordinal for item in pages) != tuple(
+            range(1, requested_page_count + 1)):
+        raise BroadQaSelectionError("broad QA prefix ordinal 漂移")
+    return BroadQaSelectionManifest(
+        parent.source_key,
+        parent.snapshot_id,
+        parent.snapshot_manifest_sha256,
+        parent.index_local_sha256,
+        parent.index_upstream_sha1,
+        parent.xml_local_sha256,
+        parent.xml_compressed_size_bytes,
+        parent.index_entry_count,
+        requested_page_count,
+        pages,
+    )
+
+
 def profile_broad_qa_selection(
         manifest: BroadQaSelectionManifest,
         ) -> dict[str, int | str]:
@@ -186,6 +216,7 @@ def profile_broad_qa_selection(
 __all__ = [
     "BroadQaSelectionError",
     "build_broad_qa_selection",
+    "derive_broad_qa_selection_prefix",
     "profile_broad_qa_selection",
     "read_broad_qa_selection",
     "write_broad_qa_selection",

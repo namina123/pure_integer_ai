@@ -227,15 +227,43 @@ def iter_broad_qa_candidate_pages(
     """有界并行解压 block，并按压缩 offset 原序产出候选。"""
     if not isinstance(selection, BroadQaSelectionManifest):
         raise TypeError("broad QA selection 类型错误")
+    yield from iter_broad_qa_selected_pages(
+        selection.selected_pages,
+        xml_path=xml_path,
+        source_key=selection.source_key,
+        xml_compressed_size_bytes=selection.xml_compressed_size_bytes,
+        worker_count=worker_count,
+    )
+
+
+def iter_broad_qa_selected_pages(
+        selected_pages: tuple[BroadQaSelectedPage, ...],
+        *,
+        xml_path: str | Path,
+        source_key: str,
+        xml_compressed_size_bytes: int,
+        worker_count: int = 1,
+        ):
+    """读取任意非空冻结页面子集，保留其全局 selection ordinal。"""
+    if (not isinstance(selected_pages, tuple) or not selected_pages
+            or any(not isinstance(item, BroadQaSelectedPage)
+                   for item in selected_pages)
+            or len({item.ordinal for item in selected_pages})
+            != len(selected_pages)
+            or len({item.page_id for item in selected_pages})
+            != len(selected_pages)):
+        raise BroadQaSourceError("broad QA selected page subset 非法")
+    if source_key != "ZHWIKIPEDIA_20260701":
+        raise BroadQaSourceError("broad QA selected page source 漂移")
     xml = Path(xml_path).resolve()
     if (not xml.is_file()
-            or xml.stat().st_size != selection.xml_compressed_size_bytes):
+            or xml.stat().st_size != xml_compressed_size_bytes):
         raise BroadQaSourceError("broad QA XML 缺失或 size 漂移")
     if type(worker_count) is not int or worker_count not in {1, 2, 4}:
         raise BroadQaSourceError("broad QA worker count 只能为 1/2/4")
     seen_ordinals: set[int] = set()
     ordered = sorted(
-        selection.selected_pages,
+        selected_pages,
         key=lambda item: (
             item.compressed_block_offset,
             item.compressed_block_end_offset,
@@ -266,19 +294,19 @@ def iter_broad_qa_candidate_pages(
             max_workers=worker_count,
             thread_name_prefix="broad-qa-block") as executor:
         pending: deque[Future] = deque()
-        for key, selected_pages in grouped:
+        for key, block_selected_pages in grouped:
             handle.seek(key[0])
             compressed = handle.read(key[1] - key[0])
             if len(compressed) != key[1] - key[0]:
                 raise BroadQaSourceError("broad QA block 读取不完整")
             pending.append(executor.submit(
-                _block_candidates, compressed, selected_pages,
-                selection.source_key))
+                _block_candidates, compressed, block_selected_pages,
+                source_key))
             if len(pending) >= worker_count * 2:
                 yield from consume(pending.popleft().result())
         while pending:
             yield from consume(pending.popleft().result())
-    if len(seen_ordinals) != len(selection.selected_pages):
+    if len(seen_ordinals) != len(selected_pages):
         raise BroadQaSourceError("broad QA index/XML page inventory 漂移")
 
 
@@ -286,5 +314,6 @@ __all__ = [
     "BroadQaSourceError",
     "BroadQaSourceCandidate",
     "iter_broad_qa_candidate_pages",
+    "iter_broad_qa_selected_pages",
     "project_broad_qa_passages",
 ]

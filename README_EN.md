@@ -54,9 +54,9 @@ The project is an actively developed research prototype. The public repository n
 
 Current research focuses include runtime efficiency, long text and long-term context, formal training material, user interaction, and generalization and reliability in real semantic settings. Public tests describe the verified engineering scope; they do not imply that these open questions are solved.
 
-The repository now also contains its first real-source Chinese broad factual QA vertical slice. It deterministically selects and indexes 10,000 main-namespace, non-redirect pages from a frozen Chinese Wikipedia snapshot, accepts questions that are not stored in an answer table, and attaches page, revision, contributor, raw evidence span/hash, and license identity to every `ANSWER`. A fixed 24-question development probe produced `22 ANSWER / 1 UNKNOWN / 1 CLARIFY`; all 22 citations passed reconstruction from the frozen source. Warm p95 was 245 ms over 72 queries, and separate-process cold p95 was 1.501 s over 24 queries.
+The repository now contains a real-source Chinese broad factual QA vertical slice. It deterministically selects 100,000 candidate pages from a frozen Chinese Wikipedia snapshot and, without reselecting for answerability, publishes a compact index of 20,000 accepted pages, 109,006 passages, and 3,608,002 sparse features. Every `ANSWER` carries page, revision, contributor, raw evidence span/hash, and license identity. The fixed 24-question development probe produced `22 ANSWER / 1 UNKNOWN / 1 CLARIFY`, with zero citation reconstruction failures. The 20k SQLite artifact is 251,494,400 bytes with SHA-256 `e18db72b090dfdfd96aac23c74a5ad0751afe17c2dcfb02fc91f1213b0f7c4da`.
 
-This is a development-tuned 10k slice, not an independent held-out result, general QA, or language weaning. The 100k minimum scale, separate 200-question dev/300-question held-out sets, checkpointed shards, and external merge remain under construction. See the [10k development preview](docs/broad_qa_10k_preview.md) for the contract, reproduction path, and limits.
+This is a source-bound extractive development preview, not an independent held-out result, free-form generation, general QA, or language weaning. Checkpointed projection, posting shards, external merge, and receipt-last publication have run in reality. The next priority is to freeze independent `200`-question dev and `300`-question held-out sets, while profiling and reducing the posting-merge hotspot. See the [20k development preview](docs/broad_qa_20k_preview_en.md) for the contract, reproduction path, and limits.
 
 ## Quick start
 
@@ -103,7 +103,7 @@ pure-integer-broad-qa query \
   "矮寨大桥何时建成通车？"
 ```
 
-Building requires the XML and index files pinned by the snapshot manifest from the official Wikimedia URLs. The repository does not commit the 3.5 GB source dump or the 135 MB development index. The public fixed questions and path-independent runner are `data/ph2/broad_qa_dev_questions_v1.json` and `scripts/run_broad_qa_dev_probe.py`. This path currently performs sparse retrieval and source-bound extraction without an LLM; it is not free-form generation, mature dialogue, or completed open-domain semantic learning.
+Building requires the XML and index files pinned by the snapshot manifest from the official Wikimedia URLs. The repository does not commit the 3.5 GB source dump or the 20k SQLite artifact. The public fixed questions and path-independent runner are `data/ph2/broad_qa_dev_questions_v1.json` and `scripts/run_broad_qa_dev_probe.py`. This path currently performs sparse retrieval and source-bound extraction without an LLM; it is not free-form generation, mature dialogue, or completed open-domain semantic learning.
 
 ### Public-source sense probe
 
