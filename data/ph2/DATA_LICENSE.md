@@ -370,3 +370,34 @@ frequency in the larger slice cannot authorize either renderer. The source
 pack and compact artifact are public reproducibility records and experimental
 source-bound observations; they do not assert training, mastery, readiness,
 project-adjudicated truth, or open-domain capability.
+
+## FT34 Wiktionary template specification review
+
+`manifests/ft34_public_template_specification_review_v1.json` freezes the
+public specification review of the six template names newly qualified by the
+FT33 census. It binds the complete 30-occurrence inventory, the FT33 census,
+the full frozen multistream index, and 18 attributable template,
+documentation, and Lua-module revisions from the same 2026-07-01 Wiktionary
+snapshot.
+
+SPDX-License-Identifier: CC-BY-SA-4.0
+
+Source: https://dumps.wikimedia.org/zhwiktionary/20260701/
+
+License: https://creativecommons.org/licenses/by-sa/4.0/
+
+The manifest stores revision URLs, contributors, revision identities, content
+hashes, parameter findings, dependency findings, and each exact source
+definition needed to reproduce the decisions. It does not redistribute the
+full upstream template or module source.
+
+FT34 authorizes only narrow, source-preserving semantic projections for the
+observed Chinese profiles of `alt form`, `syn of`, `zh-alt-form`, and
+`surname`. The authorization excludes category side effects, live wiki state,
+automatic transliteration, and broader optional-parameter behavior. `rfdef`
+is explicitly not authorized because it is an editor request for a missing
+definition rather than lexical content. The `†` call remains blocked because
+the frozen full index contains no `Template:†` page and its intended semantics
+cannot be inferred from the symbol or surrounding definitions. These review
+and projection records remain external observations, not project-adjudicated
+truth, training mastery, or an open-domain capability claim.

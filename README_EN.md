@@ -118,6 +118,8 @@ The explicit `--definition` mode recognizes the general Chinese forms “什么�
 
 `--artifact-version v4` selects another 512 titles from the same 2026-07-01 Wiktionary snapshot after excluding all 293 titles already used by `v1`, `v2`, and `v3`. Selection depends only on the frozen snapshot, title-length strata, and stable hashing; parsing then reads only the selected multistream blocks. The public census records every selected page, definition, failure state, and template frequency while inheriting the public specification decisions: `place` remains blocked and `zh-div` remains unauthorized for rendering. v4 expands attributable, auditable experimental sense coverage; it is not training, truth adjudication, or an open-domain capability claim.
 
+The repository also publishes a specification review of the six frequent template families newly qualified by v4 and a separate deterministic semantic projector. It currently supports only the evidence-closed Chinese profiles for alternative-form, synonym, Chinese alternative-form, and surname structures while retaining the raw template text, parameters, source, and commitment chain. `rfdef` is a maintenance request for a missing definition and is never presented as lexical content. The `†` call has no verifiable template identity in the frozen snapshot and remains an explicit refusal. This projector does not rewrite the frozen v4 artifact or expand default command behavior.
+
 ## Repository map
 
 - `src/pure_integer_ai/`: installable source package
