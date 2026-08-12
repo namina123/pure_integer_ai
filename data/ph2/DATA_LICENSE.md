@@ -319,3 +319,26 @@ license, URL, and attribution identity. The census records unsupported markup
 and template-frequency evidence without treating frequency as authorization to
 guess template semantics. These records remain external observations, not
 project-adjudicated truth, training mastery, or an open-domain capability claim.
+
+## FT32 Wiktionary template specification review
+
+`manifests/ft32_public_template_specification_review_v1.json` freezes the
+public specification review of the frequent `place` and `zh-div` templates.
+It binds the FT31 census and the 2026-07-01 Wiktionary snapshot, and records the
+attributable template, documentation, Lua-module, and data-module revisions used
+for the review. The reviewed revisions remain available under CC-BY-SA-4.0.
+
+SPDX-License-Identifier: CC-BY-SA-4.0
+
+Source: https://dumps.wikimedia.org/zhwiktionary/20260701/
+
+License: https://creativecommons.org/licenses/by-sa/4.0/
+
+The review does not redistribute the full module source. It stores revision
+URLs, contributors, revision identities, content hashes, dependency findings,
+and the exact FT31 definition occurrences needed to reproduce the decision.
+Neither template authorizes a renderer in FT32: `place` remains blocked on an
+experimental and unclosed specification/dependency graph, while `zh-div` is
+not authorized because its output branches on current page and live target
+existence/redirect state. Frequency evidence alone grants no implementation or
+capability authority.
