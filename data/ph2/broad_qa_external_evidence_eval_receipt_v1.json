@@ -1,0 +1,29 @@
+{
+  "aggregate_sha256": "82bc0c5083fe5c9ce4e8f1a3bfee756e3681fbd28ee0756e0e6bbefb9957c96d",
+  "artifact_kind": "PH2_BROAD_QA_EXTERNAL_EVIDENCE_EVAL_RECEIPT_V1",
+  "citation_valid_count": 300,
+  "citation_valid_ppm": 1000000,
+  "evidence_hit_count": 234,
+  "evidence_hit_ppm": 780000,
+  "format_version": 1,
+  "held_out_question_count": 300,
+  "minimum_evidence_hit_ppm": 700000,
+  "per_source": {
+    "CMRC2018": {
+      "citation_valid_count": 150,
+      "evidence_hit_count": 105,
+      "evidence_hit_ppm": 700000,
+      "question_count": 150
+    },
+    "DRCD": {
+      "citation_valid_count": 150,
+      "evidence_hit_count": 129,
+      "evidence_hit_ppm": 860000,
+      "question_count": 150
+    }
+  },
+  "scope": "FORMAL_HELD_OUT",
+  "source_pack_manifest_sha256": "b6b41b128ce1fec3091ad690b1b0faaeaf5072a06323c7f396638e5dc8a69075",
+  "status": "PASS",
+  "title_domain_overlap_count": 0
+}

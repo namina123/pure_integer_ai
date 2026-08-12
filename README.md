@@ -56,7 +56,9 @@ PIDSLCA 目前适合作为研究和工程验证基础：
 
 项目现在还公开了真实来源的中文广域事实问答纵切：从冻结的中文 Wikipedia 快照稳定选择 100,000 个候选页面，并在不按可答性重选的前提下完成 20,000 个 accepted 页面、109,006 个段落和 3,608,002 个稀疏特征的紧凑索引。每个 `ANSWER` 返回页面、修订、贡献者、原始证据 span/hash 和许可身份；固定的 24 问开发探针得到 `22 ANSWER / 1 UNKNOWN / 1 CLARIFY`，22 条引用从冻结原文重建后全部通过。20k 索引为 251,494,400 bytes，SHA-256 为 `e18db72b090dfdfd96aac23c74a5ad0751afe17c2dcfb02fc91f1213b0f7c4da`。有界多轮 posting merge 在保持该 SHA 逐字节不变的同时，把真实 publication 从 840.972 秒压缩到 542.421 秒，缩短 35.501%。
 
-这是来源约束的抽取式开发预览，不是独立 held-out、自由生成、通用问答或断奶结果。分片恢复、posting 外排合并和 receipt-last 发布已经真实运行；下一步优先冻结独立 `200` 问 dev 与 `300` 问 held-out，并以 profile 修复 posting merge 热点。详细合同、复跑方式和诚实边界见[20k 开发预览](docs/broad_qa_20k_preview.md)。
+独立的外部上下文证据选择评测也已冻结并正式只运行一次：300 道 held-out 题的精确引用有效率为 100%，所选证据句包含金答案 `234/300=78%`。该结果通过预先声明的 70% 证据选择门（CMRC2018 为 70%，DRCD 为 86%），aggregate SHA-256 为 `82bc0c5083fe5c9ce4e8f1a3bfee756e3681fbd28ee0756e0e6bbefb9957c96d`。它测量的是给定上下文的回答侧证据选择，不是随机索引检索、自由生成或通用对话。详见[外部评测报告](docs/broad_qa_external_evidence_eval_cn.md)。
+
+这仍是来源约束的抽取式预览，不是自由生成、通用问答或断奶结果。分片恢复、posting 外排合并、receipt-last 发布和一次性 held-out 证据评测已经真实运行；下一步是把证据选择接入随机索引检索，补齐剩余查询/召回覆盖，同时不削弱已冻结的评测边界。详细合同、复跑方式和诚实边界见[20k 开发预览](docs/broad_qa_20k_preview.md)与[外部评测报告](docs/broad_qa_external_evidence_eval_cn.md)。
 
 ## 快速开始
 

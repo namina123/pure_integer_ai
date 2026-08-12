@@ -166,6 +166,16 @@ def _is_ambiguous_list(text: str) -> bool:
     return text.count("*") >= 2 and ("：" in text or ":" in text)
 
 
+def select_broad_qa_evidence_sentence(question: str, context: str) -> str:
+    """从调用方给定的来源上下文中确定性选择一条完整证据句。"""
+    if (not isinstance(question, str) or not question.strip()
+            or not isinstance(context, str) or not context.strip()):
+        raise BroadQaQueryError("broad QA question/context 不能为空")
+    slots = load_broad_qa_question_slots()
+    surface = slots.strip_slots(question)
+    return _best_sentence(set(_script_terms(surface)), context)
+
+
 def query_broad_qa(
         connection: sqlite3.Connection,
         question: str,
@@ -330,4 +340,8 @@ def query_broad_qa(
     )
 
 
-__all__ = ["BroadQaQueryError", "query_broad_qa"]
+__all__ = [
+    "BroadQaQueryError",
+    "query_broad_qa",
+    "select_broad_qa_evidence_sentence",
+]
