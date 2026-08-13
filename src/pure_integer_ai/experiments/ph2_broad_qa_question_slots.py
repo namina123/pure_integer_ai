@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import sysconfig
 
+from opencc import OpenCC
+
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_bytes
 
 
@@ -19,6 +21,27 @@ QUESTION_SLOT_SHA256 = (
     "932f5ed9b95c4501e64dc06ca769f9fb6b5a79b529f2e09b4a2c5b322c59f2ee")
 _ANSWER_KINDS = (
     "CAUSE", "ENTITY", "LOCATION", "MANNER", "QUANTITY", "TIME", "TYPE")
+_TO_SIMPLIFIED = OpenCC("t2s")
+
+
+def _aligned_simplified_surface(value: str) -> str:
+    """构造与原文等长的简体视图，使问式 span 保持原坐标。"""
+    converted = []
+    for character in value:
+        simplified = _TO_SIMPLIFIED.convert(character)
+        converted.append(simplified if len(simplified) == 1 else character)
+    return "".join(converted)
+
+
+def _is_contextual_slot(
+        question: str, start: int, kind: str, surface: str) -> bool:
+    """拒绝侵入关系谓词的歧义槽，同时保留独立因果问式。"""
+    return not (
+        kind == "CAUSE"
+        and surface == "为什么"
+        and start > 0
+        and question[start - 1] in {"称", "稱"}
+    )
 
 
 # object-model: exception
@@ -54,19 +77,44 @@ class BroadQaQuestionSlots:
             key=lambda item: (-len(item), item),
         ))
 
+    def _selected_slots(
+            self, question: str,
+            ) -> tuple[tuple[int, int, str], ...]:
+        """按上下文选择最长且互不重叠的问式槽 span。"""
+        aligned_question = _aligned_simplified_surface(question)
+        candidates = []
+        for kind, surfaces in self.entries:
+            for surface in surfaces:
+                start = aligned_question.find(surface)
+                while start >= 0:
+                    end = start + len(surface)
+                    if _is_contextual_slot(
+                            aligned_question, start, kind, surface):
+                        candidates.append((start, end, kind))
+                    start = aligned_question.find(surface, start + 1)
+        candidates.sort(key=lambda item: (-(item[1] - item[0]), item))
+        selected = []
+        for item in candidates:
+            if any(item[0] < prior[1] and prior[0] < item[1]
+                   for prior in selected):
+                continue
+            selected.append(item)
+        return tuple(sorted(selected))
+
     def strip_slots(self, question: str) -> str:
         """移除显式问式变量但保留实体、属性和其他限定。"""
-        value = question
-        for surface in self.surfaces:
-            value = value.replace(surface, "\n")
-        return value
+        parts = []
+        cursor = 0
+        for start, end, _ in self._selected_slots(question):
+            parts.extend((question[cursor:start], "\n"))
+            cursor = end
+        parts.append(question[cursor:])
+        return "".join(parts)
 
     def answer_kinds(self, question: str) -> tuple[str, ...]:
         """返回问题实际命中的答案槽类型，不依赖任何知识页。"""
-        return tuple(
-            kind for kind, surfaces in self.entries
-            if any(surface in question for surface in surfaces)
-        )
+        observed = {item[2] for item in self._selected_slots(question)}
+        return tuple(kind for kind, _ in self.entries if kind in observed)
 
 
 def _candidate_paths() -> tuple[Path, ...]:

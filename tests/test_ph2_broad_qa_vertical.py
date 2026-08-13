@@ -764,6 +764,22 @@ def test_question_slot_artifact_is_external_canonical_and_tamper_evident(
         load_broad_qa_question_slots(tampered)
 
 
+@pytest.mark.parametrize(("question", "expected_surface", "expected_kinds"), [
+    ("为什么形成该现象？", "\n形成该现象？", ("CAUSE",)),
+    ("魔弹理论又被称为什么理论？", "魔弹理论又被称为\n理论？", ("ENTITY",)),
+    ("魔彈理論又被稱為什麼理論？", "魔彈理論又被稱為\n理論？", ("ENTITY",)),
+    ("事件发生在什么时候？", "事件发生在\n？", ("TIME",)),
+    ("河水上涨的原因是什么？", "河水上涨的\n？", ("CAUSE",)),
+])
+def test_question_slots_select_contextual_non_overlapping_spans(
+        question: str, expected_surface: str,
+        expected_kinds: tuple[str, ...]) -> None:
+    """重叠问式只占用最长合法槽，且不得切断关系谓词。"""
+    slots = load_broad_qa_question_slots()
+    assert slots.strip_slots(question) == expected_surface
+    assert slots.answer_kinds(question) == expected_kinds
+
+
 def test_public_dev_question_artifact_is_canonical_and_not_held_out() -> None:
     """公开问题集明确是开发探针，不能被后续报告冒充 held-out。"""
     source = Path("data/ph2/broad_qa_dev_questions_v1.json").resolve()
