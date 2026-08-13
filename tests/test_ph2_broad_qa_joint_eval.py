@@ -32,6 +32,9 @@ from pure_integer_ai.experiments.ph2_broad_qa_joint_eval import (
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_line
 from pure_integer_ai.experiments.ph2_broad_qa_query import query_broad_qa
+from pure_integer_ai.experiments.ph2_broad_qa_query import (
+    _cover_explicit_number_evidence_windows,
+)
 from pure_integer_ai.storage.integer_codec import encode_integer_tuple
 
 
@@ -344,6 +347,33 @@ def test_page_evidence_prefers_distinct_passages_before_duplicate_windows(
         item.passage_id for item in trace.evidence_candidates)
     assert len(passage_ids) == 4
     assert len(set(passage_ids)) == 4
+
+
+def test_explicit_number_coverage_uses_exact_same_page_window_only() -> None:
+    """缺失数字可替换低优先窗口，但不得把 2014 当作 014。"""
+    def item(score: int, passage_id: int, text: str):
+        """构造只含选择器所需列的稳定窗口。"""
+        row = (passage_id, 0, len(text), "a" * 64, text)
+        return ((score, 1, 0, -1, 0), -passage_id, row, text)
+
+    answer = item(50, 1, "反驱逐舰驱逐舰的代表为空想级。")
+    exact = item(49, 1, "在1920年代，这类舰艇被称为反驱逐舰驱逐舰。")
+    distractors = tuple(
+        item(score, passage_id, f"无关证据{passage_id}。")
+        for score, passage_id in ((40, 2), (30, 3), (20, 4)))
+    ranked = [answer, exact, *distractors]
+    selected = (answer, *distractors)
+    covered = _cover_explicit_number_evidence_windows(
+        ranked, selected, explicit_numbers=frozenset({"1920"}), limit=4)
+    assert exact in covered
+    assert answer in covered
+    assert len(covered) == 4
+
+    near = item(49, 1, "2014年，球队迁入新球场。")
+    unchanged = _cover_explicit_number_evidence_windows(
+        [answer, near, *distractors], selected,
+        explicit_numbers=frozenset({"014"}), limit=4)
+    assert unchanged == selected
 
 
 def test_joint_augmentation_can_extend_an_existing_alias_index(

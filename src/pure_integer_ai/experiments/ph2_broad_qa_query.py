@@ -272,6 +272,65 @@ def _select_diverse_evidence_windows(
     return tuple(selected)
 
 
+def _cover_explicit_number_evidence_windows(
+        ranked_windows: list[tuple[
+            tuple[int, int, int, int, int], int, tuple, str]],
+        selected_windows: tuple[tuple[
+            tuple[int, int, int, int, int], int, tuple, str], ...],
+        *, explicit_numbers: frozenset[str], limit: int,
+        ) -> tuple[tuple[
+            tuple[int, int, int, int, int], int, tuple, str], ...]:
+    """用同页高排窗口精确补齐问题数字，不猜测近似或算术关系。"""
+    if (type(limit) is not int or limit <= 0
+            or not isinstance(explicit_numbers, frozenset)
+            or any(not isinstance(item, str) or not item
+                   for item in explicit_numbers)
+            or len(selected_windows) > limit):
+        raise BroadQaQueryError("broad QA explicit number coverage 输入非法")
+    selected = list(selected_windows)
+
+    def identity(item: tuple[
+            tuple[int, int, int, int, int], int, tuple, str],
+            ) -> tuple[int, str]:
+        """返回窗口在一个 passage 内的稳定去重身份。"""
+        return int(item[2][0]), item[3]
+
+    def covered(values: list[tuple[
+            tuple[int, int, int, int, int], int, tuple, str]],
+            ) -> frozenset[str]:
+        """返回当前证据逐字覆盖的问题显式数字。"""
+        observed = set()
+        for item in values:
+            observed.update(_NUMBER_RE.findall(item[3]))
+        return frozenset(observed.intersection(explicit_numbers))
+
+    for number in sorted(explicit_numbers):
+        current_coverage = covered(selected)
+        if number in current_coverage:
+            continue
+        identities = {identity(item) for item in selected}
+        option = next((
+            item for item in ranked_windows
+            if identity(item) not in identities
+            and number in _NUMBER_RE.findall(item[3])
+        ), None)
+        if option is None:
+            continue
+        if len(selected) < limit:
+            selected.append(option)
+            continue
+        for index in range(len(selected) - 1, -1, -1):
+            proposal = [
+                item for ordinal, item in enumerate(selected)
+                if ordinal != index
+            ]
+            proposal.append(option)
+            if current_coverage.issubset(covered(proposal)):
+                selected = proposal
+                break
+    return tuple(selected)
+
+
 def _answer_kind_bonus(answer_kinds: tuple[str, ...], text: str) -> int:
     """用问式槽类型优先满足显式值形态的证据句。"""
     bonus = 0
@@ -547,6 +606,11 @@ def retrieve_broad_qa_candidates(
         page_candidates = []
         selected_windows = _select_diverse_evidence_windows(
             ranked_windows, limit=_MAX_EVIDENCE_CITATIONS)
+        selected_windows = _cover_explicit_number_evidence_windows(
+            ranked_windows, selected_windows,
+            explicit_numbers=frozenset(
+                _NUMBER_RE.findall(slot_free_question)),
+            limit=_MAX_EVIDENCE_CITATIONS)
         for window_score, _, page_row, selected_text in selected_windows:
             page_candidates.append(BroadQaRetrievalCandidate(
                 page_candidate.score + window_score[0],
