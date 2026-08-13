@@ -36,6 +36,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_query import (
     _cover_explicit_number_evidence_windows,
     _expand_structural_evidence_windows,
     _page_evidence_surface,
+    _remove_redundant_evidence_candidates,
 )
 from pure_integer_ai.storage.integer_codec import encode_integer_tuple
 
@@ -398,7 +399,7 @@ def test_explicit_number_coverage_uses_exact_same_page_window_only() -> None:
 
 def test_structural_expansion_stays_in_passage_and_adds_required_context(
         ) -> None:
-    """因果问式和前向指代只扩展同 passage 的连续候选窗口。"""
+    """因果问式和事件回指只扩展同 passage 的连续候选窗口。"""
     def item(score: int, passage_id: int, passage: str, text: str):
         """构造带真实 passage 文本的稳定窗口。"""
         row = (passage_id, 0, len(passage), "a" * 64, passage)
@@ -419,6 +420,105 @@ def test_structural_expansion_stays_in_passage_and_adds_required_context(
     expanded_reference = _expand_structural_evidence_windows(
         [reference, reference_context], (reference,), answer_kinds=())
     assert expanded_reference == (reference_context,)
+
+    event_passage = "甲与乙结婚。此举令到乙成为甲的继祖母。"
+    event = item(50, 4, event_passage, "此举令到乙成为甲的继祖母。")
+    event_context = item(49, 4, event_passage, event_passage)
+    expanded_event = _expand_structural_evidence_windows(
+        [event, event_context], (event,), answer_kinds=("CAUSE",))
+    assert expanded_event == (event_context,)
+
+    unrelated_event = _expand_structural_evidence_windows(
+        [event, event_context], (event,), answer_kinds=("ENTITY",))
+    assert unrelated_event == (event,)
+
+
+def test_evidence_compression_removes_only_byte_redundant_windows() -> None:
+    """回答压缩只删除重复或被完整包含的窗口，保留独立证据。"""
+    from pure_integer_ai.experiments.ph2_broad_qa_query import (
+        BroadQaRetrievalCandidate,
+    )
+
+    def candidate(
+            passage_id: int, text: str, *, page_id: int = 1,
+            ) -> BroadQaRetrievalCandidate:
+        """构造压缩器所需的最小稳定来源候选。"""
+        return BroadQaRetrievalCandidate(
+            1, 1, passage_id, 0, len(text), "a" * 64, text,
+            1, "标题", "标题", page_id, 2,
+            "2026-07-01T00:00:00Z", "{}",
+            text,
+        )
+
+    containing = candidate(1, "前句。答案句。")
+    contained = candidate(1, "答案句。")
+    duplicate = candidate(2, "前句。答案句。")
+    independent = candidate(3, "独立证据。")
+    assert _remove_redundant_evidence_candidates((
+        contained, containing, duplicate, independent,
+    )) == (containing, independent)
+    other_source = candidate(4, "答案句。", page_id=2)
+    assert _remove_redundant_evidence_candidates((
+        containing, other_source,
+    )) == (containing, other_source)
+
+
+def test_evidence_compression_rebinds_primary_source_to_retained_window(
+        ) -> None:
+    """首窗口被更完整来源覆盖后，主引用必须随 evidence chain 更新。"""
+    from pure_integer_ai.experiments.ph2_broad_qa_query import (
+        answer_broad_qa_candidates,
+        BroadQaRetrievalCandidate,
+        BroadQaRetrievalTrace,
+    )
+
+    contributor = (
+        '{"kind":"registered","user_id":7,"username":"测试"}')
+
+    def candidate(
+            passage_id: int, passage: str, selected: str, raw_sha: str,
+            ) -> BroadQaRetrievalCandidate:
+        """构造同页不同 passage 的来源绑定压缩候选。"""
+        return BroadQaRetrievalCandidate(
+            1_000_000_000, 2, passage_id, 0, len(passage), raw_sha,
+            passage, 1, "标题", "标题", 1, 2,
+            "2026-07-01T00:00:00Z", contributor, selected,
+        )
+
+    contained = candidate(1, "答案句。", "答案句。", "a" * 64)
+    containing = candidate(
+        2, "前句。答案句。", "前句。答案句。", "b" * 64)
+    trace = BroadQaRetrievalTrace(
+        "synthetic", "CC-BY-SA-4.0", 2, 2, 1, 2,
+        (contained, containing),
+    )
+    result = answer_broad_qa_candidates(
+        "标题是什么？", (contained,), trace)
+    assert result.status == "ANSWER"
+    assert result.evidence_text == containing.text
+    assert result.evidence_raw_sha256 == containing.raw_sha256
+    assert len(result.evidence_chain) == 1
+    assert result.evidence_chain[0].selected_text == containing.selected_text
+
+
+def test_production_query_closes_same_passage_event_reference(
+        tmp_path: Path) -> None:
+    """原因回答遇到事件回指时必须连同前句 antecedent 一起引用。"""
+    database = tmp_path / "event-reference.sqlite3"
+    _database(database, ((1, "乙", (
+        "乙原本与甲没有亲属关系。",
+        "甲的母亲丙改嫁乙的祖父丁。此举令到乙成为甲的继祖母。",
+        "乙后来搬到另一座城市。",
+    )),))
+    connection = sqlite3.connect(str(database))
+    try:
+        result = query_broad_qa(connection, "乙为什么会成为甲的继祖母？")
+    finally:
+        connection.close()
+    assert result.status == "ANSWER"
+    assert result.evidence_chain
+    assert result.evidence_chain[0].selected_text == (
+        "甲的母亲丙改嫁乙的祖父丁。此举令到乙成为甲的继祖母。")
 
 
 def test_scoped_quantity_focus_keeps_relation_after_title_only() -> None:

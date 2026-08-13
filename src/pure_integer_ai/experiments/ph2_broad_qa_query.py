@@ -31,9 +31,14 @@ _EXPLICIT_SCOPE_RE = re.compile(
     r"發源於|发源于|居住於|居住于)")
 _CAUSE_EVIDENCE_RE = re.compile(
     r"因为|由於|由于|因而|因此|為此|为此|導致|导致|使得|"
-    r"(?:^|[。！？!?])\s*因|使[^。！？!?\n]{0,80}(?:成為|成为)")
+    r"(?:^|[。！？!?])\s*因|"
+    r"(?:使|令到?)[^。！？!?\n]{0,80}(?:成為|成为|變成|变成)")
 _BACKWARD_REFERENCE_RE = re.compile(
     r"^(?:前者|後者|后者|上述|以上)")
+_EVENT_REFERENCE_RE = re.compile(
+    r"^(?:此(?:舉|举|事|行為|行为)|"
+    r"(?:這|这)(?:一(?:舉|举|事|行為|行为|做法)|"
+    r"導致|导致|使得|令到?))")
 _TO_SIMPLIFIED = OpenCC("t2s")
 _TO_TRADITIONAL = OpenCC("s2t")
 _MAX_EVIDENCE_CITATIONS = 4
@@ -347,7 +352,7 @@ def _expand_structural_evidence_windows(
         *, answer_kinds: tuple[str, ...],
         ) -> tuple[tuple[
             tuple[int, int, int, int, int], int, tuple, str], ...]:
-    """用同 passage 连续窗口补齐显式因果或前向指代所需邻句。"""
+    """用同 passage 连续窗口补齐显式因果或事件回指所需邻句。"""
     if (not isinstance(answer_kinds, tuple)
             or any(not isinstance(item, str) or not item
                    for item in answer_kinds)):
@@ -366,7 +371,10 @@ def _expand_structural_evidence_windows(
             and _CAUSE_EVIDENCE_RE.search(current_text) is None)
         needs_reference = _BACKWARD_REFERENCE_RE.search(
             current_text.lstrip()) is not None
-        if not needs_cause and not needs_reference:
+        needs_event_reference = (
+            "CAUSE" in answer_kinds
+            and _EVENT_REFERENCE_RE.search(current_text.lstrip()) is not None)
+        if not needs_cause and not needs_reference and not needs_event_reference:
             continue
         current_start = current[2][4].find(current_text)
         if current_start < 0:
@@ -382,12 +390,36 @@ def _expand_structural_evidence_windows(
             and item[3] != current_text
             and (not needs_cause
                  or _CAUSE_EVIDENCE_RE.search(item[3]) is not None)
-            and (not needs_reference
+            and (not (needs_reference or needs_event_reference)
                  or item[2][4].find(item[3]) < current_start)
         ), None)
         if option is not None:
             selected[index] = option
     return tuple(selected)
+
+
+def _remove_redundant_evidence_candidates(
+        candidates: tuple[BroadQaRetrievalCandidate, ...],
+        ) -> tuple[BroadQaRetrievalCandidate, ...]:
+    """删除完全重复或被另一条引用逐字覆盖的证据窗口。"""
+    if any(not isinstance(item, BroadQaRetrievalCandidate)
+           for item in candidates):
+        raise BroadQaQueryError("broad QA evidence compression 输入非法")
+    retained = []
+    for index, candidate in enumerate(candidates):
+        text = candidate.selected_text or candidate.text
+        redundant = any(
+            candidate.page_id == other.page_id
+            and candidate.revision_id == other.revision_id
+            and ((text == other_text and other_index < index)
+                 or (len(other_text) > len(text) and text in other_text))
+            for other_index, other in enumerate(candidates)
+            if other_index != index
+            for other_text in (other.selected_text or other.text,)
+        )
+        if not redundant:
+            retained.append(candidate)
+    return tuple(retained)
 
 
 def _answer_kind_bonus(answer_kinds: tuple[str, ...], text: str) -> int:
@@ -864,6 +896,9 @@ def answer_broad_qa_candidates(
             sentence_question[:span[0]] + "\n" + sentence_question[span[1]:])
     question_terms = _script_terms(sentence_question)
     answer_kinds = question_slots.answer_kinds(question)
+    evidence_candidates = _remove_redundant_evidence_candidates(
+        evidence_candidates)
+    primary_evidence = evidence_candidates[0]
     citations = []
     answer_parts = []
     for evidence in evidence_candidates[:_MAX_EVIDENCE_CITATIONS]:
@@ -884,14 +919,17 @@ def answer_broad_qa_candidates(
     answer = "\n".join(answer_parts)
     source_url = (
         "https://zh.wikipedia.org/w/index.php?curid="
-        f"{best.page_id}&oldid={best.revision_id}"
+        f"{primary_evidence.page_id}&oldid={primary_evidence.revision_id}"
     )
     return BroadQaResult(
-        "ANSWER", question, answer, best.title, best.page_id,
-        best.revision_id, best.text, best.raw_start, best.raw_end,
-        best.raw_sha256, source_url, trace.snapshot_id, trace.license_id,
+        "ANSWER", question, answer, primary_evidence.title,
+        primary_evidence.page_id, primary_evidence.revision_id,
+        primary_evidence.text, primary_evidence.raw_start,
+        primary_evidence.raw_end, primary_evidence.raw_sha256, source_url,
+        trace.snapshot_id, trace.license_id,
         trace.matched_query_term_count, trace.candidate_document_count,
-        best.revision_timestamp, best.contributor_json,
+        primary_evidence.revision_timestamp,
+        primary_evidence.contributor_json,
         WIKIPEDIA_ATTRIBUTION, tuple(citations),
     )
 
