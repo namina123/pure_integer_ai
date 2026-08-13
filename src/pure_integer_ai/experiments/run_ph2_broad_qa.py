@@ -13,6 +13,9 @@ from typing import TextIO
 from pure_integer_ai.experiments.ph2_broad_qa_index import (
     build_broad_qa_index,
 )
+from pure_integer_ai.experiments.ph2_broad_qa_interactive import (
+    render_broad_qa_text,
+)
 from pure_integer_ai.experiments.ph2_broad_qa_query import query_broad_qa
 from pure_integer_ai.experiments.ph2_broad_qa_sharded import (
     build_broad_qa_sharded_index,
@@ -60,7 +63,7 @@ def _work_path(value: str) -> Path:
 
 
 def _parser() -> argparse.ArgumentParser:
-    """构造 select/build/query 三个显式子命令。"""
+    """构造选择、构建、机器查询和人类问答子命令。"""
     parser = argparse.ArgumentParser(
         description="Build or query the source-bound broad QA preview.")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -94,10 +97,15 @@ def _parser() -> argparse.ArgumentParser:
                     "--no-publish", action="store_true")
                 command.add_argument(
                     "--discard-unsealed", action="store_true")
-    query = subcommands.add_parser("query")
-    query.add_argument("--run-root", type=_work_path, required=True)
-    query.add_argument("--database", type=_work_path, required=True)
-    query.add_argument("question")
+    for name in ("query", "ask"):
+        query = subcommands.add_parser(name)
+        query.add_argument("--run-root", type=_work_path, required=True)
+        query.add_argument("--database", type=_work_path, required=True)
+        query.add_argument("question", nargs="?" if name == "ask" else None)
+        if name == "ask":
+            query.add_argument(
+                "--audit", action="store_true",
+                help="Emit the complete canonical JSON result.")
     return parser
 
 
@@ -106,7 +114,7 @@ def _validate_run_paths(args: argparse.Namespace) -> None:
     root = args.run_root.resolve()
     if not root.is_dir():
         raise SystemExit("run-root must be an existing directory")
-    if args.command == "query":
+    if args.command in {"query", "ask"}:
         names = ("database",)
     elif args.command in {"select", "prefix"}:
         names = ("index", "selection")
@@ -131,15 +139,57 @@ def _emit(value: object, stream: TextIO) -> None:
     stream.flush()
 
 
+def _ask_questions(
+        database_path: Path,
+        questions: tuple[str, ...],
+        *, audit: bool,
+        stream: TextIO,
+        ) -> int:
+    """在同一只读连接上回答多题，并选择文本或完整审计输出。"""
+    if (not questions or any(
+            not isinstance(item, str) or not item.strip()
+            for item in questions)):
+        raise SystemExit("ask requires a question argument or non-empty stdin")
+    database = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    try:
+        for ordinal, question in enumerate(questions):
+            result = query_broad_qa(database, question.strip())
+            if audit:
+                _emit(result.to_dict(), stream)
+            else:
+                if ordinal:
+                    stream.write("\n\n")
+                stream.write(render_broad_qa_text(result))
+                stream.write("\n")
+                stream.flush()
+    finally:
+        database.close()
+    return 0
+
+
+def _stdin_questions(stream: TextIO) -> tuple[str, ...]:
+    """读取 UTF-8 文本行，并移除首行可能存在的 BOM。"""
+    result = []
+    for raw in stream:
+        value = raw.strip()
+        if not result:
+            value = value.lstrip("\ufeff")
+        if value:
+            result.append(value)
+    return tuple(result)
+
+
 def main(
         argv: list[str] | None = None,
         *,
         stdout: TextIO | None = None,
+        stdin: TextIO | None = None,
         ) -> int:
-    """执行不可覆盖构建或只读单问题查询。"""
+    """执行不可覆盖构建、机器查询或只读交互问答。"""
     args = _parser().parse_args(argv)
     _validate_run_paths(args)
     stream = sys.stdout if stdout is None else stdout
+    input_stream = sys.stdin if stdin is None else stdin
     if args.command == "query":
         database = sqlite3.connect(f"file:{args.database}?mode=ro", uri=True)
         try:
@@ -148,6 +198,13 @@ def main(
             database.close()
         _emit(result.to_dict(), stream)
         return 0
+    if args.command == "ask":
+        questions = (
+            (args.question,) if args.question is not None
+            else _stdin_questions(input_stream)
+        )
+        return _ask_questions(
+            args.database, questions, audit=args.audit, stream=stream)
     manifest_path = args.snapshot_manifest.resolve()
     snapshot_bytes = manifest_path.read_bytes()
     snapshot = read_mediawiki_dump_snapshot(manifest_path)

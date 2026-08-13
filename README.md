@@ -96,16 +96,18 @@ pure-integer-qa --jsonl
 
 每个输入对象会立即得到一个结果记录；坏行返回类型化错误并继续处理后续行，输入结束时再输出一条 session probe。
 
-### 来源约束广域问答开发预览
+### 来源约束广域问答入口
 
-`pure-integer-broad-qa` 可以从冻结的中文 Wikipedia multistream snapshot 选择页面、构建紧凑整数索引并执行来源约束查询：
+`pure-integer-broad-qa` 可以从冻结的中文 Wikipedia multistream snapshot 选择页面、构建紧凑整数索引并执行来源约束问答。`ask` 默认输出简洁答案、页面修订和来源链接：
 
 ```bash
-pure-integer-broad-qa query \
+pure-integer-broad-qa ask \
   --run-root <run-root> \
   --database <run-root>/indexes/broad-qa.sqlite3 \
   "矮寨大桥何时建成通车？"
 ```
+
+不传问题参数时，`ask` 可从 UTF-8 stdin 逐行读取多个问题，并在同一个只读数据库连接上回答；Windows PowerShell 下建议把中文问题直接作为参数传入，避免旧管道编码改写字符。需要完整候选计数、证据链、raw span/hash 和贡献者信息时使用 `ask --audit`；原有 `query` 继续输出单题完整 JSON，供自动化调用。
 
 构建需要从官方 Wikimedia 地址取得 snapshot manifest 中固定的 XML 和 index 文件；仓库不提交 3.5 GB 原始 dump 或 20k SQLite。公开的固定问题与路径无关探针位于 `data/ph2/broad_qa_dev_questions_v1.json` 和 `scripts/run_broad_qa_dev_probe.py`。此入口目前只做稀疏检索与来源约束抽取，不调用 LLM，也不代表自由生成、成熟对话或开放域语义学习已经完成。
 

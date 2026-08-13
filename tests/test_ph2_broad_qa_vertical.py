@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import bz2
 import hashlib
+from io import StringIO
 import json
 from pathlib import Path
 import sqlite3
@@ -19,6 +20,9 @@ from pure_integer_ai.experiments.ph2_broad_qa_contract import (
 from pure_integer_ai.experiments.ph2_broad_qa_index import (
     broad_qa_terms,
     build_broad_qa_index,
+)
+from pure_integer_ai.experiments.ph2_broad_qa_interactive import (
+    render_broad_qa_text,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_query import query_broad_qa
 from pure_integer_ai.experiments.ph2_broad_qa_query import BroadQaQueryError
@@ -43,7 +47,9 @@ from pure_integer_ai.experiments.ph2_dataset_contract import (
     canonical_json_bytes,
 )
 from pure_integer_ai.experiments.run_ph2_broad_qa import (
+    _ask_questions,
     _parser,
+    _stdin_questions,
     _work_path,
 )
 
@@ -196,6 +202,66 @@ def test_build_query_answer_unknown_and_bit_identical_rebuild(
         "https://zh.wikipedia.org/w/index.php?curid=1&oldid=1001")
     assert unknown.status in {"UNKNOWN", "CLARIFY"}
     assert unknown.answer is None
+
+
+def test_interactive_text_preserves_answer_source_and_refusal(
+        tmp_path: Path) -> None:
+    """人类可读输出保留回答、来源和拒答，不倾倒完整审计 JSON。"""
+    manifest, xml = _fixture(tmp_path)
+    database = tmp_path / "interactive.sqlite3"
+    build_broad_qa_index(
+        manifest, xml_path=xml, database_path=database,
+        accepted_page_limit=3)
+    connection = sqlite3.connect(str(database))
+    try:
+        answer = query_broad_qa(connection, "谁主持修建都江堰用于防洪？")
+        unknown = query_broad_qa(connection, "火星上的都江堰由谁修建？")
+    finally:
+        connection.close()
+    rendered = render_broad_qa_text(answer)
+    assert "问题：谁主持修建都江堰用于防洪？" in rendered
+    assert "李冰" in rendered
+    assert "来源：都江堰，修订 1001，CC-BY-SA-4.0" in rendered
+    assert answer.source_url in rendered
+    assert '"candidate_document_count"' not in rendered
+    assert render_broad_qa_text(unknown).endswith(
+        "结果：未找到足够且可核验的来源证据。")
+
+
+def test_interactive_ask_reuses_database_and_separates_audit_output(
+        tmp_path: Path) -> None:
+    """ask 可连续回答多题，完整 JSON 只在显式 audit 模式输出。"""
+    manifest, xml = _fixture(tmp_path)
+    database = tmp_path / "ask.sqlite3"
+    build_broad_qa_index(
+        manifest, xml_path=xml, database_path=database,
+        accepted_page_limit=3)
+    questions = (
+        "谁主持修建都江堰用于防洪？",
+        "火星上的都江堰由谁修建？",
+    )
+    text_output = StringIO()
+    assert _ask_questions(
+        database, questions, audit=False, stream=text_output) == 0
+    text_value = text_output.getvalue()
+    assert text_value.count("问题：") == 2
+    assert "李冰" in text_value
+    assert "未找到足够且可核验的来源证据" in text_value
+    audit_output = StringIO()
+    assert _ask_questions(
+        database, questions, audit=True, stream=audit_output) == 0
+    records = [json.loads(line) for line in audit_output.getvalue().splitlines()]
+    assert [item["status"] for item in records] == ["ANSWER", "UNKNOWN"]
+    assert records[0]["citation"]["title"] == "都江堰"
+
+
+def test_interactive_stdin_strips_utf8_bom_and_blank_lines() -> None:
+    """stdin 多题入口接受 UTF-8 BOM，不把空行变成问题。"""
+    assert _stdin_questions(StringIO(
+        "\ufeff黄山松分布在哪些地区？\n\n矮寨大桥何时通车？\n")) == (
+            "黄山松分布在哪些地区？",
+            "矮寨大桥何时通车？",
+        )
 
 
 def test_terms_are_integer_index_features_not_full_question_keys() -> None:

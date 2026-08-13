@@ -96,16 +96,18 @@ pure-integer-qa --jsonl
 
 Each input object receives an immediate result record. A bad line emits a typed error without stopping later lines, and a final session probe is emitted when input ends.
 
-### Source-bound broad-QA development preview
+### Source-bound broad-QA interface
 
-`pure-integer-broad-qa` selects pages from a frozen Chinese Wikipedia multistream snapshot, builds a compact integer index, and runs source-bound queries:
+`pure-integer-broad-qa` selects pages from a frozen Chinese Wikipedia multistream snapshot, builds a compact integer index, and runs source-bound QA. `ask` emits a concise answer, page revision, and source link by default:
 
 ```bash
-pure-integer-broad-qa query \
+pure-integer-broad-qa ask \
   --run-root <run-root> \
   --database <run-root>/indexes/broad-qa.sqlite3 \
   "矮寨大桥何时建成通车？"
 ```
+
+Without a question argument, `ask` reads UTF-8 questions line by line from stdin and reuses one read-only database connection. On Windows PowerShell, passing Chinese questions directly as arguments avoids legacy pipeline encoding changes. Use `ask --audit` for complete candidate counters, evidence chains, raw spans/hashes, and contributor metadata. The existing `query` command continues to emit complete single-question JSON for automation.
 
 Building requires the XML and index files pinned by the snapshot manifest from the official Wikimedia URLs. The repository does not commit the 3.5 GB source dump or the 20k SQLite artifact. The public fixed questions and path-independent runner are `data/ph2/broad_qa_dev_questions_v1.json` and `scripts/run_broad_qa_dev_probe.py`. This path currently performs sparse retrieval and source-bound extraction without an LLM; it is not free-form generation, mature dialogue, or completed open-domain semantic learning.
 
