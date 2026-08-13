@@ -127,7 +127,13 @@ def _fixture():
         (BroadQaSourceOutputPart(result_role, 0, "丙"),),
         "丙",
     )
-    return BroadQaSourceInferenceRecord(claim)
+    return BroadQaSourceInferenceRecord(
+        claim,
+        "a" * 64,
+        hashlib.sha256("示例问题".encode("utf-8")).hexdigest(),
+        (hashlib.sha256("丙".encode("utf-8")).hexdigest(),),
+        hashlib.sha256("示例终页".encode("utf-8")).hexdigest(),
+    )
 
 
 def test_record_round_trip_is_bit_identical_and_contract_only() -> None:

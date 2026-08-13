@@ -166,10 +166,77 @@ def _read_dossier(path: Path) -> tuple[dict[str, object], ...]:
                 or not isinstance(review.get("context_sha256"), str)
                 or not isinstance(terminal.get("wikitext_sha256"), str)
                 or not isinstance(terminal.get("plain_text"), str)
+                or not isinstance(terminal.get("snapshot_id"), str)
+                or not isinstance(terminal.get("license_id"), str)
+                or type(terminal.get("page_id")) is not int
+                or type(terminal.get("revision_id")) is not int
+                or not isinstance(terminal.get("title"), str)
+                or not isinstance(terminal.get("passages"), list)
                 or not isinstance(review.get("gold_answers"), list)):
             raise BroadQaExternalDataError(
                 "source inference dossier 来源承诺缺失")
+        required_passage = {
+            "ordinal", "raw_end", "raw_sha256", "raw_start",
+            "section_title", "text", "text_sha256",
+        }
+        if any(not isinstance(item, dict) or set(item) != required_passage
+               for item in terminal["passages"]):
+            raise BroadQaExternalDataError(
+                "source inference dossier passage 承诺缺失")
     return values
+
+
+def _gold_answer_sha256s(gold_answers: tuple[str, ...]) -> tuple[str, ...]:
+    """返回固定 gold 文本集合的规范 SHA 承诺。"""
+    return tuple(sorted({
+        hashlib.sha256(item.encode("utf-8")).hexdigest()
+        for item in gold_answers
+    }))
+
+
+def _validate_inference_record_binding(
+        record,
+        *,
+        item_id: str,
+        roster_record: dict[str, object],
+        dossier_record: dict[str, object],
+        gold_answers: tuple[str, ...],
+        ) -> None:
+    """核验 inference record 只使用当前题目的固定终页来源。"""
+    terminal = dossier_record["terminal_source"]
+    if (record.item_id != item_id
+            or record.question_sha256 != roster_record["question_sha256"]
+            or record.gold_answer_sha256s
+            != _gold_answer_sha256s(gold_answers)
+            or record.terminal_wikitext_sha256
+            != terminal["wikitext_sha256"]):
+        raise BroadQaExternalDataError(
+            "SOURCE_DERIVABLE inference record 题目承诺漂移")
+    passages = {
+        (
+            value["ordinal"], value["raw_start"], value["raw_end"],
+            value["raw_sha256"], value["text"],
+        )
+        for value in terminal["passages"]
+    }
+    for premise in record.claim.premises:
+        observation = premise.observation
+        passage = (
+            observation.passage_ordinal,
+            observation.raw_start,
+            observation.raw_end,
+            observation.raw_sha256,
+            observation.evidence_text,
+        )
+        if (observation.page_id != roster_record["terminal_page_id"]
+                or observation.revision_id
+                != roster_record["terminal_revision_id"]
+                or observation.title != terminal["title"]
+                or observation.snapshot_id != terminal["snapshot_id"]
+                or observation.license_id != terminal["license_id"]
+                or passage not in passages):
+            raise BroadQaExternalDataError(
+                "SOURCE_DERIVABLE inference record 终页证据漂移")
 
 
 # object-model: value; representation=struct; interop=pending
@@ -417,6 +484,14 @@ def validate_source_inference_decision_ledger(
                     not in verified_inference_records):
                 raise BroadQaExternalDataError(
                     "SOURCE_DERIVABLE decision 来源边界漂移")
+            _validate_inference_record_binding(
+                verified_inference_records[
+                    decision.inference_record_sha256],
+                item_id=item_id,
+                roster_record=roster_record,
+                dossier_record=dossier_record,
+                gold_answers=gold_answers,
+            )
         elif decision.decision == "SOURCE_CONFLICT":
             if (roster_record["assignment"] != "NON_EXTRACTIVE_REVIEW"
                     or terminal_hit

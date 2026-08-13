@@ -747,13 +747,31 @@ class BroadQaSourceInferenceRecord:
     """封装一个默认关闭的来源内归纳合同记录。"""
 
     claim: BroadQaSourceDerivedClaim
+    item_id: str
+    question_sha256: str
+    gold_answer_sha256s: tuple[str, ...]
+    terminal_wikitext_sha256: str
     runtime_state: str = SOURCE_INFERENCE_RUNTIME_STATE
     production_enabled: int = 0
 
     def __post_init__(self) -> None:
-        """阻止合同存在被误记为生产能力已经接通。"""
+        """核验题目/来源承诺，并阻止合同冒充生产能力已接通。"""
         if not isinstance(self.claim, BroadQaSourceDerivedClaim):
             raise TypeError("source inference record claim 类型非法")
+        _sha256(self.item_id, label="source inference item_id")
+        _sha256(self.question_sha256, label="source inference question")
+        if (not isinstance(self.gold_answer_sha256s, tuple)
+                or not self.gold_answer_sha256s
+                or self.gold_answer_sha256s
+                != tuple(sorted(set(self.gold_answer_sha256s)))):
+            raise BroadQaSourceInferenceError(
+                "source inference gold answer 承诺必须非空唯一排序")
+        for item in self.gold_answer_sha256s:
+            _sha256(item, label="source inference gold answer")
+        _sha256(
+            self.terminal_wikitext_sha256,
+            label="source inference terminal Wikitext",
+        )
         if (self.runtime_state != SOURCE_INFERENCE_RUNTIME_STATE
                 or type(self.production_enabled) is not int
                 or self.production_enabled != 0):
@@ -766,8 +784,12 @@ class BroadQaSourceInferenceRecord:
             "artifact_kind": SOURCE_INFERENCE_RECORD_KIND,
             "claim": self.claim.to_dict(),
             "format_version": 1,
+            "gold_answer_sha256s": list(self.gold_answer_sha256s),
+            "item_id": self.item_id,
             "production_enabled": self.production_enabled,
+            "question_sha256": self.question_sha256,
             "runtime_state": self.runtime_state,
+            "terminal_wikitext_sha256": self.terminal_wikitext_sha256,
         }
 
     def canonical_bytes(self) -> bytes:
@@ -782,15 +804,20 @@ class BroadQaSourceInferenceRecord:
     def from_dict(cls, value: object) -> "BroadQaSourceInferenceRecord":
         """从字段精确的 JSON object 恢复 record。"""
         raw = _exact(value, {
-            "artifact_kind", "claim", "format_version", "production_enabled",
-            "runtime_state",
+            "artifact_kind", "claim", "format_version",
+            "gold_answer_sha256s", "item_id", "production_enabled",
+            "question_sha256", "runtime_state", "terminal_wikitext_sha256",
         }, label="source inference record")
         if (raw["artifact_kind"] != SOURCE_INFERENCE_RECORD_KIND
-                or raw["format_version"] != 1):
+                or raw["format_version"] != 1
+                or not isinstance(raw["gold_answer_sha256s"], list)):
             raise BroadQaSourceInferenceError(
                 "source inference record envelope 漂移")
         return cls(
             BroadQaSourceDerivedClaim.from_dict(raw["claim"]),
+            raw["item_id"], raw["question_sha256"],
+            tuple(raw["gold_answer_sha256s"]),
+            raw["terminal_wikitext_sha256"],
             raw["runtime_state"], raw["production_enabled"],
         )
 

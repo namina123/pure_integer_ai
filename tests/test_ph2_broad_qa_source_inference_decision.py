@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
 from pure_integer_ai.experiments.ph2_broad_qa_source_inference_decision import (
     BroadQaSourceInferenceDecision,
     BroadQaSourceInferenceDecisionLedger,
+    _validate_inference_record_binding,
     parse_source_inference_decision_ledger,
     publish_source_inference_review_worksheet,
     validate_source_inference_decision_ledger,
@@ -81,8 +83,20 @@ def _files(root: Path):
             },
             "roster_commitment": {"title_key": "抽取页"},
             "terminal_source": {
-                "passages": [],
+                "license_id": "CC-BY-SA-4.0",
+                "page_id": 1,
+                "passages": [{
+                    "ordinal": 1,
+                    "raw_end": 8,
+                    "raw_sha256": _sha_text("抽取原文"),
+                    "raw_start": 0,
+                    "section_title": "",
+                    "text": "终页包含抽取答案。",
+                    "text_sha256": _sha_text("终页包含抽取答案。"),
+                }],
                 "plain_text": "终页包含抽取答案。",
+                "revision_id": 11,
+                "snapshot_id": "ZHWIKIPEDIA_TEST",
                 "title": "抽取页",
                 "wikitext_sha256": terminal_first,
             },
@@ -101,8 +115,20 @@ def _files(root: Path):
             },
             "roster_commitment": {"title_key": "非抽取页"},
             "terminal_source": {
-                "passages": [],
+                "license_id": "CC-BY-SA-4.0",
+                "page_id": 2,
+                "passages": [{
+                    "ordinal": 1,
+                    "raw_end": 9,
+                    "raw_sha256": _sha_text("非抽取原文"),
+                    "raw_start": 0,
+                    "section_title": "",
+                    "text": "终页只有不同表述。",
+                    "text_sha256": _sha_text("终页只有不同表述。"),
+                }],
                 "plain_text": "终页只有不同表述。",
+                "revision_id": 22,
+                "snapshot_id": "ZHWIKIPEDIA_TEST",
                 "title": "非抽取页",
                 "wikitext_sha256": terminal_second,
             },
@@ -224,6 +250,74 @@ def test_derivable_requires_an_actual_verified_inference_record(
     with pytest.raises(BroadQaExternalDataError, match="来源边界"):
         validate_source_inference_decision_ledger(
             ledger, roster_path=roster, dossier_path=dossier)
+
+
+def test_inference_record_is_bound_to_exact_item_and_terminal_passage(
+        tmp_path: Path) -> None:
+    """合法 record 也不得跨题、跨页或脱离固定 passage 被复用。"""
+    (roster, dossier, _, second_id, _, terminal_second, _) = _files(tmp_path)
+    roster_record = json.loads(roster.read_text(
+        encoding="utf-8").splitlines()[1])
+    dossier_record = json.loads(dossier.read_text(
+        encoding="utf-8").splitlines()[1])
+    terminal = dossier_record["terminal_source"]
+    passage = terminal["passages"][0]
+    observation = SimpleNamespace(
+        page_id=2,
+        revision_id=22,
+        title="非抽取页",
+        snapshot_id="ZHWIKIPEDIA_TEST",
+        license_id="CC-BY-SA-4.0",
+        passage_ordinal=passage["ordinal"],
+        raw_start=passage["raw_start"],
+        raw_end=passage["raw_end"],
+        raw_sha256=passage["raw_sha256"],
+        evidence_text=passage["text"],
+    )
+    record = SimpleNamespace(
+        item_id=second_id,
+        question_sha256=roster_record["question_sha256"],
+        gold_answer_sha256s=(_sha_text("旧答案"),),
+        terminal_wikitext_sha256=terminal_second,
+        claim=SimpleNamespace(
+            premises=(SimpleNamespace(observation=observation),),
+        ),
+    )
+    _validate_inference_record_binding(
+        record,
+        item_id=second_id,
+        roster_record=roster_record,
+        dossier_record=dossier_record,
+        gold_answers=("旧答案",),
+    )
+
+    with pytest.raises(BroadQaExternalDataError, match="题目承诺"):
+        _validate_inference_record_binding(
+            SimpleNamespace(**{**record.__dict__, "item_id": "9" * 64}),
+            item_id=second_id,
+            roster_record=roster_record,
+            dossier_record=dossier_record,
+            gold_answers=("旧答案",),
+        )
+
+    wrong_observation = SimpleNamespace(
+        **{**observation.__dict__, "title": "别的终页"})
+    wrong_record = SimpleNamespace(
+        **{
+            **record.__dict__,
+            "claim": SimpleNamespace(
+                premises=(SimpleNamespace(observation=wrong_observation),),
+            ),
+        },
+    )
+    with pytest.raises(BroadQaExternalDataError, match="终页证据"):
+        _validate_inference_record_binding(
+            wrong_record,
+            item_id=second_id,
+            roster_record=roster_record,
+            dossier_record=dossier_record,
+            gold_answers=("旧答案",),
+        )
 
 
 def test_ledger_requires_exact_roster_coverage(tmp_path: Path) -> None:
