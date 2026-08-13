@@ -57,6 +57,17 @@ The new family freezes 200 development and 300 held-out questions, split evenly 
 
 The 459 source pages form a target index of 4,514 passages and 390,483 terms. The combined index contains 20,449 pages, 113,431 passages, and 3,781,174 terms; SHA-256 is `17bdea8850ca6afea3637fdab2bd4f58fa90fc0c3df5ea04ebf1a697a4c31cab`. Development reaches `200/200` Recall@20, `200/200` top1, `195/195` valid ANSWER citations, and `165/200 = 82.5%` evidence hit: `PASS`, aggregate SHA-256 `bfdb15d6244ccd9a245598efb5987034a752397ceb5ed78cfcf73479bb92e9bf`.
 
+## Interactive development slice (non-formal)
+
+After the formal vertical slice, a new interactive development pack was frozen without reading or rerunning any consumed held-out data. It contains 100 questions with 100 distinct titles, 60 from CMRC2018 and 40 from DRCD, split into five public question-surface buckets of 20 each: CAUSE, COMPARISON, TIME, QUANTITY, and RELATION. These are surface buckets for development accounting, not proven semantic-understanding categories; the source census contains no explicit DRCD CAUSE inventory, so this slice does not claim source balance or causal generalization.
+
+- Recall@20: `99/100 = 99%`; top1: `99/100 = 99%`.
+- Valid ANSWER citations: `97/97 = 100%`; evidence hit: `87/100 = 87%`; source-page gold coverage: `100/100`.
+- Failures: `GOLD_NOT_IN_EVIDENCE=10`, `NON_ANSWER=2`, `RETRIEVAL_MISS_AT_20=1`; bucket evidence hits are CAUSE `18/20`, COMPARISON `16/20`, TIME `17/20`, QUANTITY `18/20`, and RELATION `18/20`.
+- Independent production UNKNOWN/CLARIFY regression: `4/4 PASS`; fictional entities prefer `UNKNOWN`, while real ambiguous entities remain `CLARIFY`.
+
+The scope is `DEVELOPMENT_NON_FORMAL`, not a formal receipt or a semantic-category claim. The compact public receipt is [`broad_qa_interactive_development_receipt_v1.json`](../data/ph2/broad_qa_interactive_development_receipt_v1.json); it contains only metrics, boundaries, and commitment hashes. The dimension report was reaccounted read-only against source-page coverage and failure counts; its SHA-256 is `3b28edc134a0ccd09b32699f28ea100f51d91e8225f2d28812da8c285d7e826d`, and the earlier report was not overwritten.
+
 ## Unique formal held-out run
 
 The algorithm, family, census, index, aliases, selection, questions, labels, development aggregate, and 14 algorithm files are bound to public commit `7f3d87607eedc29c69eb17f40729be39e04f9045`. A fixed-path `OUTCOME_PENDING` intent claims the single run before prediction. Ordinary prediction rejects held-out; formal prediction authorization does not read labels; formal scoring revalidates the complete freeze before parsing labels. An existing intent forbids rerunning from another output directory.

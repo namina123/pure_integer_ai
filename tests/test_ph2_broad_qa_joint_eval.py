@@ -15,6 +15,12 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
     normalize_external_text,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_index import broad_qa_terms
+from pure_integer_ai.experiments.ph2_broad_qa_interactive_eval import (
+    publish_interactive_dimension_report,
+)
+from pure_integer_ai.experiments.ph2_broad_qa_interactive_family import (
+    INTERACTIVE_DIMENSION_RECORD_KIND,
+)
 from pure_integer_ai.experiments.ph2_broad_qa_joint_eval import (
     JOINT_ALIAS_KIND,
     JOINT_QUESTION_KIND,
@@ -25,6 +31,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_joint_eval import (
     score_joint_retrieval,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_line
+from pure_integer_ai.experiments.ph2_broad_qa_query import query_broad_qa
 from pure_integer_ai.storage.integer_codec import encode_integer_tuple
 
 
@@ -268,6 +275,126 @@ def test_joint_augmentation_prediction_and_scoring_close_end_to_end(
     assert aggregate["evidence_hit_count"] == 1
     assert aggregate["source_page_gold_coverage_count"] == 1
     assert aggregate["conditional_evidence_hit_ppm"] == 1_000_000
+    dimensions = tmp_path / "dimensions.jsonl"
+    dimensions.write_bytes(canonical_json_line({
+        "dimension": "RELATION", "format_version": 1,
+        "item_id": item_id,
+        "record_kind": INTERACTIVE_DIMENSION_RECORD_KIND,
+    }))
+    dimension_report = publish_interactive_dimension_report(
+        questions_path=question, labels_path=label,
+        dimensions_path=dimensions, predictions_path=prediction,
+        aggregate_path=tmp_path / "aggregate.json", aliases_path=aliases,
+        database_path=combined, report_path=tmp_path / "dimension-report.json")
+    assert dimension_report["global_counts"] == {
+        "answer_count": 1,
+        "citation_valid_count": 1,
+        "evidence_hit_count": 1,
+        "recall_at_20_count": 1,
+        "source_page_gold_coverage_count": 1,
+        "top1_source_hit_count": 1,
+    }
+    assert dimension_report["per_dimension"]["RELATION"][
+        "evidence_hit_ppm"] == 1_000_000
+    assert dimension_report["boundary"] == (
+        "DEVELOPMENT_SURFACE_BUCKETS_NOT_SEMANTIC_UNDERSTANDING")
+    assert dimension_report["failure_counts"] == {}
+    assert dimension_report["status_counts"] == {"ANSWER": 1}
+
+
+def test_production_query_prefers_unknown_for_explicit_fiction_and_clarifies(
+        tmp_path: Path) -> None:
+    """同一真实索引上，虚构限定须优先 UNKNOWN，真实多义词仍 CLARIFY。"""
+    database = tmp_path / "database.sqlite3"
+    _database(database, ((2, "亚马逊河", (
+        "亚马逊：\n* 亚马逊河：南美洲河流。\n* 亚马逊公司：电子商务公司。",
+        "亚马逊公司成立于二十世纪九十年代。",
+    )),))
+    connection = sqlite3.connect(str(database))
+    try:
+        fictional = query_broad_qa(connection, "虚构的亚马逊成立于何时？")
+        ambiguous = query_broad_qa(connection, "亚马逊是什么？")
+    finally:
+        connection.close()
+    assert fictional.status == "UNKNOWN"
+    assert ambiguous.status == "CLARIFY"
+
+
+def test_page_evidence_prefers_distinct_passages_before_duplicate_windows(
+        tmp_path: Path) -> None:
+    """同页高分段不得以重叠窗口挤掉其他 passage 的证据。"""
+    database = tmp_path / "database.sqlite3"
+    _database(database, ((2, "都江堰", (
+        "都江堰水利工程用于防洪。都江堰水利工程用于灌溉。"
+        "都江堰水利工程历史悠久。都江堰水利工程影响深远。",
+        "这项工程由李冰主持修建。",
+        "都江堰位于四川。",
+        "都江堰至今仍在发挥作用。",
+    )),))
+    connection = sqlite3.connect(str(database))
+    try:
+        from pure_integer_ai.experiments.ph2_broad_qa_query import (
+            retrieve_broad_qa_candidates,
+        )
+        _, trace = retrieve_broad_qa_candidates(
+            connection, "谁主持修建都江堰？")
+    finally:
+        connection.close()
+    passage_ids = tuple(
+        item.passage_id for item in trace.evidence_candidates)
+    assert len(passage_ids) == 4
+    assert len(set(passage_ids)) == 4
+
+
+def test_joint_augmentation_can_extend_an_existing_alias_index(
+        tmp_path: Path) -> None:
+    """链式增量须保留旧 alias 表，并把新页和新 alias 追加进去。"""
+    base = tmp_path / "base.sqlite3"
+    first = tmp_path / "first.sqlite3"
+    second = tmp_path / "second.sqlite3"
+    first_extra = tmp_path / "first-extra.sqlite3"
+    second_extra = tmp_path / "second-extra.sqlite3"
+    _database(base, ((1, "基页", "基页包含基础说明。"),))
+    _database(first_extra, ((2, "甲工程", "甲工程由甲主持。"),))
+    _database(second_extra, ((3, "乙工程", "乙工程由乙主持。"),))
+
+    def alias(path: Path, page_id: int, title: str) -> None:
+        """写入一条解析完成的合成 alias。"""
+        path.write_bytes(canonical_json_line({
+            "chain": [title], "format_version": 1,
+            "original_surfaces": [title], "record_kind": JOINT_ALIAS_KIND,
+            "status": "RESOLVED", "terminal_page_id": page_id,
+            "terminal_revision_id": 1000 + page_id,
+            "terminal_title": title,
+            "terminal_title_key": normalize_external_text(title),
+            "title_key": normalize_external_text(title),
+        }))
+
+    first_alias = tmp_path / "first-alias.jsonl"
+    second_alias = tmp_path / "second-alias.jsonl"
+    alias(first_alias, 2, "甲工程")
+    alias(second_alias, 3, "乙工程")
+    augment_broad_qa_index(
+        base, first_extra, output_database_path=first,
+        base_expected_sha256=hashlib.sha256(base.read_bytes()).hexdigest(),
+        target_selection_sha256="1" * 64, alias_path=first_alias)
+    report = augment_broad_qa_index(
+        first, second_extra, output_database_path=second,
+        base_expected_sha256=hashlib.sha256(first.read_bytes()).hexdigest(),
+        target_selection_sha256="2" * 64, alias_path=second_alias)
+    assert report["added_document_count"] == 1
+    connection = sqlite3.connect(str(second))
+    try:
+        assert connection.execute(
+            "SELECT surface FROM alias ORDER BY surface").fetchall() == [
+                ("乙工程",), ("甲工程",)]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM alias_term").fetchone()[0] > 0
+        assert connection.execute(
+            "SELECT page_id FROM document ORDER BY page_id").fetchall() == [
+                (1,), (2,), (3,)]
+    finally:
+        connection.close()
 
 
 def test_joint_score_rejects_one_tampered_chain_citation(

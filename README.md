@@ -60,6 +60,8 @@ PIDSLCA 目前适合作为研究和工程验证基础：
 
 联合评测随后完成了来源版本对齐。完整候选 census 显示，10,061 道自然标题锚定问题中有 7,189 道同时在当前终页和实际索引 passage 预算内保留金答案，原始总体覆盖率为 `71.4541%`；未覆盖部分没有从项目边界中删除。排除所有已消费标题后冻结的新 family 在唯一一次 300 问 held-out 正式运行中达到 Recall@20 `300/300`、top1 `300/300`、ANSWER 引用有效 `296/296`，证据命中 `253/300=84.3333%`，通过预先冻结的 60% 门。aggregate SHA-256 为 `84bfeb9023ffa31386fb4dcd159af9d82d797c92393d5e83322210a3cf4d30f3`；公开紧凑 receipt 位于 [`data/ph2/broad_qa_source_aligned_formal_receipt_v1.json`](data/ph2/broad_qa_source_aligned_formal_receipt_v1.json)。详见[联合评测报告](docs/broad_qa_joint_retrieval_eval_cn.md)。
 
+formal 纵切后又公开了一个不消费 held-out 的 100 问交互开发集：五个公开问式表面桶各 20 问，Recall@20 `99/100`、top1 `99/100`、ANSWER 引用有效 `97/97`、证据命中 `87/100=87%`，来源页金答案覆盖 `100/100`；四条原创 UNKNOWN/CLARIFY 生产回归 `4/4`。这些桶只是开发分账，不是已证明的语义理解类别；结果属于 `DEVELOPMENT_NON_FORMAL`，紧凑 receipt 位于 [`data/ph2/broad_qa_interactive_development_receipt_v1.json`](data/ph2/broad_qa_interactive_development_receipt_v1.json)。
+
 这仍是来源约束的抽取式广域事实问答纵切，不是自由生成、通用问答或断奶结果。它证明了当前中文 Wikipedia 冻结快照内的稀疏页面检索、来源约束证据选择和逐引用核验可以在预声明评测上闭合；没有证明任意问题、任意来源更新、长对话或自主语言学习已经闭合。详细合同和诚实边界见[20k 开发预览](docs/broad_qa_20k_preview.md)、[外部评测报告](docs/broad_qa_external_evidence_eval_cn.md)与[联合评测报告](docs/broad_qa_joint_retrieval_eval_cn.md)。
 
 ## 快速开始

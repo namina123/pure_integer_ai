@@ -75,6 +75,17 @@ V2 的 300 问 held-out 没有运行，也没有发布联合 PASS receipt。
 
 459 个来源页形成 4,514 passages、390,483 terms 的目标索引；与随机 20k 合并后的联合索引为 20,449 pages、113,431 passages、3,781,174 terms，SHA-256=`17bdea8850ca6afea3637fdab2bd4f58fa90fc0c3df5ea04ebf1a697a4c31cab`。开发结果为 Recall@20 `200/200`、top1 `200/200`、ANSWER citation valid `195/195`、evidence hit `165/200=82.5%`，状态 `PASS`，aggregate SHA-256=`bfdb15d6244ccd9a245598efb5987034a752397ceb5ed78cfcf73479bb92e9bf`。
 
+## 交互开发切片（非 formal）
+
+formal 结果之后，新建的交互开发集不读取或重跑任何已消费 held-out。它冻结 100 问、100 个不同标题，CMRC2018 60 问、DRCD 40 问，并以 CAUSE、COMPARISON、TIME、QUANTITY、RELATION 五个公开问式表面桶各 20 问做工程分账。表面桶不是已证明的语义理解类别，DRCD 的 CAUSE 库为空，因此该切片不声称来源平衡或因果泛化。
+
+- Recall@20：`99/100 = 99%`；top1：`99/100 = 99%`；
+- ANSWER citation valid：`97/97 = 100%`；evidence hit：`87/100 = 87%`；source-page gold coverage：`100/100`；
+- 失败分账：`GOLD_NOT_IN_EVIDENCE=10`、`NON_ANSWER=2`、`RETRIEVAL_MISS_AT_20=1`；五桶 evidence hit 依次为 CAUSE `18/20`、COMPARISON `16/20`、TIME `17/20`、QUANTITY `18/20`、RELATION `18/20`；
+- 独立生产 UNKNOWN/CLARIFY 回归：`4/4 PASS`，其中虚构实体优先 `UNKNOWN`，真实多义实体保持 `CLARIFY`。
+
+该运行状态是 `DEVELOPMENT_NON_FORMAL`，不是 formal receipt、不是新能力断言，也不是语义类别证明。公开紧凑 receipt 为 [`broad_qa_interactive_development_receipt_v1.json`](../data/ph2/broad_qa_interactive_development_receipt_v1.json)，只含指标、边界和承诺哈希，不含题目、标签、正文、预测或本机路径。维度报告在 K 盘只读复算后重新核对来源覆盖与失败分账，SHA-256 为 `3b28edc134a0ccd09b32699f28ea100f51d91e8225f2d28812da8c285d7e826d`；旧报告未覆盖。
+
 ## 唯一 formal held-out
 
 算法、family、census、索引、alias、selection、questions、labels、开发 aggregate 和 14 个算法文件绑定到公开提交 `7f3d87607eedc29c69eb17f40729be39e04f9045`。固定位置 intent 在预测前以 `OUTCOME_PENDING` 占用；普通 `predict` 拒绝 held-out；正式预测授权不读取 labels；`FORMAL_HELD_OUT` 评分在解析 labels 前重新验证完整冻结链。intent 已存在时禁止换运行目录重跑。

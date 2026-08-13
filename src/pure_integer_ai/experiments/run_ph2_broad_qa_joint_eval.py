@@ -12,6 +12,14 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
     official_external_qa_sources,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_index import build_broad_qa_index
+from pure_integer_ai.experiments.ph2_broad_qa_interactive_family import (
+    build_interactive_dimension_census,
+    freeze_interactive_development_pack,
+)
+from pure_integer_ai.experiments.ph2_broad_qa_interactive_eval import (
+    publish_interactive_dimension_report,
+    publish_interactive_refusal_report,
+)
 from pure_integer_ai.experiments.ph2_broad_qa_formal_protocol import (
     publish_formal_algorithm_freeze,
     publish_formal_run_intent,
@@ -203,6 +211,57 @@ def _parser() -> argparse.ArgumentParser:
     census.add_argument("--manifest", type=_work_path, required=True)
     census.add_argument("--workers", type=_worker_count, default=4)
 
+    interactive_census = commands.add_parser(
+        "interactive-dimension-census")
+    interactive_census.add_argument(
+        "--run-root", type=_work_path, required=True)
+    interactive_census.add_argument(
+        "--cmrc-root", type=_work_path, required=True)
+    interactive_census.add_argument(
+        "--drcd-root", type=_work_path, required=True)
+    interactive_census.add_argument(
+        "--candidates", type=_work_path, required=True)
+    interactive_census.add_argument(
+        "--source-census", type=_work_path, required=True)
+    interactive_census.add_argument(
+        "--consumed-source-targets", type=_work_path, action="append",
+        required=True)
+    interactive_census.add_argument(
+        "--census", type=_work_path, required=True)
+    interactive_census.add_argument(
+        "--manifest", type=_work_path, required=True)
+
+    interactive_freeze = commands.add_parser("freeze-interactive-dev")
+    interactive_freeze.add_argument(
+        "--run-root", type=_work_path, required=True)
+    interactive_freeze.add_argument(
+        "--cmrc-root", type=_work_path, required=True)
+    interactive_freeze.add_argument(
+        "--drcd-root", type=_work_path, required=True)
+    interactive_freeze.add_argument(
+        "--census", type=_work_path, required=True)
+    interactive_freeze.add_argument(
+        "--census-manifest", type=_work_path, required=True)
+    interactive_freeze.add_argument(
+        "--target", type=_work_path, required=True)
+
+    interactive_report = commands.add_parser("interactive-dimension-report")
+    interactive_report.add_argument(
+        "--run-root", type=_work_path, required=True)
+    for name in (
+            "questions", "labels", "dimensions", "predictions", "aggregate",
+            "aliases", "database", "report"):
+        interactive_report.add_argument(
+            f"--{name}", type=_work_path, required=True)
+
+    refusal_report = commands.add_parser("interactive-refusal-report")
+    refusal_report.add_argument(
+        "--run-root", type=_work_path, required=True)
+    refusal_report.add_argument(
+        "--database", type=_work_path, required=True)
+    refusal_report.add_argument(
+        "--report", type=_work_path, required=True)
+
     aligned_freeze = commands.add_parser("freeze-source-aligned")
     aligned_freeze.add_argument(
         "--run-root", type=_work_path, required=True)
@@ -263,6 +322,16 @@ def _validate_paths(args: argparse.Namespace) -> None:
         "alignment-census": (
             "candidates", "aliases", "selection", "xml", "census",
             "manifest"),
+        "interactive-dimension-census": (
+            "cmrc_root", "drcd_root", "candidates", "source_census",
+            "census", "manifest"),
+        "freeze-interactive-dev": (
+            "cmrc_root", "drcd_root", "census", "census_manifest",
+            "target"),
+        "interactive-dimension-report": (
+            "questions", "labels", "dimensions", "predictions", "aggregate",
+            "aliases", "database", "report"),
+        "interactive-refusal-report": ("database", "report"),
         "freeze-source-aligned": (
             "cmrc_root", "drcd_root", "candidates", "candidate_manifest",
             "census", "census_manifest", "target"),
@@ -286,6 +355,11 @@ def _validate_paths(args: argparse.Namespace) -> None:
             if not path.resolve().is_relative_to(root):
                 raise SystemExit(
                     "prior_source_targets must stay within run-root")
+    if args.command == "interactive-dimension-census":
+        for path in args.consumed_source_targets:
+            if not path.resolve().is_relative_to(root):
+                raise SystemExit(
+                    "consumed_source_targets must stay within run-root")
 
 
 def _emit(value: object) -> None:
@@ -401,6 +475,32 @@ def main(argv: list[str] | None = None) -> int:
             read_broad_qa_target_selection(args.selection),
             xml_path=args.xml, census_path=args.census,
             manifest_path=args.manifest, worker_count=args.workers)
+    elif args.command == "interactive-dimension-census":
+        items, source_report = load_external_qa_sources(
+            official_external_qa_sources(args.cmrc_root, args.drcd_root))
+        report = build_interactive_dimension_census(
+            items, candidates_path=args.candidates,
+            source_census_path=args.source_census,
+            consumed_source_target_paths=args.consumed_source_targets,
+            census_path=args.census, manifest_path=args.manifest,
+            source_report=source_report)
+    elif args.command == "freeze-interactive-dev":
+        items, source_report = load_external_qa_sources(
+            official_external_qa_sources(args.cmrc_root, args.drcd_root))
+        report = freeze_interactive_development_pack(
+            items, census_path=args.census,
+            census_manifest_path=args.census_manifest,
+            target_dir=args.target, source_report=source_report)
+    elif args.command == "interactive-dimension-report":
+        report = publish_interactive_dimension_report(
+            questions_path=args.questions, labels_path=args.labels,
+            dimensions_path=args.dimensions,
+            predictions_path=args.predictions, aggregate_path=args.aggregate,
+            aliases_path=args.aliases, database_path=args.database,
+            report_path=args.report)
+    elif args.command == "interactive-refusal-report":
+        report = publish_interactive_refusal_report(
+            args.database, report_path=args.report)
     elif args.command == "freeze-source-aligned":
         items, source_report = load_external_qa_sources(
             official_external_qa_sources(args.cmrc_root, args.drcd_root))

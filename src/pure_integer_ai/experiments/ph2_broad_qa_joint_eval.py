@@ -640,15 +640,17 @@ def augment_broad_qa_index(
         alias_term_count = 0
         if alias_path is not None:
             target.execute("""
-                CREATE TABLE alias(
+                CREATE TABLE IF NOT EXISTS alias(
                     surface TEXT NOT NULL,
                     doc_id INTEGER NOT NULL,
                     PRIMARY KEY(surface,doc_id)
                 )
             """)
-            target.execute("CREATE INDEX alias_doc ON alias(doc_id,surface)")
+            target.execute(
+                "CREATE INDEX IF NOT EXISTS alias_doc "
+                "ON alias(doc_id,surface)")
             target.execute("""
-                CREATE TABLE alias_term(
+                CREATE TABLE IF NOT EXISTS alias_term(
                     term TEXT NOT NULL,
                     surface TEXT NOT NULL,
                     doc_id INTEGER NOT NULL,
@@ -656,7 +658,7 @@ def augment_broad_qa_index(
                 )
             """)
             target.execute(
-                "CREATE INDEX alias_term_lookup "
+                "CREATE INDEX IF NOT EXISTS alias_term_lookup "
                 "ON alias_term(term,surface,doc_id)")
             alias_postings: dict[str, set[int]] = defaultdict(set)
             for alias in read_joint_source_aliases(alias_path):

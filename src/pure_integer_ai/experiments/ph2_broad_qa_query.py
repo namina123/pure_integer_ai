@@ -24,6 +24,8 @@ from pure_integer_ai.storage.integer_codec import decode_integer_tuple
 _SENTENCE_RE = re.compile(r"[^。！？!?\n]+[。！？!?]?|[^。！？!?\n]+$")
 _CJK_SEQUENCE_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]+")
 _NUMBER_RE = re.compile(r"[0-9]+(?:[.,][0-9]+)?")
+_NON_REAL_ENTITY_RE = re.compile(
+    r"(?:不存在|虚构|假想|杜撰|幻想|架空)(?:的|之)?")
 _TO_SIMPLIFIED = OpenCC("t2s")
 _TO_TRADITIONAL = OpenCC("s2t")
 _MAX_EVIDENCE_CITATIONS = 4
@@ -208,6 +210,68 @@ def _rank_evidence_windows(
     return tuple(sorted(ranked, reverse=True))
 
 
+def _select_diverse_evidence_windows(
+        ranked_windows: list[tuple[
+            tuple[int, int, int, int, int], int, tuple, str]],
+        *, limit: int,
+        ) -> tuple[tuple[
+            tuple[int, int, int, int, int], int, tuple, str], ...]:
+    """先跨 passage 扩散，再补非重叠窗口，最后才允许重叠。"""
+    if type(limit) is not int or limit <= 0:
+        raise BroadQaQueryError("broad QA evidence window limit 非法")
+    selected = []
+    selected_identities = set()
+    selected_passages = set()
+    selected_ranges: dict[int, list[tuple[int, int]]] = defaultdict(list)
+
+    def adopt(item: tuple[
+            tuple[int, int, int, int, int], int, tuple, str]) -> None:
+        """登记一个已排序窗口及其 passage 内字符范围。"""
+        _, _, page_row, selected_text = item
+        passage_id = int(page_row[0])
+        identity = (passage_id, selected_text)
+        selected.append(item)
+        selected_identities.add(identity)
+        selected_passages.add(passage_id)
+        start = page_row[4].find(selected_text)
+        if start >= 0:
+            selected_ranges[passage_id].append(
+                (start, start + len(selected_text)))
+
+    for item in ranked_windows:
+        passage_id = int(item[2][0])
+        if passage_id in selected_passages:
+            continue
+        adopt(item)
+        if len(selected) == limit:
+            return tuple(selected)
+    for item in ranked_windows:
+        passage_id = int(item[2][0])
+        selected_text = item[3]
+        identity = (passage_id, selected_text)
+        if identity in selected_identities:
+            continue
+        start = item[2][4].find(selected_text)
+        if start < 0:
+            continue
+        end = start + len(selected_text)
+        if any(start < prior_end and prior_start < end
+               for prior_start, prior_end in selected_ranges[passage_id]):
+            continue
+        adopt(item)
+        if len(selected) == limit:
+            return tuple(selected)
+    for item in ranked_windows:
+        passage_id = int(item[2][0])
+        identity = (passage_id, item[3])
+        if identity in selected_identities:
+            continue
+        adopt(item)
+        if len(selected) == limit:
+            break
+    return tuple(selected)
+
+
 def _answer_kind_bonus(answer_kinds: tuple[str, ...], text: str) -> int:
     """用问式槽类型优先满足显式值形态的证据句。"""
     bonus = 0
@@ -275,6 +339,16 @@ def _missing_strong_constraint(
 def _is_ambiguous_list(text: str) -> bool:
     """识别一个证据段内列举多个同名候选的消歧页。"""
     return text.count("*") >= 2 and ("：" in text or ":" in text)
+
+
+def _has_explicit_non_real_entity(
+        question: str, *, slot_free_question: str,
+        candidate_title: str,
+        ) -> bool:
+    """显式虚构/不存在限定未被页面标题锚定时，保持 UNKNOWN。"""
+    if _title_span(slot_free_question, candidate_title) is not None:
+        return False
+    return _NON_REAL_ENTITY_RE.search(slot_free_question) is not None
 
 
 def select_broad_qa_evidence_sentence(question: str, context: str) -> str:
@@ -471,12 +545,9 @@ def retrieve_broad_qa_candidates(
                     window_score, -int(page_row[0]), page_row, selected_text))
         ranked_windows.sort(reverse=True)
         page_candidates = []
-        seen_windows = set()
-        for window_score, _, page_row, selected_text in ranked_windows:
-            identity = (int(page_row[0]), selected_text)
-            if identity in seen_windows:
-                continue
-            seen_windows.add(identity)
+        selected_windows = _select_diverse_evidence_windows(
+            ranked_windows, limit=_MAX_EVIDENCE_CITATIONS)
+        for window_score, _, page_row, selected_text in selected_windows:
             page_candidates.append(BroadQaRetrievalCandidate(
                 page_candidate.score + window_score[0],
                 max(page_candidate.matched_term_count,
@@ -485,8 +556,6 @@ def retrieve_broad_qa_candidates(
                 page_row[5], page_row[6], page_candidate.query_anchor_title,
                 page_row[7], page_row[8], page_row[9], page_row[10],
                 selected_text))
-            if len(page_candidates) == _MAX_EVIDENCE_CITATIONS:
-                break
         evidence_candidates = tuple(page_candidates)
         page_candidate = page_candidates[0]
         candidate_rows[0] = page_candidate
@@ -538,6 +607,14 @@ def answer_broad_qa_candidates(
             candidate_terms=candidate_terms,
             slot_free_question=slot_free_question,
             candidate_text=candidate_text):
+        return BroadQaResult(
+            "UNKNOWN", question, None, None, None, None, None, None, None,
+            None, None, trace.snapshot_id, trace.license_id,
+            trace.matched_query_term_count, trace.candidate_document_count,
+        )
+    if _has_explicit_non_real_entity(
+            question, slot_free_question=slot_free_question,
+            candidate_title=best.query_anchor_title):
         return BroadQaResult(
             "UNKNOWN", question, None, None, None, None, None, None, None,
             None, None, trace.snapshot_id, trace.license_id,
