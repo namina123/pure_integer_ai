@@ -14,7 +14,9 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
 from pure_integer_ai.experiments.ph2_broad_qa_source_inference_decision import (
     BroadQaSourceInferenceDecision,
     BroadQaSourceInferenceDecisionLedger,
+    SOURCE_INFERENCE_REVIEW_INPUT_KIND,
     _validate_inference_record_binding,
+    compile_source_inference_decision_ledger,
     parse_source_inference_decision_ledger,
     publish_source_inference_review_worksheet,
     validate_source_inference_decision_ledger,
@@ -281,6 +283,7 @@ def test_inference_record_is_bound_to_exact_item_and_terminal_passage(
         terminal_wikitext_sha256=terminal_second,
         claim=SimpleNamespace(
             premises=(SimpleNamespace(observation=observation),),
+            rendered_text="旧答案",
         ),
     )
     _validate_inference_record_binding(
@@ -307,12 +310,31 @@ def test_inference_record_is_bound_to_exact_item_and_terminal_passage(
             **record.__dict__,
             "claim": SimpleNamespace(
                 premises=(SimpleNamespace(observation=wrong_observation),),
+                rendered_text="旧答案",
             ),
         },
     )
     with pytest.raises(BroadQaExternalDataError, match="终页证据"):
         _validate_inference_record_binding(
             wrong_record,
+            item_id=second_id,
+            roster_record=roster_record,
+            dossier_record=dossier_record,
+            gold_answers=("旧答案",),
+        )
+
+    wrong_output = SimpleNamespace(
+        **{
+            **record.__dict__,
+            "claim": SimpleNamespace(
+                premises=(SimpleNamespace(observation=observation),),
+                rendered_text="别的答案",
+            ),
+        },
+    )
+    with pytest.raises(BroadQaExternalDataError, match="目标 gold"):
+        _validate_inference_record_binding(
+            wrong_output,
             item_id=second_id,
             roster_record=roster_record,
             dossier_record=dossier_record,
@@ -359,3 +381,75 @@ def test_worksheet_is_unreviewed_and_non_overwritable(tmp_path: Path) -> None:
     with pytest.raises(BroadQaExternalDataError, match="输出或预算"):
         publish_source_inference_review_worksheet(
             dossier, target_path=target)
+
+
+def test_review_input_compiles_complete_validated_ledger(
+        tmp_path: Path) -> None:
+    """人工四态输入可重复编译，备注文本只以 SHA 进入公开 ledger。"""
+    (roster, dossier, first_id, second_id, *_rest) = _files(tmp_path)
+    review_input = tmp_path / "review.input.jsonl"
+    review_input.write_bytes(b"".join(canonical_json_line(item) for item in (
+        {
+            "decision": "EXTRACTIVE",
+            "format_version": 1,
+            "inference_record_path": None,
+            "item_id": first_id,
+            "record_kind": SOURCE_INFERENCE_REVIEW_INPUT_KIND,
+            "reviewer_note": "终页规范化后逐字包含 gold。",
+        },
+        {
+            "decision": "REJECT",
+            "format_version": 1,
+            "inference_record_path": None,
+            "item_id": second_id,
+            "record_kind": SOURCE_INFERENCE_REVIEW_INPUT_KIND,
+            "reviewer_note": "终页不足以严格推出旧答案。",
+        },
+    )))
+    target = tmp_path / "compiled"
+    report = compile_source_inference_decision_ledger(
+        roster_path=roster,
+        dossier_path=dossier,
+        review_input_path=review_input,
+        target_dir=target,
+    )
+    assert report["decision_counts"] == {
+        "EXTRACTIVE": 1,
+        "SOURCE_DERIVABLE": 0,
+        "SOURCE_CONFLICT": 0,
+        "REJECT": 1,
+    }
+    assert report["status"] == "VALIDATED_REVIEWED_NOT_RUN"
+    ledger = parse_source_inference_decision_ledger(
+        (target / "decision.ledger.json").read_bytes())
+    assert len(ledger.decisions) == 2
+    assert "终页规范化" not in (
+        target / "decision.ledger.json").read_text(encoding="utf-8")
+    with pytest.raises(BroadQaExternalDataError, match="已存在"):
+        compile_source_inference_decision_ledger(
+            roster_path=roster,
+            dossier_path=dossier,
+            review_input_path=review_input,
+            target_dir=target,
+        )
+
+
+def test_review_input_requires_exact_inventory(tmp_path: Path) -> None:
+    """缺项、重复项或无备注的输入不得被编译为 reviewed ledger。"""
+    roster, dossier, first_id, *_rest = _files(tmp_path)
+    review_input = tmp_path / "incomplete.jsonl"
+    review_input.write_bytes(canonical_json_line({
+        "decision": "EXTRACTIVE",
+        "format_version": 1,
+        "inference_record_path": None,
+        "item_id": first_id,
+        "record_kind": SOURCE_INFERENCE_REVIEW_INPUT_KIND,
+        "reviewer_note": "仅有一项。",
+    }))
+    with pytest.raises(BroadQaExternalDataError, match="精确覆盖"):
+        compile_source_inference_decision_ledger(
+            roster_path=roster,
+            dossier_path=dossier,
+            review_input_path=review_input,
+            target_dir=tmp_path / "out",
+        )

@@ -47,6 +47,8 @@ SOURCE_INFERENCE_DEVELOPMENT_PACK_KIND = (
     "PH2_BROAD_QA_SOURCE_INFERENCE_DEVELOPMENT_PACK_V1")
 SOURCE_INFERENCE_DEVELOPMENT_RECORD_KIND = (
     "PH2_BROAD_QA_SOURCE_INFERENCE_DEVELOPMENT_RECORD_V1")
+SOURCE_INFERENCE_REVIEW_INPUT_KIND = (
+    "PH2_BROAD_QA_SOURCE_INFERENCE_REVIEW_INPUT_V1")
 SOURCE_INFERENCE_RATIONALE_CODES = (
     "EXACT_TERMINAL_SUPPORT",
     "AUDITABLE_SOURCE_DERIVATION",
@@ -212,6 +214,12 @@ def _validate_inference_record_binding(
             != terminal["wikitext_sha256"]):
         raise BroadQaExternalDataError(
             "SOURCE_DERIVABLE inference record 题目承诺漂移")
+    rendered = normalize_external_text(record.claim.rendered_text)
+    if not any(
+            rendered == normalize_external_text(answer)
+            for answer in gold_answers):
+        raise BroadQaExternalDataError(
+            "SOURCE_DERIVABLE inference record 未派生目标 gold")
     passages = {
         (
             value["ordinal"], value["raw_start"], value["raw_end"],
@@ -521,6 +529,133 @@ def validate_source_inference_decision_ledger(
     }
 
 
+def _read_review_input(path: Path) -> tuple[dict[str, object], ...]:
+    """严格回读 reviewer 写入的四态输入，不接受自动语义标签。"""
+    values = _read_jsonl(
+        path, record_kind=SOURCE_INFERENCE_REVIEW_INPUT_KIND)
+    expected = {
+        "decision", "format_version", "inference_record_path", "item_id",
+        "record_kind", "reviewer_note",
+    }
+    for value in values:
+        if (set(value) != expected or value["format_version"] != 1
+                or value["decision"] not in SOURCE_INFERENCE_DECISIONS
+                or not isinstance(value["reviewer_note"], str)
+                or not value["reviewer_note"].strip()
+                or value["reviewer_note"].strip()
+                != value["reviewer_note"]
+                or (value["inference_record_path"] is not None
+                    and not isinstance(
+                        value["inference_record_path"], str))):
+            raise BroadQaExternalDataError(
+                "source inference review input 字段漂移")
+        _sha256(value["item_id"], label="review input item_id")
+        if ((value["decision"] == "SOURCE_DERIVABLE")
+                != (value["inference_record_path"] is not None)):
+            raise BroadQaExternalDataError(
+                "source inference review input record path 漂移")
+    return values
+
+
+def compile_source_inference_decision_ledger(
+        *,
+        roster_path: str | Path,
+        dossier_path: str | Path,
+        review_input_path: str | Path,
+        target_dir: str | Path,
+        ) -> dict[str, object]:
+    """把人工四态输入编译为规范 ledger、校验报告和 SHA manifest。"""
+    roster_file = Path(roster_path).resolve()
+    dossier_file = Path(dossier_path).resolve()
+    input_file = Path(review_input_path).resolve()
+    target = Path(target_dir).resolve()
+    if target.exists():
+        raise BroadQaExternalDataError(
+            "source inference decision target 已存在")
+    roster = _read_roster(roster_file)
+    dossier = _read_dossier(dossier_file)
+    review_input = _read_review_input(input_file)
+    roster_by_id = {str(item["item_id"]): item for item in roster}
+    dossier_by_id = {str(item["item_id"]): item for item in dossier}
+    input_by_id = {str(item["item_id"]): item for item in review_input}
+    if (len(input_by_id) != len(review_input)
+            or set(roster_by_id) != set(dossier_by_id)
+            or set(roster_by_id) != set(input_by_id)):
+        raise BroadQaExternalDataError(
+            "source inference review input 未精确覆盖固定 roster")
+
+    decisions = []
+    inference_paths = []
+    for item_id in sorted(roster_by_id):
+        dossier_record = dossier_by_id[item_id]
+        review = dossier_record["review_source"]
+        terminal = dossier_record["terminal_source"]
+        value = input_by_id[item_id]
+        decision = str(value["decision"])
+        terminal_sha = _sha256(
+            terminal["wikitext_sha256"], label="terminal commitment")
+        if decision == "SOURCE_CONFLICT":
+            source_sha256s = tuple(sorted((
+                _sha256(
+                    review["context_sha256"], label="review commitment"),
+                terminal_sha,
+            )))
+        else:
+            source_sha256s = (terminal_sha,)
+        inference_sha = None
+        if decision == "SOURCE_DERIVABLE":
+            raw_path = Path(str(value["inference_record_path"]))
+            path = (raw_path if raw_path.is_absolute()
+                    else (input_file.parent / raw_path)).resolve()
+            if not path.is_file():
+                raise BroadQaExternalDataError(
+                    "source inference review input record 不存在")
+            inference_sha = _sha256_file(path)
+            inference_paths.append(path)
+        note_sha = hashlib.sha256(
+            str(value["reviewer_note"]).encode("utf-8")).hexdigest()
+        decisions.append(BroadQaSourceInferenceDecision(
+            item_id,
+            decision,
+            _DECISION_RATIONALE[decision],
+            source_sha256s,
+            inference_sha,
+            note_sha,
+        ))
+    ledger = BroadQaSourceInferenceDecisionLedger(
+        _sha256_file(roster_file),
+        _sha256_file(dossier_file),
+        tuple(decisions),
+    )
+    validation = validate_source_inference_decision_ledger(
+        ledger,
+        roster_path=roster_file,
+        dossier_path=dossier_file,
+        inference_record_paths=inference_paths,
+    )
+    target.mkdir(parents=True)
+    ledger_path = target / "decision.ledger.json"
+    report_path = target / "validation.report.json"
+    manifest_path = target / "manifest.json"
+    ledger_path.write_bytes(ledger.canonical_bytes())
+    report_path.write_bytes(canonical_json_line(validation))
+    manifest = {
+        "artifact_kind": SOURCE_INFERENCE_DECISION_LEDGER_KIND,
+        "decision_counts": validation["decision_counts"],
+        "dossier_sha256": _sha256_file(dossier_file),
+        "format_version": 1,
+        "inference_record_count": len(inference_paths),
+        "item_count": len(decisions),
+        "ledger_sha256": _sha256_file(ledger_path),
+        "review_input_sha256": _sha256_file(input_file),
+        "roster_sha256": _sha256_file(roster_file),
+        "status": "VALIDATED_REVIEWED_NOT_RUN",
+        "validation_report_sha256": _sha256_file(report_path),
+    }
+    manifest_path.write_bytes(canonical_json_line(manifest))
+    return {**manifest, "manifest_sha256": _sha256_file(manifest_path)}
+
+
 def publish_source_inference_review_worksheet(
         dossier_path: str | Path,
         *,
@@ -691,6 +826,8 @@ __all__ = [
     "BroadQaSourceInferenceDecisionLedger",
     "SOURCE_INFERENCE_DECISION_LEDGER_KIND",
     "SOURCE_INFERENCE_DECISION_RECORD_KIND",
+    "SOURCE_INFERENCE_REVIEW_INPUT_KIND",
+    "compile_source_inference_decision_ledger",
     "SOURCE_INFERENCE_DEVELOPMENT_PACK_KIND",
     "SOURCE_INFERENCE_RATIONALE_CODES",
     "SOURCE_INFERENCE_REVIEW_WORKSHEET_KIND",
