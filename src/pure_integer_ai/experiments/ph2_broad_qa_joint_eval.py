@@ -36,6 +36,10 @@ from pure_integer_ai.experiments.ph2_mediawiki_snapshot import (
 )
 from pure_integer_ai.experiments.ph2_broad_qa_index import broad_qa_terms
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_line
+from pure_integer_ai.experiments.ph2_broad_qa_formal_protocol import (
+    verify_formal_prediction_authorization,
+    verify_formal_score_authorization,
+)
 from pure_integer_ai.storage.integer_codec import (
     decode_integer_tuple,
     encode_integer_tuple,
@@ -311,21 +315,32 @@ def resolve_joint_source_aliases(
         ) -> tuple[BroadQaTargetSelectionManifest, dict[str, object]]:
     """解析冻结重定向链，发布 alias ledger 并返回终页 selection。"""
     if (not isinstance(snapshot, MediaWikiDumpSnapshotManifest)
-            or not isinstance(initial_selection, BroadQaTargetSelectionManifest)
-            or set(source_targets) != (
-                {normalize_external_text(item.title)
-                 for item in initial_selection.selected_pages}
-                | set(initial_selection.missing_title_keys))
+            or not isinstance(initial_selection,
+                              BroadQaTargetSelectionManifest)
+            or not isinstance(source_targets, dict) or not source_targets):
+        raise BroadQaExternalDataError("joint alias resolution 输入漂移")
+    surface_to_key = {}
+    for key, surfaces in source_targets.items():
+        for surface in surfaces:
+            prior = surface_to_key.setdefault(surface, key)
+            if prior != key:
+                raise BroadQaExternalDataError(
+                    "joint alias source surface 映射冲突")
+    selected_by_key = {}
+    for item in initial_selection.selected_pages:
+        key = surface_to_key.get(item.title)
+        if key is None or key in selected_by_key:
+            raise BroadQaExternalDataError(
+                "joint alias selected page 无法恢复请求键")
+        selected_by_key[key] = item
+    if (set(source_targets) != (
+                set(selected_by_key) | set(initial_selection.missing_title_keys))
             or type(max_redirect_depth) is not int
             or not 1 <= max_redirect_depth <= 32):
         raise BroadQaExternalDataError("joint alias resolution 输入漂移")
     output = Path(alias_path).resolve()
     if output.exists():
         raise BroadQaExternalDataError("joint alias ledger 禁止覆盖")
-    selected_by_key = {
-        normalize_external_text(item.title): item
-        for item in initial_selection.selected_pages
-    }
     inspection_cache = {}
     resolution: dict[str, dict[str, object]] = {}
     resolved_pages = {}
@@ -749,12 +764,35 @@ def predict_joint_retrieval(
         *,
         predictions_path: str | Path,
         max_candidate_passages: int = 20,
+        formal_run_root: str | Path | None = None,
+        formal_freeze_path: str | Path | None = None,
+        formal_intent_path: str | Path | None = None,
+        repository_root: str | Path | None = None,
         ) -> dict[str, object]:
     """只读 questions 与联合索引，输出候选、回答和查询资源轨迹。"""
     questions_file = Path(questions_path).resolve()
     database_file = Path(database_path).resolve()
     output = Path(predictions_path).resolve()
+    formal_values = (
+        formal_run_root, formal_freeze_path, formal_intent_path,
+        repository_root,
+    )
+    if any(value is not None for value in formal_values):
+        if any(value is None for value in formal_values):
+            raise BroadQaExternalDataError("joint formal prediction 授权不完整")
+        verify_formal_prediction_authorization(
+            formal_run_root, formal_freeze_path, formal_intent_path,
+            questions_path=questions_file, database_path=database_file,
+            predictions_path=output, repository_root=repository_root)
+        formal_authorized = True
+    else:
+        formal_authorized = False
     questions = _read_jsonl(questions_file, expected_kind=JOINT_QUESTION_KIND)
+    splits = {item.get("split") for item in questions}
+    if (splits not in ({"dev"}, {"held_out"})
+            or (splits == {"held_out"} and not formal_authorized)
+            or (splits == {"dev"} and formal_authorized)):
+        raise BroadQaExternalDataError("joint prediction split/authorization 漂移")
     connection = sqlite3.connect(f"file:{database_file}?mode=ro", uri=True)
     elapsed_values = []
     records = []
@@ -846,6 +884,11 @@ def score_joint_retrieval(
         alias_path: str | Path,
         aggregate_path: str | Path,
         scope: str,
+        formal_run_root: str | Path | None = None,
+        formal_freeze_path: str | Path | None = None,
+        formal_intent_path: str | Path | None = None,
+        formal_selection_path: str | Path | None = None,
+        repository_root: str | Path | None = None,
         ) -> dict[str, object]:
     """独立读取 labels，聚合联合检索、证据、引用和失败类型。"""
     if (scope not in {"DEVELOPMENT", "FORMAL_HELD_OUT"}
@@ -858,7 +901,27 @@ def score_joint_retrieval(
     target = Path(aggregate_path).resolve()
     if target.exists():
         raise BroadQaExternalDataError("joint aggregate 禁止覆盖")
+    formal_values = (
+        formal_run_root, formal_freeze_path, formal_intent_path,
+        formal_selection_path, repository_root,
+    )
+    if scope == "FORMAL_HELD_OUT":
+        if any(value is None for value in formal_values):
+            raise BroadQaExternalDataError("joint formal score 授权不完整")
+        verify_formal_score_authorization(
+            formal_run_root, formal_freeze_path, formal_intent_path,
+            questions_path=question_file, predictions_path=prediction_file,
+            labels_path=label_file, database_path=database_file,
+            alias_path=alias_path,
+            terminal_selection_path=formal_selection_path,
+            aggregate_path=target, repository_root=repository_root)
+    elif any(value is not None for value in formal_values):
+        raise BroadQaExternalDataError("joint development score 不接受 formal 授权")
     questions = _read_jsonl(question_file, expected_kind=JOINT_QUESTION_KIND)
+    splits = {item.get("split") for item in questions}
+    if ((scope == "DEVELOPMENT" and splits != {"dev"})
+            or (scope == "FORMAL_HELD_OUT" and splits != {"held_out"})):
+        raise BroadQaExternalDataError("joint score split/scope 漂移")
     predictions = _read_jsonl(
         prediction_file, expected_kind=JOINT_PREDICTION_KIND)
     labels = _read_jsonl(label_file, expected_kind=JOINT_LABEL_KIND)

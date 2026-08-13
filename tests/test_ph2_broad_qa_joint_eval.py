@@ -21,6 +21,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_joint_eval import (
     augment_broad_qa_index,
     freeze_joint_source_pack,
     predict_joint_retrieval,
+    resolve_joint_source_aliases,
     score_joint_retrieval,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_line
@@ -159,6 +160,47 @@ def test_joint_freeze_excludes_prior_titles_and_keeps_labels_separate(
     assert "gold_answers" in labels
     assert normalize_external_text("旧标题") not in labels
     assert normalize_external_text("前代标题") not in labels
+
+
+def test_alias_resolution_restores_requested_key_from_exact_surface(
+        tmp_path: Path, monkeypatch) -> None:
+    """命中页标题字形不同于规范键时，仍须恢复原始请求键。"""
+    from pure_integer_ai.experiments.ph2_broad_qa_source import (
+        BroadQaSourceInspection,
+    )
+    from pure_integer_ai.experiments.ph2_mediawiki_snapshot import (
+        MediaWikiDumpSnapshotManifest,
+    )
+
+    selected = BroadQaSelectedPage(
+        1, "1" * 64, "橢球座標系",
+        hashlib.sha256("橢球座標系".encode()).hexdigest(), 7, 1, 0, 1)
+    selection = BroadQaTargetSelectionManifest(
+        "ZHWIKIPEDIA_20260701", "synthetic", "a" * 64, "b" * 64,
+        "c" * 40, "d" * 64, 1, 1, 1, "e" * 64, (selected,), ())
+    source_targets = {
+        normalize_external_text("椭球坐标系"): (
+            "椭球坐标系", "橢球座標系"),
+    }
+    inspection = BroadQaSourceInspection(
+        1, "橢球座標系", 7, 1007, "2026-07-01T00:00:00Z", "{}",
+        "f" * 64, None, "正文")
+    monkeypatch.setattr(
+        "pure_integer_ai.experiments.ph2_broad_qa_joint_eval."
+        "iter_broad_qa_selected_page_inspections",
+        lambda *args, **kwargs: iter((inspection,)))
+    snapshot = object.__new__(MediaWikiDumpSnapshotManifest)
+    terminal, report = resolve_joint_source_aliases(
+        snapshot, selection, source_targets,
+        snapshot_manifest_sha256="a" * 64,
+        index_path=tmp_path / "unused-index",
+        xml_path=tmp_path / "unused-xml",
+        alias_path=tmp_path / "aliases.jsonl", worker_count=1)
+    assert report["resolved_count"] == 1
+    assert terminal.selected_pages[0].title == "橢球座標系"
+    record = json.loads((tmp_path / "aliases.jsonl").read_text(
+        encoding="utf-8"))
+    assert record["title_key"] == normalize_external_text("椭球坐标系")
 
 
 def test_joint_augmentation_prediction_and_scoring_close_end_to_end(

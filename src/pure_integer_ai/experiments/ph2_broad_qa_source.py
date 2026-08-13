@@ -129,6 +129,13 @@ def _plain_text(raw: str) -> str:
     return " ".join(item for item in lines if item).strip()
 
 
+def project_broad_qa_plain_text(wikitext: str) -> str:
+    """把完整页面 Wikitext 投影为用于来源覆盖审计的确定性纯文本。"""
+    if not isinstance(wikitext, str):
+        raise TypeError("broad QA wikitext 必须是字符串")
+    return _plain_text(wikitext)
+
+
 def project_broad_qa_passages(
         wikitext: str,
         *,
@@ -415,4 +422,5 @@ __all__ = [
     "iter_broad_qa_selected_pages",
     "iter_broad_qa_selected_page_inspections",
     "project_broad_qa_passages",
+    "project_broad_qa_plain_text",
 ]

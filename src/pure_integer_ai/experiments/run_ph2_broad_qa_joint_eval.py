@@ -12,6 +12,11 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
     official_external_qa_sources,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_index import build_broad_qa_index
+from pure_integer_ai.experiments.ph2_broad_qa_formal_protocol import (
+    publish_formal_algorithm_freeze,
+    publish_formal_run_intent,
+    publish_formal_run_outcome,
+)
 from pure_integer_ai.experiments.ph2_broad_qa_joint_eval import (
     augment_broad_qa_index,
     freeze_joint_source_pack,
@@ -24,6 +29,15 @@ from pure_integer_ai.experiments.ph2_broad_qa_selection import (
     build_broad_qa_target_selection,
     read_broad_qa_target_selection,
     write_broad_qa_target_selection,
+)
+from pure_integer_ai.experiments.ph2_broad_qa_source_aligned_family import (
+    derive_source_aligned_runtime_sources,
+    freeze_source_aligned_joint_pack,
+)
+from pure_integer_ai.experiments.ph2_broad_qa_source_alignment import (
+    build_source_alignment_census,
+    freeze_source_alignment_candidates,
+    read_consumed_title_keys,
 )
 from pure_integer_ai.experiments.ph2_mediawiki_snapshot import (
     read_mediawiki_dump_snapshot,
@@ -53,7 +67,7 @@ def _worker_count(value: str) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    """构造联合 family 的六个显式、可恢复子命令。"""
+    """构造联合评测与来源对齐的显式、可恢复子命令。"""
     parser = argparse.ArgumentParser(
         description="Freeze and run source-bound retrieval + evidence eval.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -68,6 +82,22 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="Repeat for every consumed joint-family source_targets.jsonl.")
     freeze.add_argument("--target", type=_work_path, required=True)
+
+    alignment_candidates = commands.add_parser(
+        "freeze-alignment-candidates")
+    alignment_candidates.add_argument(
+        "--run-root", type=_work_path, required=True)
+    alignment_candidates.add_argument(
+        "--cmrc-root", type=_work_path, required=True)
+    alignment_candidates.add_argument(
+        "--drcd-root", type=_work_path, required=True)
+    alignment_candidates.add_argument(
+        "--prior-pack", type=_work_path, required=True)
+    alignment_candidates.add_argument(
+        "--prior-source-targets", type=_work_path, action="append",
+        required=True)
+    alignment_candidates.add_argument(
+        "--target", type=_work_path, required=True)
 
     select = commands.add_parser("select")
     select.add_argument("--run-root", type=_work_path, required=True)
@@ -108,6 +138,9 @@ def _parser() -> argparse.ArgumentParser:
     predict.add_argument("--questions", type=_work_path, required=True)
     predict.add_argument("--database", type=_work_path, required=True)
     predict.add_argument("--predictions", type=_work_path, required=True)
+    predict.add_argument("--formal-freeze", type=_work_path)
+    predict.add_argument("--formal-intent", type=_work_path)
+    predict.add_argument("--repository-root", type=Path)
 
     score = commands.add_parser("score")
     score.add_argument("--run-root", type=_work_path, required=True)
@@ -121,6 +154,88 @@ def _parser() -> argparse.ArgumentParser:
     score.add_argument(
         "--scope", choices=("DEVELOPMENT", "FORMAL_HELD_OUT"),
         required=True)
+    score.add_argument("--formal-freeze", type=_work_path)
+    score.add_argument("--formal-intent", type=_work_path)
+    score.add_argument("--repository-root", type=Path)
+
+    formal_freeze = commands.add_parser("freeze-formal-algorithm")
+    formal_freeze.add_argument("--run-root", type=_work_path, required=True)
+    formal_freeze.add_argument("--family-root", type=_work_path, required=True)
+    formal_freeze.add_argument(
+        "--candidate-manifest", type=_work_path, required=True)
+    formal_freeze.add_argument("--census", type=_work_path, required=True)
+    formal_freeze.add_argument(
+        "--census-manifest", type=_work_path, required=True)
+    formal_freeze.add_argument(
+        "--dev-aggregate", type=_work_path, required=True)
+    formal_freeze.add_argument("--database", type=_work_path, required=True)
+    formal_freeze.add_argument("--aliases", type=_work_path, required=True)
+    formal_freeze.add_argument("--selection", type=_work_path, required=True)
+    formal_freeze.add_argument(
+        "--runtime-source-manifest", type=_work_path, required=True)
+    formal_freeze.add_argument(
+        "--predictions", type=_work_path, required=True)
+    formal_freeze.add_argument("--aggregate", type=_work_path, required=True)
+    formal_freeze.add_argument(
+        "--repository-root", type=Path, required=True)
+
+    formal_intent = commands.add_parser("claim-formal-run")
+    formal_intent.add_argument("--run-root", type=_work_path, required=True)
+    formal_intent.add_argument("--formal-freeze", type=_work_path, required=True)
+    formal_intent.add_argument(
+        "--repository-root", type=Path, required=True)
+
+    formal_outcome = commands.add_parser("publish-formal-outcome")
+    formal_outcome.add_argument("--run-root", type=_work_path, required=True)
+    formal_outcome.add_argument("--formal-freeze", type=_work_path, required=True)
+    formal_outcome.add_argument("--formal-intent", type=_work_path, required=True)
+    formal_outcome.add_argument("--aggregate", type=_work_path, required=True)
+    formal_outcome.add_argument(
+        "--repository-root", type=Path, required=True)
+
+    census = commands.add_parser("alignment-census")
+    census.add_argument("--run-root", type=_work_path, required=True)
+    census.add_argument("--candidates", type=_work_path, required=True)
+    census.add_argument("--aliases", type=_work_path, required=True)
+    census.add_argument("--selection", type=_work_path, required=True)
+    census.add_argument("--xml", type=_work_path, required=True)
+    census.add_argument("--census", type=_work_path, required=True)
+    census.add_argument("--manifest", type=_work_path, required=True)
+    census.add_argument("--workers", type=_worker_count, default=4)
+
+    aligned_freeze = commands.add_parser("freeze-source-aligned")
+    aligned_freeze.add_argument(
+        "--run-root", type=_work_path, required=True)
+    aligned_freeze.add_argument(
+        "--cmrc-root", type=_work_path, required=True)
+    aligned_freeze.add_argument(
+        "--drcd-root", type=_work_path, required=True)
+    aligned_freeze.add_argument(
+        "--candidates", type=_work_path, required=True)
+    aligned_freeze.add_argument(
+        "--candidate-manifest", type=_work_path, required=True)
+    aligned_freeze.add_argument(
+        "--census", type=_work_path, required=True)
+    aligned_freeze.add_argument(
+        "--census-manifest", type=_work_path, required=True)
+    aligned_freeze.add_argument(
+        "--target", type=_work_path, required=True)
+
+    aligned_runtime = commands.add_parser("derive-aligned-runtime-sources")
+    aligned_runtime.add_argument(
+        "--run-root", type=_work_path, required=True)
+    aligned_runtime.add_argument(
+        "--source-targets", type=_work_path, required=True)
+    aligned_runtime.add_argument(
+        "--population-aliases", type=_work_path, required=True)
+    aligned_runtime.add_argument(
+        "--population-selection", type=_work_path, required=True)
+    aligned_runtime.add_argument(
+        "--aliases", type=_work_path, required=True)
+    aligned_runtime.add_argument(
+        "--selection", type=_work_path, required=True)
+    aligned_runtime.add_argument(
+        "--manifest", type=_work_path, required=True)
     return parser
 
 
@@ -131,6 +246,8 @@ def _validate_paths(args: argparse.Namespace) -> None:
         raise SystemExit("run-root must be an existing directory")
     names = {
         "freeze": ("cmrc_root", "drcd_root", "prior_pack", "target"),
+        "freeze-alignment-candidates": (
+            "cmrc_root", "drcd_root", "prior_pack", "target"),
         "select": ("index", "source_targets", "selection"),
         "build-target": ("xml", "selection", "database"),
         "resolve-aliases": (
@@ -143,11 +260,28 @@ def _validate_paths(args: argparse.Namespace) -> None:
         "score": (
             "questions", "predictions", "labels", "selection", "aliases",
             "database", "aggregate"),
+        "alignment-census": (
+            "candidates", "aliases", "selection", "xml", "census",
+            "manifest"),
+        "freeze-source-aligned": (
+            "cmrc_root", "drcd_root", "candidates", "candidate_manifest",
+            "census", "census_manifest", "target"),
+        "derive-aligned-runtime-sources": (
+            "source_targets", "population_aliases", "population_selection",
+            "aliases", "selection", "manifest"),
+        "freeze-formal-algorithm": (
+            "family_root", "candidate_manifest", "census",
+            "census_manifest", "dev_aggregate", "database", "aliases",
+            "selection", "runtime_source_manifest", "predictions",
+            "aggregate"),
+        "claim-formal-run": ("formal_freeze",),
+        "publish-formal-outcome": (
+            "formal_freeze", "formal_intent", "aggregate"),
     }[args.command]
     for name in names:
         if not getattr(args, name).resolve().is_relative_to(root):
             raise SystemExit(f"{name} must stay within run-root")
-    if args.command == "freeze":
+    if args.command in {"freeze", "freeze-alignment-candidates"}:
         for path in args.prior_source_targets:
             if not path.resolve().is_relative_to(root):
                 raise SystemExit(
@@ -175,6 +309,22 @@ def main(argv: list[str] | None = None) -> int:
                 args.prior_pack / "dev.questions.jsonl",
                 args.prior_pack / "held_out.questions.jsonl"),
             prior_source_target_paths=args.prior_source_targets,
+            target_dir=args.target,
+            source_report=source_report)
+    elif args.command == "freeze-alignment-candidates":
+        items, source_report = load_external_qa_sources(
+            official_external_qa_sources(args.cmrc_root, args.drcd_root))
+        consumed_paths = (
+            args.prior_pack / "dev.questions.jsonl",
+            args.prior_pack / "held_out.questions.jsonl",
+            *args.prior_source_targets,
+        )
+        report = freeze_source_alignment_candidates(
+            items,
+            excluded_title_keys=read_consumed_title_keys(
+                prior_question_paths=consumed_paths[:2],
+                prior_source_target_paths=args.prior_source_targets),
+            excluded_title_source_paths=consumed_paths,
             target_dir=args.target,
             source_report=source_report)
     elif args.command == "select":
@@ -226,13 +376,68 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "predict":
         report = predict_joint_retrieval(
             args.questions, args.database,
-            predictions_path=args.predictions)
-    else:
+            predictions_path=args.predictions,
+            formal_run_root=(
+                args.run_root if args.formal_freeze is not None else None),
+            formal_freeze_path=args.formal_freeze,
+            formal_intent_path=args.formal_intent,
+            repository_root=args.repository_root)
+    elif args.command == "score":
         report = score_joint_retrieval(
             args.questions, args.predictions, args.labels,
             read_broad_qa_target_selection(args.selection), args.database,
             alias_path=args.aliases, aggregate_path=args.aggregate,
-            scope=args.scope)
+            scope=args.scope,
+            formal_run_root=(
+                args.run_root if args.scope == "FORMAL_HELD_OUT" else None),
+            formal_freeze_path=args.formal_freeze,
+            formal_intent_path=args.formal_intent,
+            formal_selection_path=(
+                args.selection if args.scope == "FORMAL_HELD_OUT" else None),
+            repository_root=args.repository_root)
+    elif args.command == "alignment-census":
+        report = build_source_alignment_census(
+            args.candidates, args.aliases,
+            read_broad_qa_target_selection(args.selection),
+            xml_path=args.xml, census_path=args.census,
+            manifest_path=args.manifest, worker_count=args.workers)
+    elif args.command == "freeze-source-aligned":
+        items, source_report = load_external_qa_sources(
+            official_external_qa_sources(args.cmrc_root, args.drcd_root))
+        report = freeze_source_aligned_joint_pack(
+            items, candidates_path=args.candidates,
+            census_path=args.census,
+            census_manifest_path=args.census_manifest,
+            candidate_manifest_path=args.candidate_manifest,
+            target_dir=args.target, source_report=source_report)
+    elif args.command == "derive-aligned-runtime-sources":
+        report = derive_source_aligned_runtime_sources(
+            args.source_targets, args.population_aliases,
+            read_broad_qa_target_selection(args.population_selection),
+            aliases_path=args.aliases,
+            terminal_selection_path=args.selection,
+            manifest_path=args.manifest)
+    elif args.command == "freeze-formal-algorithm":
+        report = publish_formal_algorithm_freeze(
+            args.run_root, args.family_root,
+            candidate_manifest_path=args.candidate_manifest,
+            census_path=args.census,
+            census_manifest_path=args.census_manifest,
+            dev_aggregate_path=args.dev_aggregate,
+            database_path=args.database, alias_path=args.aliases,
+            terminal_selection_path=args.selection,
+            runtime_source_manifest_path=args.runtime_source_manifest,
+            predictions_path=args.predictions,
+            aggregate_path=args.aggregate,
+            repository_root=args.repository_root)
+    elif args.command == "claim-formal-run":
+        report = publish_formal_run_intent(
+            args.run_root, args.formal_freeze,
+            repository_root=args.repository_root)
+    else:
+        report = publish_formal_run_outcome(
+            args.run_root, args.formal_freeze, args.formal_intent,
+            args.aggregate, repository_root=args.repository_root)
     _emit(report)
     return 0
 
