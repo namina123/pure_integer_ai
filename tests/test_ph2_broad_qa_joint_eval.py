@@ -325,6 +325,24 @@ def test_production_query_prefers_unknown_for_explicit_fiction_and_clarifies(
     assert ambiguous.status == "CLARIFY"
 
 
+def test_longer_complete_title_dominates_only_nested_short_title(
+        tmp_path: Path) -> None:
+    """嵌套短标题不得抢页，但独立出现时仍可作为完整标题锚定。"""
+    database = tmp_path / "database.sqlite3"
+    _database(database, (
+        (2, "罗马", "罗马是古代文明的重要起源地。"),
+        (3, "马", "马是哺乳动物。罗马文明起源地研究不是本词条主题。"),
+    ))
+    connection = sqlite3.connect(str(database))
+    try:
+        longer = query_broad_qa(connection, "罗马是什么文明的起源地？")
+        standalone = query_broad_qa(connection, "马是什么动物？")
+    finally:
+        connection.close()
+    assert longer.title == "罗马"
+    assert standalone.title == "马"
+
+
 def test_page_evidence_prefers_distinct_passages_before_duplicate_windows(
         tmp_path: Path) -> None:
     """同页高分段不得以重叠窗口挤掉其他 passage 的证据。"""

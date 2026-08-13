@@ -422,6 +422,49 @@ def _title_span(question: str, title: str) -> tuple[int, int] | None:
     return None
 
 
+def _title_spans(question: str, title: str) -> tuple[tuple[int, int, int], ...]:
+    """枚举标题在原文及简繁标准化问题中的全部确定性位置。"""
+    candidates = (
+        (question, title),
+        (_TO_SIMPLIFIED.convert(question), _TO_SIMPLIFIED.convert(title)),
+        (_TO_TRADITIONAL.convert(question), _TO_TRADITIONAL.convert(title)),
+    )
+    spans = set()
+    for variant, (surface, expected) in enumerate(candidates):
+        if not expected:
+            continue
+        start = surface.find(expected)
+        while start >= 0:
+            spans.add((variant, start, start + len(expected)))
+            start = surface.find(expected, start + 1)
+    return tuple(sorted(spans))
+
+
+def _dominated_title_surfaces(
+        question: str, surfaces: frozenset[str],
+        ) -> frozenset[str]:
+    """找出仅作为更长候选标题子串出现的短标题 surface。"""
+    spans_by_surface = {
+        surface: _title_spans(question, surface)
+        for surface in surfaces
+    }
+    dominated = set()
+    for short_surface, short_spans in spans_by_surface.items():
+        if not short_spans:
+            continue
+        if all(any(
+                long_variant == short_variant
+                and long_start <= short_start
+                and short_end <= long_end
+                and long_end - long_start > short_end - short_start
+                for long_surface, long_spans in spans_by_surface.items()
+                if long_surface != short_surface
+                for long_variant, long_start, long_end in long_spans)
+                for short_variant, short_start, short_end in short_spans):
+            dominated.add(short_surface)
+    return frozenset(dominated)
+
+
 def _page_evidence_surface(
         slot_free_question: str, anchor_span: tuple[int, int],
         answer_kinds: tuple[str, ...],
@@ -602,7 +645,7 @@ def retrieve_broad_qa_candidates(
             key=lambda item: (-item[1], -matched[item[0]], item[0])))
     ranked_ids = tuple(dict.fromkeys(
         (*anchor_passage_ids, *regular_ids)))[:max_candidate_passages]
-    candidate_rows = []
+    candidate_inputs = []
     term_weights = {
         term: max(1, 1_000_000 // frequency)
         for term, frequency, _ in all_rows}
@@ -625,9 +668,24 @@ def retrieve_broad_qa_candidates(
         matching_titles = tuple(
             title for title in title_surfaces
             if _title_span(question, title) is not None)
+        candidate_inputs.append((row, title_surfaces, matching_titles))
+    dominated_titles = _dominated_title_surfaces(
+        question,
+        frozenset(
+            title
+            for _, _, matching_titles in candidate_inputs
+            for title in matching_titles),
+    )
+    candidate_rows = []
+    for row, title_surfaces, matching_titles in candidate_inputs:
+        scoring_titles = tuple(
+            title for title in matching_titles
+            if title not in dominated_titles)
         query_anchor_title = (
-            sorted(matching_titles, key=lambda item: (-len(item), item))[0]
-            if matching_titles else row[6])
+            sorted(scoring_titles, key=lambda item: (-len(item), item))[0]
+            if scoring_titles else (
+                sorted(matching_titles, key=lambda item: (-len(item), item))[0]
+                if matching_titles else row[6]))
         passage_terms = _script_terms(row[4])
         title_terms = frozenset().union(*(
             _script_terms(title) for title in title_surfaces))
@@ -635,7 +693,7 @@ def retrieve_broad_qa_candidates(
         title_overlap = len(set(raw_terms).intersection(title_terms))
         exact_title_score = (
             1_000_000_000 + len(query_anchor_title) * 1_000_000
-            if matching_titles else 0)
+            if scoring_titles else 0)
         sentence_surface = slot_free_question
         title_span = _title_span(sentence_surface, query_anchor_title)
         if title_span is not None:
