@@ -9,9 +9,12 @@ from pathlib import Path
 import pytest
 
 from pure_integer_ai.cognition.shared.hypothesis import (
+    EPISTEMIC_REFUTED,
+    EPISTEMIC_SUPPORTED,
     EVIDENCE_REFUTE,
     EVIDENCE_SUPPORT,
     EvidenceRecord,
+    HypothesisLedger,
 )
 from pure_integer_ai.cognition.shared.identity import (
     GLOBAL_OWNER_SCOPE,
@@ -57,6 +60,16 @@ from pure_integer_ai.experiments.ph2_broad_qa_source_inference_rule_pack import 
     read_source_inference_rule_pack,
     source_inference_qualification_input_sha256,
     source_inference_rule_pack_result_sha256,
+)
+from pure_integer_ai.experiments.ph2_broad_qa_source_inference_rule_pack_v3 import (
+    BroadQaSourceInferenceAcceptedRuleV3,
+    BroadQaSourceInferenceRejectedTrialV3,
+    BroadQaSourceInferenceRuleCandidateV3,
+    parse_source_inference_accepted_rule_v3,
+    parse_source_inference_rejected_trial_v3,
+    publish_source_inference_rule_pack_v3,
+    read_source_inference_rule_pack_v3,
+    source_inference_rule_pack_v3_result_sha256,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_source_inference_training_census import (
     SOURCE_INFERENCE_TRAINING_CENSUS_KIND,
@@ -762,3 +775,353 @@ def test_rule_pack_rejects_protocol_drift_dispatch_and_validation_leakage(
         parse_source_inference_learned_rule(canonical_json_line({
             **rule.to_dict(), "unexpected": 1,
         }))
+
+
+def _v3_records(
+        protocol: Path,
+        records: tuple[dict[str, object], ...],
+        *,
+        validation_support: bool = False,
+        same_hypothesis: bool = False,
+        rejection_ref: str | None = None,
+        ) -> tuple[
+            BroadQaSourceInferenceAcceptedRuleV3,
+            BroadQaSourceInferenceRejectedTrialV3,
+        ]:
+    """构造 accepted SUPPORT 与独立 rejected REFUTE 测试记录。"""
+    manifest = read_source_inference_learning_protocol(
+        protocol / "manifest.json")
+    protocol_sha = manifest["manifest_sha256"]
+    train = [item for item in records
+             if source_inference_learning_split(item["item_id"]) == "TRAIN"]
+    validation = [item for item in records
+                  if source_inference_learning_split(item["item_id"])
+                  == "VALIDATION"]
+    accepted_candidate = BroadQaSourceInferenceRuleCandidateV3(
+        protocol_sha,
+        "NORMALIZATION_EQUIVALENCE",
+        minimal_instruction_identity((817034, 1)),
+        1,
+        structure_concept_identity((817035, 1)),
+        "FORWARD",
+        SOURCE_INFERENCE_RULE_APPLICATION_DOMAINS[
+            "NORMALIZATION_EQUIVALENCE"],
+        (concept_identity((817036, 1)),),
+    )
+    rejected_candidate = (
+        accepted_candidate if same_hypothesis
+        else replace(
+            accepted_candidate,
+            operator=minimal_instruction_identity((817034, 2)),
+        )
+    )
+    support_record = validation[0] if validation_support else train[1]
+    support = _commitment(
+        dossier=support_record,
+        routing_state=("UNDETERMINED" if validation_support
+                       else "MECHANICAL_COUNTER_SIGNAL"),
+        qualification_kind="REPLAYED_CANDIDATE_SUPPORT",
+        evidence_id=1,
+        operator_family="NORMALIZATION_EQUIVALENCE",
+        hypothesis=accepted_candidate.hypothesis(),
+    )
+    refute = _commitment(
+        dossier=train[0],
+        routing_state="MECHANICAL_SUPPORT_SIGNAL",
+        qualification_kind="REPLAYED_CANDIDATE_REFUTE",
+        evidence_id=2,
+        operator_family="NORMALIZATION_EQUIVALENCE",
+        hypothesis=rejected_candidate.hypothesis(),
+    )
+    rejected = BroadQaSourceInferenceRejectedTrialV3(
+        rejected_candidate,
+        "FAILED_CANDIDATE_TRIAL",
+        hashlib.sha256(b"candidate-parameters").hexdigest(),
+        (refute,),
+    )
+    accepted = BroadQaSourceInferenceAcceptedRuleV3(
+        accepted_candidate,
+        (support,),
+        (rejected.sha256() if rejection_ref is None else rejection_ref,),
+    )
+    return accepted, rejected
+
+
+def _v3_completed_chains(
+        protocol: Path,
+        *,
+        suffix: str,
+        evidence_count: int = 2,
+        candidate_count: int = 2,
+        ) -> tuple[Path, Path]:
+    """构造证明完整 TRAIN 和双候选预算的两条独立完成链。"""
+    manifest = read_source_inference_learning_protocol(
+        protocol / "manifest.json")
+    dossier, _ = read_source_inference_learning_slice(
+        protocol_dir=protocol,
+        access_role="LEARNER",
+        operator_family="NORMALIZATION_EQUIVALENCE",
+    )
+    item_ids = tuple(item["item_id"] for item in dossier)
+    paths = []
+    for mode in ("fresh", "resumed"):
+        initial = initial_source_inference_learning_checkpoint(
+            run_id=hashlib.sha256(
+                f"{suffix}-{mode}".encode("utf-8")).hexdigest(),
+            protocol_manifest_sha256=manifest["manifest_sha256"],
+            operator_family="NORMALIZATION_EQUIVALENCE",
+            training_item_ids=item_ids,
+        )
+        complete = advance_source_inference_learning_checkpoint(
+            initial,
+            training_item_ids=item_ids,
+            processed_item_ids=item_ids,
+            evidence_candidate_count=evidence_count,
+            rule_candidate_count=candidate_count,
+            complete=True,
+        )
+        path = protocol.parent / f"{suffix}-{mode}.v3.checkpoints.jsonl"
+        append_source_inference_learning_checkpoint(path, initial)
+        append_source_inference_learning_checkpoint(path, complete)
+        paths.append(path)
+    return paths[0], paths[1]
+
+
+def test_rule_pack_v3_separates_accepted_support_from_rejected_trial(
+        tmp_path: Path,
+        ) -> None:
+    """accepted 和 rejected 使用独立 hypothesis，核心状态不再冲突。"""
+    protocol, records = _publish_protocol(tmp_path)
+    accepted, rejected = _v3_records(protocol, records)
+    assert parse_source_inference_accepted_rule_v3(
+        accepted.canonical_bytes()) == accepted
+    assert parse_source_inference_rejected_trial_v3(
+        rejected.canonical_bytes()) == rejected
+    ledger = HypothesisLedger()
+    for record, expected in (
+            (accepted, EPISTEMIC_SUPPORTED),
+            (rejected, EPISTEMIC_REFUTED)):
+        hypothesis = record.candidate.hypothesis()
+        ledger.register(hypothesis)
+        for commitment in record.evidence_commitments:
+            ledger.append_evidence(EvidenceRecord.from_stable_key(
+                commitment.evidence_key))
+        assert ledger.snapshot(hypothesis).epistemic_status == expected
+    assert accepted.candidate.hypothesis() != rejected.candidate.hypothesis()
+
+
+def test_rule_pack_v3_round_trip_closes_rejection_ledger_and_double_run(
+        tmp_path: Path,
+        ) -> None:
+    """v3 publisher 闭合 rejection 引用、双链、TRAIN 和禁用态。"""
+    protocol, records = _publish_protocol(tmp_path)
+    accepted, rejected = _v3_records(protocol, records)
+    fresh, resumed = _v3_completed_chains(protocol, suffix="v3-round-trip")
+    target = tmp_path / "rule-pack-v3"
+    report = publish_source_inference_rule_pack_v3(
+        protocol_dir=protocol,
+        operator_family="NORMALIZATION_EQUIVALENCE",
+        fresh_accepted_rules=(accepted,),
+        fresh_rejected_trials=(rejected,),
+        resumed_accepted_rules=(accepted,),
+        resumed_rejected_trials=(rejected,),
+        target_dir=target,
+        fresh_checkpoint_chain_path=fresh,
+        resumed_checkpoint_chain_path=resumed,
+    )
+    manifest, accepted_records, rejected_records = (
+        read_source_inference_rule_pack_v3(
+            target, protocol_dir=protocol))
+    assert accepted_records == (accepted,)
+    assert rejected_records == (rejected,)
+    assert report["manifest_sha256"] == manifest["manifest_sha256"]
+    assert manifest["production_enabled"] == 0
+    assert manifest["accepted_records_count"] == 1
+    assert manifest["rejected_records_count"] == 1
+    with pytest.raises(BroadQaExternalDataError, match="target 已存在"):
+        publish_source_inference_rule_pack_v3(
+            protocol_dir=protocol,
+            operator_family="NORMALIZATION_EQUIVALENCE",
+            fresh_accepted_rules=(accepted,),
+            fresh_rejected_trials=(rejected,),
+            resumed_accepted_rules=(accepted,),
+            resumed_rejected_trials=(rejected,),
+            target_dir=target,
+            fresh_checkpoint_chain_path=fresh,
+            resumed_checkpoint_chain_path=resumed,
+        )
+
+    manifest_path = target / "manifest.json"
+    drifted = json.loads(manifest_path.read_bytes())
+    drifted["rejected_records_count"] = 2
+    manifest_path.write_bytes(canonical_json_line(drifted))
+    with pytest.raises(BroadQaExternalDataError, match="record count 漂移"):
+        read_source_inference_rule_pack_v3(
+            target, protocol_dir=protocol)
+
+
+def test_rule_pack_v3_reader_replays_train_after_coherent_pack_tamper(
+        tmp_path: Path,
+        ) -> None:
+    """即使 record 与自报摘要同步伪造，reader 仍以真实 TRAIN 失败关闭。"""
+    protocol, records = _publish_protocol(tmp_path)
+    accepted, rejected = _v3_records(protocol, records)
+    fresh, resumed = _v3_completed_chains(protocol, suffix="v3-reader-replay")
+    target = tmp_path / "rule-pack-v3-reader-replay"
+    publish_source_inference_rule_pack_v3(
+        protocol_dir=protocol,
+        operator_family="NORMALIZATION_EQUIVALENCE",
+        fresh_accepted_rules=(accepted,),
+        fresh_rejected_trials=(rejected,),
+        resumed_accepted_rules=(accepted,),
+        resumed_rejected_trials=(rejected,),
+        target_dir=target,
+        fresh_checkpoint_chain_path=fresh,
+        resumed_checkpoint_chain_path=resumed,
+    )
+
+    accepted_path = target / "accepted-rules.jsonl"
+    accepted_value = json.loads(accepted_path.read_bytes())
+    accepted_value["evidence_commitments"][0][
+        "routing_signal_state"] = "MECHANICAL_SUPPORT_SIGNAL"
+    accepted_payload = canonical_json_line(accepted_value)
+    accepted_path.write_bytes(accepted_payload)
+    forged_accepted = parse_source_inference_accepted_rule_v3(
+        accepted_payload)
+    protocol_manifest = read_source_inference_learning_protocol(
+        protocol / "manifest.json")
+    train_dossier, _ = read_source_inference_learning_slice(
+        protocol_dir=protocol,
+        access_role="LEARNER",
+        operator_family="NORMALIZATION_EQUIVALENCE",
+    )
+    forged_result_sha = source_inference_rule_pack_v3_result_sha256(
+        protocol_manifest_sha256=protocol_manifest["manifest_sha256"],
+        operator_family="NORMALIZATION_EQUIVALENCE",
+        training_item_ids=tuple(item["item_id"] for item in train_dossier),
+        accepted_rules=(forged_accepted,),
+        rejected_trials=(rejected,),
+    )
+    manifest_path = target / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["accepted_records_bytes"] = len(accepted_payload)
+    manifest["accepted_records_sha256"] = hashlib.sha256(
+        accepted_payload).hexdigest()
+    manifest["fresh_result_sha256"] = forged_result_sha
+    manifest["resumed_result_sha256"] = forged_result_sha
+    manifest_path.write_bytes(canonical_json_line(manifest))
+
+    with pytest.raises(BroadQaExternalDataError, match="commitment 漂移"):
+        read_source_inference_rule_pack_v3(
+            target, protocol_dir=protocol)
+
+    accepted_path.write_bytes(accepted.canonical_bytes())
+    manifest["accepted_records_bytes"] = len(accepted.canonical_bytes())
+    manifest["accepted_records_sha256"] = accepted.sha256()
+    original_result_sha = source_inference_rule_pack_v3_result_sha256(
+        protocol_manifest_sha256=protocol_manifest["manifest_sha256"],
+        operator_family="NORMALIZATION_EQUIVALENCE",
+        training_item_ids=tuple(item["item_id"] for item in train_dossier),
+        accepted_rules=(accepted,),
+        rejected_trials=(rejected,),
+    )
+    manifest["fresh_result_sha256"] = original_result_sha
+    manifest["resumed_result_sha256"] = original_result_sha
+    manifest_path.write_bytes(canonical_json_line(manifest))
+    (protocol / "evaluator" / "validation.dossier.jsonl").write_bytes(
+        b"validation payload must remain unread\n")
+    restored_manifest, restored_accepted, restored_rejected = (
+        read_source_inference_rule_pack_v3(
+            target, protocol_dir=protocol))
+    assert restored_manifest["fresh_result_sha256"] == original_result_sha
+    assert restored_accepted == (accepted,)
+    assert restored_rejected == (rejected,)
+
+
+def test_rule_pack_v3_rejects_shared_hypothesis_bad_refs_and_validation(
+        tmp_path: Path,
+        ) -> None:
+    """同 hypothesis、错 rejection 引用、错立场和 validation 泄漏均关闭。"""
+    protocol, records = _publish_protocol(tmp_path)
+    accepted, rejected = _v3_records(protocol, records)
+    fresh, resumed = _v3_completed_chains(protocol, suffix="v3-negative")
+    with pytest.raises(BroadQaExternalDataError, match="Evidence hypothesis"):
+        BroadQaSourceInferenceAcceptedRuleV3(
+            accepted.candidate,
+            rejected.evidence_commitments,
+            (rejected.sha256(),),
+        )
+
+    shared_accepted, shared_rejected = _v3_records(
+        protocol, records, same_hypothesis=True)
+    with pytest.raises(BroadQaExternalDataError, match="hypothesis 必须独立"):
+        publish_source_inference_rule_pack_v3(
+            protocol_dir=protocol,
+            operator_family="NORMALIZATION_EQUIVALENCE",
+            fresh_accepted_rules=(shared_accepted,),
+            fresh_rejected_trials=(shared_rejected,),
+            resumed_accepted_rules=(shared_accepted,),
+            resumed_rejected_trials=(shared_rejected,),
+            target_dir=tmp_path / "shared-hypothesis",
+            fresh_checkpoint_chain_path=fresh,
+            resumed_checkpoint_chain_path=resumed,
+        )
+
+    bad_ref_accepted, bad_ref_rejected = _v3_records(
+        protocol, records, rejection_ref="f" * 64)
+    with pytest.raises(BroadQaExternalDataError, match="引用未精确闭合"):
+        publish_source_inference_rule_pack_v3(
+            protocol_dir=protocol,
+            operator_family="NORMALIZATION_EQUIVALENCE",
+            fresh_accepted_rules=(bad_ref_accepted,),
+            fresh_rejected_trials=(bad_ref_rejected,),
+            resumed_accepted_rules=(bad_ref_accepted,),
+            resumed_rejected_trials=(bad_ref_rejected,),
+            target_dir=tmp_path / "bad-ref",
+            fresh_checkpoint_chain_path=fresh,
+            resumed_checkpoint_chain_path=resumed,
+        )
+
+    validation_accepted, validation_rejected = _v3_records(
+        protocol, records, validation_support=True)
+    with pytest.raises(BroadQaExternalDataError, match="非 TRAIN"):
+        publish_source_inference_rule_pack_v3(
+            protocol_dir=protocol,
+            operator_family="NORMALIZATION_EQUIVALENCE",
+            fresh_accepted_rules=(validation_accepted,),
+            fresh_rejected_trials=(validation_rejected,),
+            resumed_accepted_rules=(validation_accepted,),
+            resumed_rejected_trials=(validation_rejected,),
+            target_dir=tmp_path / "validation-leak-v3",
+            fresh_checkpoint_chain_path=fresh,
+            resumed_checkpoint_chain_path=resumed,
+        )
+
+
+def test_rule_pack_v3_rejects_global_evidence_id_reuse(
+        tmp_path: Path,
+        ) -> None:
+    """不同 hypothesis 不得复用核心 ledger 的全局 Evidence id。"""
+    protocol, records = _publish_protocol(tmp_path)
+    accepted, rejected = _v3_records(protocol, records)
+    support = accepted.evidence_commitments[0]
+    support_evidence = EvidenceRecord.from_stable_key(support.evidence_key)
+    reused = replace(support_evidence, evidence_id=2)
+    reused_accepted = replace(
+        accepted,
+        evidence_commitments=(replace(
+            support, evidence_key=reused.stable_key()),),
+    )
+    fresh, resumed = _v3_completed_chains(protocol, suffix="v3-id-reuse")
+    with pytest.raises(BroadQaExternalDataError, match="Evidence id"):
+        publish_source_inference_rule_pack_v3(
+            protocol_dir=protocol,
+            operator_family="NORMALIZATION_EQUIVALENCE",
+            fresh_accepted_rules=(reused_accepted,),
+            fresh_rejected_trials=(rejected,),
+            resumed_accepted_rules=(reused_accepted,),
+            resumed_rejected_trials=(rejected,),
+            target_dir=tmp_path / "id-reuse",
+            fresh_checkpoint_chain_path=fresh,
+            resumed_checkpoint_chain_path=resumed,
+        )

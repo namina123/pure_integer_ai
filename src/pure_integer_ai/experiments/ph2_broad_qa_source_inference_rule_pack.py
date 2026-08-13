@@ -493,7 +493,9 @@ def parse_source_inference_learned_rule(
     return rule
 
 
-def _read_split_inventory(path: Path) -> dict[str, str]:
+def read_source_inference_learning_split_inventory(
+        path: Path,
+        ) -> dict[str, str]:
     """回读全局 item split inventory，供 pack 阻断泄漏。"""
     values = {}
     expected = {
@@ -525,15 +527,25 @@ def _read_split_inventory(path: Path) -> dict[str, str]:
     return values
 
 
-def _validate_rule_training_commitments(
-        rule: BroadQaSourceInferenceLearnedRule,
+def validate_source_inference_training_commitments(
+        rule: object,
         *,
         dossier_by_id: dict[str, dict[str, object]],
         census_by_id: dict[str, dict[str, object]],
         split_by_item: dict[str, str],
         ) -> None:
     """逐条核验 rule Evidence 只引用 TRAIN 物理切片中的真实 span。"""
-    for commitment in rule.evidence_commitments:
+    operator_family = getattr(rule, "operator_family", None)
+    commitments = getattr(rule, "evidence_commitments", None)
+    if (operator_family not in SOURCE_INFERENCE_LEARNING_FAMILIES
+            or not isinstance(commitments, tuple)
+            or not commitments
+            or any(not isinstance(
+                item, BroadQaSourceInferenceRuleEvidenceCommitment)
+                   for item in commitments)):
+        raise BroadQaExternalDataError(
+            "learned rule TRAIN commitment carrier 非法")
+    for commitment in commitments:
         if split_by_item.get(commitment.item_id) != "TRAIN":
             raise BroadQaExternalDataError(
                 "learned rule 读取了非 TRAIN item")
@@ -590,7 +602,7 @@ def _validate_rule_training_commitments(
                 != census["mechanical_signal_state"]
                 or commitment.qualification_input_sha256
                 != source_inference_qualification_input_sha256(
-                    rule.operator_family, dossier)
+                    operator_family, dossier)
                 or commitment.qualification_expected_sha256
                 not in expected_answer_shas
                 or commitment.qualification_observed_sha256
@@ -678,9 +690,10 @@ def publish_source_inference_rule_pack(
             or hashlib.sha256(inventory_path.read_bytes()).hexdigest()
             != inventory_identity["sha256"]):
         raise BroadQaExternalDataError("rule pack split inventory commitment 漂移")
-    split_by_item = _read_split_inventory(inventory_path)
+    split_by_item = read_source_inference_learning_split_inventory(
+        inventory_path)
     for rule in rules:
-        _validate_rule_training_commitments(
+        validate_source_inference_training_commitments(
             rule,
             dossier_by_id=dossier_by_id,
             census_by_id=census_by_id,
@@ -880,7 +893,9 @@ __all__ = [
     "SOURCE_INFERENCE_TERMINAL_DOCUMENT_SOURCE_KIND",
     "parse_source_inference_learned_rule",
     "publish_source_inference_rule_pack",
+    "read_source_inference_learning_split_inventory",
     "read_source_inference_rule_pack",
     "source_inference_qualification_input_sha256",
     "source_inference_rule_pack_result_sha256",
+    "validate_source_inference_training_commitments",
 ]
