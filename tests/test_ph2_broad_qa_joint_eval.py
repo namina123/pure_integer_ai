@@ -35,6 +35,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_query import query_broad_qa
 from pure_integer_ai.experiments.ph2_broad_qa_query import (
     _cover_explicit_number_evidence_windows,
     _expand_structural_evidence_windows,
+    _page_evidence_surface,
 )
 from pure_integer_ai.storage.integer_codec import encode_integer_tuple
 
@@ -400,6 +401,38 @@ def test_structural_expansion_stays_in_passage_and_adds_required_context(
     expanded_reference = _expand_structural_evidence_windows(
         [reference, reference_context], (reference,), answer_kinds=())
     assert expanded_reference == (reference_context,)
+
+
+def test_scoped_quantity_focus_keeps_relation_after_title_only() -> None:
+    """前置限定以的/之收束时，数量选窗聚焦标题后的属性。"""
+    question = "甲省下辖的乙市总人口为多少人？"
+    start = question.index("乙市")
+    span = (start, start + len("乙市"))
+    assert _page_evidence_surface(
+        question, span, ("QUANTITY",)) == "总人口为多少人？"
+    assert _page_evidence_surface(
+        question, span, ("ENTITY",)) == "甲省下辖的\n总人口为多少人？"
+
+
+def test_scoped_quantity_focus_changes_production_evidence_window(
+        tmp_path: Path) -> None:
+    """生产查询应在标题页内按数量属性选值，不被前置作用域淹没。"""
+    database = tmp_path / "scoped-quantity.sqlite3"
+    _database(database, ((1, "乙市", (
+        "乙市是甲省下辖的城市，位于甲省南部。",
+        "甲省总人口为九千万人，辖有多个城市。",
+        "乙市东西最宽处八十公里，南北最长处九十公里。",
+        "乙市总人口为一百二十三万人。",
+    )),))
+    connection = sqlite3.connect(str(database))
+    try:
+        result = query_broad_qa(
+            connection, "甲省下辖的乙市总人口为多少人？")
+    finally:
+        connection.close()
+    assert result.status == "ANSWER"
+    assert result.answer is not None
+    assert result.answer.splitlines()[0] == "乙市总人口为一百二十三万人。"
 
 
 def test_joint_augmentation_can_extend_an_existing_alias_index(

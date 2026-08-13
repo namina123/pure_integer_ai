@@ -26,6 +26,9 @@ _CJK_SEQUENCE_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]+")
 _NUMBER_RE = re.compile(r"[0-9]+(?:[.,][0-9]+)?")
 _NON_REAL_ENTITY_RE = re.compile(
     r"(?:不存在|虚构|假想|杜撰|幻想|架空)(?:的|之)?")
+_EXPLICIT_SCOPE_RE = re.compile(
+    r"(?:上的|中的|位于|位在|来自|来自于|所在|"
+    r"發源於|发源于|居住於|居住于)")
 _CAUSE_EVIDENCE_RE = re.compile(
     r"因为|由於|由于|因而|因此|為此|为此|導致|导致|使得|"
     r"(?:^|[。！？!?])\s*因|使[^。！？!?\n]{0,80}(?:成為|成为)")
@@ -419,6 +422,29 @@ def _title_span(question: str, title: str) -> tuple[int, int] | None:
     return None
 
 
+def _page_evidence_surface(
+        slot_free_question: str, anchor_span: tuple[int, int],
+        answer_kinds: tuple[str, ...],
+        ) -> str:
+    """移除标题后，为带前置实体作用域的数量问式保留关系焦点。"""
+    prefix = slot_free_question[:anchor_span[0]]
+    suffix = slot_free_question[anchor_span[1]:]
+    if _uses_scoped_quantity_focus(prefix, suffix, answer_kinds):
+        return suffix
+    return prefix + "\n" + suffix
+
+
+def _uses_scoped_quantity_focus(
+        prefix: str, suffix: str, answer_kinds: tuple[str, ...],
+        ) -> bool:
+    """判断数量属性是否应脱离标题前实体作用域独立排序。"""
+    return (
+        "QUANTITY" in answer_kinds
+        and bool(suffix.strip())
+        and prefix.rstrip().endswith(("的", "之"))
+    )
+
+
 def _missing_strong_constraint(
         question: str,
         *,
@@ -432,9 +458,7 @@ def _missing_strong_constraint(
     if span is None:
         return False
     prefix = slot_free_question[:span[0]]
-    explicit_scope = re.search(
-        r"(?:上的|中的|位于|位在|来自|来自于|所在|發源於|发源于|居住於|居住于)",
-        prefix)
+    explicit_scope = _EXPLICIT_SCOPE_RE.search(prefix)
     if explicit_scope is None:
         prefix = ""
     for match in _CJK_SEQUENCE_RE.finditer(prefix):
@@ -648,14 +672,25 @@ def retrieve_broad_qa_candidates(
         page_terms = _script_terms(slot_free_question)
         anchor_span = _title_span(slot_free_question,
                                   page_candidate.query_anchor_title)
+        scoped_quantity_focus = False
         if anchor_span is not None:
-            surface = (slot_free_question[:anchor_span[0]] + "\n"
-                       + slot_free_question[anchor_span[1]:])
+            scoped_quantity_focus = _uses_scoped_quantity_focus(
+                slot_free_question[:anchor_span[0]],
+                slot_free_question[anchor_span[1]:], answer_kinds)
+            surface = _page_evidence_surface(
+                slot_free_question, anchor_span, answer_kinds)
             page_terms = _script_terms(surface)
         ranked_windows = []
         for page_row in page_rows:
             for window_score, selected_text in _rank_evidence_windows(
                     set(page_terms), page_row[4], answer_kinds, term_weights):
+                if (scoped_quantity_focus
+                        and _title_span(
+                            selected_text,
+                            page_candidate.query_anchor_title) is not None):
+                    window_score = (
+                        window_score[0], window_score[1],
+                        window_score[2] + 1, window_score[3], window_score[4])
                 ranked_windows.append((
                     window_score, -int(page_row[0]), page_row, selected_text))
         ranked_windows.sort(reverse=True)
