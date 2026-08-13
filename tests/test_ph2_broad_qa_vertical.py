@@ -750,3 +750,38 @@ def test_public_20k_receipt_is_canonical_and_explicitly_bounded() -> None:
     assert value["citation_probe"]["scope"] == (
         "DEVELOPMENT_VERTICAL_PROBE_NOT_HELD_OUT")
     assert value["citation_probe"]["citation_audit_failure_count"] == 0
+
+
+def test_source_aligned_formal_receipt_is_canonical_and_bounded() -> None:
+    """正式 receipt 锁定来源覆盖与评测指标，且不再分发评测 payload。"""
+    source = Path(
+        "data/ph2/broad_qa_source_aligned_formal_receipt_v1.json").resolve()
+    payload = source.read_bytes()
+    value = json.loads(payload.decode("utf-8"))
+    assert canonical_json_bytes(value) + b"\n" == payload
+    assert value["artifact_kind"] == (
+        "PH2_BROAD_QA_SOURCE_ALIGNED_FORMAL_RECEIPT_V1")
+    assert value["scope"] == "FORMAL_HELD_OUT"
+    assert value["status"] == "PASS"
+    assert value["population_candidate_count"] == 10_061
+    assert value["population_source_aligned_count"] == 7_189
+    assert value["population_source_aligned_ppm"] == 714_541
+    assert value["held_out_question_count"] == 300
+    assert value["recall_at_20_count"] == 300
+    assert value["top1_source_hit_count"] == 300
+    assert value["answer_citation_valid_count"] == value["answer_count"] == 296
+    assert value["evidence_hit_count"] == 253
+    assert value["thresholds"]["minimum_evidence_hit_ppm"] == 600_000
+    assert not ({
+        "questions", "labels", "predictions", "contexts", "local_paths",
+    } & set(value))
+
+
+def test_source_aligned_formal_receipt_is_packaged() -> None:
+    """紧凑正式 receipt 必须进入 wheel data-files 清单。"""
+    import tomllib
+
+    value = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    files = value["tool"]["setuptools"]["data-files"][
+        "share/pure_integer_ai/data/ph2"]
+    assert "data/ph2/broad_qa_source_aligned_formal_receipt_v1.json" in files

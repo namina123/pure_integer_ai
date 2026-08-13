@@ -252,6 +252,14 @@ retain page title, page id, revision id, revision timestamp, contributor
 metadata, source URL, and the CC-BY-SA-4.0 notice. Wikipedia text and links are
 external observations, not definitive project truth.
 
+`broad_qa_source_aligned_formal_receipt_v1.json` is project-authored compact
+evaluation metadata under the repository license. It contains only counts,
+thresholds, source-family names, hashes, and runtime summaries. It does not
+redistribute CMRC2018 or DRCD questions, labels, contexts, Wikipedia page text,
+predictions, or local artifacts. CMRC2018 remains CC BY-SA 4.0; DRCD's upstream
+README identifies its Wikipedia-derived dataset as CC BY-SA 3.0. The evaluated
+terminal-page content remains subject to Wikipedia CC BY-SA 4.0 attribution.
+
 ## Unified D-02 source-pack coverage metadata
 
 `manifests/d02_source_pack_coverage_v1.json` is a project-authored coverage

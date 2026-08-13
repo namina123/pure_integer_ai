@@ -56,13 +56,41 @@ CMRC2018/DRCD 保存的是较早 Wikipedia context，而检索目标是 2026-07 
 
 V2 的 300 问 held-out 没有运行，也没有发布联合 PASS receipt。
 
-## 下一合同
+## 来源对齐 census
 
-下一阶段先建立新的来源版本对齐合同，而不是继续在当前 200 问 dev 上调参：
+下一合同已经按 V2 暴露的问题执行。完整候选冻结先排除 external、joint V1 和 joint V2 共 1,344 个已消费标题，再从 48,129 个合格外部问题中保留 10,061 个自然包含来源标题的问题。census 在运行新 family 问答前逐题检查 alias、当前终页、完整可见页面文本和实际索引前 12 个 passage：
 
-1. 在运行问答算法前，对完整候选池冻结标题/alias 解析与“金答案是否存在于目标快照终页”的来源覆盖 census。
-2. 覆盖率与算法准确率始终分账；若从可覆盖总体冻结新评测 family，必须同时公开原始总体覆盖率，不能把来源缺失从项目能力边界中抹去。
-3. 新 family 继续排除所有已消费标题域，并在任何开发运行前冻结 split、阈值、问题、标签和来源身份。
-4. 只有新的 source-aligned dev 达门且算法冻结后，才允许唯一一次 held-out formal run。
+- `SOURCE_ALIGNED=7,189`，原始候选总体覆盖率 `71.4541%`；
+- `GOLD_ABSENT_FROM_TERMINAL_REVISION=1,854`；
+- `GOLD_PRESENT_OUTSIDE_PROJECTED_PASSAGES=790`；
+- `SOURCE_ALIAS_MISSING=159`；
+- `GOLD_ONLY_IN_RAW_WIKITEXT=65`；
+- `PASSAGE_PROJECTION_DIVERGES_FROM_FULL_PAGE=4`。
 
-当前可准确表述的能力是：20k 来源约束抽取式预览、外部给定上下文证据选择 formal PASS，以及联合检索 successor dev `FAIL`。V2 已证明页面检索和引用核验接近闭合，同时暴露了必须单独处理的来源版本对齐问题。
+只有答案同时存在于完整可见页面文本和实际 passage 投影的题目进入新 family。这个选择规则在问答运行前冻结；原始总体的 28.5459% 未覆盖部分继续公开分账，不能用新 family 的准确率替代来源总体覆盖率。census SHA-256 为 `0809f96843c11bec6264065fb166498fc73e3df4a325833711d4a66bc7dc5823`。
+
+## Source-aligned family 与开发门
+
+新 family 冻结 200 dev、300 held-out，CMRC2018/DRCD 各半；dev 使用 182 个标题，held-out 使用 277 个标题，彼此和全部前代已消费标题域无重叠。family manifest SHA-256 为 `82f4d641cf44c553594c8a5610b071e1e3ec09197a6bcf562d9c838d6dfcd666`。
+
+459 个来源页形成 4,514 passages、390,483 terms 的目标索引；与随机 20k 合并后的联合索引为 20,449 pages、113,431 passages、3,781,174 terms，SHA-256=`17bdea8850ca6afea3637fdab2bd4f58fa90fc0c3df5ea04ebf1a697a4c31cab`。开发结果为 Recall@20 `200/200`、top1 `200/200`、ANSWER citation valid `195/195`、evidence hit `165/200=82.5%`，状态 `PASS`，aggregate SHA-256=`bfdb15d6244ccd9a245598efb5987034a752397ceb5ed78cfcf73479bb92e9bf`。
+
+## 唯一 formal held-out
+
+算法、family、census、索引、alias、selection、questions、labels、开发 aggregate 和 14 个算法文件绑定到公开提交 `7f3d87607eedc29c69eb17f40729be39e04f9045`。固定位置 intent 在预测前以 `OUTCOME_PENDING` 占用；普通 `predict` 拒绝 held-out；正式预测授权不读取 labels；`FORMAL_HELD_OUT` 评分在解析 labels 前重新验证完整冻结链。intent 已存在时禁止换运行目录重跑。
+
+唯一一次 300 问正式结果：
+
+- Recall@20：`300/300 = 100%`；
+- top1 source hit：`300/300 = 100%`；
+- ANSWER citation valid：`296/296 = 100%`；
+- evidence hit：`253/300 = 84.3333%`；
+- CMRC2018：`126/150 = 84.0%`；DRCD：`127/150 = 84.6666%`；
+- `UNKNOWN=4`，`GOLD_NOT_IN_EVIDENCE=43`；
+- 查询 p50/p95：`177.8824/350.2957 ms`；
+- 状态：`PASS`，未降低 Recall 80%、top1 70%、引用 100%、证据 60% 的冻结门；
+- aggregate SHA-256：`84bfeb9023ffa31386fb4dcd159af9d82d797c92393d5e83322210a3cf4d30f3`。
+
+公开紧凑 receipt 为 [`broad_qa_source_aligned_formal_receipt_v1.json`](../data/ph2/broad_qa_source_aligned_formal_receipt_v1.json)。它不含第三方题目、标签、原文、预测或本机路径。
+
+当前可以准确表述的新增能力是：在冻结中文 Wikipedia 来源、稀疏联合索引和来源版本对齐问题总体上，页面检索、来源约束抽取与逐引用核验通过了预声明的 300 问正式评测。它不是任意开放域来源覆盖、自由生成、成熟对话、语言断奶或通用问答。下一工程缺口是减少 43 个“正确页但证据窗口未包含金答案”和 4 个拒答，并另建未消费 family 验证关系、时间、数量、因果与比较约束；不得重跑或按本次 held-out 调参。

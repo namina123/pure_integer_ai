@@ -38,8 +38,41 @@ CMRC2018 and DRCD preserve older Wikipedia contexts, while retrieval targets the
 
 The 300-question V2 held-out split has not been run, and no joint PASS receipt has been published.
 
-## Next contract
+## Source-alignment census
 
-The next step is a new source-version-alignment contract, not more tuning on this consumed 200-question development split. Before QA execution, it must freeze a complete title/alias and terminal-page answer-coverage census. Source coverage and algorithm accuracy remain separate metrics. Any new source-aligned family must exclude all consumed title domains and freeze its questions, labels, splits, thresholds, and source identities before development execution. Held-out may run once only after the new development gate passes and the algorithm is frozen.
+The next contract has now been executed. Before any new-family QA run, the complete candidate freeze excluded 1,344 consumed titles from the external, joint V1, and joint V2 families, then retained 10,061 naturally title-anchored questions from 48,129 valid external questions. The census checked aliases, current terminal revisions, full visible page text, and the actual first-12-passage index projection.
 
-The honest current claim is a 20k source-bound extractive preview, a formal PASS for evidence selection on provided external contexts, and a joint-retrieval successor development `FAIL`. V2 nearly closes page retrieval and citation verification while exposing source-version alignment as a distinct unresolved problem.
+- `SOURCE_ALIGNED=7,189`, or `71.4541%` raw-population coverage.
+- `GOLD_ABSENT_FROM_TERMINAL_REVISION=1,854`.
+- `GOLD_PRESENT_OUTSIDE_PROJECTED_PASSAGES=790`.
+- `SOURCE_ALIAS_MISSING=159`.
+- `GOLD_ONLY_IN_RAW_WIKITEXT=65`.
+- `PASSAGE_PROJECTION_DIVERGES_FROM_FULL_PAGE=4`.
+
+Only questions whose answer appears in both full visible page text and the actual passage projection enter the new family. This rule was frozen before QA execution. The uncovered 28.5459% remains public source-coverage accounting and is not replaced by the family accuracy. Census SHA-256 is `0809f96843c11bec6264065fb166498fc73e3df4a325833711d4a66bc7dc5823`.
+
+## Source-aligned family and development gate
+
+The new family freezes 200 development and 300 held-out questions, split evenly between CMRC2018 and DRCD. Development uses 182 titles and held-out uses 277, with zero overlap between them or any consumed predecessor title domain. Family manifest SHA-256 is `82f4d641cf44c553594c8a5610b071e1e3ec09197a6bcf562d9c838d6dfcd666`.
+
+The 459 source pages form a target index of 4,514 passages and 390,483 terms. The combined index contains 20,449 pages, 113,431 passages, and 3,781,174 terms; SHA-256 is `17bdea8850ca6afea3637fdab2bd4f58fa90fc0c3df5ea04ebf1a697a4c31cab`. Development reaches `200/200` Recall@20, `200/200` top1, `195/195` valid ANSWER citations, and `165/200 = 82.5%` evidence hit: `PASS`, aggregate SHA-256 `bfdb15d6244ccd9a245598efb5987034a752397ceb5ed78cfcf73479bb92e9bf`.
+
+## Unique formal held-out run
+
+The algorithm, family, census, index, aliases, selection, questions, labels, development aggregate, and 14 algorithm files are bound to public commit `7f3d87607eedc29c69eb17f40729be39e04f9045`. A fixed-path `OUTCOME_PENDING` intent claims the single run before prediction. Ordinary prediction rejects held-out; formal prediction authorization does not read labels; formal scoring revalidates the complete freeze before parsing labels. An existing intent forbids rerunning from another output directory.
+
+The single 300-question formal result is:
+
+- Recall@20: `300/300 = 100%`.
+- Top1 source hit: `300/300 = 100%`.
+- ANSWER citation validity: `296/296 = 100%`.
+- Evidence hit: `253/300 = 84.3333%`.
+- CMRC2018: `126/150 = 84.0%`; DRCD: `127/150 = 84.6666%`.
+- Four `UNKNOWN` results and 43 `GOLD_NOT_IN_EVIDENCE` failures.
+- Query p50/p95: `177.8824/350.2957 ms`.
+- Status: `PASS`; the frozen 80% Recall, 70% top1, 100% citation, and 60% evidence gates were not reduced.
+- Aggregate SHA-256: `84bfeb9023ffa31386fb4dcd159af9d82d797c92393d5e83322210a3cf4d30f3`.
+
+The compact public receipt is [`broad_qa_source_aligned_formal_receipt_v1.json`](../data/ph2/broad_qa_source_aligned_formal_receipt_v1.json). It contains no third-party questions, labels, page text, predictions, or local paths.
+
+The accurate new claim is that page retrieval, source-bound extraction, and citation-by-citation verification pass a predeclared 300-question evaluation on a frozen Chinese Wikipedia source and source-version-aligned question population. This is not arbitrary open-source coverage, free-form generation, mature dialogue, language weaning, or general QA. The next engineering gap is the 43 correct-page evidence-window misses and four refusals, followed by a fresh unconsumed family for relational, temporal, quantitative, causal, and comparative constraints. This held-out family must not be rerun or used for item-level tuning.
