@@ -32,6 +32,7 @@ classifiers = [
 pure-integer-qa = "pure_integer_ai.experiments.run_ph2_w03_w04_w05_sparse_qa:main"
 pure-integer-sense = "pure_integer_ai.experiments.run_ph2_w03_public_sense:main"
 pure-integer-broad-qa = "pure_integer_ai.experiments.run_ph2_broad_qa:main"
+pure-integer-broad-qa-joint = "pure_integer_ai.experiments.run_ph2_broad_qa_joint_eval:main"
 
 [project.optional-dependencies]
 test = [

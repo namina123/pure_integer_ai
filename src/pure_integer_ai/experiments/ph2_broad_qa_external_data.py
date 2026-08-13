@@ -16,6 +16,25 @@ from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_line
 EXTERNAL_EVAL_KIND = "PH2_BROAD_QA_EXTERNAL_EVAL_PACK_V1"
 EXTERNAL_SELECTION_RULE = "TITLE_BUCKET_THEN_ITEM_SHA256_V1"
 _TO_SIMPLIFIED = OpenCC("t2s")
+_TO_TRADITIONAL = OpenCC("s2t")
+_CMRC_REVISION = "c0eb1b6ba219847457e6af3180da722bbeb656af"
+_DRCD_REVISION = "b944790de5af02c5fbb7cd9cb1473d27d169eebf"
+_CMRC_FILES = (
+    ("train", "data/cmrc2018_train.json",
+     "d935a2d2c3ea8fef4b6b3d7f1c876f5870b720fc0c9caf4d14989f394a3d4745"),
+    ("dev", "data/cmrc2018_dev.json",
+     "5cfe4414c28a8ecbb51670f78c0dc7d1049f286c2d5769b52f1f94bcc0752cf1"),
+    ("trial", "data/cmrc2018_trial.json",
+     "a976d1fd5efc173bd58ff1c57e958de5f49fed633a7bfb8e0e402e5490d75f5e"),
+)
+_DRCD_FILES = (
+    ("training", "DRCD_training.json",
+     "5e6268091ab98f0bb858f03c77fba85e23b31e49a91638e4f22d0d8ec703f79a"),
+    ("dev", "DRCD_dev.json",
+     "e236df03861ba241bd7b29628cd48b3b8e339c60137e041a4358b5320ed61928"),
+    ("test", "DRCD_test.json",
+     "d9de0b4d247a8391ac8daee6c02c2c8272b75562a1e2377b50ae04ecc09a7438"),
+)
 
 
 # object-model: exception
@@ -119,11 +138,41 @@ class ExternalQaItem:
         }
 
 
+def official_external_qa_sources(
+        cmrc_root: str | Path,
+        drcd_root: str | Path,
+        ) -> tuple[ExternalQaSourceFile, ...]:
+    """把官方 checkout 的 commit、文件 hash、许可和 URL 绑定为来源。"""
+    cmrc = Path(cmrc_root).resolve()
+    drcd = Path(drcd_root).resolve()
+    values = []
+    for partition, relative, sha256 in _CMRC_FILES:
+        values.append(ExternalQaSourceFile(
+            "CMRC2018", partition, "CMRC2018", cmrc / relative,
+            sha256, _CMRC_REVISION, "CC-BY-SA-4.0",
+            "https://github.com/ymcui/cmrc2018"))
+    for partition, relative, sha256 in _DRCD_FILES:
+        values.append(ExternalQaSourceFile(
+            "DRCD", partition, "DRCD", drcd / relative,
+            sha256, _DRCD_REVISION, "CC-BY-SA-3.0",
+            "https://github.com/DRCKnowledgeTeam/DRCD"))
+    return tuple(values)
+
+
 def normalize_external_text(value: str) -> str:
     """以简体、无空白、casefold 形式做标题和答案严格比对。"""
     if not isinstance(value, str):
         raise TypeError("external normalized value 必须是字符串")
     return "".join(_TO_SIMPLIFIED.convert(value).split()).casefold()
+
+
+def external_title_surfaces(value: str) -> tuple[str, ...]:
+    """返回来源标题的原文、简体和繁体精确表面形式。"""
+    if not isinstance(value, str) or not value:
+        raise BroadQaExternalDataError("external title surface 非法")
+    return tuple(sorted({
+        value, _TO_SIMPLIFIED.convert(value), _TO_TRADITIONAL.convert(value),
+    }))
 
 
 def _sha256_file(path: Path) -> str:
@@ -386,6 +435,28 @@ def select_external_source_pack(
     }
 
 
+def select_external_successor_pack(
+        items: Iterable[ExternalQaItem],
+        *,
+        excluded_title_keys: Iterable[str],
+        dev_per_source: int = 100,
+        held_out_per_source: int = 150,
+        ) -> dict[str, tuple[ExternalQaItem, ...]]:
+    """排除已消费标题域，再以同一预定义桶规则冻结 successor family。"""
+    excluded = frozenset(excluded_title_keys)
+    if (not excluded
+            or any(not isinstance(item, str) or not item for item in excluded)):
+        raise BroadQaExternalDataError("successor excluded title inventory 非法")
+    filtered = tuple(item for item in items if item.title_key not in excluded)
+    selected = select_external_source_pack(
+        filtered, dev_per_source=dev_per_source,
+        held_out_per_source=held_out_per_source)
+    if any(item.title_key in excluded
+           for values in selected.values() for item in values):
+        raise BroadQaExternalDataError("successor family 复用了已消费标题域")
+    return selected
+
+
 def _write_jsonl(path: Path, records: Iterable[dict[str, object]]) -> int:
     """以规范单行 JSON 写入不可覆盖文件并返回记录数。"""
     if path.exists():
@@ -458,7 +529,10 @@ __all__ = [
     "ExternalQaItem",
     "ExternalQaSourceFile",
     "freeze_external_source_pack",
+    "external_title_surfaces",
     "load_external_qa_sources",
     "normalize_external_text",
+    "official_external_qa_sources",
     "select_external_source_pack",
+    "select_external_successor_pack",
 ]

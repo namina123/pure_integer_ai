@@ -13,6 +13,8 @@ from pure_integer_ai.experiments.ph2_dataset_contract import (
 
 SELECTION_KIND = "PH2_BROAD_QA_SELECTION_V1"
 SELECTION_RULE = "SNAPSHOT_PAGE_TITLE_SHA256_LOWEST_V1"
+TARGET_SELECTION_KIND = "PH2_BROAD_QA_TITLE_BOUND_SELECTION_V1"
+TARGET_SELECTION_RULE = "FROZEN_NORMALIZED_TITLE_EXACT_INDEX_MATCH_V1"
 RESULT_STATUSES = ("ANSWER", "CLARIFY", "UNKNOWN", "CONFLICT")
 WIKIPEDIA_ATTRIBUTION = "Wikipedia contributors"
 
@@ -201,6 +203,140 @@ class BroadQaSelectionManifest:
         )
 
 
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class BroadQaTargetSelectionManifest:
+    """绑定预先冻结标题域与同一 Wikipedia snapshot 的页面坐标。"""
+
+    source_key: str
+    snapshot_id: str
+    snapshot_manifest_sha256: str
+    index_local_sha256: str
+    index_upstream_sha1: str
+    xml_local_sha256: str
+    xml_compressed_size_bytes: int
+    index_entry_count: int
+    target_title_count: int
+    target_titles_sha256: str
+    selected_pages: tuple[BroadQaSelectedPage, ...]
+    missing_title_keys: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        """核验目标标题分母、来源身份和坐标 inventory 不变量。"""
+        if (self.source_key != "ZHWIKIPEDIA_20260701"
+                or not isinstance(self.snapshot_id, str)
+                or not self.snapshot_id):
+            raise BroadQaContractError("target selection source identity 漂移")
+        for label, value in (
+                ("snapshot manifest", self.snapshot_manifest_sha256),
+                ("index local", self.index_local_sha256),
+                ("xml local", self.xml_local_sha256),
+                ("target titles", self.target_titles_sha256)):
+            _sha256(value, label=label)
+        if (not isinstance(self.index_upstream_sha1, str)
+                or len(self.index_upstream_sha1) != 40
+                or any(item not in "0123456789abcdef"
+                       for item in self.index_upstream_sha1)):
+            raise BroadQaContractError("target selection index SHA-1 非法")
+        _positive(self.xml_compressed_size_bytes, label="target XML size")
+        _positive(self.index_entry_count, label="target index count")
+        _positive(self.target_title_count, label="target title count")
+        if (not isinstance(self.selected_pages, tuple)
+                or not self.selected_pages
+                or tuple(item.ordinal for item in self.selected_pages)
+                != tuple(range(1, len(self.selected_pages) + 1))
+                or len({item.page_id for item in self.selected_pages})
+                != len(self.selected_pages)):
+            raise BroadQaContractError("target selection page inventory 非规范")
+        ranks = tuple(item.rank_sha256 for item in self.selected_pages)
+        if ranks != tuple(sorted(ranks)):
+            raise BroadQaContractError("target selection rank 顺序漂移")
+        if (not isinstance(self.missing_title_keys, tuple)
+                or any(not isinstance(item, str) or not item
+                       for item in self.missing_title_keys)
+                or self.missing_title_keys
+                != tuple(sorted(set(self.missing_title_keys)))
+                or self.target_title_count
+                != len(self.selected_pages) + len(self.missing_title_keys)):
+            raise BroadQaContractError("target title 分母未闭合")
+
+    @property
+    def requested_page_count(self) -> int:
+        """兼容索引构建器，返回实际匹配到的页面数。"""
+        return len(self.selected_pages)
+
+    def to_dict(self) -> dict[str, object]:
+        """导出不伪装为随机 selection 的规范 JSON 值。"""
+        return {
+            "artifact_kind": TARGET_SELECTION_KIND,
+            "format_version": 1,
+            "index_entry_count": self.index_entry_count,
+            "index_local_sha256": self.index_local_sha256,
+            "index_upstream_sha1": self.index_upstream_sha1,
+            "missing_title_keys": list(self.missing_title_keys),
+            "selected_pages": [item.to_dict() for item in self.selected_pages],
+            "selection_rule": TARGET_SELECTION_RULE,
+            "snapshot_id": self.snapshot_id,
+            "snapshot_manifest_sha256": self.snapshot_manifest_sha256,
+            "source_key": self.source_key,
+            "target_title_count": self.target_title_count,
+            "target_titles_sha256": self.target_titles_sha256,
+            "xml_compressed_size_bytes": self.xml_compressed_size_bytes,
+            "xml_local_sha256": self.xml_local_sha256,
+        }
+
+    def canonical_bytes(self) -> bytes:
+        """返回规范目标 selection 字节。"""
+        return canonical_json_line(self.to_dict())
+
+    def sha256(self) -> str:
+        """返回目标 selection 的规范 SHA-256。"""
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+    @classmethod
+    def from_dict(cls, value: object) -> "BroadQaTargetSelectionManifest":
+        """从字段精确的 JSON object 恢复目标 selection。"""
+        keys = {
+            "artifact_kind", "format_version", "index_entry_count",
+            "index_local_sha256", "index_upstream_sha1",
+            "missing_title_keys", "selected_pages", "selection_rule",
+            "snapshot_id", "snapshot_manifest_sha256", "source_key",
+            "target_title_count", "target_titles_sha256",
+            "xml_compressed_size_bytes", "xml_local_sha256",
+        }
+        if (not isinstance(value, dict) or set(value) != keys
+                or value["artifact_kind"] != TARGET_SELECTION_KIND
+                or value["format_version"] != 1
+                or value["selection_rule"] != TARGET_SELECTION_RULE
+                or not isinstance(value["selected_pages"], list)
+                or not isinstance(value["missing_title_keys"], list)):
+            raise BroadQaContractError("target selection manifest 字段漂移")
+        return cls(
+            value["source_key"], value["snapshot_id"],
+            value["snapshot_manifest_sha256"], value["index_local_sha256"],
+            value["index_upstream_sha1"], value["xml_local_sha256"],
+            value["xml_compressed_size_bytes"], value["index_entry_count"],
+            value["target_title_count"], value["target_titles_sha256"],
+            tuple(BroadQaSelectedPage.from_dict(item)
+                  for item in value["selected_pages"]),
+            tuple(value["missing_title_keys"]),
+        )
+
+
+def parse_target_selection_manifest(
+        payload: bytes,
+        ) -> BroadQaTargetSelectionManifest:
+    """严格回读规范、单换行结尾的目标 selection。"""
+    if (not isinstance(payload, bytes) or not payload.endswith(b"\n")
+            or payload.endswith(b"\n\n")):
+        raise BroadQaContractError("target selection manifest 换行非法")
+    value = parse_canonical_json_bytes(payload[:-1], require_object=True)
+    manifest = BroadQaTargetSelectionManifest.from_dict(value)
+    if manifest.canonical_bytes() != payload:
+        raise BroadQaContractError("target selection manifest 不是规范字节")
+    return manifest
+
+
 def parse_selection_manifest(payload: bytes) -> BroadQaSelectionManifest:
     """严格回读单换行结尾且逐字节规范的选择 manifest。"""
     if (not isinstance(payload, bytes) or not payload.endswith(b"\n")
@@ -331,9 +467,13 @@ __all__ = [
     "BroadQaResult",
     "BroadQaSelectedPage",
     "BroadQaSelectionManifest",
+    "BroadQaTargetSelectionManifest",
     "RESULT_STATUSES",
     "SELECTION_KIND",
     "SELECTION_RULE",
+    "TARGET_SELECTION_KIND",
+    "TARGET_SELECTION_RULE",
     "WIKIPEDIA_ATTRIBUTION",
     "parse_selection_manifest",
+    "parse_target_selection_manifest",
 ]

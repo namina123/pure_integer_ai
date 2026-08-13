@@ -9,8 +9,11 @@ from pathlib import Path
 from pure_integer_ai.experiments.ph2_broad_qa_contract import (
     BroadQaSelectedPage,
     BroadQaSelectionManifest,
+    BroadQaTargetSelectionManifest,
     parse_selection_manifest,
+    parse_target_selection_manifest,
 )
+from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_line
 from pure_integer_ai.experiments.ph2_mediawiki_multistream_adapter import (
     iter_multistream_index,
 )
@@ -127,6 +130,89 @@ def build_broad_qa_selection(
     )
 
 
+def build_broad_qa_target_selection(
+        manifest: MediaWikiDumpSnapshotManifest,
+        *,
+        index_path: str | Path,
+        snapshot_manifest_sha256: str,
+        target_titles: dict[str, tuple[str, ...]],
+        ) -> BroadQaTargetSelectionManifest:
+    """单遍扫描 index，把预冻结标题域绑定到确切页面压缩坐标。"""
+    if not isinstance(manifest, MediaWikiDumpSnapshotManifest):
+        raise TypeError("broad QA snapshot manifest 类型错误")
+    if (manifest.source_key != "ZHWIKIPEDIA_20260701"
+            or manifest.project != "zhwiki"):
+        raise BroadQaSelectionError("target selection 只接受冻结中文 Wikipedia")
+    if (not isinstance(target_titles, dict) or not target_titles
+            or any(not isinstance(key, str) or not key
+                   or not isinstance(surfaces, tuple) or not surfaces
+                   or any(not isinstance(item, str) or not item
+                          for item in surfaces)
+                   or surfaces != tuple(sorted(set(surfaces)))
+                   for key, surfaces in target_titles.items())):
+        raise BroadQaSelectionError("target title inventory 非法")
+    surface_to_key: dict[str, str] = {}
+    for key, surfaces in sorted(target_titles.items()):
+        for surface in surfaces:
+            prior = surface_to_key.setdefault(surface, key)
+            if prior != key:
+                raise BroadQaSelectionError("target title surface 映射冲突")
+    index = Path(index_path).resolve()
+    if not index.is_file():
+        raise BroadQaSelectionError("target selection index 缺失")
+    index_file = _raw_file(manifest, "INDEX")
+    xml_file = _raw_file(manifest, "XML")
+    if (index.stat().st_size != index_file.compressed_size_bytes
+            or _sha256_path(index) != index_file.local_sha256):
+        raise BroadQaSelectionError("target selection index size/SHA 漂移")
+    offsets = []
+    prior_offset = -1
+    index_count = 0
+    matches: dict[str, tuple[str, str, int, int, int]] = {}
+    with bz2.open(index, "rb") as stream:
+        for entry in iter_multistream_index(stream):
+            index_count += 1
+            if entry.offset != prior_offset:
+                offsets.append(entry.offset)
+                prior_offset = entry.offset
+            key = surface_to_key.get(entry.title)
+            if key is None:
+                continue
+            rank = _rank(manifest.snapshot_id, entry.page_id, entry.title)
+            candidate = (
+                rank, entry.title, entry.page_id, entry.line_number,
+                entry.offset)
+            if key not in matches or candidate < matches[key]:
+                matches[key] = candidate
+    ends = {
+        offset: offsets[ordinal + 1]
+        if ordinal + 1 < len(offsets) else xml_file.compressed_size_bytes
+        for ordinal, offset in enumerate(offsets)
+    }
+    ranked = sorted(matches.values())
+    selected = tuple(
+        BroadQaSelectedPage(
+            ordinal, rank, title,
+            hashlib.sha256(title.encode("utf-8")).hexdigest(), page_id,
+            line_number, offset, ends[offset])
+        for ordinal, (rank, title, page_id, line_number, offset)
+        in enumerate(ranked, start=1)
+    )
+    target_payload = canonical_json_line({
+        "target_titles": [
+            {"surfaces": list(target_titles[key]), "title_key": key}
+            for key in sorted(target_titles)
+        ],
+    })
+    return BroadQaTargetSelectionManifest(
+        manifest.source_key, manifest.snapshot_id, snapshot_manifest_sha256,
+        index_file.local_sha256, index_file.upstream_sha1,
+        xml_file.local_sha256, xml_file.compressed_size_bytes, index_count,
+        len(target_titles), hashlib.sha256(target_payload).hexdigest(),
+        selected, tuple(sorted(set(target_titles) - set(matches))),
+    )
+
+
 def write_broad_qa_selection(
         manifest: BroadQaSelectionManifest,
         path: str | Path,
@@ -154,6 +240,38 @@ def read_broad_qa_selection(path: str | Path) -> BroadQaSelectionManifest:
         raise
     except Exception as error:
         raise BroadQaSelectionError("broad QA selection 不可读") from error
+
+
+def write_broad_qa_target_selection(
+        manifest: BroadQaTargetSelectionManifest,
+        path: str | Path,
+        ) -> Path:
+    """独占发布目标 selection，已有相同字节时保持幂等。"""
+    if not isinstance(manifest, BroadQaTargetSelectionManifest):
+        raise TypeError("broad QA target selection 类型错误")
+    target = Path(path).resolve()
+    payload = manifest.canonical_bytes()
+    if target.exists():
+        if not target.is_file() or target.read_bytes() != payload:
+            raise BroadQaSelectionError("target selection 已存在且字节不同")
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("xb") as handle:
+        handle.write(payload)
+    return target
+
+
+def read_broad_qa_target_selection(
+        path: str | Path,
+        ) -> BroadQaTargetSelectionManifest:
+    """严格读取并复核规范目标 selection。"""
+    try:
+        return parse_target_selection_manifest(
+            Path(path).resolve().read_bytes())
+    except BroadQaSelectionError:
+        raise
+    except Exception as error:
+        raise BroadQaSelectionError("target selection 不可读") from error
 
 
 def derive_broad_qa_selection_prefix(
@@ -216,8 +334,11 @@ def profile_broad_qa_selection(
 __all__ = [
     "BroadQaSelectionError",
     "build_broad_qa_selection",
+    "build_broad_qa_target_selection",
     "derive_broad_qa_selection_prefix",
     "profile_broad_qa_selection",
     "read_broad_qa_selection",
+    "read_broad_qa_target_selection",
     "write_broad_qa_selection",
+    "write_broad_qa_target_selection",
 ]

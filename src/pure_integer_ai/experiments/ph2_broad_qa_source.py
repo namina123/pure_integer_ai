@@ -18,6 +18,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_contract import (
     BroadQaPassage,
     BroadQaSelectedPage,
     BroadQaSelectionManifest,
+    BroadQaTargetSelectionManifest,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_bytes
 from pure_integer_ai.experiments.ph2_mediawiki_multistream_adapter import (
@@ -47,6 +48,22 @@ class BroadQaSourceCandidate:
     timestamp: str
     contributor_json: str
     text_sha256: str
+    wikitext: str
+
+
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class BroadQaSourceInspection:
+    """记录目标页 revision、重定向和原始正文，供 alias 链解析。"""
+
+    ordinal: int
+    title: str
+    page_id: int
+    revision_id: int
+    timestamp: str
+    contributor_json: str
+    text_sha256: str
+    redirect_title: str | None
     wikitext: str
 
 
@@ -167,6 +184,23 @@ def _block_candidates(
         source_key: str,
         ) -> tuple[tuple[int, ...], tuple[BroadQaSourceCandidate, ...]]:
     """在一个 worker 内解压单块并恢复其中全部目标候选。"""
+    seen, inspections = _block_inspections(
+        compressed, selected_pages, source_key)
+    candidates = tuple(BroadQaSourceCandidate(
+        item.ordinal, item.title, item.page_id, item.revision_id,
+        item.timestamp, item.contributor_json, item.text_sha256,
+        item.wikitext)
+        for item in inspections
+        if not item.redirect_title and item.wikitext.strip())
+    return seen, candidates
+
+
+def _block_inspections(
+        compressed: bytes,
+        selected_pages: tuple[BroadQaSelectedPage, ...],
+        source_key: str,
+        ) -> tuple[tuple[int, ...], tuple[BroadQaSourceInspection, ...]]:
+    """解压单块并保留目标页的重定向与 revision 身份。"""
     targets = {(item.page_id, item.title): item for item in selected_pages}
     if len(targets) != len(selected_pages):
         raise BroadQaSourceError("broad QA block target identity 重复")
@@ -182,7 +216,7 @@ def _block_candidates(
         max_template_depth=1,
     )
     seen = []
-    candidates = []
+    inspections = []
     for page in pages:
         selected = targets.get(_page_identity(page))
         if selected is None:
@@ -201,11 +235,9 @@ def _block_candidates(
             raise BroadQaSourceError(
                 f"broad QA page 解析失败: {error.code}") from error
         wikitext = _page_text(page)
-        if not wikitext.strip() or record.redirect_title:
-            continue
         contributor = canonical_json_bytes(
             record.contributor.to_value()).decode("utf-8")
-        candidates.append(BroadQaSourceCandidate(
+        inspections.append(BroadQaSourceInspection(
             selected.ordinal,
             record.title,
             record.page_id,
@@ -213,9 +245,10 @@ def _block_candidates(
             record.timestamp,
             contributor,
             record.text_sha256,
+            record.redirect_title or None,
             wikitext,
         ))
-    return tuple(seen), tuple(candidates)
+    return tuple(seen), tuple(inspections)
 
 
 def iter_broad_qa_candidate_pages(
@@ -225,7 +258,8 @@ def iter_broad_qa_candidate_pages(
         worker_count: int = 1,
         ):
     """有界并行解压 block，并按压缩 offset 原序产出候选。"""
-    if not isinstance(selection, BroadQaSelectionManifest):
+    if not isinstance(selection, (
+            BroadQaSelectionManifest, BroadQaTargetSelectionManifest)):
         raise TypeError("broad QA selection 类型错误")
     yield from iter_broad_qa_selected_pages(
         selection.selected_pages,
@@ -310,10 +344,75 @@ def iter_broad_qa_selected_pages(
         raise BroadQaSourceError("broad QA index/XML page inventory 漂移")
 
 
+def iter_broad_qa_selected_page_inspections(
+        selected_pages: tuple[BroadQaSelectedPage, ...],
+        *,
+        xml_path: str | Path,
+        source_key: str,
+        xml_compressed_size_bytes: int,
+        worker_count: int = 1,
+        ):
+    """按冻结坐标产出含重定向的完整目标页 inspection。"""
+    if (not isinstance(selected_pages, tuple) or not selected_pages
+            or any(not isinstance(item, BroadQaSelectedPage)
+                   for item in selected_pages)
+            or len({item.ordinal for item in selected_pages})
+            != len(selected_pages)
+            or len({item.page_id for item in selected_pages})
+            != len(selected_pages)):
+        raise BroadQaSourceError("broad QA inspection page subset 非法")
+    if source_key != "ZHWIKIPEDIA_20260701":
+        raise BroadQaSourceError("broad QA inspection source 漂移")
+    xml = Path(xml_path).resolve()
+    if (not xml.is_file()
+            or xml.stat().st_size != xml_compressed_size_bytes):
+        raise BroadQaSourceError("broad QA inspection XML size 漂移")
+    if type(worker_count) is not int or worker_count not in {1, 2, 4}:
+        raise BroadQaSourceError("broad QA inspection worker 非法")
+    ordered = sorted(selected_pages, key=lambda item: (
+        item.compressed_block_offset, item.compressed_block_end_offset,
+        item.ordinal))
+    grouped = tuple(
+        (key, tuple(values))
+        for key, values in groupby(ordered, key=lambda item: (
+            item.compressed_block_offset, item.compressed_block_end_offset))
+    )
+    seen_ordinals = set()
+
+    def consume(result):
+        """按提交顺序核对 inspection inventory。"""
+        seen, inspections = result
+        for ordinal in seen:
+            if ordinal in seen_ordinals:
+                raise BroadQaSourceError("broad QA inspection identity 重复")
+            seen_ordinals.add(ordinal)
+        yield from inspections
+
+    with xml.open("rb") as handle, ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="broad-qa-inspect") as executor:
+        pending: deque[Future] = deque()
+        for key, block_pages in grouped:
+            handle.seek(key[0])
+            compressed = handle.read(key[1] - key[0])
+            if len(compressed) != key[1] - key[0]:
+                raise BroadQaSourceError("broad QA inspection block 不完整")
+            pending.append(executor.submit(
+                _block_inspections, compressed, block_pages, source_key))
+            if len(pending) >= worker_count * 2:
+                yield from consume(pending.popleft().result())
+        while pending:
+            yield from consume(pending.popleft().result())
+    if len(seen_ordinals) != len(selected_pages):
+        raise BroadQaSourceError("broad QA inspection inventory 漂移")
+
+
 __all__ = [
     "BroadQaSourceError",
     "BroadQaSourceCandidate",
+    "BroadQaSourceInspection",
     "iter_broad_qa_candidate_pages",
     "iter_broad_qa_selected_pages",
+    "iter_broad_qa_selected_page_inspections",
     "project_broad_qa_passages",
 ]

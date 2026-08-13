@@ -10,6 +10,7 @@ import time
 
 from pure_integer_ai.experiments.ph2_broad_qa_contract import (
     BroadQaSelectionManifest,
+    BroadQaTargetSelectionManifest,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_source import (
     iter_broad_qa_candidate_pages,
@@ -83,11 +84,12 @@ def build_broad_qa_index(
         *,
         xml_path: str | Path,
         database_path: str | Path,
-        accepted_page_limit: int,
+        accepted_page_limit: int | None,
         worker_count: int = 1,
         ) -> dict[str, object]:
     """流式读取主空间页，写文档/证据表并生成 delta-varint postings。"""
-    if not isinstance(selection, BroadQaSelectionManifest):
+    if not isinstance(selection, (
+            BroadQaSelectionManifest, BroadQaTargetSelectionManifest)):
         raise TypeError("broad QA selection 类型错误")
     target = Path(database_path).resolve()
     if target.exists():
@@ -184,15 +186,18 @@ def build_broad_qa_index(
                      passage.text, passage.text_sha256,
                      passage.section_title),
                 )
-            if accepted >= accepted_page_limit:
+            if (accepted_page_limit is not None
+                    and accepted >= accepted_page_limit):
                 break
         projection_elapsed_ns = max(
             1, time.perf_counter_ns() - projection_started_ns)
-        if accepted != accepted_page_limit:
+        if accepted_page_limit is not None and accepted != accepted_page_limit:
             raise BroadQaIndexError(
                 "broad QA candidate 不足: "
                 f"requested={accepted_page_limit}, "
                 f"main_nonredirect={eligible_page_count}, projected={accepted}")
+        if accepted == 0:
+            raise BroadQaIndexError("broad QA 没有可投影页面")
         connection.execute("DROP TABLE candidate")
 
         postings_started_ns = time.perf_counter_ns()
@@ -219,7 +224,7 @@ def build_broad_qa_index(
         postings_elapsed_ns = max(
             1, time.perf_counter_ns() - postings_started_ns)
         metadata = {
-            "accepted_page_count": str(accepted_page_limit),
+            "accepted_page_count": str(accepted),
             "index_schema_version": str(INDEX_SCHEMA_VERSION),
             "license_id": "CC-BY-SA-4.0",
             "passage_count": str(passage_count),
@@ -244,7 +249,7 @@ def build_broad_qa_index(
     rss_after_bytes, peak_after_bytes = _memory_sample()
     total_elapsed_ns = max(1, time.perf_counter_ns() - started_ns)
     return {
-        "accepted_page_count": accepted_page_limit,
+        "accepted_page_count": accepted,
         "candidate_page_count": len(selection.selected_pages),
         "compressed_block_count": len(unique_blocks),
         "compressed_bytes_read": compressed_bytes_read,
