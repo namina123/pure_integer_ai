@@ -26,6 +26,11 @@ _CJK_SEQUENCE_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]+")
 _NUMBER_RE = re.compile(r"[0-9]+(?:[.,][0-9]+)?")
 _NON_REAL_ENTITY_RE = re.compile(
     r"(?:不存在|虚构|假想|杜撰|幻想|架空)(?:的|之)?")
+_CAUSE_EVIDENCE_RE = re.compile(
+    r"因为|由於|由于|因而|因此|為此|为此|導致|导致|使得|"
+    r"(?:^|[。！？!?])\s*因|使[^。！？!?\n]{0,80}(?:成為|成为)")
+_BACKWARD_REFERENCE_RE = re.compile(
+    r"^(?:前者|後者|后者|上述|以上)")
 _TO_SIMPLIFIED = OpenCC("t2s")
 _TO_TRADITIONAL = OpenCC("s2t")
 _MAX_EVIDENCE_CITATIONS = 4
@@ -331,6 +336,57 @@ def _cover_explicit_number_evidence_windows(
     return tuple(selected)
 
 
+def _expand_structural_evidence_windows(
+        ranked_windows: list[tuple[
+            tuple[int, int, int, int, int], int, tuple, str]],
+        selected_windows: tuple[tuple[
+            tuple[int, int, int, int, int], int, tuple, str], ...],
+        *, answer_kinds: tuple[str, ...],
+        ) -> tuple[tuple[
+            tuple[int, int, int, int, int], int, tuple, str], ...]:
+    """用同 passage 连续窗口补齐显式因果或前向指代所需邻句。"""
+    if (not isinstance(answer_kinds, tuple)
+            or any(not isinstance(item, str) or not item
+                   for item in answer_kinds)):
+        raise BroadQaQueryError("broad QA structural expansion 输入非法")
+    selected = list(selected_windows)
+    for index, current in enumerate(selected):
+        passage_id = int(current[2][0])
+        current_text = current[3]
+        other_identities = {
+            (int(item[2][0]), item[3])
+            for ordinal, item in enumerate(selected)
+            if ordinal != index
+        }
+        needs_cause = (
+            "CAUSE" in answer_kinds
+            and _CAUSE_EVIDENCE_RE.search(current_text) is None)
+        needs_reference = _BACKWARD_REFERENCE_RE.search(
+            current_text.lstrip()) is not None
+        if not needs_cause and not needs_reference:
+            continue
+        current_start = current[2][4].find(current_text)
+        if current_start < 0:
+            continue
+        current_end = current_start + len(current_text)
+        option = next((
+            item for item in ranked_windows
+            if int(item[2][0]) == passage_id
+            and (int(item[2][0]), item[3]) not in other_identities
+            and item[2][4].find(item[3]) >= 0
+            and item[2][4].find(item[3]) <= current_start
+            and (item[2][4].find(item[3]) + len(item[3])) >= current_end
+            and item[3] != current_text
+            and (not needs_cause
+                 or _CAUSE_EVIDENCE_RE.search(item[3]) is not None)
+            and (not needs_reference
+                 or item[2][4].find(item[3]) < current_start)
+        ), None)
+        if option is not None:
+            selected[index] = option
+    return tuple(selected)
+
+
 def _answer_kind_bonus(answer_kinds: tuple[str, ...], text: str) -> int:
     """用问式槽类型优先满足显式值形态的证据句。"""
     bonus = 0
@@ -611,6 +667,8 @@ def retrieve_broad_qa_candidates(
             explicit_numbers=frozenset(
                 _NUMBER_RE.findall(slot_free_question)),
             limit=_MAX_EVIDENCE_CITATIONS)
+        selected_windows = _expand_structural_evidence_windows(
+            ranked_windows, selected_windows, answer_kinds=answer_kinds)
         for window_score, _, page_row, selected_text in selected_windows:
             page_candidates.append(BroadQaRetrievalCandidate(
                 page_candidate.score + window_score[0],

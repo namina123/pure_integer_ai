@@ -34,6 +34,7 @@ from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_line
 from pure_integer_ai.experiments.ph2_broad_qa_query import query_broad_qa
 from pure_integer_ai.experiments.ph2_broad_qa_query import (
     _cover_explicit_number_evidence_windows,
+    _expand_structural_evidence_windows,
 )
 from pure_integer_ai.storage.integer_codec import encode_integer_tuple
 
@@ -374,6 +375,31 @@ def test_explicit_number_coverage_uses_exact_same_page_window_only() -> None:
         [answer, near, *distractors], selected,
         explicit_numbers=frozenset({"014"}), limit=4)
     assert unchanged == selected
+
+
+def test_structural_expansion_stays_in_passage_and_adds_required_context(
+        ) -> None:
+    """因果问式和前向指代只扩展同 passage 的连续候选窗口。"""
+    def item(score: int, passage_id: int, passage: str, text: str):
+        """构造带真实 passage 文本的稳定窗口。"""
+        row = (passage_id, 0, len(passage), "a" * 64, passage)
+        return ((score, 1, 0, -1, 0), -passage_id, row, text)
+
+    cause_passage = "该经济体长期稳定。其金融体系安全，使该国成为避风港。"
+    cause = item(50, 1, cause_passage, "该经济体长期稳定。")
+    cause_context = item(49, 1, cause_passage, cause_passage)
+    unrelated = item(60, 2, "因为天气晴朗。", "因为天气晴朗。")
+    expanded = _expand_structural_evidence_windows(
+        [unrelated, cause, cause_context], (cause,),
+        answer_kinds=("CAUSE",))
+    assert expanded == (cause_context,)
+
+    reference_passage = "该门同时有无性及有性形态。前者常见于幼生寄主。"
+    reference = item(50, 3, reference_passage, "前者常见于幼生寄主。")
+    reference_context = item(49, 3, reference_passage, reference_passage)
+    expanded_reference = _expand_structural_evidence_windows(
+        [reference, reference_context], (reference,), answer_kinds=())
+    assert expanded_reference == (reference_context,)
 
 
 def test_joint_augmentation_can_extend_an_existing_alias_index(
