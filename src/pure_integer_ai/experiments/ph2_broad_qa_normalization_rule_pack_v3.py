@@ -215,6 +215,37 @@ def normalization_rule_pack_v3_result_sha256(
     )
 
 
+def validate_normalization_rule_records_v3(
+        *,
+        source_pack_dir: str | Path,
+        contrastive_protocol_dir: str | Path,
+        accepted_rules: tuple[BroadQaNormalizationAcceptedRuleV3, ...],
+        rejected_trials: tuple[BroadQaNormalizationRejectedTrialV3, ...],
+        ) -> tuple[
+            dict[str, object],
+            dict[str, object],
+            tuple[dict[str, object], ...],
+            tuple[dict[str, object], ...],
+            tuple[str, ...],
+        ]:
+    """从冻结 OpenCC 来源重放并验证一组 v3 records。"""
+    provenance = read_normalization_training_provenance(
+        source_pack_dir=source_pack_dir,
+        contrastive_protocol_dir=contrastive_protocol_dir,
+    )
+    source_manifest, protocol_manifest, candidates, trials, _ = provenance
+    _record_payloads(accepted_rules, rejected_trials)
+    _validate_pack_records(
+        accepted_rules=accepted_rules,
+        rejected_trials=rejected_trials,
+        source_manifest=source_manifest,
+        protocol_manifest=protocol_manifest,
+        candidates=candidates,
+        trials=trials,
+    )
+    return provenance
+
+
 def _validate_checkpoint_chains(
         *,
         chain_paths: tuple[Path, Path],
@@ -568,4 +599,5 @@ __all__ = [
     "parse_normalization_rejected_trial_v3",
     "publish_normalization_rule_pack_v3",
     "read_normalization_rule_pack_v3",
+    "validate_normalization_rule_records_v3",
 ]
