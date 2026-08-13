@@ -43,15 +43,22 @@ from pure_integer_ai.storage.integer_codec import (
 
 
 JOINT_PACK_KIND = "PH2_BROAD_QA_JOINT_RETRIEVAL_EVIDENCE_PACK_V1"
+JOINT_SUCCESSOR_PACK_KIND = (
+    "PH2_BROAD_QA_JOINT_RETRIEVAL_EVIDENCE_PACK_V2"
+)
 JOINT_QUESTION_KIND = "PH2_BROAD_QA_JOINT_QUESTION_V1"
 JOINT_LABEL_KIND = "PH2_BROAD_QA_JOINT_LABEL_V1"
 JOINT_TARGET_KIND = "PH2_BROAD_QA_JOINT_SOURCE_TARGET_V1"
 JOINT_PREDICTION_KIND = "PH2_BROAD_QA_JOINT_PREDICTION_V1"
-JOINT_AGGREGATE_KIND = "PH2_BROAD_QA_JOINT_AGGREGATE_V1"
+JOINT_AGGREGATE_KIND = "PH2_BROAD_QA_JOINT_AGGREGATE_V2"
 JOINT_ALIAS_KIND = "PH2_BROAD_QA_JOINT_SOURCE_ALIAS_V1"
 JOINT_SELECTION_RULE = (
     "EXCLUDE_PRIOR_TITLE_DOMAIN_THEN_NATURAL_TITLE_ANCHOR_"
     "TITLE_BUCKET_ITEM_SHA256_V1"
+)
+JOINT_SUCCESSOR_SELECTION_RULE = (
+    "EXCLUDE_PRIOR_QUESTION_AND_SOURCE_TARGET_TITLE_DOMAINS_THEN_"
+    "NATURAL_TITLE_ANCHOR_TITLE_BUCKET_ITEM_SHA256_V2"
 )
 JOINT_THRESHOLDS = {
     "minimum_evidence_hit_ppm": 600_000,
@@ -133,10 +140,26 @@ def _prior_title_keys(paths: Iterable[str | Path]) -> tuple[str, ...]:
     return tuple(sorted(keys))
 
 
+def _prior_source_target_keys(paths: Iterable[str | Path]) -> tuple[str, ...]:
+    """从前代公开 target ledger 读取标题域，不接触问题标签。"""
+    keys = set()
+    for raw_path in paths:
+        path = Path(raw_path).resolve()
+        for value in _read_jsonl(path, expected_kind=JOINT_TARGET_KIND):
+            key = value.get("title_key")
+            if (not isinstance(key, str) or not key
+                    or normalize_external_text(key) != key):
+                raise BroadQaExternalDataError(
+                    "prior source target title key 漂移")
+            keys.add(key)
+    return tuple(sorted(keys))
+
+
 def freeze_joint_source_pack(
         items: Iterable[ExternalQaItem],
         *,
         prior_question_paths: Iterable[str | Path],
+        prior_source_target_paths: Iterable[str | Path] = (),
         target_dir: str | Path,
         source_report: dict[str, object],
         dev_per_source: int = 100,
@@ -147,7 +170,11 @@ def freeze_joint_source_pack(
     if target.exists():
         raise BroadQaExternalDataError("joint freeze target 已存在")
     prior_paths = tuple(Path(item).resolve() for item in prior_question_paths)
-    excluded = _prior_title_keys(prior_paths)
+    prior_target_paths = tuple(
+        Path(item).resolve() for item in prior_source_target_paths)
+    question_excluded = _prior_title_keys(prior_paths)
+    target_excluded = _prior_source_target_keys(prior_target_paths)
+    excluded = tuple(sorted(set(question_excluded) | set(target_excluded)))
     anchored = tuple(
         item for item in items
         if item.title_key in normalize_external_text(item.question)
@@ -210,7 +237,9 @@ def freeze_joint_source_pack(
     })
     excluded_payload = canonical_json_line({"title_keys": list(excluded)})
     manifest = {
-        "artifact_kind": JOINT_PACK_KIND,
+        "artifact_kind": (
+            JOINT_SUCCESSOR_PACK_KIND if prior_target_paths
+            else JOINT_PACK_KIND),
         "artifacts": artifacts,
         "excluded_prior_question_files": [
             {"sha256": _sha256_file(path)} for path in prior_paths],
@@ -218,7 +247,9 @@ def freeze_joint_source_pack(
         "excluded_prior_titles_sha256": hashlib.sha256(
             excluded_payload).hexdigest(),
         "format_version": 1,
-        "selection_rule": JOINT_SELECTION_RULE,
+        "selection_rule": (
+            JOINT_SUCCESSOR_SELECTION_RULE if prior_target_paths
+            else JOINT_SELECTION_RULE),
         "source_report": source_report,
         "source_target_count": target_count,
         "splits": {
@@ -234,6 +265,13 @@ def freeze_joint_source_pack(
         "thresholds": JOINT_THRESHOLDS,
         "title_domain_overlap_count": 0,
     }
+    if prior_target_paths:
+        manifest["excluded_prior_question_title_count"] = len(
+            question_excluded)
+        manifest["excluded_prior_source_target_files"] = [
+            {"sha256": _sha256_file(path)} for path in prior_target_paths]
+        manifest["excluded_prior_source_target_title_count"] = len(
+            target_excluded)
     manifest_path = target / "manifest.json"
     manifest_path.write_bytes(canonical_json_line(manifest))
     return {**manifest, "manifest_sha256": _sha256_file(manifest_path)}
@@ -594,6 +632,17 @@ def augment_broad_qa_index(
                 )
             """)
             target.execute("CREATE INDEX alias_doc ON alias(doc_id,surface)")
+            target.execute("""
+                CREATE TABLE alias_term(
+                    term TEXT NOT NULL,
+                    surface TEXT NOT NULL,
+                    doc_id INTEGER NOT NULL,
+                    PRIMARY KEY(term,surface,doc_id)
+                )
+            """)
+            target.execute(
+                "CREATE INDEX alias_term_lookup "
+                "ON alias_term(term,surface,doc_id)")
             alias_postings: dict[str, set[int]] = defaultdict(set)
             for alias in read_joint_source_aliases(alias_path):
                 if alias["status"] != "RESOLVED":
@@ -613,6 +662,9 @@ def augment_broad_qa_index(
                         "INSERT OR IGNORE INTO alias VALUES(?,?)",
                         (surface, document_row[0]))
                     for term in broad_qa_terms(surface):
+                        target.execute(
+                            "INSERT OR IGNORE INTO alias_term VALUES(?,?,?)",
+                            (term, surface, document_row[0]))
                         alias_postings[term].update(passage_ids)
             alias_term_count = len(alias_postings)
             for term, values in sorted(alias_postings.items()):
@@ -763,6 +815,27 @@ def _ppm(numerator: int, denominator: int) -> int:
     return 0 if denominator == 0 else numerator * 1_000_000 // denominator
 
 
+def _page_contains_gold_answer(
+        database: sqlite3.Connection,
+        page_id: int,
+        gold_answers: Iterable[str],
+        ) -> bool:
+    """核验冻结终页的任一 passage 是否实际包含规范化金答案。"""
+    normalized = tuple(
+        normalize_external_text(item) for item in gold_answers
+        if isinstance(item, str) and item)
+    if not normalized:
+        raise BroadQaExternalDataError("joint gold answer inventory 非法")
+    return any(
+        answer in normalize_external_text(row[0])
+        for row in database.execute("""
+            SELECT p.text FROM passage AS p
+            JOIN document AS d ON d.doc_id=p.doc_id
+            WHERE d.page_id=? ORDER BY p.ordinal
+        """, (page_id,))
+        for answer in normalized)
+
+
 def score_joint_retrieval(
         questions_path: str | Path,
         predictions_path: str | Path,
@@ -805,6 +878,7 @@ def score_joint_retrieval(
     answer_count = 0
     citation_valid = 0
     evidence_hits = 0
+    source_page_gold_coverage = 0
     status_counts: Counter[str] = Counter()
     failure_counts: Counter[str] = Counter()
     per_source: dict[str, Counter[str]] = defaultdict(Counter)
@@ -830,6 +904,11 @@ def score_joint_retrieval(
             expected = (
                 None if alias is None or alias["status"] != "RESOLVED"
                 else (alias["terminal_page_id"], alias["terminal_title"]))
+            source_covered = (
+                expected is not None
+                and _page_contains_gold_answer(
+                    database, expected[0], label["gold_answers"]))
+            source_page_gold_coverage += int(source_covered)
             candidates = prediction.get("candidates")
             result = prediction.get("result")
             if (not isinstance(candidates, list)
@@ -845,28 +924,50 @@ def score_joint_retrieval(
             answer = status == "ANSWER"
             answer_count += int(answer)
             valid = False
-            citation = result.get("citation")
-            if answer and isinstance(citation, dict):
-                row = database.execute("""
-                    SELECT p.text,d.title,d.revision_id
-                    FROM passage AS p JOIN document AS d ON d.doc_id=p.doc_id
-                    WHERE d.page_id=? AND d.revision_id=?
-                      AND p.raw_start=? AND p.raw_end=? AND p.raw_sha256=?
-                    """, (
-                        citation.get("page_id"), citation.get("revision_id"),
-                        citation.get("evidence_raw_start"),
-                        citation.get("evidence_raw_end"),
-                        citation.get("evidence_raw_sha256"),
-                    )).fetchone()
-                valid = (row is not None
-                         and row[0] == citation.get("evidence_text")
-                         and row[1] == citation.get("title")
-                         and row[2] == citation.get("revision_id")
+            citations = result.get("citations")
+            selected_evidence = []
+            if (answer and isinstance(citations, list)
+                    and 1 <= len(citations) <= 4):
+                citation_validity = []
+                for citation in citations:
+                    if not isinstance(citation, dict):
+                        citation_validity.append(False)
+                        continue
+                    row = database.execute("""
+                        SELECT p.text,d.title,d.revision_id
+                        FROM passage AS p
+                        JOIN document AS d ON d.doc_id=p.doc_id
+                        WHERE d.page_id=? AND d.revision_id=?
+                          AND p.raw_start=? AND p.raw_end=? AND p.raw_sha256=?
+                        """, (
+                            citation.get("page_id"),
+                            citation.get("revision_id"),
+                            citation.get("evidence_raw_start"),
+                            citation.get("evidence_raw_end"),
+                            citation.get("evidence_raw_sha256"),
+                        )).fetchone()
+                    selected_text = citation.get("selected_text")
+                    item_valid = (
+                        row is not None
+                        and row[0] == citation.get("evidence_text")
+                        and row[1] == citation.get("title")
+                        and row[2] == citation.get("revision_id")
+                        and isinstance(selected_text, str)
+                        and selected_text
+                        and selected_text in row[0])
+                    citation_validity.append(item_valid)
+                    if item_valid:
+                        selected_evidence.append(selected_text)
+                valid = (all(citation_validity)
                          and isinstance(result.get("answer"), str)
-                         and result["answer"] in row[0])
-            evidence_hit = valid and any(
+                         and result["answer"] == "\n".join(selected_evidence))
+            source_correct = (
+                valid and expected is not None
+                and all(citation.get("page_id") == expected[0]
+                        for citation in citations))
+            evidence_hit = source_correct and any(
                 normalize_external_text(answer_text)
-                in normalize_external_text(result["answer"])
+                in normalize_external_text("\n".join(selected_evidence))
                 for answer_text in label["gold_answers"]
                 if isinstance(answer_text, str) and answer_text)
             recall_hits += int(recall)
@@ -881,6 +982,8 @@ def score_joint_retrieval(
             counters["recall_at_20_count"] += int(recall)
             counters["top1_source_hit_count"] += int(top1)
             counters["evidence_hit_count"] += int(evidence_hit)
+            counters["source_page_gold_coverage_count"] += int(
+                source_covered)
             if alias is None or alias["status"] != "RESOLVED":
                 failure_counts[
                     "SOURCE_ALIAS_" + str(
@@ -890,6 +993,8 @@ def score_joint_retrieval(
                     "SELECT 1 FROM document WHERE page_id=?", (expected[0],)
                     ).fetchone() is None:
                 failure_counts["SOURCE_PAGE_NOT_PROJECTED"] += 1
+            elif not source_covered:
+                failure_counts["SOURCE_GOLD_ABSENT_FROM_SNAPSHOT"] += 1
             elif not recall:
                 failure_counts["RETRIEVAL_MISS_AT_20"] += 1
             elif not top1:
@@ -907,6 +1012,9 @@ def score_joint_retrieval(
     top1_ppm = _ppm(top1_hits, total)
     citation_ppm = _ppm(citation_valid, answer_count)
     evidence_ppm = _ppm(evidence_hits, total)
+    source_coverage_ppm = _ppm(source_page_gold_coverage, total)
+    conditional_evidence_ppm = _ppm(
+        evidence_hits, source_page_gold_coverage)
     passed = (
         recall_ppm >= JOINT_THRESHOLDS["minimum_recall_at_20_ppm"]
         and top1_ppm >= JOINT_THRESHOLDS["minimum_top1_source_hit_ppm"]
@@ -922,6 +1030,7 @@ def score_joint_retrieval(
         "candidate_read_p50": _percentile(candidate_reads, 50),
         "candidate_read_p95": _percentile(candidate_reads, 95),
         "database_sha256": _sha256_file(database_file),
+        "conditional_evidence_hit_ppm": conditional_evidence_ppm,
         "evidence_hit_count": evidence_hits,
         "evidence_hit_ppm": evidence_ppm,
         "failure_counts": dict(sorted(failure_counts.items())),
@@ -932,6 +1041,9 @@ def score_joint_retrieval(
                 **dict(sorted(values.items())),
                 "evidence_hit_ppm": _ppm(
                     values["evidence_hit_count"], values["question_count"]),
+                "conditional_evidence_hit_ppm": _ppm(
+                    values["evidence_hit_count"],
+                    values["source_page_gold_coverage_count"]),
                 "recall_at_20_ppm": _ppm(
                     values["recall_at_20_count"], values["question_count"]),
                 "top1_source_hit_ppm": _ppm(
@@ -947,6 +1059,8 @@ def score_joint_retrieval(
         "recall_at_20_count": recall_hits,
         "recall_at_20_ppm": recall_ppm,
         "scope": scope,
+        "source_page_gold_coverage_count": source_page_gold_coverage,
+        "source_page_gold_coverage_ppm": source_coverage_ppm,
         "status": "PASS" if passed else "FAIL",
         "status_counts": dict(sorted(status_counts.items())),
         "target_selection_sha256": target_selection.sha256(),
@@ -963,6 +1077,8 @@ def score_joint_retrieval(
 __all__ = [
     "JOINT_AGGREGATE_KIND",
     "JOINT_ALIAS_KIND",
+    "JOINT_SUCCESSOR_PACK_KIND",
+    "JOINT_SUCCESSOR_SELECTION_RULE",
     "JOINT_LABEL_KIND",
     "JOINT_PACK_KIND",
     "JOINT_PREDICTION_KIND",

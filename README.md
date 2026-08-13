@@ -58,7 +58,7 @@ PIDSLCA 目前适合作为研究和工程验证基础：
 
 独立的外部上下文证据选择评测也已冻结并正式只运行一次：300 道 held-out 题的精确引用有效率为 100%，所选证据句包含金答案 `234/300=78%`。该结果通过预先声明的 70% 证据选择门（CMRC2018 为 70%，DRCD 为 86%），aggregate SHA-256 为 `82bc0c5083fe5c9ce4e8f1a3bfee756e3681fbd28ee0756e0e6bbefb9957c96d`。它测量的是给定上下文的回答侧证据选择，不是随机索引检索、自由生成或通用对话。详见[外部评测报告](docs/broad_qa_external_evidence_eval_cn.md)。
 
-新的联合开发评测已把检索和证据选择接到同一条链：在随机 20k 页面加冻结来源页组成的 20,428 页索引上，200 问 dev 的 Recall@20 为 88.0%、top1 来源命中为 85.5%，所有 159 个 ANSWER 的引用均有效；但金答案证据命中只有 43.0%，未达到冻结的 60% 门，因此结果如实为 `FAIL`，300 问 held-out 未运行。该结果把下一缺口收窄为页面内事实/证据定位，而不是继续扩大索引。详见[联合评测报告](docs/broad_qa_joint_retrieval_eval_cn.md)。
+联合检索 successor 评测使用全新标题域，把页面召回提升到 Recall@20 `99.5%`、top1 `99.0%`，190 个 ANSWER 的引用全部可核验。全分母证据命中为 `107/200=53.5%`，未达到冻结的 60% 门，因此状态仍为 `FAIL`，300 问 held-out 未运行。进一步审计发现，旧阅读理解数据的金答案只存在于当前冻结终页的 `126/200` 题中；在该可覆盖子集上证据命中为 `107/126=84.92%`。这说明下一缺口首先是旧数据 context 与当前 Wikipedia 快照的来源版本对齐，不能靠降低门槛或继续调同一开发集掩盖。详见[联合评测报告](docs/broad_qa_joint_retrieval_eval_cn.md)。
 
 这仍是来源约束的抽取式预览，不是自由生成、通用问答或断奶结果。分片恢复、posting 外排合并、receipt-last 发布和一次性 held-out 证据评测已经真实运行；详细合同、复跑方式和诚实边界见[20k 开发预览](docs/broad_qa_20k_preview.md)、[外部评测报告](docs/broad_qa_external_evidence_eval_cn.md)与[联合评测报告](docs/broad_qa_joint_retrieval_eval_cn.md)。
 

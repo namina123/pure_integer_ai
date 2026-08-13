@@ -10,6 +10,7 @@ import sqlite3
 from opencc import OpenCC
 
 from pure_integer_ai.experiments.ph2_broad_qa_contract import (
+    BroadQaEvidenceCitation,
     BroadQaResult,
     WIKIPEDIA_ATTRIBUTION,
 )
@@ -25,6 +26,7 @@ _CJK_SEQUENCE_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]+")
 _NUMBER_RE = re.compile(r"[0-9]+(?:[.,][0-9]+)?")
 _TO_SIMPLIFIED = OpenCC("t2s")
 _TO_TRADITIONAL = OpenCC("s2t")
+_MAX_EVIDENCE_CITATIONS = 4
 
 
 # object-model: exception
@@ -51,6 +53,7 @@ class BroadQaRetrievalCandidate:
     revision_id: int
     revision_timestamp: str
     contributor_json: str
+    selected_text: str = ""
 
 
 # object-model: value; representation=struct; interop=pending
@@ -64,6 +67,7 @@ class BroadQaRetrievalTrace:
     posting_visit_count: int
     candidate_document_count: int
     total_passage_count: int
+    evidence_candidates: tuple[BroadQaRetrievalCandidate, ...] = ()
 
 
 def _metadata(connection: sqlite3.Connection) -> dict[str, str]:
@@ -161,6 +165,47 @@ def _best_sentence_overlap(question_terms: set[str], text: str) -> int:
         for item in _SENTENCE_RE.finditer(text)
         if item.group(0).strip()
     ), default=0)
+
+
+def _best_evidence_window(
+        question_terms: set[str], text: str,
+        answer_kinds: tuple[str, ...],
+        term_weights: dict[str, int],
+        ) -> tuple[int, str]:
+    """在一个 passage 内选择最多三句的整数加权证据窗口。"""
+    ranked = _rank_evidence_windows(
+        question_terms, text, answer_kinds, term_weights)
+    if not ranked:
+        return 0, text[:360].strip()
+    return ranked[0][0][0], ranked[0][1]
+
+
+def _rank_evidence_windows(
+        question_terms: set[str], text: str,
+        answer_kinds: tuple[str, ...],
+        term_weights: dict[str, int],
+        ) -> tuple[tuple[tuple[int, int, int, int, int], str], ...]:
+    """对 passage 内全部 1 至 3 句精确窗口做确定性整数排序。"""
+    sentences = tuple(
+        item for item in _SENTENCE_RE.finditer(text)
+        if item.group(0).strip())
+    if not sentences:
+        return ()
+    ranked = []
+    for start in range(len(sentences)):
+        for width in (1, 2, 3):
+            if start + width > len(sentences):
+                continue
+            window = text[
+                sentences[start].start():sentences[start + width - 1].end()
+            ].strip()
+            overlap = question_terms.intersection(_script_terms(window))
+            rare_score = sum(term_weights.get(term, 1) for term in overlap)
+            ranked.append(((
+                rare_score, len(overlap),
+                _sentence_shape_bonus(answer_kinds, window),
+                -width, -start), window))
+    return tuple(sorted(ranked, reverse=True))
 
 
 def _answer_kind_bonus(answer_kinds: tuple[str, ...], text: str) -> int:
@@ -275,13 +320,13 @@ def retrieve_broad_qa_candidates(
             metadata["snapshot_id"], metadata["license_id"], 0, 0, 0,
             int(metadata["passage_count"]))
     placeholders = ",".join("?" for _ in raw_terms)
-    rows = tuple(connection.execute(
+    all_rows = tuple(connection.execute(
         "SELECT term,document_frequency,passage_deltas FROM posting "
         f"WHERE term IN ({placeholders})",
         raw_terms,
     ))
-    rows = tuple(sorted(rows, key=lambda item: (item[1], item[0])))
-    rows = rows[:max_query_terms]
+    all_rows = tuple(sorted(all_rows, key=lambda item: (item[1], item[0])))
+    rows = all_rows[:max_query_terms]
     if not rows:
         return (), BroadQaRetrievalTrace(
             metadata["snapshot_id"], metadata["license_id"], 0, 0, 0,
@@ -300,16 +345,54 @@ def retrieve_broad_qa_candidates(
         for passage_id in restored:
             scores[passage_id] += weight
             matched[passage_id] += 1
-    ranked_ids = tuple(
+    # 标题/alias 是来源合同的一部分；精确出现在问题中时，补入对应页面，
+    # 防止低频关系词截断 max_query_terms 后把正确页排除。
+    alias_table_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='alias'"
+    ).fetchone() is not None
+    alias_term_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='table' AND name='alias_term'"
+    ).fetchone() is not None
+    anchor_matches: dict[int, str] = {}
+    if alias_term_exists:
+        alias_rows = tuple(connection.execute(
+            "SELECT surface,doc_id,COUNT(*) AS matched_count "
+            "FROM alias_term WHERE term IN (" + placeholders + ") "
+            "GROUP BY surface,doc_id "
+            "ORDER BY matched_count DESC,LENGTH(surface) DESC,surface,doc_id "
+            "LIMIT ?",
+            (*raw_terms, max_candidate_passages * 32),
+        ))
+        for surface, doc_id, _ in alias_rows:
+            if _title_span(question, surface) is None:
+                continue
+            prior = anchor_matches.get(int(doc_id))
+            if prior is None or (-len(surface), surface) < (-len(prior), prior):
+                anchor_matches[int(doc_id)] = surface
+    anchor_passage_ids = []
+    for doc_id, _ in sorted(
+            anchor_matches.items(), key=lambda item: (
+                -len(item[1]), item[1], item[0])):
+        passages = tuple(
+            int(row[0]) for row in connection.execute(
+                "SELECT passage_id FROM passage WHERE doc_id=? ", (doc_id,)))
+        if passages:
+            anchor_passage_ids.append(max(
+                passages,
+                key=lambda passage_id: (
+                    scores.get(passage_id, 0),
+                    matched.get(passage_id, 0), -passage_id)))
+    regular_ids = tuple(
         item[0] for item in sorted(
             scores.items(),
-            key=lambda item: (-item[1], -matched[item[0]], item[0]),
-        )[:max_candidate_passages]
-    )
+            key=lambda item: (-item[1], -matched[item[0]], item[0])))
+    ranked_ids = tuple(dict.fromkeys(
+        (*anchor_passage_ids, *regular_ids)))[:max_candidate_passages]
     candidate_rows = []
-    alias_table_exists = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='alias'"
-    ).fetchone() is not None
+    term_weights = {
+        term: max(1, 1_000_000 // frequency)
+        for term, frequency, _ in all_rows}
     for passage_id in ranked_ids:
         row = connection.execute("""
             SELECT p.passage_id,p.raw_start,p.raw_end,p.raw_sha256,p.text,
@@ -337,7 +420,9 @@ def retrieve_broad_qa_candidates(
             _script_terms(title) for title in title_surfaces))
         overlap = len(set(raw_terms).intersection(passage_terms))
         title_overlap = len(set(raw_terms).intersection(title_terms))
-        exact_title_score = 20_000_000 if matching_titles else 0
+        exact_title_score = (
+            1_000_000_000 + len(query_anchor_title) * 1_000_000
+            if matching_titles else 0)
         sentence_surface = slot_free_question
         title_span = _title_span(sentence_surface, query_anchor_title)
         if title_span is not None:
@@ -359,6 +444,7 @@ def retrieve_broad_qa_candidates(
             row[9], row[10]))
     candidate_rows.sort(key=lambda item: (
         -item.score, -item.matched_term_count, item.passage_id))
+    evidence_candidates: tuple[BroadQaRetrievalCandidate, ...] = ()
     if candidate_rows:
         # 页面已由标题/alias 锚定后，仅在该页面的有限段落内重选证据，
         # 避免把“找对页、选错段”误判为全库检索失败。
@@ -377,30 +463,38 @@ def retrieve_broad_qa_candidates(
             surface = (slot_free_question[:anchor_span[0]] + "\n"
                        + slot_free_question[anchor_span[1]:])
             page_terms = _script_terms(surface)
-        def _page_passage_score(row: tuple[object, ...]) -> tuple[int, int]:
-            """对单页段落执行有界问题特征与问式形态评分。"""
-            overlap = _best_sentence_overlap(set(page_terms), row[4])
-            sentence = _best_sentence(
-                set(page_terms), row[4], answer_kinds)
-            return (
-                overlap * 2_000_000
-                + _sentence_shape_bonus(answer_kinds, sentence),
-                -int(row[0]),
-            )
-        best_page_row = max(page_rows, key=_page_passage_score)
-        if best_page_row[0] != page_candidate.passage_id:
-            page_candidate = BroadQaRetrievalCandidate(
-                page_candidate.score, page_candidate.matched_term_count,
-                best_page_row[0], best_page_row[1], best_page_row[2],
-                best_page_row[3], best_page_row[4], best_page_row[5],
-                best_page_row[6], page_candidate.query_anchor_title,
-                best_page_row[7], best_page_row[8], best_page_row[9],
-                best_page_row[10])
-            candidate_rows[0] = page_candidate
+        ranked_windows = []
+        for page_row in page_rows:
+            for window_score, selected_text in _rank_evidence_windows(
+                    set(page_terms), page_row[4], answer_kinds, term_weights):
+                ranked_windows.append((
+                    window_score, -int(page_row[0]), page_row, selected_text))
+        ranked_windows.sort(reverse=True)
+        page_candidates = []
+        seen_windows = set()
+        for window_score, _, page_row, selected_text in ranked_windows:
+            identity = (int(page_row[0]), selected_text)
+            if identity in seen_windows:
+                continue
+            seen_windows.add(identity)
+            page_candidates.append(BroadQaRetrievalCandidate(
+                page_candidate.score + window_score[0],
+                max(page_candidate.matched_term_count,
+                    window_score[1]),
+                page_row[0], page_row[1], page_row[2], page_row[3], page_row[4],
+                page_row[5], page_row[6], page_candidate.query_anchor_title,
+                page_row[7], page_row[8], page_row[9], page_row[10],
+                selected_text))
+            if len(page_candidates) == _MAX_EVIDENCE_CITATIONS:
+                break
+        evidence_candidates = tuple(page_candidates)
+        page_candidate = page_candidates[0]
+        candidate_rows[0] = page_candidate
     document_count = len({item.doc_id for item in candidate_rows})
     return tuple(candidate_rows), BroadQaRetrievalTrace(
         metadata["snapshot_id"], metadata["license_id"], len(rows),
-        posting_visits, document_count, int(metadata["passage_count"]))
+        posting_visits, document_count, int(metadata["passage_count"]),
+        evidence_candidates)
 
 
 def answer_broad_qa_candidates(
@@ -424,26 +518,32 @@ def answer_broad_qa_candidates(
             trace.matched_query_term_count, 0,
         )
     best = candidates[0]
-    if (best.matched_term_count < 2
+    exact_title_anchor = (
+        _title_span(slot_free_question, best.query_anchor_title) is not None)
+    if ((best.matched_term_count < 2 and not exact_title_anchor)
             or best.score <= max(1, 1_000_000 // trace.total_passage_count)):
         return BroadQaResult(
             "UNKNOWN", question, None, None, None, None, None, None, None,
             None, None, trace.snapshot_id, trace.license_id,
             trace.matched_query_term_count, trace.candidate_document_count,
         )
-    candidate_terms = set(_script_terms(best.text))
+    evidence_candidates = trace.evidence_candidates or (best,)
+    candidate_text = "\n".join(
+        item.selected_text or item.text for item in evidence_candidates)
+    candidate_terms = set(_script_terms(candidate_text))
     candidate_terms.update(_script_terms(best.title))
     candidate_terms.update(_script_terms(best.query_anchor_title))
     if _missing_strong_constraint(
             question, title=best.query_anchor_title,
             candidate_terms=candidate_terms,
-            slot_free_question=slot_free_question, candidate_text=best.text):
+            slot_free_question=slot_free_question,
+            candidate_text=candidate_text):
         return BroadQaResult(
             "UNKNOWN", question, None, None, None, None, None, None, None,
             None, None, trace.snapshot_id, trace.license_id,
             trace.matched_query_term_count, trace.candidate_document_count,
         )
-    if _is_ambiguous_list(best.text):
+    if _is_ambiguous_list(best.text) and not exact_title_anchor:
         return BroadQaResult(
             "CLARIFY", question, None, None, None, None, None, None, None,
             None, None, trace.snapshot_id, trace.license_id,
@@ -471,8 +571,25 @@ def answer_broad_qa_candidates(
         sentence_question = (
             sentence_question[:span[0]] + "\n" + sentence_question[span[1]:])
     question_terms = _script_terms(sentence_question)
-    answer = _best_sentence(
-        question_terms, best.text, question_slots.answer_kinds(question))
+    answer_kinds = question_slots.answer_kinds(question)
+    citations = []
+    answer_parts = []
+    for evidence in evidence_candidates[:_MAX_EVIDENCE_CITATIONS]:
+        window = evidence.selected_text
+        if not window:
+            _, window = _best_evidence_window(
+                question_terms, evidence.text, answer_kinds, {})
+        answer_parts.append(window)
+        source_url = (
+            "https://zh.wikipedia.org/w/index.php?curid="
+            f"{evidence.page_id}&oldid={evidence.revision_id}")
+        citations.append(BroadQaEvidenceCitation(
+            evidence.title, evidence.page_id, evidence.revision_id,
+            evidence.text, evidence.raw_start, evidence.raw_end,
+            evidence.raw_sha256, source_url, trace.snapshot_id,
+            trace.license_id, evidence.revision_timestamp,
+            evidence.contributor_json, WIKIPEDIA_ATTRIBUTION, window))
+    answer = "\n".join(answer_parts)
     source_url = (
         "https://zh.wikipedia.org/w/index.php?curid="
         f"{best.page_id}&oldid={best.revision_id}"
@@ -483,7 +600,7 @@ def answer_broad_qa_candidates(
         best.raw_sha256, source_url, trace.snapshot_id, trace.license_id,
         trace.matched_query_term_count, trace.candidate_document_count,
         best.revision_timestamp, best.contributor_json,
-        WIKIPEDIA_ATTRIBUTION,
+        WIKIPEDIA_ATTRIBUTION, tuple(citations),
     )
 
 

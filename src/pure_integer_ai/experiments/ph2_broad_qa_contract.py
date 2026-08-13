@@ -377,6 +377,74 @@ class BroadQaPassage:
 
 # object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
+class BroadQaEvidenceCitation:
+    """表示一条可独立核验的来源证据 span。"""
+
+    title: str
+    page_id: int
+    revision_id: int
+    evidence_text: str
+    evidence_raw_start: int
+    evidence_raw_end: int
+    evidence_raw_sha256: str
+    source_url: str
+    snapshot_id: str
+    license_id: str
+    revision_timestamp: str
+    contributor_json: str
+    attribution: str
+    selected_text: str
+
+    def __post_init__(self) -> None:
+        """核验证据 span、来源身份和 contributor 不变量。"""
+        if (not isinstance(self.title, str) or not self.title
+                or type(self.page_id) is not int or self.page_id <= 0
+                or type(self.revision_id) is not int or self.revision_id <= 0
+                or not isinstance(self.evidence_text, str)
+                or not self.evidence_text
+                or not isinstance(self.selected_text, str)
+                or not self.selected_text
+                or self.selected_text not in self.evidence_text
+                or type(self.evidence_raw_start) is not int
+                or type(self.evidence_raw_end) is not int
+                or self.evidence_raw_start < 0
+                or self.evidence_raw_end <= self.evidence_raw_start):
+            raise BroadQaContractError("broad QA evidence citation 非法")
+        _sha256(self.evidence_raw_sha256, label="evidence raw")
+        if (not self.source_url.startswith("https://")
+                or not self.snapshot_id
+                or self.license_id != "CC-BY-SA-4.0"
+                or not self.revision_timestamp
+                or self.attribution != WIKIPEDIA_ATTRIBUTION):
+            raise BroadQaContractError("broad QA evidence source 非法")
+        try:
+            contributor = json.loads(self.contributor_json)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise BroadQaContractError("broad QA evidence contributor 非法") from error
+        if not isinstance(contributor, dict):
+            raise BroadQaContractError("broad QA evidence contributor 非法")
+
+    def to_dict(self) -> dict[str, object]:
+        """导出可独立回读的 citation object。"""
+        return {
+            "attribution": self.attribution,
+            "contributor": json.loads(self.contributor_json),
+            "evidence_raw_end": self.evidence_raw_end,
+            "evidence_raw_sha256": self.evidence_raw_sha256,
+            "evidence_raw_start": self.evidence_raw_start,
+            "evidence_text": self.evidence_text,
+            "license_id": self.license_id,
+            "page_id": self.page_id,
+            "revision_id": self.revision_id,
+            "revision_timestamp": self.revision_timestamp,
+            "snapshot_id": self.snapshot_id,
+            "source_url": self.source_url,
+            "selected_text": self.selected_text,
+            "title": self.title,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class BroadQaResult:
     """表达回答、澄清或拒答，并绑定可核验的来源证据。"""
 
@@ -398,6 +466,7 @@ class BroadQaResult:
     revision_timestamp: str | None = None
     contributor_json: str | None = None
     attribution: str | None = None
+    evidence_chain: tuple[BroadQaEvidenceCitation, ...] = ()
 
     def __post_init__(self) -> None:
         """核验状态、计数和 ANSWER 完整来源归属的不变量。"""
@@ -434,27 +503,53 @@ class BroadQaResult:
                     or not self.revision_timestamp
                     or self.attribution != WIKIPEDIA_ATTRIBUTION):
                 raise BroadQaContractError("ANSWER 归属身份不完整")
+            if (not isinstance(self.evidence_chain, tuple)
+                    or len(self.evidence_chain) > 4
+                    or any(not isinstance(item, BroadQaEvidenceCitation)
+                           for item in self.evidence_chain)):
+                raise BroadQaContractError("ANSWER evidence chain 非法")
+            if self.evidence_chain:
+                first = self.evidence_chain[0]
+                if (first.page_id != self.page_id
+                        or first.revision_id != self.revision_id
+                        or first.evidence_text != self.evidence_text
+                        or first.evidence_raw_start != self.evidence_raw_start
+                        or first.evidence_raw_end != self.evidence_raw_end
+                        or first.evidence_raw_sha256
+                        != self.evidence_raw_sha256
+                        or any(item.page_id != self.page_id
+                               or item.revision_id != self.revision_id
+                               for item in self.evidence_chain)
+                        or self.answer != "\n".join(
+                            item.selected_text for item in self.evidence_chain)):
+                    raise BroadQaContractError(
+                        "ANSWER evidence chain 与主引用不一致")
+        elif self.evidence_chain:
+            raise BroadQaContractError("非 ANSWER 不得携带 evidence chain")
 
     def to_dict(self) -> dict[str, object]:
         """导出稳定的外部 JSON 结果。"""
+        chain = tuple(item.to_dict() for item in self.evidence_chain)
+        primary = None if self.status != "ANSWER" else (chain[0] if chain else {
+            "evidence_raw_end": self.evidence_raw_end,
+            "evidence_raw_sha256": self.evidence_raw_sha256,
+            "evidence_raw_start": self.evidence_raw_start,
+            "evidence_text": self.evidence_text,
+            "attribution": self.attribution,
+            "contributor": json.loads(self.contributor_json),
+            "license_id": self.license_id,
+            "page_id": self.page_id,
+            "revision_id": self.revision_id,
+            "revision_timestamp": self.revision_timestamp,
+            "snapshot_id": self.snapshot_id,
+            "source_url": self.source_url,
+            "title": self.title,
+        })
         return {
             "answer": self.answer,
             "candidate_document_count": self.candidate_document_count,
-            "citation": None if self.status != "ANSWER" else {
-                "evidence_raw_end": self.evidence_raw_end,
-                "evidence_raw_sha256": self.evidence_raw_sha256,
-                "evidence_raw_start": self.evidence_raw_start,
-                "evidence_text": self.evidence_text,
-                "attribution": self.attribution,
-                "contributor": json.loads(self.contributor_json),
-                "license_id": self.license_id,
-                "page_id": self.page_id,
-                "revision_id": self.revision_id,
-                "revision_timestamp": self.revision_timestamp,
-                "snapshot_id": self.snapshot_id,
-                "source_url": self.source_url,
-                "title": self.title,
-            },
+            "citation": primary,
+            "citations": chain if chain else ([] if primary is None else [primary]),
             "matched_term_count": self.matched_term_count,
             "question": self.question,
             "status": self.status,
@@ -463,6 +558,7 @@ class BroadQaResult:
 
 __all__ = [
     "BroadQaContractError",
+    "BroadQaEvidenceCitation",
     "BroadQaPassage",
     "BroadQaResult",
     "BroadQaSelectedPage",

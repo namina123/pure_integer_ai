@@ -63,6 +63,10 @@ def _parser() -> argparse.ArgumentParser:
     freeze.add_argument("--cmrc-root", type=_work_path, required=True)
     freeze.add_argument("--drcd-root", type=_work_path, required=True)
     freeze.add_argument("--prior-pack", type=_work_path, required=True)
+    freeze.add_argument(
+        "--prior-source-targets", type=_work_path, action="append",
+        required=True,
+        help="Repeat for every consumed joint-family source_targets.jsonl.")
     freeze.add_argument("--target", type=_work_path, required=True)
 
     select = commands.add_parser("select")
@@ -143,6 +147,11 @@ def _validate_paths(args: argparse.Namespace) -> None:
     for name in names:
         if not getattr(args, name).resolve().is_relative_to(root):
             raise SystemExit(f"{name} must stay within run-root")
+    if args.command == "freeze":
+        for path in args.prior_source_targets:
+            if not path.resolve().is_relative_to(root):
+                raise SystemExit(
+                    "prior_source_targets must stay within run-root")
 
 
 def _emit(value: object) -> None:
@@ -165,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
             prior_question_paths=(
                 args.prior_pack / "dev.questions.jsonl",
                 args.prior_pack / "held_out.questions.jsonl"),
+            prior_source_target_paths=args.prior_source_targets,
             target_dir=args.target,
             source_report=source_report)
     elif args.command == "select":
