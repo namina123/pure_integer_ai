@@ -16,6 +16,11 @@ from pure_integer_ai.cognition.shared.identity import (
     occurrence_identity,
     structure_concept_identity,
 )
+from pure_integer_ai.cognition.shared.hypothesis import (
+    EVIDENCE_REFUTE,
+    EVIDENCE_SUPPORT,
+    EvidenceRecord,
+)
 from pure_integer_ai.cognition.shared.scope_identity import document_scope
 from pure_integer_ai.cognition.shared.semantic_object import (
     AtomicPropositionDefinition,
@@ -36,6 +41,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_source_inference_contract import (
     BroadQaSourceRoleProjection,
     BroadQaSourceRoleSpan,
     parse_broad_qa_source_inference_record,
+    source_inference_rule_hypothesis_key,
 )
 
 
@@ -108,14 +114,27 @@ def _fixture():
     )
     projection = BroadQaSourceRoleProjection(
         result_role, 0, 1, object_role, 0)
-    derivation = BroadQaSourceDerivation(
-        minimal_instruction_identity((817, 1)),
+    operator = minimal_instruction_identity((817, 1))
+    schema = structure_concept_identity((818, 1))
+    applicability_scope = document_scope(source)
+    rule_hypothesis = source_inference_rule_hypothesis_key(
+        operator, schema, "FORWARD", 1, applicability_scope)
+    rule_evidence = EvidenceRecord(
+        819,
+        rule_hypothesis,
+        EVIDENCE_SUPPORT,
+        (819, 1),
+        source,
         1,
-        structure_concept_identity((818, 1)),
+    )
+    derivation = BroadQaSourceDerivation(
+        operator,
+        1,
+        schema,
         "FORWARD",
-        document_scope(source),
+        applicability_scope,
         (first.sha256(), second.sha256()),
-        ((819, 1),),
+        (rule_evidence.stable_key(),),
         (projection,),
         (),
         (),
@@ -228,6 +247,30 @@ def test_output_cannot_add_text_absent_from_projected_role_span() -> None:
             output_parts=(replace(part, surface="丙病"),),
             rendered_text="丙病",
         )
+
+
+def test_rule_evidence_must_support_the_exact_bound_rule() -> None:
+    """无关、反驳或不能恢复的 Evidence 不得冒充规则学习依据。"""
+    derivation = _fixture().claim.derivation
+    evidence = EvidenceRecord.from_stable_key(
+        derivation.rule_evidence_keys[0])
+    refute = replace(evidence, stance=EVIDENCE_REFUTE)
+    with pytest.raises(BroadQaSourceInferenceError, match="绑定当前规则"):
+        replace(derivation, rule_evidence_keys=(refute.stable_key(),))
+
+    other_hypothesis = source_inference_rule_hypothesis_key(
+        minimal_instruction_identity((817, 99)),
+        derivation.schema,
+        derivation.direction,
+        derivation.operator_version,
+        derivation.applicability_scope,
+    )
+    unrelated = replace(evidence, hypothesis=other_hypothesis)
+    with pytest.raises(BroadQaSourceInferenceError, match="绑定当前规则"):
+        replace(derivation, rule_evidence_keys=(unrelated.stable_key(),))
+
+    with pytest.raises(BroadQaSourceInferenceError, match="无法恢复"):
+        replace(derivation, rule_evidence_keys=((819, 1),))
 
 
 def test_contract_contains_no_seen_failure_or_open_surface_dispatch() -> None:

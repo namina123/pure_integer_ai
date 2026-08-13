@@ -17,6 +17,11 @@ from pure_integer_ai.cognition.shared.identity import (
     SourceRef,
     occurrence_identity,
 )
+from pure_integer_ai.cognition.shared.hypothesis import (
+    EVIDENCE_SUPPORT,
+    EvidenceRecord,
+    HypothesisKey,
+)
 from pure_integer_ai.cognition.shared.scope_identity import ScopeIdentity
 from pure_integer_ai.cognition.shared.semantic_object import (
     SEMANTIC_OBJECT_KINDS,
@@ -35,6 +40,8 @@ SOURCE_INFERENCE_DIRECTIONS = ("FORWARD", "REVERSE")
 SOURCE_INFERENCE_EPISTEMIC_STATUS = "SOURCE_DERIVED_FROM_ASSERTIONS"
 SOURCE_INFERENCE_TRUTH_STATUS = "NOT_ADJUDICATED"
 SOURCE_INFERENCE_RUNTIME_STATE = "CONTRACT_ONLY_DISABLED"
+SOURCE_INFERENCE_RULE_HYPOTHESIS_KIND = (817030, 1)
+_SOURCE_INFERENCE_DIRECTION_CODE = {"FORWARD": 1, "REVERSE": 2}
 
 
 # object-model: exception
@@ -117,6 +124,43 @@ def _binding_key(binding: AtomicRoleBinding) -> tuple[int, ...]:
         *binding.role.stable_key(),
         binding.ordinal,
         *binding.filler.stable_key(),
+    )
+
+
+def source_inference_rule_hypothesis_key(
+        operator: ObjectIdentity,
+        schema: ObjectIdentity,
+        direction: str,
+        operator_version: int,
+        applicability_scope: ScopeIdentity,
+        ) -> HypothesisKey:
+    """构造与规则身份、方向、版本和适用域绑定的 Evidence 候选键。"""
+    if (not isinstance(operator, ObjectIdentity)
+            or operator.object_kind != OBJECT_MINIMAL_INSTRUCTION
+            or not isinstance(schema, ObjectIdentity)
+            or schema.object_kind != OBJECT_STRUCTURE_CONCEPT
+            or direction not in SOURCE_INFERENCE_DIRECTIONS
+            or type(operator_version) is not int
+            or operator_version <= 0
+            or not isinstance(applicability_scope, ScopeIdentity)
+            or applicability_scope.source is None):
+        raise BroadQaSourceInferenceError(
+            "source inference rule hypothesis 坐标非法")
+    schema_key = schema.stable_key()
+    competition_key = (
+        817030,
+        2,
+        operator_version,
+        _SOURCE_INFERENCE_DIRECTION_CODE[direction],
+        len(schema_key),
+        *schema_key,
+    )
+    return HypothesisKey(
+        SOURCE_INFERENCE_RULE_HYPOTHESIS_KIND,
+        operator.stable_key(),
+        competition_key,
+        applicability_scope,
+        applicability_scope.source,
     )
 
 
@@ -486,7 +530,25 @@ class BroadQaSourceDerivation:
             raise BroadQaSourceInferenceError(
                 "derivation rule Evidence 必须非空、唯一、规范排序")
         for item in self.rule_evidence_keys:
-            _strict_key(item, label="derivation rule Evidence")
+            evidence_key = _strict_key(
+                item, label="derivation rule Evidence")
+            try:
+                evidence = EvidenceRecord.from_stable_key(evidence_key)
+            except (TypeError, ValueError) as error:
+                raise BroadQaSourceInferenceError(
+                    "derivation rule Evidence 无法恢复") from error
+            expected_hypothesis = source_inference_rule_hypothesis_key(
+                self.operator,
+                self.schema,
+                self.direction,
+                self.operator_version,
+                self.applicability_scope,
+            )
+            if (evidence.stance != EVIDENCE_SUPPORT
+                    or evidence.supersedes_evidence_id != 0
+                    or evidence.hypothesis != expected_hypothesis):
+                raise BroadQaSourceInferenceError(
+                    "derivation rule Evidence 未绑定当前规则")
         if (not isinstance(self.role_projections, tuple)
                 or not self.role_projections
                 or any(not isinstance(item, BroadQaSourceRoleProjection)
@@ -855,6 +917,8 @@ __all__ = [
     "SOURCE_INFERENCE_DIRECTIONS",
     "SOURCE_INFERENCE_EPISTEMIC_STATUS",
     "SOURCE_INFERENCE_RECORD_KIND",
+    "SOURCE_INFERENCE_RULE_HYPOTHESIS_KIND",
+    "source_inference_rule_hypothesis_key",
     "SOURCE_INFERENCE_RUNTIME_STATE",
     "SOURCE_INFERENCE_TRUTH_STATUS",
     "parse_broad_qa_source_inference_record",
