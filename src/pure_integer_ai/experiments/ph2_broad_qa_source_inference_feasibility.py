@@ -62,7 +62,7 @@ def _read_worksheet(path: Path) -> tuple[dict[str, object], ...]:
     return tuple(values)
 
 
-def _minimum_source_segments(source: str, target: str) -> int:
+def minimum_source_segments(source: str, target: str) -> int:
     """返回按序从 source 连续片段拼成 target 所需的最少片段数。"""
     if not target:
         return _UNREACHABLE
@@ -135,7 +135,7 @@ def audit_source_inference_feasibility(
         direct_hit = int(any(item in source for item in gold_values))
         normalized_direct_hit_count += direct_hit
         minimum = min(
-            _minimum_source_segments(source, item) for item in gold_values)
+            minimum_source_segments(source, item) for item in gold_values)
         segment_key = "UNREACHABLE" if minimum == _UNREACHABLE else str(minimum)
         segment_counts[segment_key] += 1
         assignment = str(value.get("assignment"))
@@ -181,4 +181,5 @@ __all__ = [
     "SOURCE_INFERENCE_FEASIBILITY_KIND",
     "SOURCE_INFERENCE_FEASIBILITY_RECORD_KIND",
     "audit_source_inference_feasibility",
+    "minimum_source_segments",
 ]

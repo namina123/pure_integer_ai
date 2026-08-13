@@ -26,6 +26,9 @@ from pure_integer_ai.experiments.ph2_broad_qa_source import (
     project_broad_qa_passages,
     project_broad_qa_plain_text,
 )
+from pure_integer_ai.experiments.ph2_broad_qa_source_dossier import (
+    materialize_terminal_sources,
+)
 from pure_integer_ai.experiments.ph2_broad_qa_source_inference_family import (
     SOURCE_INFERENCE_ASSIGNMENTS,
     SOURCE_INFERENCE_REVIEW_PAYLOAD_KIND,
@@ -183,19 +186,6 @@ def _read_roster_manifest(path: Path) -> dict[str, object]:
     return value
 
 
-def _passage_dict(value) -> dict[str, object]:
-    """导出完整 passage span、原文 hash 和显示投影。"""
-    return {
-        "ordinal": value.ordinal,
-        "raw_end": value.raw_end,
-        "raw_sha256": value.raw_sha256,
-        "raw_start": value.raw_start,
-        "section_title": value.section_title,
-        "text": value.text,
-        "text_sha256": value.text_sha256,
-    }
-
-
 def publish_source_inference_review_dossier(
         *,
         run_root: str | Path,
@@ -253,57 +243,23 @@ def publish_source_inference_review_dossier(
                 "source inference roster/payload binding 漂移")
 
     selection = read_broad_qa_target_selection(selection_file)
-    page_ids = {int(item["terminal_page_id"]) for item in roster}
-    selected_pages = tuple(
-        item for item in selection.selected_pages if item.page_id in page_ids)
-    if {item.page_id for item in selected_pages} != page_ids:
-        raise BroadQaExternalDataError(
-            "source inference roster page 不在 terminal selection")
-    inspections = tuple(iter_broad_qa_selected_page_inspections(
-        selected_pages,
-        xml_path=xml_file,
-        source_key=selection.source_key,
-        xml_compressed_size_bytes=selection.xml_compressed_size_bytes,
-        worker_count=worker_count,
-    ))
-    inspection_by_id = {item.page_id: item for item in inspections}
-    if (set(inspection_by_id) != page_ids
-            or any(item.redirect_title for item in inspections)):
-        raise BroadQaExternalDataError(
-            "source inference terminal inspection inventory 漂移")
-
-    terminal_pages = {}
-    for page_id, inspection in inspection_by_id.items():
-        wikitext_sha256 = hashlib.sha256(
-            inspection.wikitext.encode("utf-8")).hexdigest()
-        if wikitext_sha256 != inspection.text_sha256:
+    required_page_revisions = {}
+    for item in roster:
+        page_id = int(item["terminal_page_id"])
+        revision_id = int(item["terminal_revision_id"])
+        prior = required_page_revisions.setdefault(page_id, revision_id)
+        if prior != revision_id:
             raise BroadQaExternalDataError(
-                "source inference terminal Wikitext hash 漂移")
-        plain_text = project_broad_qa_plain_text(inspection.wikitext)
-        passages = project_broad_qa_passages(
-            inspection.wikitext,
-            max_passages=128,
-            max_projection_characters=16384,
-        )
-        terminal_pages[page_id] = {
-            "attribution": "Wikipedia contributors",
-            "contributor": json.loads(inspection.contributor_json),
-            "license_id": "CC-BY-SA-4.0",
-            "page_id": inspection.page_id,
-            "passages": [_passage_dict(item) for item in passages],
-            "plain_text": plain_text,
-            "plain_text_sha256": hashlib.sha256(
-                plain_text.encode("utf-8")).hexdigest(),
-            "revision_id": inspection.revision_id,
-            "revision_timestamp": inspection.timestamp,
-            "snapshot_id": selection.snapshot_id,
-            "source_url": (
-                "https://zh.wikipedia.org/w/index.php?curid="
-                f"{inspection.page_id}&oldid={inspection.revision_id}"),
-            "title": inspection.title,
-            "wikitext": inspection.wikitext,
-            "wikitext_sha256": wikitext_sha256,
-        }
+                "source inference terminal revision inventory 冲突")
+    terminal_pages = materialize_terminal_sources(
+        selection,
+        required_page_revisions=required_page_revisions,
+        xml_path=xml_file,
+        worker_count=worker_count,
+        inspection_reader=iter_broad_qa_selected_page_inspections,
+        plain_text_projector=project_broad_qa_plain_text,
+        passage_projector=project_broad_qa_passages,
+    )
 
     records = []
     for item_id in sorted(roster_by_id):
