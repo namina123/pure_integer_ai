@@ -25,6 +25,11 @@ from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_evaluation_
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_training_audit import (
     derive_normalization_recovery_loso,
 )
+from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_learning_records import (
+    derive_normalization_recovery_learning_outputs,
+    normalization_recovery_output_payloads,
+    normalization_recovery_prefix_output_counts,
+)
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_training_protocol import (
     ICU_RECOVERY_SOURCE_MANIFEST_SHA256,
     NORMALIZATION_RECOVERY_AUTHORITY_CONTRACT,
@@ -359,19 +364,24 @@ def _publish_protocol(
     successor.mkdir()
     evaluation.mkdir()
     (opencc / "dictionary" / "TSCharacters.txt").write_bytes(
-        "甲\t一\n舊\t旧\n詞\t词\n".encode())
+        "甲\t一\n舊\t旧\n詞\t词\n丁\t一\n".encode())
     (opencc / "dictionary" / "TSPhrases.txt").write_bytes(
-        "舊詞\t旧词\n".encode())
+        "舊詞\t旧词\n詞舊\t词故\n".encode())
     icu_rules = (
         _icu_rule("甲", "一", 1),
         _icu_rule("乙", "一", 2),
+        _icu_rule("丁", "一", 3),
     )
-    unihan_records = (_unihan_record("甲", "一", 1),)
+    unihan_records = (
+        _unihan_record("甲", "一", 1),
+        _unihan_record("丁", "二", 2),
+    )
     mediawiki_records = (
         _mediawiki_record("ZH_TO_HANS", "甲", "一", 1),
         _mediawiki_record("ZH_TO_HANS", "舊", "旧", 2),
         _mediawiki_record("ZH_TO_HANS", "詞", "词", 3),
-        _mediawiki_record("ZH_TO_CN", "乙", "二", 4),
+        _mediawiki_record("ZH_TO_HANS", "丁", "一", 4),
+        _mediawiki_record("ZH_TO_CN", "乙", "二", 5),
     )
     opencc_manifest = {
         "artifact_kind": NORMALIZATION_SOURCE_PACK_KIND,
@@ -576,6 +586,83 @@ def test_k_root_and_source_manifest_identity_fail_closed(
         )
 
 
+def test_learning_outputs_separate_authority_conflict_and_phrase_override(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ) -> None:
+    """纯 learner 输出不把 regional、family conflict 或 phrase rule 混账。"""
+    target, _sources, report, _calls = _publish_protocol(tmp_path, monkeypatch)
+    values = read_normalization_recovery_learner_input(
+        target, expected_manifest_sha256=report["manifest_sha256"])
+    outputs, summary = derive_normalization_recovery_learning_outputs(
+        protocol_manifest=values[0],
+        roster=values[1],
+        observations=values[2],
+        groups=values[3],
+        compositions=values[4],
+        work=values[5],
+    )
+    assert summary == {
+        "composition_qualification_counts": {
+            "COMPOSITION_SUPPORT": 1,
+            "EXPLICIT_OVERRIDE": 1,
+        },
+        "composition_receipt_count": 2,
+        "conflict_ledger_count": 1,
+        "evidence_count": 17,
+        "evidence_stance_counts": {"REFUTE": 1, "SUPPORT": 16},
+        "generic_rule_count": 3,
+        "group_decision_count": 7,
+        "group_decision_kind_counts": {
+            "DEFER_NO_TARGET_AUTHORITY": 3,
+            "GENERIC_CROSS_FAMILY_RULE_EMITTED": 3,
+            "REGIONAL_EXACT_RULE_EMITTED": 1,
+        },
+        "regional_rule_count": 1,
+        "result_record_count": 15,
+        "source_phrase_rule_count": 1,
+    }
+    assert {item["input_text"] for item in outputs["generic-rules.jsonl"]} == {
+        "甲", "舊", "詞"}
+    regional = outputs["regional-rules.jsonl"][0]
+    assert regional["input_text"] == "乙"
+    assert regional["output_text"] == "二"
+    assert regional["global_upgrade_allowed"] == 0
+    conflict = outputs["conflict-ledger.jsonl"][0]
+    assert conflict["input_text"] == "丁"
+    assert conflict["conflict_kind"] == "INTRA_FAMILY_CONFLICT"
+    phrase_rule = outputs["source-phrase-rules.jsonl"][0]
+    assert phrase_rule["input_text"] == "詞舊"
+    assert phrase_rule["output_text"] == "词故"
+    assert phrase_rule["target_policy_scope"] == ""
+    assert normalization_recovery_output_payloads(outputs) == (
+        normalization_recovery_output_payloads(outputs))
+
+
+def test_learning_prefix_counts_follow_four_frozen_phases(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ) -> None:
+    """checkpoint 计数只由 roster/observation/group/composition 前缀决定。"""
+    target, _sources, report, _calls = _publish_protocol(tmp_path, monkeypatch)
+    values = read_normalization_recovery_learner_input(
+        target, expected_manifest_sha256=report["manifest_sha256"])
+    roster, observations, groups, compositions, work = values[1:]
+    assert normalization_recovery_prefix_output_counts(
+        work=work, groups=groups, compositions=compositions,
+        processed_item_count=len(roster)) == (0, 0)
+    assert normalization_recovery_prefix_output_counts(
+        work=work, groups=groups, compositions=compositions,
+        processed_item_count=len(roster) + len(observations)) == (16, 0)
+    assert normalization_recovery_prefix_output_counts(
+        work=work, groups=groups, compositions=compositions,
+        processed_item_count=len(roster) + len(observations) + len(groups)) == (
+            16, 12)
+    assert normalization_recovery_prefix_output_counts(
+        work=work, groups=groups, compositions=compositions,
+        processed_item_count=len(work)) == (17, 15)
+
+
 def test_official_recovery_training_census_is_frozen() -> None:
     """显式 K 盘 fixture 的五 policy、三 family 与组合库存保持一致。"""
     configured = os.environ.get(
@@ -593,7 +680,9 @@ def test_official_recovery_training_census_is_frozen() -> None:
         "evaluation_protocol_dir": (
             root / "normalization-recovery-evaluation-protocol-v2"),
     }
-    if any(not path.is_dir() for path in paths.values()):
+    training_protocol = root / "normalization-recovery-training-protocol-v2"
+    if (any(not path.is_dir() for path in paths.values())
+            or not training_protocol.is_dir()):
         pytest.skip("official recovery training fixture is incomplete")
     roster, observations, groups, compositions, loso, work, summary = (
         protocol_module._derive_from_sources(**paths))
@@ -629,3 +718,48 @@ def test_official_recovery_training_census_is_frozen() -> None:
         summary["target_rule_phrase_count"],
         summary["target_rule_identity_count"],
     ) == (4_053, 1_777, 483)
+    protocol = read_normalization_recovery_learner_input(
+        training_protocol,
+        expected_manifest_sha256=(
+            "315c2a34a026d42e7d4dedc3126acda5c24f0cca5cb49d76a9cc798de7760af9"),
+    )
+    outputs, learning_summary = derive_normalization_recovery_learning_outputs(
+        protocol_manifest=protocol[0],
+        roster=protocol[1],
+        observations=protocol[2],
+        groups=protocol[3],
+        compositions=protocol[4],
+        work=protocol[5],
+    )
+    assert learning_summary == {
+        "composition_qualification_counts": {
+            "COMPOSITION_SUPPORT": 1_430,
+            "EXPLICIT_OVERRIDE": 151,
+            "NO_COMPOSITION_EVIDENCE": 1_326,
+            "PARTIAL_COMPOSITION": 1_156,
+        },
+        "composition_receipt_count": 4_063,
+        "conflict_ledger_count": 124,
+        "evidence_count": 22_004,
+        "evidence_stance_counts": {"REFUTE": 151, "SUPPORT": 21_853},
+        "generic_rule_count": 4_120,
+        "group_decision_count": 11_279,
+        "group_decision_kind_counts": {
+            "DEFER_NO_TARGET_AUTHORITY": 4_966,
+            "GENERIC_CROSS_FAMILY_RULE_EMITTED": 4_120,
+            "REGIONAL_EXACT_RULE_EMITTED": 1_710,
+            "TARGET_AUTHORITY_IDENTITY_NOOP": 483,
+        },
+        "regional_rule_count": 1_710,
+        "result_record_count": 21_447,
+        "source_phrase_rule_count": 151,
+    }
+    assert {name: len(values) for name, values in outputs.items()} == {
+        "composition-receipts.jsonl": 4_063,
+        "conflict-ledger.jsonl": 124,
+        "evidence.jsonl": 22_004,
+        "generic-rules.jsonl": 4_120,
+        "group-decisions.jsonl": 11_279,
+        "regional-rules.jsonl": 1_710,
+        "source-phrase-rules.jsonl": 151,
+    }
