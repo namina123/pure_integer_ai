@@ -417,6 +417,27 @@ def _artifact(path: Path, *, role: str, count: int) -> dict[str, object]:
     }
 
 
+def _validate_artifact_identity(
+        value: object,
+        *,
+        relative_path: str,
+        role: str,
+        ) -> dict[str, object]:
+    """核验 manifest 内一个未打开 payload 的冻结文件身份。"""
+    expected_fields = {
+        "bytes", "record_count", "relative_path", "role", "sha256"}
+    if (not isinstance(value, dict) or set(value) != expected_fields
+            or type(value["bytes"]) is not int or value["bytes"] <= 0
+            or type(value["record_count"]) is not int
+            or value["record_count"] <= 0
+            or value["relative_path"] != relative_path
+            or value["role"] != role):
+        raise BroadQaExternalDataError(
+            f"successor evaluation {relative_path} identity 漂移")
+    _sha_value(value["sha256"], label=f"successor {relative_path} SHA")
+    return value
+
+
 def _manifest(
         *,
         source_pack_manifest_sha256: str,
@@ -572,6 +593,82 @@ def read_normalization_successor_evaluation_protocol(
     )
 
 
+def read_normalization_successor_evaluation_manifest_only(
+        protocol_dir: str | Path,
+        *,
+        expected_manifest_sha256: str,
+        ) -> dict[str, object]:
+    """只打开 manifest 并核验冻结 identity，绝不读取 evaluation/reserve。"""
+    root = Path(protocol_dir).resolve()
+    try:
+        encoded = (root / "manifest.json").read_bytes()
+        stored = json.loads(encoded)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BroadQaExternalDataError(
+            "normalization successor evaluation manifest 不可读") from error
+    expected_sha = _sha_value(
+        expected_manifest_sha256,
+        label="successor evaluation expected manifest")
+    if (_sha256(encoded) != expected_sha
+            or not isinstance(stored, dict)
+            or canonical_json_line(stored) != encoded):
+        raise BroadQaExternalDataError(
+            "successor evaluation manifest identity/encoding 漂移")
+    evaluation_artifact = _validate_artifact_identity(
+        stored.get("evaluation_inventory"),
+        relative_path="evaluation.inventory.jsonl",
+        role="EVALUATION_WITH_LABELS",
+    )
+    reserve_artifact = _validate_artifact_identity(
+        stored.get("reserve_identity"),
+        relative_path="reserve.identity.jsonl",
+        role="RESERVE_IDENTITY_WITHOUT_LABELS",
+    )
+    summary = stored.get("inventory_summary")
+    source_sha = _sha_value(
+        stored.get("source_pack_manifest_sha256"),
+        label="successor evaluation source manifest")
+    if (not isinstance(summary, dict)
+            or summary.get("evaluation_count")
+            != evaluation_artifact["record_count"]
+            or summary.get("reserve_count")
+            != reserve_artifact["record_count"]):
+        raise BroadQaExternalDataError(
+            "successor evaluation manifest inventory summary 漂移")
+    expected = _manifest(
+        source_pack_manifest_sha256=source_sha,
+        evaluation_artifact=evaluation_artifact,
+        reserve_artifact=reserve_artifact,
+        inventory_summary=summary,
+    )
+    if not _strict_equal(stored, expected):
+        raise BroadQaExternalDataError(
+            "successor evaluation manifest 冻结字段漂移")
+    return {**stored, "manifest_sha256": expected_sha}
+
+
+def read_normalization_successor_evaluation_inventory_only(
+        protocol_dir: str | Path,
+        *,
+        expected_manifest_sha256: str,
+        ) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
+    """只按冻结 manifest 打开正式 evaluation，不读 source/reserve payload。"""
+    root = Path(protocol_dir).resolve()
+    manifest = read_normalization_successor_evaluation_manifest_only(
+        root, expected_manifest_sha256=expected_manifest_sha256)
+    stored_evaluation = _read_jsonl(
+        root / "evaluation.inventory.jsonl", label="successor evaluation")
+    artifact = _artifact(
+        root / "evaluation.inventory.jsonl",
+        role="EVALUATION_WITH_LABELS", count=len(stored_evaluation))
+    if (not _strict_equal(artifact, manifest["evaluation_inventory"])
+            or len(stored_evaluation)
+            != manifest["inventory_summary"]["evaluation_count"]):
+        raise BroadQaExternalDataError(
+            "successor evaluation-only inventory/manifest 漂移")
+    return manifest, stored_evaluation
+
+
 __all__ = [
     "NORMALIZATION_SUCCESSOR_EVALUATION_DIMENSIONS",
     "NORMALIZATION_SUCCESSOR_EVALUATION_METRIC_CONTRACT",
@@ -581,5 +678,7 @@ __all__ = [
     "derive_normalization_successor_evaluation_inventory",
     "normalization_successor_evaluation_split",
     "publish_normalization_successor_evaluation_protocol",
+    "read_normalization_successor_evaluation_inventory_only",
+    "read_normalization_successor_evaluation_manifest_only",
     "read_normalization_successor_evaluation_protocol",
 ]

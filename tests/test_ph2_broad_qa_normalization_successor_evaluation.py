@@ -25,6 +25,8 @@ from pure_integer_ai.experiments.ph2_broad_qa_normalization_successor_evaluation
     NORMALIZATION_SUCCESSOR_EVALUATION_STATUS,
     NORMALIZATION_SUCCESSOR_TARGET_POLICY_SCOPE,
     publish_normalization_successor_evaluation_protocol,
+    read_normalization_successor_evaluation_inventory_only,
+    read_normalization_successor_evaluation_manifest_only,
     read_normalization_successor_evaluation_protocol,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_successor_source_pack import (
@@ -313,3 +315,29 @@ def test_evaluation_reader_rejects_label_and_zero_boundary_tamper(
     with pytest.raises(BroadQaExternalDataError, match="manifest 漂移"):
         read_normalization_successor_evaluation_protocol(
             target_two, source_pack_dir=source)
+
+
+def test_manifest_and_evaluation_only_readers_do_not_open_reserve_payload(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ) -> None:
+    """family freeze 与正式运行可分别保持 evaluation/reserve 读取边界。"""
+    source = _publish_source(tmp_path, monkeypatch)
+    target = tmp_path / "evaluation-protocol"
+    report = publish_normalization_successor_evaluation_protocol(
+        run_root=tmp_path, source_pack_dir=source, target_dir=target)
+    manifest = read_normalization_successor_evaluation_manifest_only(
+        target, expected_manifest_sha256=report["manifest_sha256"])
+    assert manifest["evaluation_run_count"] == 0
+    assert manifest["reserve_label_read_count"] == 0
+    (target / "reserve.identity.jsonl").unlink()
+    restored, evaluation = (
+        read_normalization_successor_evaluation_inventory_only(
+            target,
+            expected_manifest_sha256=report["manifest_sha256"],
+        ))
+    assert restored["manifest_sha256"] == report["manifest_sha256"]
+    assert len(evaluation) == restored["inventory_summary"]["evaluation_count"]
+    with pytest.raises(BroadQaExternalDataError, match="reserve JSONL 不可读"):
+        read_normalization_successor_evaluation_protocol(
+            target, source_pack_dir=source)
