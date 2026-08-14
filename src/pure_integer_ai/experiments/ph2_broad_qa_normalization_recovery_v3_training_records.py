@@ -95,6 +95,32 @@ def _pair_observation(
     }
 
 
+def normalization_recovery_v3_pair_observation(
+        *,
+        source_family: str,
+        source_policy_scope: str,
+        license_id: str,
+        source_pack_manifest_sha256: str,
+        source_pair_id: str,
+        input_text: str,
+        output_text: str,
+        structure_tokens: tuple[str, ...],
+        source_commitment: dict[str, object],
+        ) -> dict[str, object]:
+    """公开复用冻结 v3 observation schema，不改变其 identity 语义。"""
+    return _pair_observation(
+        source_family=source_family,
+        source_policy_scope=source_policy_scope,
+        license_id=license_id,
+        source_pack_manifest_sha256=source_pack_manifest_sha256,
+        source_pair_id=source_pair_id,
+        input_text=input_text,
+        output_text=output_text,
+        structure_tokens=structure_tokens,
+        source_commitment=source_commitment,
+    )
+
+
 def derive_normalization_recovery_v3_pair_observations(
         *,
         thunderbird_manifest_sha256: str,
@@ -363,4 +389,5 @@ __all__ = [
     "derive_normalization_recovery_v3_fragments",
     "derive_normalization_recovery_v3_groups",
     "derive_normalization_recovery_v3_pair_observations",
+    "normalization_recovery_v3_pair_observation",
 ]
