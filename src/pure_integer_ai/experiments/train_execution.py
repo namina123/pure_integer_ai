@@ -179,7 +179,14 @@ def process_working_set_bytes() -> int:
             counters = ProcessMemoryCounters()
             counters.cb = ctypes.sizeof(counters)
             process = ctypes.windll.kernel32.GetCurrentProcess()
-            ok = ctypes.windll.psapi.GetProcessMemoryInfo(
+            reader = ctypes.windll.psapi.GetProcessMemoryInfo
+            reader.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ProcessMemoryCounters),
+                wintypes.DWORD,
+            ]
+            reader.restype = wintypes.BOOL
+            ok = reader(
                 process,
                 ctypes.byref(counters),
                 counters.cb,
