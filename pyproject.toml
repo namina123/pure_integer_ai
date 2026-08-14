@@ -14,9 +14,11 @@ authors = [
   { name = "Jing Jianbin", email = "2698801855@qq.com" },
 ]
 dependencies = [
+  "fluent.syntax==0.19.0",
   "lxml==6.1.1",
   "markdown-it-py==4.2.0",
   "opencc-python-reimplemented==0.1.7",
+  "typing_extensions==4.12.2",
   "wikitextparser==0.56.4",
 ]
 
