@@ -213,6 +213,31 @@ def _defeater_matches(
     return left_match and right_match
 
 
+def normalization_recovery_v3_defeater_matches(
+        record: dict[str, object],
+        text: str,
+        start: int,
+        end: int,
+        ) -> bool:
+    """严格核验并执行一个 pack-derived exact-context defeater。"""
+    source = _text(text, label="v3 defeater runtime input")
+    if (not isinstance(record, dict)
+            or record.get("record_kind")
+            != NORMALIZATION_RECOVERY_V3_DEFEATER_KIND
+            or record.get("action") != "BLOCK_PHRASE_RULE_USE_BACKOFF"
+            or record.get("production_enabled") != 0
+            or not isinstance(record.get("left_context"), str)
+            or len(record["left_context"]) > 4
+            or not isinstance(record.get("right_context"), str)
+            or len(record["right_context"]) > 4
+            or record.get("left_boundary") not in {0, 1}
+            or record.get("right_boundary") not in {0, 1}
+            or type(start) is not int or type(end) is not int
+            or not 0 <= start < end <= len(source)):
+        raise BroadQaExternalDataError("v3 defeater predicate 输入漂移")
+    return _defeater_matches(record, source, start, end)
+
+
 def _validated_character_rules(
         value: dict[str, str] | None,
         ) -> dict[str, str]:
@@ -279,17 +304,16 @@ def _validated_program(program: dict[str, object]) -> tuple[
     )
 
 
-def _execute(
-        program: dict[str, object],
-        text: str,
+def _execute_validated(
         *,
-        character_rules: dict[str, str] | None,
+        source: str,
+        program_sha256: str,
+        buckets: dict[int, tuple[dict[str, object], ...]],
+        defeaters_by_rule: dict[str, tuple[dict[str, object], ...]],
+        backoff: dict[str, str],
         indexed: bool,
         ) -> dict[str, object]:
-    """执行 indexed 或独立 linear reference 路径。"""
-    source = _text(text, label="v3 phrase runtime input")
-    buckets, defeaters_by_rule = _validated_program(program)
-    backoff = _validated_character_rules(character_rules)
+    """在已核验 program/index 上执行一个输入。"""
     if indexed:
         candidates_at = lambda position: buckets.get(ord(source[position]), ())
     else:
@@ -368,7 +392,7 @@ def _execute(
         "input_text": source,
         "output_text": "".join(output),
         "production_enabled": 0,
-        "program_sha256": program["program_sha256"],
+        "program_sha256": program_sha256,
         "steps": steps,
         "target_policy_scope": RECOVERY_V3_TARGET_POLICY_SCOPE,
     }
@@ -377,6 +401,51 @@ def _execute(
         "result_sha256": hashlib.sha256(
             canonical_json_bytes(result)).hexdigest(),
     }
+
+
+def _execute(
+        program: dict[str, object],
+        text: str,
+        *,
+        character_rules: dict[str, str] | None,
+        indexed: bool,
+        ) -> dict[str, object]:
+    """执行 indexed 或独立 linear reference 路径。"""
+    source = _text(text, label="v3 phrase runtime input")
+    buckets, defeaters_by_rule = _validated_program(program)
+    backoff = _validated_character_rules(character_rules)
+    return _execute_validated(
+        source=source,
+        program_sha256=str(program["program_sha256"]),
+        buckets=buckets,
+        defeaters_by_rule=defeaters_by_rule,
+        backoff=backoff,
+        indexed=indexed,
+    )
+
+
+def _execute_batch(
+        program: dict[str, object],
+        texts: tuple[str, ...],
+        *,
+        character_rules: dict[str, str] | None,
+        indexed: bool,
+        ) -> tuple[dict[str, object], ...]:
+    """一次核验 program 后按输入序执行完整 batch。"""
+    if (not isinstance(texts, tuple) or not texts
+            or any(not isinstance(item, str) for item in texts)):
+        raise BroadQaExternalDataError("v3 phrase batch 输入非法")
+    sources = tuple(_text(item, label="v3 phrase batch input") for item in texts)
+    buckets, defeaters_by_rule = _validated_program(program)
+    backoff = _validated_character_rules(character_rules)
+    return tuple(_execute_validated(
+        source=source,
+        program_sha256=str(program["program_sha256"]),
+        buckets=buckets,
+        defeaters_by_rule=defeaters_by_rule,
+        backoff=backoff,
+        indexed=indexed,
+    ) for source in sources)
 
 
 def execute_normalization_recovery_v3_phrase_program(
@@ -401,10 +470,35 @@ def reference_normalization_recovery_v3_phrase_program(
         program, text, character_rules=character_rules, indexed=False)
 
 
+def execute_normalization_recovery_v3_phrase_batch(
+        program: dict[str, object],
+        texts: tuple[str, ...],
+        *,
+        character_rules: dict[str, str] | None = None,
+        ) -> tuple[dict[str, object], ...]:
+    """一次校验 program 后以 indexed 路径执行多个输入。"""
+    return _execute_batch(
+        program, texts, character_rules=character_rules, indexed=True)
+
+
+def reference_normalization_recovery_v3_phrase_batch(
+        program: dict[str, object],
+        texts: tuple[str, ...],
+        *,
+        character_rules: dict[str, str] | None = None,
+        ) -> tuple[dict[str, object], ...]:
+    """一次校验 program 后以 linear reference 执行多个输入。"""
+    return _execute_batch(
+        program, texts, character_rules=character_rules, indexed=False)
+
+
 __all__ = [
     "NORMALIZATION_RECOVERY_V3_PHRASE_PROGRAM_KIND",
     "NORMALIZATION_RECOVERY_V3_PHRASE_PROGRAM_STATUS",
     "compile_normalization_recovery_v3_phrase_program",
+    "execute_normalization_recovery_v3_phrase_batch",
     "execute_normalization_recovery_v3_phrase_program",
+    "normalization_recovery_v3_defeater_matches",
+    "reference_normalization_recovery_v3_phrase_batch",
     "reference_normalization_recovery_v3_phrase_program",
 ]
