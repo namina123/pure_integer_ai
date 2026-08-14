@@ -8,7 +8,6 @@ source、evaluation、reserve、旧 formal 或 candidate，也不写文件。相
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from difflib import SequenceMatcher
 import hashlib
 
 from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
@@ -16,6 +15,11 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v3_training_records import (
     RECOVERY_V3_TARGET_POLICY_SCOPE,
+)
+from pure_integer_ai.experiments.ph2_broad_qa_normalization_phrase_learning import (
+    normalization_phrase_alignment_boundary_map,
+    normalization_phrase_observed_output,
+    normalization_phrase_occurrences,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     canonical_json_bytes,
@@ -83,17 +87,7 @@ def _alignment_boundary_map(
         output_text: str,
         ) -> dict[int, set[int]]:
     """建立只含确定边界的 input-to-output 对齐表。"""
-    result: dict[int, set[int]] = defaultdict(set)
-    matcher = SequenceMatcher(None, input_text, output_text, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        result[i1].add(j1)
-        result[i2].add(j2)
-        if tag == "equal" or (tag == "replace" and i2 - i1 == j2 - j1):
-            for offset in range(i2 - i1 + 1):
-                result[i1 + offset].add(j1 + offset)
-        elif tag == "insert":
-            result[i1].add(j2)
-    return result
+    return normalization_phrase_alignment_boundary_map(input_text, output_text)
 
 
 def _observed_output(
@@ -103,27 +97,13 @@ def _observed_output(
         boundaries: dict[int, set[int]],
         ) -> str | None:
     """只在 occurrence 两端均有唯一确定对齐时返回实际输出 span。"""
-    input_text = observation.get("input_text")
-    output_text = observation.get("output_text")
-    if not isinstance(input_text, str) or not isinstance(output_text, str):
-        raise BroadQaExternalDataError("v3 learner observation surface 漂移")
-    starts = boundaries.get(start, set())
-    ends = boundaries.get(end, set())
-    if len(starts) != 1 or len(ends) != 1:
-        return None
-    output_start = next(iter(starts))
-    output_end = next(iter(ends))
-    if not 0 <= output_start <= output_end <= len(output_text):
-        return None
-    return output_text[output_start:output_end]
+    return normalization_phrase_observed_output(
+        observation, start, end, boundaries, label="v3 learner")
 
 
 def _occurrences(text: str, phrase: str):
     """按 scalar 起点产生允许重叠的全部 literal occurrence。"""
-    start = text.find(phrase)
-    while start >= 0:
-        yield start, start + len(phrase)
-        start = text.find(phrase, start + 1)
+    yield from normalization_phrase_occurrences(text, phrase)
 
 
 def _support_evidence(
