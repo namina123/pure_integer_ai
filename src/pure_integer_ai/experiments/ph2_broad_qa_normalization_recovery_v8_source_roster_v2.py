@@ -9,7 +9,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
     BroadQaExternalDataError,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_source_content_audit import (
-    NORMALIZATION_RECOVERY_V8_SOURCE_CONTENT_AUDIT_KIND,
+    read_normalization_recovery_v8_source_content_aggregate,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_source_roster import (
     read_normalization_recovery_v8_source_roster,
@@ -63,77 +63,21 @@ def _within(root: Path, value: str | Path, *, label: str) -> Path:
     return path
 
 
-def _read_jsonl(
-        path: Path,
-        *,
-        expected: dict[str, object],
-        label: str,
-        ) -> tuple[dict[str, object], ...]:
-    """按manifest commitment严格读取规范JSONL。"""
-    try:
-        payload = path.read_bytes()
-    except OSError as error:
-        raise BroadQaExternalDataError(
-            f"v8 roster v2 {label} 不可读") from error
-    if (len(payload) != expected.get("bytes")
-            or _sha256(payload) != expected.get("sha256")):
-        raise BroadQaExternalDataError(
-            f"v8 roster v2 {label} identity 漂移")
-    values = []
-    try:
-        for line in payload.splitlines(keepends=True):
-            value = json.loads(line)
-            if (not isinstance(value, dict)
-                    or canonical_json_line(value) != line):
-                raise BroadQaExternalDataError(
-                    f"v8 roster v2 {label} JSONL 非规范")
-            values.append(value)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise BroadQaExternalDataError(
-            f"v8 roster v2 {label} JSONL 非法") from error
-    if len(values) != expected.get("record_count"):
-        raise BroadQaExternalDataError(
-            f"v8 roster v2 {label} record count 漂移")
-    return tuple(values)
-
-
 def _content_records(
         audit_dir: Path,
         ) -> tuple[dict[str, object], ...]:
     """只读已封存content aggregate，不重开31份source blob。"""
-    path = audit_dir / "manifest.json"
-    try:
-        encoded = path.read_bytes()
-        manifest = json.loads(encoded)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise BroadQaExternalDataError(
-            "v8 roster v2 content manifest 不可读") from error
-    if (_sha256(encoded) != V8_SOURCE_CONTENT_AUDIT_MANIFEST_SHA256
-            or not isinstance(manifest, dict)
-            or canonical_json_line(manifest) != encoded
-            or manifest.get("artifact_kind")
-            != NORMALIZATION_RECOVERY_V8_SOURCE_CONTENT_AUDIT_KIND
-            or manifest.get("summary", {}).get("content_pass_count") != 2
+    manifest, outputs = (
+        read_normalization_recovery_v8_source_content_aggregate(
+            audit_dir,
+            expected_manifest_sha256=(
+                V8_SOURCE_CONTENT_AUDIT_MANIFEST_SHA256),
+        ))
+    if (manifest.get("summary", {}).get("content_pass_count") != 2
             or manifest.get("summary", {}).get("content_rejected_count") != 1):
         raise BroadQaExternalDataError(
             "v8 roster v2 content manifest fields 漂移")
-    files = {str(item.get("relative_path")): item
-             for item in manifest.get("files", [])
-             if isinstance(item, dict)}
-    if set(files) != {"source-content.jsonl", "source-content-census.jsonl"}:
-        raise BroadQaExternalDataError(
-            "v8 roster v2 content file inventory 漂移")
-    records = _read_jsonl(
-        audit_dir / "source-content.jsonl",
-        expected=files["source-content.jsonl"],
-        label="source content",
-    )
-    _read_jsonl(
-        audit_dir / "source-content-census.jsonl",
-        expected=files["source-content-census.jsonl"],
-        label="source content census",
-    )
-    return records
+    return outputs["source-content.jsonl"]
 
 
 def _inputs(

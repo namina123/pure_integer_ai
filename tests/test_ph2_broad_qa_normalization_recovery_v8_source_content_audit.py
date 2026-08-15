@@ -13,6 +13,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_source_content_audit import (
     publish_normalization_recovery_v8_source_content_audit,
+    read_normalization_recovery_v8_source_content_aggregate,
     read_normalization_recovery_v8_source_content_audit,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import (
@@ -98,6 +99,13 @@ def test_v8_source_content_round_trip_nonoverwrite_and_tamper(
     assert outputs == _fake_outputs()[0]
     assert manifest["summary"]["content_pass_count"] == 2
     assert manifest["summary"]["content_rejected_count"] == 1
+    aggregate_manifest, aggregate_outputs = (
+        read_normalization_recovery_v8_source_content_aggregate(
+            target,
+            expected_manifest_sha256=str(published["manifest_sha256"]),
+        ))
+    assert aggregate_manifest == manifest
+    assert aggregate_outputs == outputs
     with pytest.raises(BroadQaExternalDataError, match="input/target path"):
         publish_normalization_recovery_v8_source_content_audit(
             run_root=tmp_path,

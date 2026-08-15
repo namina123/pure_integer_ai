@@ -142,6 +142,18 @@ def _read_payloads(
     return payloads
 
 
+def read_normalization_recovery_v8_source_payloads(
+        record: dict[str, object],
+        source_root: str | Path,
+        ) -> dict[str, bytes]:
+    """按冻结roster身份读取单个source family的全部blob。"""
+    root = Path(source_root).resolve()
+    if not root.is_dir():
+        raise BroadQaExternalDataError(
+            "v8 source content source root 不存在")
+    return _read_payloads(record, root)
+
+
 def _qt_pair_spec(
         *,
         domain: str,
@@ -343,6 +355,54 @@ def _read_jsonl(path: Path, *, label: str) -> tuple[dict[str, object], ...]:
     return tuple(values)
 
 
+def read_normalization_recovery_v8_source_content_aggregate(
+        audit_dir: str | Path,
+        *,
+        expected_manifest_sha256: str,
+        ) -> tuple[
+            dict[str, object], dict[str, tuple[dict[str, object], ...]]]:
+    """只按sealed commitments回读v1 aggregate，不重开source blob。"""
+    root = Path(audit_dir).resolve()
+    path = root / "manifest.json"
+    try:
+        encoded = path.read_bytes()
+        stored = json.loads(encoded)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BroadQaExternalDataError(
+            "v8 source content aggregate manifest 不可读") from error
+    if (_sha256(encoded) != expected_manifest_sha256
+            or not isinstance(stored, dict)
+            or canonical_json_line(stored) != encoded
+            or stored.get("artifact_kind")
+            != NORMALIZATION_RECOVERY_V8_SOURCE_CONTENT_AUDIT_KIND):
+        raise BroadQaExternalDataError(
+            "v8 source content aggregate manifest identity 漂移")
+    files = {str(item.get("relative_path")): item
+             for item in stored.get("files", [])
+             if isinstance(item, dict)}
+    if set(files) != {name for name, _role in _OUTPUT_FILES}:
+        raise BroadQaExternalDataError(
+            "v8 source content aggregate file inventory 漂移")
+    outputs = {}
+    for name, role in _OUTPUT_FILES:
+        values = _read_jsonl(root / name, label=role)
+        if files[name] != _artifact(
+                root / name, role=role, count=len(values)):
+            raise BroadQaExternalDataError(
+                "v8 source content aggregate file identity 漂移")
+        outputs[name] = values
+    census = outputs["source-content-census.jsonl"]
+    if (len(outputs["source-content.jsonl"]) != 3
+            or len(census) != 1
+            or stored.get("summary") != {
+                key: value for key, value in census[0].items()
+                if key not in {"format_version", "record_kind"}
+            }):
+        raise BroadQaExternalDataError(
+            "v8 source content aggregate census 漂移")
+    return {**stored, "manifest_sha256": _sha256(encoded)}, outputs
+
+
 def _artifact(path: Path, *, role: str, count: int) -> dict[str, object]:
     """形成一个aggregate输出文件commitment。"""
     payload = path.read_bytes()
@@ -494,5 +554,7 @@ __all__ = [
     "NORMALIZATION_RECOVERY_V8_SOURCE_CONTENT_STATUS",
     "V8_SOURCE_ROSTER_MANIFEST_SHA256",
     "publish_normalization_recovery_v8_source_content_audit",
+    "read_normalization_recovery_v8_source_content_aggregate",
     "read_normalization_recovery_v8_source_content_audit",
+    "read_normalization_recovery_v8_source_payloads",
 ]
