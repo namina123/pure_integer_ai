@@ -226,11 +226,10 @@ def _validate_candidate(candidate: dict[str, object]) -> dict[str, object]:
     return inventories
 
 
-def build_normalization_recovery_v8_candidate_index(
-        candidate: dict[str, object],
+def _build_index(
+        inventories: dict[str, object],
         ) -> dict[str, dict[object, dict[str, object]]]:
-    """构造三个执行索引并拒绝任何 key 冲突。"""
-    inventories = _validate_candidate(candidate)
+    """从已核验 inventory 构造三个执行索引并拒绝 key 冲突。"""
     specs = {
         "SOURCE_CONDITIONED_LEXICAL_ATOM": (
             inventories["source_conditioned_rules"],
@@ -250,6 +249,13 @@ def build_normalization_recovery_v8_candidate_index(
             index[key] = record
         indexes[kind] = index
     return indexes
+
+
+def build_normalization_recovery_v8_candidate_index(
+        candidate: dict[str, object],
+        ) -> dict[str, dict[object, dict[str, object]]]:
+    """核验候选一次并构造三个执行索引。"""
+    return _build_index(_validate_candidate(candidate))
 
 
 def _query(value: dict[str, object]) -> dict[str, object]:
@@ -309,11 +315,11 @@ def _reference_match(
 
 def _execute_one(
         candidate: dict[str, object], query_value: dict[str, object], *,
+        inventories: dict[str, object],
         index: dict[str, dict[object, dict[str, object]]] | None,
         ) -> dict[str, object]:
     """按冻结优先级执行一条整串 query。"""
     query = _query(query_value)
-    inventories = _validate_candidate(candidate)
     source = str(query["official_source_text"])
     input_text = str(query["input_text"])
     if index is None:
@@ -321,9 +327,7 @@ def _execute_one(
             inventories["source_conditioned_rules"],
             lambda item: item["official_source_text"] == source
             and item["input_text"] == input_text)
-        atom_by_input = {
-            str(item["input_atom"]): item
-            for item in inventories["orthographic_rules"]}
+        atom_by_input = None
         identity = _reference_match(
             inventories["identity_veto_rules"],
             lambda item: item["input_text"] == input_text)
@@ -343,7 +347,10 @@ def _execute_one(
         output = []
         atom_rules = []
         for character in input_text:
-            rule = atom_by_input.get(character)
+            rule = (_reference_match(
+                inventories["orthographic_rules"],
+                lambda item: item["input_atom"] == character)
+                if atom_by_input is None else atom_by_input.get(character))
             output.append(character if rule is None else str(rule["output_atom"]))
             if rule is not None:
                 atom_rules.append(str(rule["candidate_rule_id"]))
@@ -378,8 +385,11 @@ def execute_normalization_recovery_v8_candidate_batch(
     """使用字典索引执行一批整串 query。"""
     if not isinstance(queries, tuple) or not queries:
         raise BroadQaExternalDataError("v8 candidate batch 为空")
-    index = build_normalization_recovery_v8_candidate_index(candidate)
-    return tuple(_execute_one(candidate, item, index=index) for item in queries)
+    inventories = _validate_candidate(candidate)
+    index = _build_index(inventories)
+    return tuple(_execute_one(
+        candidate, item, inventories=inventories, index=index)
+        for item in queries)
 
 
 def reference_normalization_recovery_v8_candidate_batch(
@@ -389,7 +399,10 @@ def reference_normalization_recovery_v8_candidate_batch(
     """使用独立线性扫描执行同一批整串 query。"""
     if not isinstance(queries, tuple) or not queries:
         raise BroadQaExternalDataError("v8 candidate reference batch 为空")
-    return tuple(_execute_one(candidate, item, index=None) for item in queries)
+    inventories = _validate_candidate(candidate)
+    return tuple(_execute_one(
+        candidate, item, inventories=inventories, index=None)
+        for item in queries)
 
 
 def derive_normalization_recovery_v8_candidate_preflight(

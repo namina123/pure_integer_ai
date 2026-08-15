@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import hashlib
 
+from pure_integer_ai.experiments import (
+    ph2_broad_qa_normalization_recovery_v8_candidate as candidate_module,
+)
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_candidate import (
     V8_CANDIDATE_RULE_COUNTS,
     compile_normalization_recovery_v8_candidate,
@@ -185,3 +188,27 @@ def test_candidate_preflight_covers_all_rules_without_mismatch() -> None:
     assert preflight["failure_count"] == 0
     assert preflight["indexed_reference_mismatch_count"] == 0
     assert preflight["unknown_case_count"] == 1
+
+
+def test_each_batch_validates_candidate_once(
+        monkeypatch,
+        ) -> None:
+    candidate = _candidate()
+    queries = tuple({
+        "input_text": f"未授权文本{index}",
+        "official_source_text": f"Unknown {index}",
+        "structure_tokens": [],
+    } for index in range(16))
+    original = candidate_module._validate_candidate
+    calls = []
+
+    def counted(value):
+        calls.append(1)
+        return original(value)
+
+    monkeypatch.setattr(candidate_module, "_validate_candidate", counted)
+    execute_normalization_recovery_v8_candidate_batch(candidate, queries)
+    assert len(calls) == 1
+    calls.clear()
+    reference_normalization_recovery_v8_candidate_batch(candidate, queries)
+    assert len(calls) == 1
