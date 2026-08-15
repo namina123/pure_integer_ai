@@ -369,15 +369,16 @@ def publish_normalization_recovery_v8_observation_coverage(
     return {**manifest, "manifest_sha256": _sha256(path.read_bytes())}
 
 
-def read_normalization_recovery_v8_observation_coverage(
+def _read_normalization_recovery_v8_observation_coverage_state(
         coverage_dir: str | Path, *, observation_dir: str | Path,
         v2_roster_dir: str | Path, v1_roster_dir: str | Path,
         v1_content_audit_dir: str | Path, v2_content_audit_dir: str | Path,
         source_overlap_dir: str | Path, qbittorrent_source_pack_dir: str | Path,
         stellarium_source_pack_dir: str | Path, keepassxc_source_pack_dir: str | Path,
         expected_manifest_sha256: str) -> tuple[
-            dict[str, object], dict[str, tuple[dict[str, object], ...]]]:
-    """严格重派生coverage候选并拒绝records/manifest同步篡改。"""
+            dict[str, object], dict[str, tuple[dict[str, object], ...]],
+            dict[str, tuple[dict[str, object], ...]]]:
+    """一次回读Observation与coverage并拒绝同步篡改。"""
     root = Path(coverage_dir).resolve()
     try:
         encoded = (root / "manifest.json").read_bytes()
@@ -404,11 +405,64 @@ def read_normalization_recovery_v8_observation_coverage(
              for name, role in _OUTPUT_FILES]
     if stored != _manifest(files, summary):
         raise BroadQaExternalDataError("v8 coverage fields 漂移")
-    return {**stored, "manifest_sha256": _sha256(encoded)}, stored_outputs
+    return ({**stored, "manifest_sha256": _sha256(encoded)},
+            stored_outputs, state)
+
+
+def read_normalization_recovery_v8_observation_coverage(
+        coverage_dir: str | Path, *, observation_dir: str | Path,
+        v2_roster_dir: str | Path, v1_roster_dir: str | Path,
+        v1_content_audit_dir: str | Path, v2_content_audit_dir: str | Path,
+        source_overlap_dir: str | Path, qbittorrent_source_pack_dir: str | Path,
+        stellarium_source_pack_dir: str | Path, keepassxc_source_pack_dir: str | Path,
+        expected_manifest_sha256: str) -> tuple[
+            dict[str, object], dict[str, tuple[dict[str, object], ...]]]:
+    """严格重派生coverage候选并拒绝records/manifest同步篡改。"""
+    manifest, outputs, _observations = (
+        _read_normalization_recovery_v8_observation_coverage_state(
+            coverage_dir,
+            observation_dir=observation_dir,
+            v2_roster_dir=v2_roster_dir,
+            v1_roster_dir=v1_roster_dir,
+            v1_content_audit_dir=v1_content_audit_dir,
+            v2_content_audit_dir=v2_content_audit_dir,
+            source_overlap_dir=source_overlap_dir,
+            qbittorrent_source_pack_dir=qbittorrent_source_pack_dir,
+            stellarium_source_pack_dir=stellarium_source_pack_dir,
+            keepassxc_source_pack_dir=keepassxc_source_pack_dir,
+            expected_manifest_sha256=expected_manifest_sha256,
+        ))
+    return manifest, outputs
+
+
+def read_normalization_recovery_v8_observation_coverage_with_observations(
+        coverage_dir: str | Path, *, observation_dir: str | Path,
+        v2_roster_dir: str | Path, v1_roster_dir: str | Path,
+        v1_content_audit_dir: str | Path, v2_content_audit_dir: str | Path,
+        source_overlap_dir: str | Path, qbittorrent_source_pack_dir: str | Path,
+        stellarium_source_pack_dir: str | Path, keepassxc_source_pack_dir: str | Path,
+        expected_manifest_sha256: str) -> tuple[
+            dict[str, object], dict[str, tuple[dict[str, object], ...]],
+            dict[str, tuple[dict[str, object], ...]]]:
+    """供后继协议一次取得已严格核验的coverage与Observation。"""
+    return _read_normalization_recovery_v8_observation_coverage_state(
+        coverage_dir,
+        observation_dir=observation_dir,
+        v2_roster_dir=v2_roster_dir,
+        v1_roster_dir=v1_roster_dir,
+        v1_content_audit_dir=v1_content_audit_dir,
+        v2_content_audit_dir=v2_content_audit_dir,
+        source_overlap_dir=source_overlap_dir,
+        qbittorrent_source_pack_dir=qbittorrent_source_pack_dir,
+        stellarium_source_pack_dir=stellarium_source_pack_dir,
+        keepassxc_source_pack_dir=keepassxc_source_pack_dir,
+        expected_manifest_sha256=expected_manifest_sha256,
+    )
 
 
 __all__ = ["NORMALIZATION_RECOVERY_V8_COVERAGE_KIND",
            "NORMALIZATION_RECOVERY_V8_COVERAGE_STATUS",
            "V8_OBSERVATION_PACK_MANIFEST_SHA256",
            "publish_normalization_recovery_v8_observation_coverage",
-           "read_normalization_recovery_v8_observation_coverage"]
+           "read_normalization_recovery_v8_observation_coverage",
+           "read_normalization_recovery_v8_observation_coverage_with_observations"]
