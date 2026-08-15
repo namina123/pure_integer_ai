@@ -336,6 +336,41 @@ def _public_source_files(
     return tuple(output)
 
 
+def transient_vscode_english_source_by_pair(
+        *,
+        source_files: tuple[dict[str, object], ...],
+        ast_result: dict[str, object],
+        vscode_pairs: tuple[dict[str, object], ...],
+        ) -> dict[str, str]:
+    """返回 main pair 到唯一官方英文 message 的内存映射。"""
+    _validate_ast_result(ast_result, source_files=source_files)
+    if ast_result["parse_diagnostics"] or ast_result["unsupported"]:
+        raise BroadQaExternalDataError(
+            "VS Code English AST 存在 diagnostic 或动态 localize")
+    calls: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for item in ast_result["bindings"]:
+        calls[(str(item["module"]), str(item["key"]))].add(
+            str(item["message"]))
+    values = {}
+    for pair in vscode_pairs:
+        if (not isinstance(pair, dict)
+                or pair.get("training_eligible") != 1
+                or pair.get("translation_relative_path")
+                != MAIN_TRANSLATION_PATH):
+            continue
+        pair_id = pair.get("pair_id")
+        path = pair.get("json_path")
+        if (not isinstance(pair_id, str) or len(pair_id) != 64
+                or not isinstance(path, list) or len(path) != 2
+                or any(not isinstance(item, str) or not item for item in path)):
+            raise BroadQaExternalDataError(
+                "VS Code English transient pair identity 非法")
+        messages = calls.get((path[0], path[1]), set())
+        if len(messages) == 1:
+            values[pair_id] = next(iter(messages))
+    return values
+
+
 def derive_vscode_english_binding_feasibility(
         *,
         source_files: tuple[dict[str, object], ...],
@@ -540,4 +575,5 @@ __all__ = [
     "derive_vscode_english_binding_feasibility",
     "inspect_vscode_typescript_source",
     "run_vscode_typescript_ast_extractor",
+    "transient_vscode_english_source_by_pair",
 ]

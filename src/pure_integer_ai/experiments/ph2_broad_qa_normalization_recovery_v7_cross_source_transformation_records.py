@@ -578,13 +578,13 @@ def _family_consensus(
     return results, consensus
 
 
-def derive_cross_source_transformation_consensus_proposals(
+def derive_cross_source_transformation_unscored_proposals(
         *,
         observations: tuple[dict[str, object], ...],
         fragments: tuple[dict[str, object], ...],
         plans: tuple[dict[str, object], ...],
         ) -> tuple[dict[str, object], ...]:
-    """重建 TRAIN-only LOSO 共识 proposal，surface 只供下游内存鉴权。"""
+    """重建不含 held outcome 的 TRAIN-only LOSO 共识 proposal。"""
     observation_by_id, _plan_by_id = _indexes(observations, plans)
     models, _model_records = _derive_models(
         observations=observations,
@@ -608,13 +608,30 @@ def derive_cross_source_transformation_consensus_proposals(
         proposals.append({
             "held_out_observation_id": observation["observation_id"],
             "held_out_source_family": held_out_family,
-            "pre_authorization_outcome": _outcome(observation, consensus),
             "proposal_output_sha256": _text_sha256(consensus),
             "proposal_output_text": consensus,
             "source_pair_id": observation["source_pair_id"],
         })
     proposals.sort(key=lambda item: str(item["held_out_observation_id"]))
     return tuple(proposals)
+
+
+def derive_cross_source_transformation_consensus_proposals(
+        *,
+        observations: tuple[dict[str, object], ...],
+        fragments: tuple[dict[str, object], ...],
+        plans: tuple[dict[str, object], ...],
+        ) -> tuple[dict[str, object], ...]:
+    """在 unscored proposal 冻结后单独附加 TRAIN-only held outcome。"""
+    observation_by_id, _plan_by_id = _indexes(observations, plans)
+    proposals = derive_cross_source_transformation_unscored_proposals(
+        observations=observations, fragments=fragments, plans=plans)
+    return tuple({
+        **proposal,
+        "pre_authorization_outcome": _outcome(
+            observation_by_id[str(proposal["held_out_observation_id"])],
+            str(proposal["proposal_output_text"])),
+    } for proposal in proposals)
 
 
 def _family_loso(
@@ -893,5 +910,6 @@ __all__ = [
     "CROSS_SOURCE_TRANSFORMATION_TARGET_SCOPE",
     "TRANSFORMATION_ATOM_SCALAR_MAX",
     "derive_cross_source_transformation_consensus_proposals",
+    "derive_cross_source_transformation_unscored_proposals",
     "derive_cross_source_transformation_feasibility",
 ]

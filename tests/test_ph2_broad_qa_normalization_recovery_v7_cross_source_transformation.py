@@ -18,6 +18,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v5_training
     V5_SOURCE_POLICY_BY_FAMILY,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v7_cross_source_transformation_records import (
+    derive_cross_source_transformation_unscored_proposals,
     derive_cross_source_transformation_feasibility,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v7_neutral_source_projection_records import (
@@ -199,6 +200,24 @@ def test_held_projection_output_sha_is_label_blind_and_conflict_defers() -> None
     assert stages[1]["outcome_counts"] == {
         "EXACT": 0, "UNKNOWN": 1, "WRONG": 0}
     assert summary["capability_outcome"] == "NE_ZERO_AUTHORIZED_EXACT"
+
+
+def test_unscored_proposals_do_not_publish_or_depend_on_held_outcome() -> None:
+    """无标签 proposal 接口不含 outcome，held label 变化也不改变 proposal。"""
+    observations, fragments, plans, _projections = _material()
+    baseline = derive_cross_source_transformation_unscored_proposals(
+        observations=observations, fragments=fragments, plans=plans)
+    changed = tuple({
+        **item,
+        "output_text": (
+            "另一标签{0}" if item["source_family"] == VSCODE_SOURCE_FAMILY
+            else item["output_text"]),
+    } for item in observations)
+    repeated = derive_cross_source_transformation_unscored_proposals(
+        observations=changed, fragments=fragments, plans=plans)
+    assert baseline == repeated
+    assert baseline
+    assert all("pre_authorization_outcome" not in item for item in baseline)
 
 
 def _fake_outputs() -> tuple[
