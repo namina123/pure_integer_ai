@@ -164,7 +164,7 @@ def build_normalization_recovery_v8_evaluation_commitment(
             "retry_after_any_terminal_or_post_guard_exception_allowed": 0,
             "wrong_committed_output_outcome": "FAIL",
         },
-        "judgements": ("EXACT", "UNKNOWN", "WRONG"),
+        "judgements": ["EXACT", "UNKNOWN", "WRONG"],
         "mastery_claimed": 0,
         "production_enabled": 0,
         "source_exclusion": predecessor["source_exclusion"],

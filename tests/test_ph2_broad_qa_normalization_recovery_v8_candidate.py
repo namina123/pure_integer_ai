@@ -133,6 +133,7 @@ def test_commitment_freezes_full_denominator_and_six_dimensions() -> None:
         _v7_commitment())
     assert commitment["denominator"]["record_count"] == 3_656
     assert tuple(commitment["dimensions"]) == NORMALIZATION_RECOVERY_V8_DIMENSION_ORDER
+    assert commitment["judgements"] == ["EXACT", "UNKNOWN", "WRONG"]
     assert commitment["vlc_identity_raw_or_translation_read_count"] == 0
     assert commitment["formal_contract"][
         "retry_after_any_terminal_or_post_guard_exception_allowed"] == 0
