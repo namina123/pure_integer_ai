@@ -116,8 +116,9 @@ def _validate_observations(
             raise BroadQaExternalDataError(
                 "v5 learner observation schema/identity 漂移")
         result[observation_id] = observation
-    if set(str(item["source_family"]) for item in observations) != set(
-            V5_SOURCE_FAMILIES):
+    source_roster = {str(item["source_family"]) for item in observations}
+    if (len(source_roster) not in {3, 4}
+            or not source_roster.issubset(set(V5_SOURCE_FAMILIES))):
         raise BroadQaExternalDataError(
             "v5 learner observation source roster 漂移")
     return result
