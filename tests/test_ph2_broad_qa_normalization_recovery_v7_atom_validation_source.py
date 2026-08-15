@@ -12,6 +12,10 @@ from pure_integer_ai.experiments import (
     as commitment,
 )
 from pure_integer_ai.experiments import (
+    ph2_broad_qa_normalization_recovery_v7_atom_validation_commitment_v2
+    as commitment_v2,
+)
+from pure_integer_ai.experiments import (
     ph2_broad_qa_normalization_recovery_v7_atom_validation_source_pack
     as source_pack,
 )
@@ -305,6 +309,31 @@ def test_commitment_manifest_only_round_trip_and_tamper(
         "vlc_commitment_manifest_read_count": 1,
         "vlc_identity_raw_or_translation_read_count": 0,
     }
+
+    commitment_v2_dir = tmp_path / "commitment-v2"
+    monkeypatch.setattr(
+        commitment_v2, "_require_k_root", lambda value: Path(value))
+    published_v2 = (
+        commitment_v2.publish_audacity_atom_validation_commitment_v2(
+            run_root=tmp_path,
+            v1_commitment_dir=commitment_dir,
+            expected_v1_manifest_sha256=str(published["manifest_sha256"]),
+            target_dir=commitment_v2_dir,
+        ))
+    restored_v2 = commitment_v2.read_audacity_atom_validation_commitment_v2(
+        commitment_v2_dir,
+        v1_commitment_dir=commitment_dir,
+        expected_v1_manifest_sha256=str(published["manifest_sha256"]),
+        expected_manifest_sha256=str(published_v2["manifest_sha256"]),
+    )
+    assert restored_v2 == published_v2
+    assert "exact_output_count_min" not in restored_v2["gates"]
+    assert restored_v2["gates"][
+        "authorized_changed_exact_output_count_min"] == 1
+    assert restored_v2["validation_contract"][
+        "identity_only_exact_satisfies_transfer_pass"] == 0
+    assert restored_v2["revision"][
+        "label_or_individual_record_read_count"] == 0
 
     path = commitment_dir / "manifest.json"
     stored = json.loads(path.read_bytes())
