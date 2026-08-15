@@ -84,6 +84,8 @@ def run_audacity_atom_validation_once(
         expected_atom_manifest_sha256: str,
         commitment_v2_dir: str | Path,
         expected_commitment_v2_manifest_sha256: str,
+        family_v1_dir: str | Path,
+        expected_family_v1_manifest_sha256: str,
         training_protocol_dir: str | Path,
         variable_structure_audit_dir: str | Path,
         neutral_semantic_source_audit_dir: str | Path,
@@ -106,6 +108,7 @@ def run_audacity_atom_validation_once(
     atom = Path(atom_audit_dir).resolve()
     commitment = Path(commitment_v2_dir).resolve()
     family = Path(family_freeze_dir).resolve()
+    family_v1 = Path(family_v1_dir).resolve()
     directory_inputs = tuple(Path(value).resolve() for value in (
         training_protocol_dir, variable_structure_audit_dir,
         neutral_semantic_source_audit_dir, godot_source_pack_dir,
@@ -117,10 +120,12 @@ def run_audacity_atom_validation_once(
     if (not publication.is_relative_to(root) or publication.exists()
             or any(not path.is_dir() or not path.is_relative_to(root)
                    for path in (
-                       source, atom, commitment, family, *directory_inputs))
+                       source, atom, commitment, family, family_v1,
+                       *directory_inputs))
             or not archive.is_file() or not archive.is_relative_to(root)
             or any(_overlap(publication, path) for path in (
-                source, atom, commitment, family, *directory_inputs, archive))):
+                source, atom, commitment, family, family_v1,
+                *directory_inputs, archive))):
         raise BroadQaExternalDataError(
             "Audacity atom-validation runner path 非法或已消费")
     family_manifest = read_audacity_atom_validation_family_freeze(
@@ -134,7 +139,16 @@ def run_audacity_atom_validation_once(
         commitment_v2_dir=commitment,
         expected_commitment_v2_manifest_sha256=(
             expected_commitment_v2_manifest_sha256),
+        family_v1_dir=family_v1,
+        expected_family_v1_manifest_sha256=(
+            expected_family_v1_manifest_sha256),
     )
+    expected_publication = (
+        root / str(family_manifest["publication_contract"]["relative_path"])
+    ).resolve()
+    if publication != expected_publication:
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation publication identity 未按 family 冻结")
     publication.mkdir()
     guard = {
         "family_commitment_sha256": family_manifest[

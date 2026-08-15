@@ -31,11 +31,17 @@ from pure_integer_ai.experiments.ph2_dataset_contract import (
 )
 
 
-NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_KIND = (
+NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V1_KIND = (
     "PH2_BROAD_QA_NORMALIZATION_RECOVERY_V7_"
     "AUDACITY_ATOM_VALIDATION_FAMILY_FREEZE_V1")
-NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_STATUS = (
+NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V1_STATUS = (
     "AUDACITY_ATOM_VALIDATION_CODE_AND_FAMILY_FROZEN_"
+    "ZH_CN_LABEL_UNREAD_NOT_RUN")
+NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_KIND = (
+    "PH2_BROAD_QA_NORMALIZATION_RECOVERY_V7_"
+    "AUDACITY_ATOM_VALIDATION_FAMILY_FREEZE_V2")
+NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_STATUS = (
+    "AUDACITY_ATOM_VALIDATION_CODE_FAMILY_AND_UNIQUE_PUBLICATION_FROZEN_"
     "ZH_CN_LABEL_UNREAD_NOT_RUN")
 
 AUDACITY_ATOM_VALIDATION_SOURCE_MANIFEST_SHA256 = (
@@ -44,6 +50,10 @@ AUDACITY_ATOM_IDENTIFIABILITY_MANIFEST_SHA256 = (
     "4dbe00153a8859f1f38c26ca652368facf9536b9f3b2cea6eb7356ee7626b343")
 AUDACITY_ATOM_VALIDATION_COMMITMENT_V2_MANIFEST_SHA256 = (
     "528d0d85debd7bb1f991fc735c71d2497ac896ece91e8420c9bc280ca866fef7")
+AUDACITY_ATOM_VALIDATION_FAMILY_V1_MANIFEST_SHA256 = (
+    "aac1ad13a868c2948e5588157b8eec0b30670ae35e4ca42e7c58fbbb8e45d4eb")
+AUDACITY_ATOM_VALIDATION_PUBLICATION_RELATIVE_PATH = (
+    "normalization-recovery-v7-audacity-atom-validation-formal-v1")
 
 AUDACITY_ATOM_VALIDATION_CODE_FILES = (
     "src/pure_integer_ai/experiments/ph2_dataset_contract.py",
@@ -144,6 +154,37 @@ def _validate_inputs(
             "Audacity atom-validation family predecessor boundary 漂移")
 
 
+def _validate_family_v1(
+        value: dict[str, object],
+        *,
+        source_sha256: str,
+        atom_sha256: str,
+        commitment_sha256: str,
+        ) -> None:
+    """核对未运行 v1，并只把它作为 superseded lineage。"""
+    reads = value.get("validation_reads")
+    inputs = value.get("inputs")
+    if (value.get("artifact_kind")
+            != NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V1_KIND
+            or value.get("status")
+            != NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V1_STATUS
+            or value.get("format_version") != 1
+            or not isinstance(reads, dict)
+            or reads.get("validation_run_count") != 0
+            or reads.get("zh_cn_label_read_count") != 0
+            or reads.get("audacity_identity_raw_or_translation_read_count")
+            != 0
+            or not isinstance(inputs, dict)
+            or inputs.get("audacity_source_pack_manifest_sha256")
+            != source_sha256
+            or inputs.get("atom_identifiability_manifest_sha256")
+            != atom_sha256
+            or inputs.get("commitment_v2_manifest_sha256")
+            != commitment_sha256):
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation family v1 lineage 漂移")
+
+
 def _git_text(repository: Path, *arguments: str) -> str:
     """执行只读 Git identity 命令。"""
     try:
@@ -200,6 +241,8 @@ def build_audacity_atom_validation_family_freeze(
         expected_atom_manifest_sha256: str,
         commitment_v2_dir: str | Path,
         expected_commitment_v2_manifest_sha256: str,
+        family_v1_dir: str | Path,
+        expected_family_v1_manifest_sha256: str,
         ) -> dict[str, object]:
     """从三份 manifest 与 live pushed code 构造零 label read family。"""
     if (expected_source_manifest_sha256
@@ -207,7 +250,9 @@ def build_audacity_atom_validation_family_freeze(
             or expected_atom_manifest_sha256
             != AUDACITY_ATOM_IDENTIFIABILITY_MANIFEST_SHA256
             or expected_commitment_v2_manifest_sha256
-            != AUDACITY_ATOM_VALIDATION_COMMITMENT_V2_MANIFEST_SHA256):
+            != AUDACITY_ATOM_VALIDATION_COMMITMENT_V2_MANIFEST_SHA256
+            or expected_family_v1_manifest_sha256
+            != AUDACITY_ATOM_VALIDATION_FAMILY_V1_MANIFEST_SHA256):
         raise BroadQaExternalDataError(
             "Audacity atom-validation family 非正式 predecessor SHA")
     source = _read_manifest_only(
@@ -221,6 +266,15 @@ def build_audacity_atom_validation_family_freeze(
         expected_sha256=expected_commitment_v2_manifest_sha256,
         label="commitment v2 manifest")
     _validate_inputs(source, atom, commitment)
+    family_v1 = _read_manifest_only(
+        family_v1_dir,
+        expected_sha256=expected_family_v1_manifest_sha256,
+        label="superseded family v1 manifest")
+    _validate_family_v1(
+        family_v1,
+        source_sha256=source["manifest_sha256"],
+        atom_sha256=atom["manifest_sha256"],
+        commitment_sha256=commitment["manifest_sha256"])
     repository = Path(repository_root).resolve()
     if not repository.is_dir():
         raise BroadQaExternalDataError(
@@ -244,7 +298,7 @@ def build_audacity_atom_validation_family_freeze(
         "code_files": code_files,
         "code_freeze_sha256": code_sha,
         "denominator": commitment["denominator"],
-        "format_version": 1,
+        "format_version": 2,
         "gates": commitment["gates"],
         "inputs": {
             "atom_identifiability_manifest_sha256": atom["manifest_sha256"],
@@ -252,10 +306,18 @@ def build_audacity_atom_validation_family_freeze(
                 "manifest_sha256"],
             "commitment_v2_manifest_sha256": commitment[
                 "manifest_sha256"],
+            "superseded_family_v1_manifest_sha256": family_v1[
+                "manifest_sha256"],
         },
         "mastery_claimed": 0,
         "production_enabled": 0,
         "public_git": public_git,
+        "publication_contract": {
+            "alternate_publication_path_allowed": 0,
+            "relative_path": AUDACITY_ATOM_VALIDATION_PUBLICATION_RELATIVE_PATH,
+            "run_ordinal": 1,
+            "v1_per_target_guard_superseded": 1,
+        },
         "runtime_program_published": 0,
         "scoring_protocol": {
             "all_denominator_rows_receive_one_of": [
@@ -272,6 +334,7 @@ def build_audacity_atom_validation_family_freeze(
             "audacity_identity_raw_or_translation_read_count": 0,
             "commitment_v2_manifest_read_count": 1,
             "source_pack_manifest_read_count": 1,
+            "superseded_family_v1_manifest_read_count": 1,
             "validation_run_count": 0,
             "zh_cn_label_read_count": 0,
         },
@@ -304,7 +367,8 @@ def publish_audacity_atom_validation_family_freeze(
     """不可覆盖发布 family，且只读取三份 predecessor manifest。"""
     root = _require_k_root(run_root)
     inputs = tuple(Path(arguments[name]).resolve() for name in (
-        "source_pack_dir", "atom_audit_dir", "commitment_v2_dir"))
+        "source_pack_dir", "atom_audit_dir", "commitment_v2_dir",
+        "family_v1_dir"))
     target = Path(target_dir).resolve()
     if (any(not path.is_dir() or not path.is_relative_to(root)
             for path in inputs)
@@ -343,9 +407,13 @@ __all__ = [
     "AUDACITY_ATOM_IDENTIFIABILITY_MANIFEST_SHA256",
     "AUDACITY_ATOM_VALIDATION_CODE_FILES",
     "AUDACITY_ATOM_VALIDATION_COMMITMENT_V2_MANIFEST_SHA256",
+    "AUDACITY_ATOM_VALIDATION_FAMILY_V1_MANIFEST_SHA256",
+    "AUDACITY_ATOM_VALIDATION_PUBLICATION_RELATIVE_PATH",
     "AUDACITY_ATOM_VALIDATION_SOURCE_MANIFEST_SHA256",
     "NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_KIND",
     "NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_STATUS",
+    "NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V1_KIND",
+    "NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V1_STATUS",
     "build_audacity_atom_validation_family_freeze",
     "publish_audacity_atom_validation_family_freeze",
     "read_audacity_atom_validation_family_freeze",

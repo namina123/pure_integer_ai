@@ -265,6 +265,22 @@ def test_family_freeze_binds_manifests_code_and_pushed_git(
         },
         "status": NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_COMMITMENT_V2_STATUS,
     })
+    family_v1_dir = tmp_path / "family-v1"
+    family_v1_sha = _write_manifest(family_v1_dir, {
+        "artifact_kind": family.NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V1_KIND,
+        "format_version": 1,
+        "inputs": {
+            "atom_identifiability_manifest_sha256": atom_sha,
+            "audacity_source_pack_manifest_sha256": source_sha,
+            "commitment_v2_manifest_sha256": commitment_sha,
+        },
+        "status": family.NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V1_STATUS,
+        "validation_reads": {
+            "audacity_identity_raw_or_translation_read_count": 0,
+            "validation_run_count": 0,
+            "zh_cn_label_read_count": 0,
+        },
+    })
     monkeypatch.setattr(
         family, "AUDACITY_ATOM_VALIDATION_SOURCE_MANIFEST_SHA256", source_sha)
     monkeypatch.setattr(
@@ -272,6 +288,9 @@ def test_family_freeze_binds_manifests_code_and_pushed_git(
     monkeypatch.setattr(
         family, "AUDACITY_ATOM_VALIDATION_COMMITMENT_V2_MANIFEST_SHA256",
         commitment_sha)
+    monkeypatch.setattr(
+        family, "AUDACITY_ATOM_VALIDATION_FAMILY_V1_MANIFEST_SHA256",
+        family_v1_sha)
     monkeypatch.setattr(family, "_require_k_root", lambda value: Path(value))
     monkeypatch.setattr(family, "_repository_identity", lambda _root: {
         "head_commit_sha1": "a" * 40,
@@ -293,6 +312,8 @@ def test_family_freeze_binds_manifests_code_and_pushed_git(
         "expected_atom_manifest_sha256": atom_sha,
         "commitment_v2_dir": commitment_dir,
         "expected_commitment_v2_manifest_sha256": commitment_sha,
+        "family_v1_dir": family_v1_dir,
+        "expected_family_v1_manifest_sha256": family_v1_sha,
     }
     published = family.publish_audacity_atom_validation_family_freeze(
         run_root=tmp_path, target_dir=target, **arguments)
@@ -325,7 +346,7 @@ def test_runner_writes_authorization_before_label_and_consumes_failure_identity(
         ) -> None:
     """runner guard/authorization 先于 label，且同一 publication 不可重跑。"""
     roots = {}
-    for name in ("family", "source", "atom", "commitment"):
+    for name in ("family", "family-v1", "source", "atom", "commitment"):
         roots[name] = tmp_path / name
         roots[name].mkdir()
     training_roots = []
@@ -342,6 +363,7 @@ def test_runner_writes_authorization_before_label_and_consumes_failure_identity(
         lambda *args, **kwargs: {
             "denominator": {"record_count": 1},
             "family_commitment_sha256": "f" * 64,
+            "publication_contract": {"relative_path": "publication"},
         })
     monkeypatch.setattr(
         runner, "read_normalization_recovery_v7_atom_identifiability_audit_state",
@@ -395,6 +417,8 @@ def test_runner_writes_authorization_before_label_and_consumes_failure_identity(
         "expected_atom_manifest_sha256": "5" * 64,
         "commitment_v2_dir": roots["commitment"],
         "expected_commitment_v2_manifest_sha256": "6" * 64,
+        "family_v1_dir": roots["family-v1"],
+        "expected_family_v1_manifest_sha256": "7" * 64,
         "training_protocol_dir": training_roots[0],
         "variable_structure_audit_dir": training_roots[1],
         "neutral_semantic_source_audit_dir": training_roots[2],
