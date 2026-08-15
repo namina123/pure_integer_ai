@@ -15,6 +15,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
     BroadQaExternalDataError,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v5_localization_structure import (
+    localization_structure_layout,
     localization_structure_layout_for_tokens,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v5_training_records import (
@@ -33,6 +34,10 @@ CROSS_SOURCE_TRANSFORMATION_LOSO_KIND = (
     "NORMALIZATION_RECOVERY_V7_CROSS_SOURCE_TRANSFORMATION_LOSO_V1")
 CROSS_SOURCE_TRANSFORMATION_TARGET_SCOPE = (
     "CROSS_PRODUCT_ZH_CN_VARIABLE_SEGMENT_TRANSFORMATION_V1")
+CROSS_SOURCE_EXTERNAL_HELD_INPUT_KIND = (
+    "NORMALIZATION_RECOVERY_V7_EXTERNAL_HELD_INPUT_V1")
+CROSS_SOURCE_EXTERNAL_OPTIONAL_REWRITE_KIND = (
+    "NORMALIZATION_RECOVERY_V7_EXTERNAL_OPTIONAL_REWRITE_PROPOSAL_V1")
 
 TRANSFORMATION_ATOM_SCALAR_MAX = 4
 _PRE_AUTHORIZATION_STAGE = "INDEPENDENT_FAMILY_TRANSFORMATION_CONSENSUS"
@@ -578,6 +583,241 @@ def _family_consensus(
     return results, consensus
 
 
+def _external_held_inputs(
+        held_inputs: tuple[dict[str, object], ...],
+        ) -> tuple[dict[str, object], ...]:
+    """核验不含 held output 的外部输入与官方 source 映射。"""
+    values = []
+    pair_ids = set()
+    for item in held_inputs:
+        if not isinstance(item, dict):
+            raise BroadQaExternalDataError(
+                "v7 external optional rewrite held input 非对象")
+        pair_id = item.get("pair_id")
+        source_family = item.get("source_family")
+        source_policy = item.get("source_policy_scope")
+        input_text = item.get("input_text")
+        official_source = item.get("official_source_text")
+        tokens = item.get("structure_tokens")
+        if (not isinstance(pair_id, str) or len(pair_id) != 64
+                or pair_id in pair_ids
+                or not isinstance(source_family, str) or not source_family
+                or source_family in V5_SOURCE_FAMILIES
+                or not isinstance(source_policy, str) or not source_policy
+                or not isinstance(input_text, str) or not input_text
+                or not isinstance(official_source, str)
+                or not isinstance(tokens, list)
+                or any(not isinstance(token, str) or not token
+                       for token in tokens)):
+            raise BroadQaExternalDataError(
+                "v7 external optional rewrite held input identity 漂移")
+        layout = localization_structure_layout(input_text)
+        if list(layout["structure_tokens"]) != tokens:
+            raise BroadQaExternalDataError(
+                "v7 external optional rewrite held structure 漂移")
+        pair_ids.add(pair_id)
+        values.append(item)
+    if not values:
+        raise BroadQaExternalDataError(
+            "v7 external optional rewrite held input 为空")
+    values.sort(key=lambda item: str(item["pair_id"]))
+    return tuple(values)
+
+
+def _execute_external_optional_family_model(
+        *,
+        held_input: dict[str, object],
+        model: dict[str, object],
+        indexed: bool,
+        ) -> dict[str, object]:
+    """只凭 held input 在各 segment 内执行可选 rewrite。"""
+    if type(indexed) is not bool:
+        raise BroadQaExternalDataError(
+            "v7 external optional rewrite interpreter 非法")
+    input_text = str(held_input["input_text"])
+    tokens = tuple(str(item) for item in held_input["structure_tokens"])
+    layout = localization_structure_layout_for_tokens(input_text, tokens)
+    stable_scalars = model.get("stable_scalars")
+    if not isinstance(stable_scalars, frozenset):
+        raise BroadQaExternalDataError(
+            "v7 external optional rewrite stable-copy state 漂移")
+    output_segments = []
+    rewrite_count = 0
+    changed_segment_count = 0
+    decision = "CANDIDATE"
+    for segment in layout["segments"]:
+        values = []
+        covered = [0] * len(segment)
+        position = 0
+        segment_rewrite_count = 0
+        while position < len(segment):
+            matches = []
+            for route in _routes_at(
+                    model=model, segment=segment, position=position,
+                    indexed=indexed):
+                source = str(route["input_text"])
+                if segment.startswith(source, position):
+                    matches.append(route)
+            if matches:
+                longest = max(len(str(item["input_text"]))
+                              for item in matches)
+                longest_matches = tuple(
+                    item for item in matches
+                    if len(str(item["input_text"])) == longest)
+                outputs = {str(item["output_text"])
+                           for item in longest_matches}
+                if len(outputs) != 1:
+                    decision = "UNKNOWN_AMBIGUOUS_LONGEST_ROUTE"
+                    break
+                source = str(longest_matches[0]["input_text"])
+                values.append(next(iter(outputs)))
+                for cursor in range(position, position + len(source)):
+                    covered[cursor] = 1
+                position += len(source)
+                segment_rewrite_count += 1
+                continue
+            values.append(segment[position])
+            position += 1
+        if decision != "CANDIDATE":
+            break
+        output_segment = "".join(values)
+        if (segment_rewrite_count > 0
+                and any(not covered[index]
+                        and scalar not in stable_scalars
+                        for index, scalar in enumerate(segment))):
+            decision = "UNKNOWN_UNCERTIFIED_COPY"
+            break
+        output_segments.append(output_segment)
+        rewrite_count += segment_rewrite_count
+        changed_segment_count += int(output_segment != segment)
+    output_text = input_text
+    structure_mismatch = 0
+    if decision == "CANDIDATE":
+        rebuilt = []
+        for ordinal, segment in enumerate(output_segments):
+            rebuilt.append(segment)
+            if ordinal < len(layout["raw_tokens"]):
+                rebuilt.append(layout["raw_tokens"][ordinal])
+        candidate = "".join(rebuilt)
+        try:
+            output_layout = localization_structure_layout_for_tokens(
+                candidate, tokens)
+            structure_mismatch = int(
+                output_layout["raw_tokens"] != layout["raw_tokens"])
+        except BroadQaExternalDataError:
+            structure_mismatch = 1
+        if structure_mismatch:
+            decision = "UNKNOWN_STRUCTURE_TOKEN_MISMATCH"
+        elif rewrite_count == 0 or candidate == input_text:
+            decision = "UNKNOWN_NO_REWRITE"
+        else:
+            output_text = candidate
+    payload = {
+        "changed_segment_count": changed_segment_count,
+        "decision": decision,
+        "output_text": output_text,
+        "partial_commit_count": 0,
+        "rewrite_count": rewrite_count,
+        "structure_token_mismatch_count": structure_mismatch,
+    }
+    return {**payload, "result_sha256": _sha256(
+        canonical_json_bytes(payload))}
+
+
+def derive_external_cross_source_optional_rewrite_proposals(
+        *,
+        observations: tuple[dict[str, object], ...],
+        fragments: tuple[dict[str, object], ...],
+        plans: tuple[dict[str, object], ...],
+        held_inputs: tuple[dict[str, object], ...],
+        ) -> tuple[tuple[dict[str, object], ...], dict[str, object]]:
+    """用 TRAIN family 对外部 label-free 输入形成唯一二票共识。"""
+    observation_by_id, _plan_by_id = _indexes(observations, plans)
+    models, _model_records = _derive_models(
+        observations=observations,
+        fragments=fragments,
+        plans=plans,
+        observation_by_id=observation_by_id,
+    )
+    inputs = _external_held_inputs(held_inputs)
+    records = []
+    census = Counter()
+    for held_input in inputs:
+        indexed_results = {
+            family: _execute_external_optional_family_model(
+                held_input=held_input, model=models[family], indexed=True)
+            for family in V5_SOURCE_FAMILIES}
+        reference_results = {
+            family: _execute_external_optional_family_model(
+                held_input=held_input, model=models[family], indexed=False)
+            for family in V5_SOURCE_FAMILIES}
+        mismatch_count = sum(
+            indexed_results[family] != reference_results[family]
+            for family in V5_SOURCE_FAMILIES)
+        candidates = {
+            family: str(result["output_text"])
+            for family, result in indexed_results.items()
+            if result["decision"] == "CANDIDATE"}
+        support = Counter(candidates.values())
+        consensus_values = tuple(
+            output for output, count in support.items() if count >= 2)
+        consensus = (
+            consensus_values[0]
+            if mismatch_count == 0 and len(consensus_values) == 1
+            and len(support) == 1 else None)
+        decision = (
+            "PROPOSED_UNIQUE_MULTI_FAMILY_CONSENSUS"
+            if consensus is not None else
+            "UNKNOWN_INDEXED_REFERENCE_MISMATCH"
+            if mismatch_count else
+            "UNKNOWN_NO_UNIQUE_MULTI_FAMILY_CONSENSUS")
+        output_text = str(held_input["input_text"]) \
+            if consensus is None else consensus
+        support_count = 0 if consensus is None else support[consensus]
+        identity = {
+            "pair_id": held_input["pair_id"],
+            "source_family": held_input["source_family"],
+            "source_policy_scope": held_input["source_policy_scope"],
+            "target_scope": CROSS_SOURCE_TRANSFORMATION_TARGET_SCOPE,
+        }
+        records.append({
+            **identity,
+            "family_candidate_count": len(candidates),
+            "family_consensus_support_count": support_count,
+            "format_version": 1,
+            "held_label_read_count": 0,
+            "indexed_reference_mismatch_count": mismatch_count,
+            "input_text": held_input["input_text"],
+            "official_source_text": held_input["official_source_text"],
+            "partial_commit_count": sum(int(result[
+                "partial_commit_count"])
+                for result in indexed_results.values()),
+            "proposal_decision": decision,
+            "proposal_id": _record_id(identity),
+            "proposal_output_sha256": _text_sha256(output_text),
+            "proposal_output_text": output_text,
+            "record_kind": CROSS_SOURCE_EXTERNAL_OPTIONAL_REWRITE_KIND,
+            "structure_token_mismatch_count": sum(int(result[
+                "structure_token_mismatch_count"])
+                for result in indexed_results.values()),
+            "structure_tokens": held_input["structure_tokens"],
+        })
+        census["held_input_count"] += 1
+        census["proposed_count"] += int(consensus is not None)
+        census["deferred_count"] += int(consensus is None)
+        census["indexed_reference_mismatch_count"] += mismatch_count
+        census["partial_commit_count"] += records[-1][
+            "partial_commit_count"]
+        census["structure_token_mismatch_count"] += records[-1][
+            "structure_token_mismatch_count"]
+    records.sort(key=lambda item: str(item["pair_id"]))
+    return tuple(records), {
+        key: census[key] for key in (
+            "held_input_count", "proposed_count", "deferred_count",
+            "indexed_reference_mismatch_count", "partial_commit_count",
+            "structure_token_mismatch_count")}
+
+
 def derive_cross_source_transformation_unscored_proposals(
         *,
         observations: tuple[dict[str, object], ...],
@@ -904,12 +1144,15 @@ def derive_cross_source_transformation_feasibility(
 
 
 __all__ = [
+    "CROSS_SOURCE_EXTERNAL_HELD_INPUT_KIND",
+    "CROSS_SOURCE_EXTERNAL_OPTIONAL_REWRITE_KIND",
     "CROSS_SOURCE_TRANSFORMATION_LOSO_KIND",
     "CROSS_SOURCE_TRANSFORMATION_MODEL_KIND",
     "CROSS_SOURCE_TRANSFORMATION_STAGE_KIND",
     "CROSS_SOURCE_TRANSFORMATION_TARGET_SCOPE",
     "TRANSFORMATION_ATOM_SCALAR_MAX",
     "derive_cross_source_transformation_consensus_proposals",
+    "derive_external_cross_source_optional_rewrite_proposals",
     "derive_cross_source_transformation_unscored_proposals",
     "derive_cross_source_transformation_feasibility",
 ]

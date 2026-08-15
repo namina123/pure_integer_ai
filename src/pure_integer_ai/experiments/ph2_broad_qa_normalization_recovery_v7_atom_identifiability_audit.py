@@ -355,7 +355,7 @@ def publish_normalization_recovery_v7_atom_identifiability_audit(
         manifest_path.read_bytes())}
 
 
-def read_normalization_recovery_v7_atom_identifiability_audit(
+def read_normalization_recovery_v7_atom_identifiability_audit_state(
         audit_dir: str | Path,
         *,
         training_protocol_dir: str | Path,
@@ -372,8 +372,12 @@ def read_normalization_recovery_v7_atom_identifiability_audit(
         unimorph_english_dir: str | Path,
         expected_manifest_sha256: str,
         node_executable: str | Path = "node",
-        ) -> tuple[dict[str, object], dict[str, tuple[dict[str, object], ...]]]:
-    """从 raw source 与 sealed TRAIN inputs 严格重派生。"""
+        ) -> tuple[
+            dict[str, object],
+            dict[str, tuple[dict[str, object], ...]],
+            dict[str, object],
+        ]:
+    """严格重派生并返回已验证 TRAIN/OpenCC/UniMorph 内存 state。"""
     root = Path(audit_dir).resolve()
     try:
         encoded = (root / "manifest.json").read_bytes()
@@ -415,11 +419,27 @@ def read_normalization_recovery_v7_atom_identifiability_audit(
     if not strict_json_equal(stored, expected):
         raise BroadQaExternalDataError(
             "v7 atom identifiability manifest fields 漂移")
-    return {**stored, "manifest_sha256": _sha256(encoded)}, stored_outputs
+    return (
+        {**stored, "manifest_sha256": _sha256(encoded)},
+        stored_outputs,
+        state,
+    )
+
+
+def read_normalization_recovery_v7_atom_identifiability_audit(
+        audit_dir: str | Path,
+        **arguments: object,
+        ) -> tuple[dict[str, object], dict[str, tuple[dict[str, object], ...]]]:
+    """保持既有二元 strict-reader API，不重复重派生。"""
+    manifest, outputs, _state = (
+        read_normalization_recovery_v7_atom_identifiability_audit_state(
+            audit_dir, **arguments))
+    return manifest, outputs
 
 
 __all__ = [
     "NORMALIZATION_RECOVERY_V7_ATOM_IDENTIFIABILITY_AUDIT_KIND",
     "publish_normalization_recovery_v7_atom_identifiability_audit",
     "read_normalization_recovery_v7_atom_identifiability_audit",
+    "read_normalization_recovery_v7_atom_identifiability_audit_state",
 ]

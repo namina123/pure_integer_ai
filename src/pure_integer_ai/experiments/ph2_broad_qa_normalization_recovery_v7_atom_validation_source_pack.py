@@ -18,12 +18,15 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v5_localization_structure import (
     git_blob_sha1,
+    localization_structure_layout,
     strict_json_equal,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v7_atom_validation_source_records import (
     AUDACITY_LICENSE_PATH,
     AUDACITY_SOURCE_FILES,
+    AUDACITY_SOURCE_PATHS,
     AUDACITY_TRANSLATION_LICENSE_EXPRESSION,
+    parse_audacity_atom_validation_locale,
     parse_audacity_atom_validation_files,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import (
@@ -208,6 +211,15 @@ def _read_jsonl(
     except OSError as error:
         raise BroadQaExternalDataError(
             f"Audacity atom-validation {label} 不可读") from error
+    return _decode_jsonl(payload, label=label)
+
+
+def _decode_jsonl(
+        payload: bytes,
+        *,
+        label: str,
+        ) -> tuple[dict[str, object], ...]:
+    """从已承诺 bytes 解码规范 JSONL，避免二次文件读取。"""
     values = []
     for line in payload.splitlines(keepends=True):
         try:
@@ -452,6 +464,218 @@ def read_audacity_atom_validation_source_pack(
     )
 
 
+def _read_source_manifest_only(
+        source_pack_dir: str | Path,
+        *,
+        expected_manifest_sha256: str,
+        ) -> tuple[Path, dict[str, object]]:
+    """只读取并核对 source-pack manifest，不打开任何 translation。"""
+    root = Path(source_pack_dir).resolve()
+    try:
+        encoded = (root / "manifest.json").read_bytes()
+        stored = json.loads(encoded)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation source manifest 不可读") from error
+    state = stored.get("validation_state") if isinstance(stored, dict) else None
+    summary = stored.get("parser_summary") if isinstance(stored, dict) else None
+    if (_sha256(encoded) != expected_manifest_sha256
+            or not isinstance(stored, dict)
+            or canonical_json_line(stored) != encoded
+            or stored.get("artifact_kind")
+            != NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_SOURCE_PACK_KIND
+            or stored.get("status")
+            != NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_SOURCE_STATUS
+            or stored.get("source_family") != AUDACITY_SOURCE_FAMILY
+            or stored.get("source_policy_scope")
+            != AUDACITY_SOURCE_POLICY_SCOPE
+            or not isinstance(state, dict)
+            or state.get("validation_run_count") != 0
+            or state.get("formal_label_jsonl_materialized") != 0
+            or not isinstance(summary, dict)
+            or type(summary.get("plain_pair_count")) is not int
+            or int(summary["plain_pair_count"]) <= 0):
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation source manifest boundary 漂移")
+    return root, {**stored, "manifest_sha256": expected_manifest_sha256}
+
+
+def _committed_payload(
+        root: Path,
+        manifest: dict[str, object],
+        *,
+        relative_path: str,
+        ) -> bytes:
+    """读取一份 manifest 已承诺文件并核对 bytes/SHA。"""
+    files = manifest.get("files")
+    matches = tuple(
+        item for item in files if isinstance(item, dict)
+        and item.get("relative_path") == relative_path) \
+        if isinstance(files, list) else ()
+    if len(matches) != 1:
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation file commitment 漂移")
+    try:
+        payload = (root / relative_path).read_bytes()
+    except OSError as error:
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation committed file 不可读") from error
+    if (matches[0].get("bytes") != len(payload)
+            or matches[0].get("sha256") != _sha256(payload)):
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation committed file identity 漂移")
+    return payload
+
+
+def _partial_identity_state(
+        root: Path,
+        manifest: dict[str, object],
+        ) -> tuple[
+            tuple[dict[str, object], ...],
+            tuple[dict[str, object], ...],
+        ]:
+    """读取无 translation 的 source-file records 与 denominator roster。"""
+    source_payload = _committed_payload(
+        root, manifest, relative_path=_OUTPUT_FILES[0][0])
+    inventory_payload = _committed_payload(
+        root, manifest, relative_path=_OUTPUT_FILES[1][0])
+    source_records = _decode_jsonl(
+        source_payload, label=_OUTPUT_FILES[0][1])
+    inventory = _decode_jsonl(
+        inventory_payload, label=_OUTPUT_FILES[1][1])
+    if (len(inventory) != manifest["parser_summary"][
+                "plain_pair_count"]):
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation partial identity 漂移")
+    return source_records, inventory
+
+
+def _source_record(
+        source_records: tuple[dict[str, object], ...],
+        *,
+        relative_path: str,
+        ) -> dict[str, object]:
+    """返回一份唯一 source-file identity。"""
+    matches = tuple(item for item in source_records
+                    if item.get("relative_path") == relative_path)
+    if len(matches) != 1:
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation source-file record 漂移")
+    return matches[0]
+
+
+def read_audacity_atom_validation_held_inputs_after_family_freeze(
+        source_pack_dir: str | Path,
+        *,
+        expected_manifest_sha256: str,
+        ) -> tuple[
+            dict[str, object],
+            tuple[dict[str, object], ...],
+            dict[str, int],
+        ]:
+    """只读 identity roster 与 zh-TW input，保持 zh-CN 文件未打开。"""
+    root, manifest = _read_source_manifest_only(
+        source_pack_dir,
+        expected_manifest_sha256=expected_manifest_sha256)
+    source_records, inventory = _partial_identity_state(root, manifest)
+    path = AUDACITY_SOURCE_PATHS["zh_Hant"]
+    payload = _committed_payload(root, manifest, relative_path=path)
+    source_record = _source_record(source_records, relative_path=path)
+    locale_records, _summary = parse_audacity_atom_validation_locale(
+        payload, locale="zh_TW",
+        source_file_id=str(source_record["file_id"]))
+    values = []
+    for item in inventory:
+        source_identity = item.get("source_identity")
+        if not isinstance(source_identity, dict):
+            raise BroadQaExternalDataError(
+                "Audacity atom-validation inventory source identity 漂移")
+        key = tuple(source_identity.get(name) for name in (
+            "msgctxt", "msgid", "msgid_plural"))
+        record = locale_records.get(key)
+        if (record is None
+                or record.get("source_file_id")
+                != item.get("zh_hant_source_file_id")
+                or not isinstance(record.get("msgstr"), str)
+                or not record["msgstr"]):
+            raise BroadQaExternalDataError(
+                "Audacity atom-validation zh-TW held input 漂移")
+        layout = localization_structure_layout(str(record["msgstr"]))
+        values.append({
+            "format_version": 1,
+            "input_text": record["msgstr"],
+            "official_source_text": source_identity["msgid"],
+            "pair_id": item["pair_id"],
+            "record_kind": (
+                "NORMALIZATION_RECOVERY_V7_EXTERNAL_HELD_INPUT_V1"),
+            "source_family": AUDACITY_SOURCE_FAMILY,
+            "source_identity": source_identity,
+            "source_policy_scope": AUDACITY_SOURCE_POLICY_SCOPE,
+            "structure_tokens": list(layout["structure_tokens"]),
+        })
+    values.sort(key=lambda item: str(item["pair_id"]))
+    return manifest, tuple(values), {
+        "identity_roster_read_count": 1,
+        "source_file_inventory_read_count": 1,
+        "zh_hans_translation_file_read_count": 0,
+        "zh_hant_input_file_read_count": 1,
+    }
+
+
+def materialize_audacity_atom_validation_labels_after_authorization_freeze(
+        source_pack_dir: str | Path,
+        *,
+        expected_manifest_sha256: str,
+        held_inputs: tuple[dict[str, object], ...],
+        ) -> tuple[dict[str, tuple[str, str]], dict[str, int]]:
+    """授权承诺后只读 zh-CN output，并按冻结 roster 全量对齐。"""
+    root, manifest = _read_source_manifest_only(
+        source_pack_dir,
+        expected_manifest_sha256=expected_manifest_sha256)
+    source_records, inventory = _partial_identity_state(root, manifest)
+    held_by_pair = {
+        str(item.get("pair_id")): item for item in held_inputs
+        if isinstance(item, dict)}
+    if (len(held_by_pair) != len(held_inputs)
+            or set(held_by_pair)
+            != {str(item.get("pair_id")) for item in inventory}):
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation label denominator 漂移")
+    path = AUDACITY_SOURCE_PATHS["zh_Hans"]
+    payload = _committed_payload(root, manifest, relative_path=path)
+    source_record = _source_record(source_records, relative_path=path)
+    locale_records, _summary = parse_audacity_atom_validation_locale(
+        payload, locale="zh_CN",
+        source_file_id=str(source_record["file_id"]))
+    labels = {}
+    for item in inventory:
+        pair_id = str(item["pair_id"])
+        held = held_by_pair[pair_id]
+        source_identity = item.get("source_identity")
+        if (not isinstance(source_identity, dict)
+                or held.get("source_identity") != source_identity):
+            raise BroadQaExternalDataError(
+                "Audacity atom-validation held/source identity 漂移")
+        key = tuple(source_identity.get(name) for name in (
+            "msgctxt", "msgid", "msgid_plural"))
+        record = locale_records.get(key)
+        if (record is None
+                or record.get("source_file_id")
+                != item.get("zh_hans_source_file_id")
+                or not isinstance(record.get("msgstr"), str)
+                or not record["msgstr"]):
+            raise BroadQaExternalDataError(
+                "Audacity atom-validation zh-CN label 漂移")
+        labels[pair_id] = (
+            str(held["input_text"]), str(record["msgstr"]))
+    return labels, {
+        "identity_roster_read_count": 1,
+        "source_file_inventory_read_count": 1,
+        "zh_hans_translation_file_read_count": 1,
+        "zh_hant_input_file_read_count": 0,
+    }
+
+
 __all__ = [
     "AUDACITY_COMMIT",
     "AUDACITY_COMMIT_DATE",
@@ -462,6 +686,8 @@ __all__ = [
     "AUDACITY_SOURCE_POLICY_SCOPE",
     "NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_SOURCE_PACK_KIND",
     "NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_SOURCE_STATUS",
+    "materialize_audacity_atom_validation_labels_after_authorization_freeze",
     "publish_audacity_atom_validation_source_pack",
+    "read_audacity_atom_validation_held_inputs_after_family_freeze",
     "read_audacity_atom_validation_source_pack",
 ]

@@ -251,6 +251,44 @@ def test_source_pack_round_trip_nonoverwrite_and_frozen_blob_tamper(
         )
 
 
+def test_held_input_and_label_readers_are_physically_separated(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        ) -> None:
+    """proposal reader 不开 zh-CN；label materializer 不重开 zh-TW。"""
+    target, published, _raw = _publish_source(tmp_path, monkeypatch)
+    original = source_pack._committed_payload
+    reads = []
+
+    def tracked(root, manifest, *, relative_path):
+        reads.append(relative_path)
+        return original(root, manifest, relative_path=relative_path)
+
+    monkeypatch.setattr(source_pack, "_committed_payload", tracked)
+    manifest, held_inputs, input_reads = (
+        source_pack.read_audacity_atom_validation_held_inputs_after_family_freeze(
+            target,
+            expected_manifest_sha256=str(published["manifest_sha256"]),
+        ))
+    assert manifest["manifest_sha256"] == published["manifest_sha256"]
+    assert len(held_inputs) == 2
+    assert input_reads["zh_hans_translation_file_read_count"] == 0
+    assert AUDACITY_SOURCE_PATHS["zh_Hans"] not in reads
+    assert all("output_text" not in item and "zh_hans" not in item
+               for item in held_inputs)
+
+    reads.clear()
+    labels, label_reads = (
+        source_pack.materialize_audacity_atom_validation_labels_after_authorization_freeze(
+            target,
+            expected_manifest_sha256=str(published["manifest_sha256"]),
+            held_inputs=held_inputs,
+        ))
+    assert len(labels) == 2
+    assert label_reads["zh_hans_translation_file_read_count"] == 1
+    assert AUDACITY_SOURCE_PATHS["zh_Hant"] not in reads
+
+
 def test_commitment_manifest_only_round_trip_and_tamper(
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,

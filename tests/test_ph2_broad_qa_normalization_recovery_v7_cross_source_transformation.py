@@ -20,6 +20,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v5_training
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v7_cross_source_transformation_records import (
     derive_cross_source_transformation_unscored_proposals,
     derive_cross_source_transformation_feasibility,
+    derive_external_cross_source_optional_rewrite_proposals,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v7_neutral_source_projection_records import (
     GODOT_SOURCE_FAMILY,
@@ -218,6 +219,42 @@ def test_unscored_proposals_do_not_publish_or_depend_on_held_outcome() -> None:
     assert baseline == repeated
     assert baseline
     assert all("pre_authorization_outcome" not in item for item in baseline)
+
+
+def test_external_optional_rewrite_uses_input_only_and_two_family_consensus(
+        ) -> None:
+    """外部输入不提供 output/plan，仍可由 TRAIN family 形成唯一共识。"""
+    observations, fragments, plans, _projections = _material()
+    held_inputs = ({
+        "format_version": 1,
+        "input_text": "舊{0}",
+        "official_source_text": "Old{0}",
+        "pair_id": _id("audacity-external-pair"),
+        "record_kind": "NORMALIZATION_RECOVERY_V7_EXTERNAL_HELD_INPUT_V1",
+        "source_family": "AUDACITY_PROJECT",
+        "source_policy_scope": "AUDACITY_ZH_TW_TO_ZH_CN_FIXED_COMMIT_V1",
+        "structure_tokens": ["{0}"],
+    },)
+    proposals, census = (
+        derive_external_cross_source_optional_rewrite_proposals(
+            observations=observations,
+            fragments=fragments,
+            plans=plans,
+            held_inputs=held_inputs,
+        ))
+    assert census == {
+        "held_input_count": 1,
+        "proposed_count": 1,
+        "deferred_count": 0,
+        "indexed_reference_mismatch_count": 0,
+        "partial_commit_count": 0,
+        "structure_token_mismatch_count": 0,
+    }
+    assert proposals[0]["proposal_decision"] == (
+        "PROPOSED_UNIQUE_MULTI_FAMILY_CONSENSUS")
+    assert proposals[0]["proposal_output_text"] == "新詞{0}"
+    assert proposals[0]["family_consensus_support_count"] >= 2
+    assert proposals[0]["held_label_read_count"] == 0
 
 
 def _fake_outputs() -> tuple[

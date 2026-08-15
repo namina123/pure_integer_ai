@@ -177,6 +177,26 @@ def _parse_po(
     }
 
 
+def parse_audacity_atom_validation_locale(
+        payload: bytes,
+        *,
+        locale: str,
+        source_file_id: str,
+        ) -> tuple[
+            dict[tuple[str, str, str], dict[str, object]],
+            dict[str, object],
+        ]:
+    """单独解析一个冻结 locale，供 label 物理隔离 reader 使用。"""
+    if locale not in {"zh_CN", "zh_TW"}:
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation locale 非法")
+    if not isinstance(source_file_id, str) or len(source_file_id) != 64:
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation source file identity 非法")
+    return _parse_po(
+        payload, locale=locale, source_file_id=source_file_id)
+
+
 def _pair_exclusion_reasons(
         zh_hans: dict[str, object],
         zh_hant: dict[str, object],
@@ -354,6 +374,7 @@ __all__ = [
     "AUDACITY_TRANSLATION_LICENSE_EXPRESSION",
     "AUDACITY_VALIDATION_PAIR_KIND",
     "AUDACITY_VALIDATION_SOURCE_FILE_KIND",
+    "parse_audacity_atom_validation_locale",
     "parse_audacity_atom_validation_files",
     "validate_audacity_license",
 ]

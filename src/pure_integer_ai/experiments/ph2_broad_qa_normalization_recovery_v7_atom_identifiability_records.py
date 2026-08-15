@@ -187,6 +187,25 @@ def _stable_lexical_authorized(
             and sum(families.values()) >= _STABLE_LEXICAL_OCCURRENCE_MIN)
 
 
+def derive_localized_atom_route_index(
+        observations: tuple[dict[str, object], ...],
+        ) -> tuple[
+            dict[tuple[str, str], dict[str, dict[str, int]]], Counter]:
+    """公开 TRAIN localized atom route，供独立外部 family 鉴权。"""
+    return _localized_atom_routes(observations)
+
+
+def stable_lexical_atom_authorized(
+        atom: tuple[str, str, str],
+        *,
+        held_family: str,
+        routes: dict[tuple[str, str], dict[str, dict[str, int]]],
+        ) -> bool:
+    """公开跨 family、零冲突的多 scalar lexical 守门。"""
+    return _stable_lexical_authorized(
+        atom, held_family=held_family, routes=routes)
+
+
 def derive_atom_identifiability_authorizations(
         *,
         observations: tuple[dict[str, object], ...],
@@ -411,5 +430,7 @@ __all__ = [
     "atomize_segment",
     "derive_atom_identifiability_authorizations",
     "derive_atom_identifiability_feasibility",
+    "derive_localized_atom_route_index",
     "score_atom_identifiability_authorizations",
+    "stable_lexical_atom_authorized",
 ]
