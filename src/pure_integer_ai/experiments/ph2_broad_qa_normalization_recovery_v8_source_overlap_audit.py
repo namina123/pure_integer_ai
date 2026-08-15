@@ -342,6 +342,54 @@ def _read_jsonl(path: Path, *, label: str) -> tuple[dict[str, object], ...]:
     return tuple(values)
 
 
+def read_normalization_recovery_v8_source_overlap_aggregate(
+        audit_dir: str | Path,
+        *,
+        expected_manifest_sha256: str,
+        ) -> tuple[
+            dict[str, object], dict[str, tuple[dict[str, object], ...]]]:
+    """只按sealed commitments回读overlap aggregate，不重开source pack。"""
+    root = Path(audit_dir).resolve()
+    path = root / "manifest.json"
+    try:
+        encoded = path.read_bytes()
+        stored = json.loads(encoded)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BroadQaExternalDataError(
+            "v8 source overlap aggregate manifest 不可读") from error
+    if (_sha256(encoded) != expected_manifest_sha256
+            or not isinstance(stored, dict)
+            or canonical_json_line(stored) != encoded
+            or stored.get("artifact_kind")
+            != NORMALIZATION_RECOVERY_V8_SOURCE_OVERLAP_AUDIT_KIND):
+        raise BroadQaExternalDataError(
+            "v8 source overlap aggregate manifest identity 漂移")
+    files = {str(item.get("relative_path")): item
+             for item in stored.get("files", [])
+             if isinstance(item, dict)}
+    if set(files) != {name for name, _role in _OUTPUT_FILES}:
+        raise BroadQaExternalDataError(
+            "v8 source overlap aggregate file inventory 漂移")
+    outputs = {}
+    for name, role in _OUTPUT_FILES:
+        values = _read_jsonl(root / name, label=role)
+        if files[name] != _artifact(
+                root / name, role=role, count=len(values)):
+            raise BroadQaExternalDataError(
+                "v8 source overlap aggregate file identity 漂移")
+        outputs[name] = values
+    census = outputs["source-overlap-census.jsonl"]
+    if (len(outputs["source-overlap.jsonl"]) != 3
+            or len(census) != 1
+            or stored.get("summary") != {
+                key: value for key, value in census[0].items()
+                if key not in {"format_version", "record_kind"}
+            }):
+        raise BroadQaExternalDataError(
+            "v8 source overlap aggregate census 漂移")
+    return {**stored, "manifest_sha256": _sha256(encoded)}, outputs
+
+
 def _artifact(path: Path, *, role: str, count: int) -> dict[str, object]:
     """形成aggregate输出文件commitment。"""
     payload = path.read_bytes()
@@ -541,5 +589,6 @@ __all__ = [
     "NORMALIZATION_RECOVERY_V8_SOURCE_OVERLAP_PASS_STATUS",
     "NORMALIZATION_RECOVERY_V8_SOURCE_OVERLAP_REJECTED_STATUS",
     "publish_normalization_recovery_v8_source_overlap_audit",
+    "read_normalization_recovery_v8_source_overlap_aggregate",
     "read_normalization_recovery_v8_source_overlap_audit",
 ]

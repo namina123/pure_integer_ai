@@ -12,6 +12,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_source_overlap_audit import (
     publish_normalization_recovery_v8_source_overlap_audit,
+    read_normalization_recovery_v8_source_overlap_aggregate,
     read_normalization_recovery_v8_source_overlap_audit,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import (
@@ -165,6 +166,13 @@ def test_v8_source_overlap_round_trip_shared_license_and_tamper(
     assert manifest["summary"]["license_blob_pairwise_overlap_count"] == 1
     assert manifest["summary"]["locale_blob_pairwise_overlap_count"] == 0
     assert len(outputs["source-overlap.jsonl"]) == 3
+    aggregate_manifest, aggregate_outputs = (
+        read_normalization_recovery_v8_source_overlap_aggregate(
+            target,
+            expected_manifest_sha256=str(published["manifest_sha256"]),
+        ))
+    assert aggregate_manifest == manifest
+    assert aggregate_outputs == outputs
     with pytest.raises(BroadQaExternalDataError, match="input/target path"):
         _publish(tmp_path, inputs, target)
 
