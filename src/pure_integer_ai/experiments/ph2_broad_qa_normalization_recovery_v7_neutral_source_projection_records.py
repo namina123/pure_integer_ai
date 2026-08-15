@@ -578,12 +578,16 @@ def derive_neutral_upstream_source_projection_records(
             dict[str, object],
         ]:
     """派生 family、projection、cross-support 与 section-80 census。"""
-    rows_by_family = {
-        GODOT_SOURCE_FAMILY: _godot_rows(godot_manifest, godot_pairs),
-        LIBREOFFICE_SOURCE_FAMILY: _libreoffice_rows(
-            libreoffice_manifest, libreoffice_pairs),
-        VSCODE_SOURCE_FAMILY: _vscode_rows(vscode_manifest, vscode_pairs),
-    }
+    rows_by_family = derive_neutral_upstream_source_rows(
+        godot_manifest=godot_manifest,
+        godot_pairs=godot_pairs,
+        libreoffice_manifest=libreoffice_manifest,
+        libreoffice_pairs=libreoffice_pairs,
+        vscode_manifest=vscode_manifest,
+        vscode_pairs=vscode_pairs,
+        thunderbird_manifest=thunderbird_manifest,
+        thunderbird_pairs=thunderbird_pairs,
+    )
     family_records = (
         _family_record(
             source_family=GODOT_SOURCE_FAMILY,
@@ -661,6 +665,31 @@ def derive_neutral_upstream_source_projection_records(
     return family_records, projections, support_records, summary
 
 
+def derive_neutral_upstream_source_rows(
+        *,
+        godot_manifest: dict[str, object],
+        godot_pairs: tuple[dict[str, object], ...],
+        libreoffice_manifest: dict[str, object],
+        libreoffice_pairs: tuple[dict[str, object], ...],
+        vscode_manifest: dict[str, object],
+        vscode_pairs: tuple[dict[str, object], ...],
+        thunderbird_manifest: dict[str, object],
+        thunderbird_pairs: tuple[dict[str, object], ...],
+        ) -> dict[str, tuple[dict[str, object], ...]]:
+    """重建只在调用链内存中存在的四来源 neutral source rows。"""
+    if (not isinstance(thunderbird_manifest, dict)
+            or not isinstance(thunderbird_pairs, tuple)):
+        raise BroadQaExternalDataError(
+            "v7 neutral source Thunderbird material 漂移")
+    return {
+        GODOT_SOURCE_FAMILY: _godot_rows(godot_manifest, godot_pairs),
+        LIBREOFFICE_SOURCE_FAMILY: _libreoffice_rows(
+            libreoffice_manifest, libreoffice_pairs),
+        VSCODE_SOURCE_FAMILY: _vscode_rows(vscode_manifest, vscode_pairs),
+        THUNDERBIRD_SOURCE_FAMILY: (),
+    }
+
+
 __all__ = [
     "GETTEXT_SOURCE_PROJECTION",
     "GODOT_SOURCE_FAMILY",
@@ -673,4 +702,5 @@ __all__ = [
     "VSCODE_LEAF_PROJECTION",
     "VSCODE_SOURCE_FAMILY",
     "derive_neutral_upstream_source_projection_records",
+    "derive_neutral_upstream_source_rows",
 ]

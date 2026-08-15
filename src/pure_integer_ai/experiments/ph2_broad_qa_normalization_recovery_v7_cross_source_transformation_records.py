@@ -543,6 +543,80 @@ def _outcome(observation: dict[str, object], output_text: str) -> str:
     return "WRONG"
 
 
+def _family_consensus(
+        *,
+        held_out_family: str,
+        observation: dict[str, object],
+        plan: dict[str, object],
+        models: dict[str, dict[str, object]],
+        indexed: bool,
+        ) -> tuple[dict[str, dict[str, object]], str | None]:
+    """执行非 held family model，并只接受全体候选的唯一二票共识。"""
+    results = {}
+    for family in V5_SOURCE_FAMILIES:
+        if family == held_out_family:
+            continue
+        result = _execute_family_model(
+            observation=observation,
+            plan=plan,
+            model=models[family],
+            indexed=indexed,
+        )
+        results[family] = result
+    candidates = {
+        family: str(result["output_text"])
+        for family, result in results.items()
+        if result["decision"] == "CANDIDATE"
+    }
+    support = Counter(candidates.values())
+    consensus_values = [
+        output for output, count in support.items() if count >= 2]
+    consensus = (
+        consensus_values[0]
+        if len(consensus_values) == 1 and len(support) == 1
+        else None)
+    return results, consensus
+
+
+def derive_cross_source_transformation_consensus_proposals(
+        *,
+        observations: tuple[dict[str, object], ...],
+        fragments: tuple[dict[str, object], ...],
+        plans: tuple[dict[str, object], ...],
+        ) -> tuple[dict[str, object], ...]:
+    """重建 TRAIN-only LOSO 共识 proposal，surface 只供下游内存鉴权。"""
+    observation_by_id, _plan_by_id = _indexes(observations, plans)
+    models, _model_records = _derive_models(
+        observations=observations,
+        fragments=fragments,
+        plans=plans,
+        observation_by_id=observation_by_id,
+    )
+    proposals = []
+    for plan in plans:
+        held_out_family = str(plan["source_family"])
+        observation = observation_by_id[str(plan["observation_id"])]
+        _results, consensus = _family_consensus(
+            held_out_family=held_out_family,
+            observation=observation,
+            plan=plan,
+            models=models,
+            indexed=True,
+        )
+        if consensus is None:
+            continue
+        proposals.append({
+            "held_out_observation_id": observation["observation_id"],
+            "held_out_source_family": held_out_family,
+            "pre_authorization_outcome": _outcome(observation, consensus),
+            "proposal_output_sha256": _text_sha256(consensus),
+            "proposal_output_text": consensus,
+            "source_pair_id": observation["source_pair_id"],
+        })
+    proposals.sort(key=lambda item: str(item["held_out_observation_id"]))
+    return tuple(proposals)
+
+
 def _family_loso(
         *,
         held_out_family: str,
@@ -567,22 +641,22 @@ def _family_loso(
         if plan["source_family"] == held_out_family)
     for plan in held_plans:
         observation = observation_by_id[str(plan["observation_id"])]
-        family_candidates = {}
-        for family in V5_SOURCE_FAMILIES:
-            if family == held_out_family:
-                continue
-            indexed_result = _execute_family_model(
-                observation=observation,
-                plan=plan,
-                model=models[family],
-                indexed=True,
-            )
-            reference_result = _execute_family_model(
-                observation=observation,
-                plan=plan,
-                model=models[family],
-                indexed=False,
-            )
+        indexed_results, consensus = _family_consensus(
+            held_out_family=held_out_family,
+            observation=observation,
+            plan=plan,
+            models=models,
+            indexed=True,
+        )
+        reference_results, reference_consensus = _family_consensus(
+            held_out_family=held_out_family,
+            observation=observation,
+            plan=plan,
+            models=models,
+            indexed=False,
+        )
+        for family, indexed_result in indexed_results.items():
+            reference_result = reference_results[family]
             counters["indexed_reference_mismatch_count"] += int(
                 indexed_result != reference_result)
             counters["partial_commit_count"] += int(
@@ -590,17 +664,8 @@ def _family_loso(
             counters["structure_token_execution_mismatch_count"] += int(
                 indexed_result["structure_token_mismatch_count"])
             decisions[str(indexed_result["decision"])] += 1
-            if indexed_result["decision"] == "CANDIDATE":
-                family_candidates[family] = str(
-                    indexed_result["output_text"])
-        output_support = Counter(family_candidates.values())
-        consensus_values = [
-            output for output, count in output_support.items()
-            if count >= 2]
-        consensus = (
-            consensus_values[0]
-            if len(consensus_values) == 1 and len(output_support) == 1
-            else None)
+        counters["indexed_reference_mismatch_count"] += int(
+            consensus != reference_consensus)
         pre_output = str(observation["input_text"]) \
             if consensus is None else consensus
         pre_outcome = _outcome(observation, pre_output)
@@ -622,7 +687,9 @@ def _family_loso(
             authority_output_sha256 is not None)
         counters["neutral_authorized_count"] += authorized
         result_rows.append({
-            "family_candidate_count": len(family_candidates),
+            "family_candidate_count": sum(
+                result["decision"] == "CANDIDATE"
+                for result in indexed_results.values()),
             "family_consensus_available": int(consensus is not None),
             "family_consensus_output_sha256": (
                 "" if consensus is None else _text_sha256(consensus)),
@@ -825,5 +892,6 @@ __all__ = [
     "CROSS_SOURCE_TRANSFORMATION_STAGE_KIND",
     "CROSS_SOURCE_TRANSFORMATION_TARGET_SCOPE",
     "TRANSFORMATION_ATOM_SCALAR_MAX",
+    "derive_cross_source_transformation_consensus_proposals",
     "derive_cross_source_transformation_feasibility",
 ]
