@@ -105,7 +105,7 @@ def test_v5_audit_distinguishes_facility_from_loso_capability() -> None:
 
 def test_v5_edit_core_routes_to_character_local_bucket() -> None:
     """五桶合同把 learned EDIT_CORE 与 character backoff 归入同一局部桶。"""
-    bucket = audit_records._bucket_from_result(
+    bucket = audit_records.normalization_recovery_v5_result_bucket(
         {"identity_preservation": 0},
         {"steps": [{
             "mode": "LONGEST_LOCAL_MATCH",

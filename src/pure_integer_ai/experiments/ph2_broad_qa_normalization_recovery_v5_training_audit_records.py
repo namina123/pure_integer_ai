@@ -134,7 +134,7 @@ def _support_structure_tokens(
     return tuple(tokens)
 
 
-def _bucket_from_result(
+def normalization_recovery_v5_result_bucket(
         observation: dict[str, object],
         result: dict[str, object],
         ) -> str:
@@ -372,14 +372,20 @@ def _context_interpreter_summary(
     return summary, tuple(rows)
 
 
-def _loso_record(
+def derive_normalization_recovery_v5_loso_execution(
         *,
         protocol_manifest_sha256: str,
         observations: tuple[dict[str, object], ...],
         fragments: tuple[dict[str, object], ...],
         held_out_source_family: str,
+        include_reference: bool,
         ) -> dict[str, object]:
-    """移除一个 family 重新学习，再执行 held-out observations。"""
+    """移除一个 family 重学，并返回 held-out 内存执行材料。"""
+    protocol_sha = _sha_value(
+        protocol_manifest_sha256, label="v5 LOSO protocol manifest")
+    if (held_out_source_family not in V5_SOURCE_FAMILIES
+            or type(include_reference) is not bool):
+        raise BroadQaExternalDataError("v5 LOSO execution 参数漂移")
     training_observations = tuple(
         item for item in observations
         if item["source_family"] != held_out_source_family)
@@ -402,7 +408,7 @@ def _loso_record(
         training_observations, training_fragments, training_groups)
     subset_identity = {
         "held_out_source_family": held_out_source_family,
-        "protocol_manifest_sha256": protocol_manifest_sha256,
+        "protocol_manifest_sha256": protocol_sha,
         "training_observation_ids": sorted(training_ids),
     }
     subset_sha = _sha256(canonical_json_bytes(subset_identity))
@@ -438,9 +444,52 @@ def _loso_record(
     indexed = execute_normalization_recovery_v5_phrase_batch(
         program, texts, source_family=held_out_source_family,
         structure_tokens=structures)
-    reference = reference_normalization_recovery_v5_phrase_batch(
-        program, texts, source_family=held_out_source_family,
-        structure_tokens=structures)
+    reference = (
+        reference_normalization_recovery_v5_phrase_batch(
+            program, texts, source_family=held_out_source_family,
+            structure_tokens=structures)
+        if include_reference else ())
+    return {
+        "held_out_observations": held_out_observations,
+        "indexed_results": indexed,
+        "learning_summary": learning_summary,
+        "outputs": outputs,
+        "program": program,
+        "reference_results": reference,
+        "subset_pack_manifest_sha256": subset_pack_sha,
+        "subset_protocol_manifest_sha256": subset_sha,
+        "training_fragments": training_fragments,
+        "training_groups": training_groups,
+        "training_observations": training_observations,
+    }
+
+
+def _loso_record(
+        *,
+        protocol_manifest_sha256: str,
+        observations: tuple[dict[str, object], ...],
+        fragments: tuple[dict[str, object], ...],
+        held_out_source_family: str,
+        ) -> dict[str, object]:
+    """移除一个 family 重新学习，再执行 held-out observations。"""
+    material = derive_normalization_recovery_v5_loso_execution(
+        protocol_manifest_sha256=protocol_manifest_sha256,
+        observations=observations,
+        fragments=fragments,
+        held_out_source_family=held_out_source_family,
+        include_reference=True,
+    )
+    training_observations = material["training_observations"]
+    held_out_observations = material["held_out_observations"]
+    training_fragments = material["training_fragments"]
+    training_groups = material["training_groups"]
+    outputs = material["outputs"]
+    learning_summary = material["learning_summary"]
+    subset_sha = material["subset_protocol_manifest_sha256"]
+    subset_pack_sha = material["subset_pack_manifest_sha256"]
+    program = material["program"]
+    indexed = material["indexed_results"]
+    reference = material["reference_results"]
     outcomes = Counter()
     bucket_outcomes = {
         bucket: Counter() for bucket in AUDIT_BUCKETS}
@@ -456,7 +505,8 @@ def _loso_record(
             outcome = "UNKNOWN"
         else:
             outcome = "WRONG"
-        bucket = _bucket_from_result(observation, indexed_result)
+        bucket = normalization_recovery_v5_result_bucket(
+            observation, indexed_result)
         if bucket not in bucket_outcomes:
             raise BroadQaExternalDataError("v5 LOSO bucket 漂移")
         outcomes[outcome] += 1
@@ -659,5 +709,7 @@ __all__ = [
     "NORMALIZATION_RECOVERY_V5_LOSO_AUDIT_KIND",
     "NORMALIZATION_RECOVERY_V5_RUNTIME_AUDIT_CASE_KIND",
     "RULE_BARE_OUTCOMES",
+    "derive_normalization_recovery_v5_loso_execution",
     "derive_normalization_recovery_v5_training_audit",
+    "normalization_recovery_v5_result_bucket",
 ]
