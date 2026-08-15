@@ -153,28 +153,127 @@ def read_exact_localization_zip(
 
 def localization_structure_tokens(value: str) -> tuple[str, ...]:
     """提取占位符、嵌入标记、实体和显式转义的有序结构。"""
+    return tuple(localization_structure_layout(value)["structure_tokens"])
+
+
+def _normalize_structure_token(token: str) -> str:
+    """把一个 raw structure token 规范为跨 locale 可比较 identity。"""
+    if token.startswith("[") and not token.startswith("$["):
+        body = token[1:-1]
+        closing = body.startswith("/")
+        name = body.lstrip("/").split("=", 1)[0].lower()
+        return ("BBCODE_CLOSE:" if closing else "BBCODE_OPEN:") + name
+    if token.startswith("<"):
+        body = token[1:-1].strip()
+        closing = body.startswith("/")
+        self_closing = body.endswith("/")
+        name = body.lstrip("/").rstrip("/").split(None, 1)[0].lower()
+        prefix = "HTML_CLOSE:" if closing else (
+            "HTML_SELF:" if self_closing else "HTML_OPEN:")
+        return prefix + name
+    return token
+
+
+def localization_structure_layout(value: str) -> dict[str, tuple[str, ...]]:
+    """返回可重建原文的 segment、raw token 与规范 token 有序布局。"""
     if not isinstance(value, str):
-        raise BroadQaExternalDataError("localization structure text 非字符串")
-    tokens = []
+        raise BroadQaExternalDataError("localization structure layout 非字符串")
+    segments = []
+    raw_tokens = []
+    structure_tokens = []
+    cursor = 0
     for match in _STRUCTURE_TOKEN.finditer(value):
-        token = match.group()
-        if token.startswith("[") and not token.startswith("$["):
-            body = token[1:-1]
-            closing = body.startswith("/")
-            name = body.lstrip("/").split("=", 1)[0].lower()
-            tokens.append(
-                ("BBCODE_CLOSE:" if closing else "BBCODE_OPEN:") + name)
-        elif token.startswith("<"):
-            body = token[1:-1].strip()
-            closing = body.startswith("/")
-            self_closing = body.endswith("/")
-            name = body.lstrip("/").rstrip("/").split(None, 1)[0].lower()
-            prefix = "HTML_CLOSE:" if closing else (
-                "HTML_SELF:" if self_closing else "HTML_OPEN:")
-            tokens.append(prefix + name)
-        else:
-            tokens.append(token)
-    return tuple(tokens)
+        raw = match.group()
+        segments.append(value[cursor:match.start()])
+        raw_tokens.append(raw)
+        structure_tokens.append(_normalize_structure_token(raw))
+        cursor = match.end()
+    segments.append(value[cursor:])
+    if len(segments) != len(raw_tokens) + 1:
+        raise BroadQaExternalDataError("localization structure layout 未闭合")
+    return {
+        "raw_tokens": tuple(raw_tokens),
+        "segments": tuple(segments),
+        "structure_tokens": tuple(structure_tokens),
+    }
+
+
+def _next_ledger_token_span(
+        value: str,
+        *,
+        cursor: int,
+        expected_token: str,
+        ) -> tuple[int, int, str]:
+    """从 cursor 后定位一个与 ledger token identity 一致的 raw span。"""
+    if expected_token.startswith(("HTML_", "BBCODE_")):
+        for match in _STRUCTURE_TOKEN.finditer(value, cursor):
+            raw = match.group()
+            if _normalize_structure_token(raw) == expected_token:
+                return match.start(), match.end(), raw
+        raise BroadQaExternalDataError(
+            "localization ledger markup token 未在 surface 中定位")
+    start = value.find(expected_token, cursor)
+    if start < 0:
+        raise BroadQaExternalDataError(
+            "localization ledger literal token 未在 surface 中定位")
+    return start, start + len(expected_token), expected_token
+
+
+def localization_structure_layout_for_tokens(
+        value: str,
+        expected_tokens: tuple[str, ...],
+        ) -> dict[str, tuple[str, ...]]:
+    """按 sealed adapter ledger 逐 token 定位，避免共享 regex 重新选分母。"""
+    if (not isinstance(value, str)
+            or not isinstance(expected_tokens, tuple)
+            or not expected_tokens
+            or any(not isinstance(token, str) or not token
+                   for token in expected_tokens)):
+        raise BroadQaExternalDataError(
+            "localization ledger-guided layout 输入非法")
+    cursor = 0
+    segments = []
+    raw_tokens = []
+    for token in expected_tokens:
+        start, end, raw = _next_ledger_token_span(
+            value,
+            cursor=cursor,
+            expected_token=token,
+        )
+        segments.append(value[cursor:start])
+        raw_tokens.append(raw)
+        cursor = end
+    segments.append(value[cursor:])
+    return {
+        "raw_tokens": tuple(raw_tokens),
+        "segments": tuple(segments),
+        "structure_tokens": expected_tokens,
+    }
+
+
+def localization_structure_token_category(token: str) -> str:
+    """把规范 structure token 映射为可复制而非可生成的广义类别。"""
+    if not isinstance(token, str) or not token:
+        raise BroadQaExternalDataError("localization structure token 非法")
+    if token.startswith("%"):
+        return "PERCENT_PLACEHOLDER"
+    if token.startswith("{"):
+        return "BRACE_PLACEHOLDER"
+    if token.startswith("HTML_"):
+        return token.split(":", 1)[0]
+    if token.startswith("BBCODE_"):
+        return token.split(":", 1)[0]
+    if token.startswith("&"):
+        return "ENTITY"
+    if token.startswith("$["):
+        return "DOLLAR_BRACKET"
+    if token.startswith("$("):
+        return "DOLLAR_PAREN"
+    if token.startswith("`"):
+        return "CODE_FENCE"
+    if token.startswith("\\"):
+        return "ESCAPE"
+    return "OTHER_STRUCTURE"
 
 
 def localization_pair_features(
@@ -224,6 +323,9 @@ __all__ = [
     "git_blob_sha1",
     "localization_pair_features",
     "localization_record_id",
+    "localization_structure_layout",
+    "localization_structure_layout_for_tokens",
+    "localization_structure_token_category",
     "localization_structure_tokens",
     "read_exact_localization_zip",
     "sha256_hex",
