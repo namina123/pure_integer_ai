@@ -15,6 +15,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v5_localiza
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_source_content_audit_v2 import (
     publish_normalization_recovery_v8_source_content_audit_v2,
+    read_normalization_recovery_v8_source_content_aggregate_v2,
     read_normalization_recovery_v8_source_content_audit_v2,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import (
@@ -174,6 +175,13 @@ def test_v8_source_content_v2_round_trip_nonoverwrite_and_tamper(
     assert by_family["KEEPASSXC_PROJECT"]["transient_pair_count"] == 1
     assert by_family["QBITTORRENT_PROJECT"][
         "content_blob_read_this_revision_count"] == 0
+    aggregate_manifest, aggregate_outputs = (
+        read_normalization_recovery_v8_source_content_aggregate_v2(
+            target,
+            expected_manifest_sha256=str(published["manifest_sha256"]),
+        ))
+    assert aggregate_manifest == manifest
+    assert aggregate_outputs == outputs
     with pytest.raises(BroadQaExternalDataError, match="input/target path"):
         publish_normalization_recovery_v8_source_content_audit_v2(
             run_root=tmp_path,

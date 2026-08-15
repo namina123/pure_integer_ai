@@ -16,11 +16,11 @@ from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_source_c
     read_normalization_recovery_v8_source_content_aggregate,
     read_normalization_recovery_v8_source_payloads,
 )
+from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_source_family_records import (
+    derive_normalization_recovery_v8_source_family_records,
+)
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_source_roster_v2 import (
     read_normalization_recovery_v8_source_roster_v2,
-)
-from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_structured_source_records import (
-    derive_normalization_recovery_v8_qt_ts_source_records,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     canonical_json_line,
@@ -161,33 +161,11 @@ def _replacement_record(
             "v8 source content v2 replacement roster 漂移")
     payloads = read_normalization_recovery_v8_source_payloads(
         roster, source_root)
-    locale_paths = tuple(
-        str(item["relative_path"]) for item in roster["locale_files"])
-    expected_paths = (
-        "share/translations/keepassxc_zh_CN.ts",
-        "share/translations/keepassxc_zh_TW.ts",
-    )
-    if locale_paths != expected_paths:
-        raise BroadQaExternalDataError(
-            "v8 source content v2 KeePassXC locale roster 漂移")
+    locale_paths = tuple(str(item["relative_path"])
+                         for item in roster["locale_files"])
     _files, pairs, summary = (
-        derive_normalization_recovery_v8_qt_ts_source_records(
-            source_family="KEEPASSXC_PROJECT",
-            source_policy_scope=str(roster["source_policy_scope"]),
-            license_expression=str(roster["license"]["expression"]),
-            pair_specs=({
-                "domain": "keepassxc",
-                "zh_Hans": {
-                    "expected_language": "zh_CN",
-                    "relative_path": expected_paths[0],
-                },
-                "zh_Hant": {
-                    "expected_language": "zh_TW",
-                    "relative_path": expected_paths[1],
-                },
-            },),
-            files={path: payloads[path] for path in expected_paths},
-        ))
+        derive_normalization_recovery_v8_source_family_records(
+            roster, payloads))
     return {
         "content_blob_read_this_revision_count": len(payloads),
         "content_inheritance": "REPLACEMENT_BLOB_DERIVED_V2",
@@ -297,6 +275,54 @@ def _read_jsonl(path: Path, *, label: str) -> tuple[dict[str, object], ...]:
         raise BroadQaExternalDataError(
             f"v8 source content v2 {label} 不可读") from error
     return tuple(values)
+
+
+def read_normalization_recovery_v8_source_content_aggregate_v2(
+        audit_dir: str | Path,
+        *,
+        expected_manifest_sha256: str,
+        ) -> tuple[
+            dict[str, object], dict[str, tuple[dict[str, object], ...]]]:
+    """只按sealed commitments回读v2 aggregate，不重开source blob。"""
+    root = Path(audit_dir).resolve()
+    path = root / "manifest.json"
+    try:
+        encoded = path.read_bytes()
+        stored = json.loads(encoded)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BroadQaExternalDataError(
+            "v8 source content v2 aggregate manifest 不可读") from error
+    if (_sha256(encoded) != expected_manifest_sha256
+            or not isinstance(stored, dict)
+            or canonical_json_line(stored) != encoded
+            or stored.get("artifact_kind")
+            != NORMALIZATION_RECOVERY_V8_SOURCE_CONTENT_AUDIT_V2_KIND):
+        raise BroadQaExternalDataError(
+            "v8 source content v2 aggregate manifest identity 漂移")
+    files = {str(item.get("relative_path")): item
+             for item in stored.get("files", [])
+             if isinstance(item, dict)}
+    if set(files) != {name for name, _role in _OUTPUT_FILES}:
+        raise BroadQaExternalDataError(
+            "v8 source content v2 aggregate file inventory 漂移")
+    outputs = {}
+    for name, role in _OUTPUT_FILES:
+        values = _read_jsonl(root / name, label=role)
+        if files[name] != _artifact(
+                root / name, role=role, count=len(values)):
+            raise BroadQaExternalDataError(
+                "v8 source content v2 aggregate file identity 漂移")
+        outputs[name] = values
+    census = outputs["source-content-census-v2.jsonl"]
+    if (len(outputs["source-content-v2.jsonl"]) != 3
+            or len(census) != 1
+            or stored.get("summary") != {
+                key: value for key, value in census[0].items()
+                if key not in {"format_version", "record_kind"}
+            }):
+        raise BroadQaExternalDataError(
+            "v8 source content v2 aggregate census 漂移")
+    return {**stored, "manifest_sha256": _sha256(encoded)}, outputs
 
 
 def _artifact(path: Path, *, role: str, count: int) -> dict[str, object]:
@@ -479,5 +505,6 @@ __all__ = [
     "V8_SOURCE_CONTENT_V1_MANIFEST_SHA256",
     "V8_SOURCE_ROSTER_V2_MANIFEST_SHA256",
     "publish_normalization_recovery_v8_source_content_audit_v2",
+    "read_normalization_recovery_v8_source_content_aggregate_v2",
     "read_normalization_recovery_v8_source_content_audit_v2",
 ]

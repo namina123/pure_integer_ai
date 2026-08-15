@@ -18,14 +18,11 @@ from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v5_localiza
     git_blob_sha1,
     sha256_hex,
 )
-from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_gettext_source_records import (
-    derive_normalization_recovery_v8_gettext_source_records,
-)
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_source_roster import (
     read_normalization_recovery_v8_source_roster,
 )
-from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_structured_source_records import (
-    derive_normalization_recovery_v8_qt_ts_source_records,
+from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_source_family_records import (
+    derive_normalization_recovery_v8_source_family_records,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     canonical_json_line,
@@ -154,57 +151,6 @@ def read_normalization_recovery_v8_source_payloads(
     return _read_payloads(record, root)
 
 
-def _qt_pair_spec(
-        *,
-        domain: str,
-        hans_language: str,
-        hans_path: str,
-        hant_path: str,
-        ) -> tuple[dict[str, object], ...]:
-    """构造一个固定Qt TS domain pair spec。"""
-    return ({
-        "domain": domain,
-        "zh_Hans": {
-            "expected_language": hans_language,
-            "relative_path": hans_path,
-        },
-        "zh_Hant": {
-            "expected_language": "zh_TW",
-            "relative_path": hant_path,
-        },
-    },)
-
-
-def _stellarium_specs(
-        locale_paths: tuple[str, ...],
-        ) -> tuple[dict[str, object], ...]:
-    """从已冻结路径重建11个gettext domain pair spec。"""
-    domains = {}
-    for path in locale_paths:
-        value = Path(path)
-        if (len(value.parts) != 3 or value.parts[0] != "po"
-                or value.name not in {"zh_CN.po", "zh_TW.po"}):
-            raise BroadQaExternalDataError(
-                "v8 Stellarium locale path 漂移")
-        domains.setdefault(value.parent.name, {})[value.name] = path
-    if (len(domains) != 11 or any(
-            set(paths) != {"zh_CN.po", "zh_TW.po"}
-            for paths in domains.values())):
-        raise BroadQaExternalDataError(
-            "v8 Stellarium domain roster 漂移")
-    return tuple({
-        "domain": domain,
-        "zh_Hans": {
-            "expected_language": "zh_CN",
-            "relative_path": paths["zh_CN.po"],
-        },
-        "zh_Hant": {
-            "expected_language": "zh_TW",
-            "relative_path": paths["zh_TW.po"],
-        },
-    } for domain, paths in sorted(domains.items()))
-
-
 def _derive_family(
         record: dict[str, object],
         payloads: dict[str, bytes],
@@ -214,50 +160,9 @@ def _derive_family(
     license_expression = str(record["license"]["expression"])
     locale_paths = tuple(str(item["relative_path"])
                          for item in record["locale_files"])
-    locale_files = {path: payloads[path] for path in locale_paths}
-    if family == "BITCOIN_CORE_PROJECT":
-        specs = _qt_pair_spec(
-            domain="bitcoin",
-            hans_language="zh_CN",
-            hans_path="src/qt/locale/bitcoin_zh_CN.ts",
-            hant_path="src/qt/locale/bitcoin_zh_TW.ts",
-        )
-        _files, pairs, summary = (
-            derive_normalization_recovery_v8_qt_ts_source_records(
-                source_family=family,
-                source_policy_scope=str(record["source_policy_scope"]),
-                license_expression=license_expression,
-                pair_specs=specs,
-                files=locale_files,
-            ))
-    elif family == "QBITTORRENT_PROJECT":
-        specs = _qt_pair_spec(
-            domain="qbittorrent",
-            hans_language="zh",
-            hans_path="src/lang/qbittorrent_zh_CN.ts",
-            hant_path="src/lang/qbittorrent_zh_TW.ts",
-        )
-        _files, pairs, summary = (
-            derive_normalization_recovery_v8_qt_ts_source_records(
-                source_family=family,
-                source_policy_scope=str(record["source_policy_scope"]),
-                license_expression=license_expression,
-                pair_specs=specs,
-                files=locale_files,
-            ))
-    elif family == "STELLARIUM_PROJECT":
-        specs = _stellarium_specs(locale_paths)
-        _files, pairs, summary = (
-            derive_normalization_recovery_v8_gettext_source_records(
-                source_family=family,
-                source_policy_scope=str(record["source_policy_scope"]),
-                license_expression=license_expression,
-                pair_specs=specs,
-                files=locale_files,
-            ))
-    else:
-        raise BroadQaExternalDataError(
-            "v8 source content family roster 漂移")
+    _files, pairs, summary = (
+        derive_normalization_recovery_v8_source_family_records(
+            record, payloads))
     return {
         "content_outcome": summary["content_outcome"],
         "format_version": 1,
