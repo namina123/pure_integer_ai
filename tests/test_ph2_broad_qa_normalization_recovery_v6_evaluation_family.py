@@ -13,6 +13,9 @@ from pure_integer_ai.experiments import (
     ph2_broad_qa_normalization_recovery_v6_evaluation_runner as runner_module,
 )
 from pure_integer_ai.experiments import (
+    ph2_broad_qa_normalization_recovery_v6_evaluator as evaluator_module,
+)
+from pure_integer_ai.experiments import (
     ph2_broad_qa_normalization_recovery_v6_label_materialization as materializer_module,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
@@ -429,6 +432,43 @@ def test_evaluator_marks_identity_backoff_on_nonidentity_as_fail() -> None:
     assert coverage["metrics"]["false_reject_count"] == 1
     assert coverage["metrics"]["applicable_count"] == len(records)
     assert report["overall_outcome"] == "FAIL"
+
+
+def test_source_dimension_counts_identity_conflict_overlap_as_blocked(
+        monkeypatch: pytest.MonkeyPatch,
+        ) -> None:
+    """同一 input 的 identity 优先 veto 仍须计入 conflict blocked。"""
+    candidate = {
+        "phrase_program": {
+            "conflict_vetoes": [
+                {"input_text": "重叠输入"},
+                {"input_text": "仅冲突输入"},
+            ],
+        },
+    }
+
+    def execute(*args, **kwargs):
+        """模拟 identity/conflict veto 优先级不同但均回退原文。"""
+        texts = args[1]
+        return ({
+            "decision_reasons": ["IDENTITY_VETO", "IDENTITY_BACKOFF"],
+            "output_text": texts[0],
+        }, {
+            "decision_reasons": ["CONFLICT_VETO", "IDENTITY_BACKOFF"],
+            "output_text": texts[1],
+        })
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "execute_normalization_recovery_v6_candidate_batch",
+        execute,
+    )
+    dimension = evaluator_module._source_dimension(candidate)
+    assert dimension["outcome"] == "NE"
+    assert dimension["metrics"]["declared_conflict_count"] == 2
+    assert dimension["metrics"]["observed_conflict_block_count"] == 2
+    assert dimension["metrics"]["identity_conflict_overlap_block_count"] == 1
+    assert dimension["metrics"]["unscoped_conflict_execution_count"] == 0
 
 
 def _install_runner(

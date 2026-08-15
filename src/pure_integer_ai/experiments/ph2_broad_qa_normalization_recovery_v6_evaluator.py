@@ -367,6 +367,7 @@ def _source_dimension(candidate: dict[str, object]) -> dict[str, object]:
     if not isinstance(conflicts, list):
         return _dimension("SOURCE_POLICY_CONFLICT", {
             "declared_conflict_count": 0,
+            "identity_conflict_overlap_block_count": 0,
             "observed_conflict_block_count": 0,
             "policy_specific_replay_count": 0,
             "unscoped_conflict_execution_count": 0,
@@ -381,10 +382,16 @@ def _source_dimension(candidate: dict[str, object]) -> dict[str, object]:
         results = ()
     blocked = sum(
         result.get("output_text") == text
-        and "CONFLICT_VETO" in result.get("decision_reasons", ())
+        and bool({"CONFLICT_VETO", "IDENTITY_VETO"}.intersection(
+            result.get("decision_reasons", ())))
+        for text, result in zip(texts, results))
+    overlap = sum(
+        result.get("output_text") == text
+        and "IDENTITY_VETO" in result.get("decision_reasons", ())
         for text, result in zip(texts, results))
     metrics = {
         "declared_conflict_count": len(conflicts),
+        "identity_conflict_overlap_block_count": overlap,
         "observed_conflict_block_count": blocked,
         "policy_specific_replay_count": 0,
         "unscoped_conflict_execution_count": sum(
