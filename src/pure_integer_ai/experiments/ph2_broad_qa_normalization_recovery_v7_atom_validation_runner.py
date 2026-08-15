@@ -86,6 +86,11 @@ def run_audacity_atom_validation_once(
         expected_commitment_v2_manifest_sha256: str,
         family_v1_dir: str | Path,
         expected_family_v1_manifest_sha256: str,
+        family_v2_dir: str | Path,
+        expected_family_v2_manifest_sha256: str,
+        failed_v2_publication_dir: str | Path,
+        expected_v2_guard_sha256: str,
+        expected_v2_failure_sha256: str,
         training_protocol_dir: str | Path,
         variable_structure_audit_dir: str | Path,
         neutral_semantic_source_audit_dir: str | Path,
@@ -109,6 +114,8 @@ def run_audacity_atom_validation_once(
     commitment = Path(commitment_v2_dir).resolve()
     family = Path(family_freeze_dir).resolve()
     family_v1 = Path(family_v1_dir).resolve()
+    family_v2 = Path(family_v2_dir).resolve()
+    failed_v2 = Path(failed_v2_publication_dir).resolve()
     directory_inputs = tuple(Path(value).resolve() for value in (
         training_protocol_dir, variable_structure_audit_dir,
         neutral_semantic_source_audit_dir, godot_source_pack_dir,
@@ -120,11 +127,13 @@ def run_audacity_atom_validation_once(
     if (not publication.is_relative_to(root) or publication.exists()
             or any(not path.is_dir() or not path.is_relative_to(root)
                    for path in (
-                       source, atom, commitment, family, family_v1,
+                       source, atom, commitment, family, family_v1, family_v2,
+                       failed_v2,
                        *directory_inputs))
             or not archive.is_file() or not archive.is_relative_to(root)
             or any(_overlap(publication, path) for path in (
-                source, atom, commitment, family, family_v1,
+                source, atom, commitment, family, family_v1, family_v2,
+                failed_v2,
                 *directory_inputs, archive))):
         raise BroadQaExternalDataError(
             "Audacity atom-validation runner path 非法或已消费")
@@ -142,6 +151,12 @@ def run_audacity_atom_validation_once(
         family_v1_dir=family_v1,
         expected_family_v1_manifest_sha256=(
             expected_family_v1_manifest_sha256),
+        family_v2_dir=family_v2,
+        expected_family_v2_manifest_sha256=(
+            expected_family_v2_manifest_sha256),
+        failed_v2_publication_dir=failed_v2,
+        expected_v2_guard_sha256=expected_v2_guard_sha256,
+        expected_v2_failure_sha256=expected_v2_failure_sha256,
     )
     expected_publication = (
         root / str(family_manifest["publication_contract"]["relative_path"])

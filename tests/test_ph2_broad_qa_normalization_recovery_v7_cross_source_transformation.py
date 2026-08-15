@@ -257,6 +257,32 @@ def test_external_optional_rewrite_uses_input_only_and_two_family_consensus(
     assert proposals[0]["held_label_read_count"] == 0
 
 
+def test_external_optional_rewrite_accepts_plain_input_without_token_ledger(
+        ) -> None:
+    """无 structure token 的普通文本必须走标准 layout parser。"""
+    observations, fragments, plans, _projections = _material()
+    held_inputs = ({
+        "format_version": 1,
+        "input_text": "舊",
+        "official_source_text": "Old",
+        "pair_id": _id("audacity-plain-pair"),
+        "record_kind": "NORMALIZATION_RECOVERY_V7_EXTERNAL_HELD_INPUT_V1",
+        "source_family": "AUDACITY_PROJECT",
+        "source_policy_scope": "AUDACITY_ZH_TW_TO_ZH_CN_FIXED_COMMIT_V1",
+        "structure_tokens": [],
+    },)
+    proposals, census = (
+        derive_external_cross_source_optional_rewrite_proposals(
+            observations=observations,
+            fragments=fragments,
+            plans=plans,
+            held_inputs=held_inputs,
+        ))
+    assert census["proposed_count"] == 1
+    assert census["indexed_reference_mismatch_count"] == 0
+    assert proposals[0]["proposal_output_text"] == "新詞"
+
+
 def _fake_outputs() -> tuple[
         dict[str, tuple[dict[str, object], ...]], dict[str, object]]:
     """构造 audit publisher/reader 的小型稳定输出。"""

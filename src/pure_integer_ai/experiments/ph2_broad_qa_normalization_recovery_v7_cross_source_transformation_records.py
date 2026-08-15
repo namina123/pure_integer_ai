@@ -636,7 +636,9 @@ def _execute_external_optional_family_model(
             "v7 external optional rewrite interpreter 非法")
     input_text = str(held_input["input_text"])
     tokens = tuple(str(item) for item in held_input["structure_tokens"])
-    layout = localization_structure_layout_for_tokens(input_text, tokens)
+    layout = (
+        localization_structure_layout_for_tokens(input_text, tokens)
+        if tokens else localization_structure_layout(input_text))
     stable_scalars = model.get("stable_scalars")
     if not isinstance(stable_scalars, frozenset):
         raise BroadQaExternalDataError(
@@ -700,8 +702,9 @@ def _execute_external_optional_family_model(
                 rebuilt.append(layout["raw_tokens"][ordinal])
         candidate = "".join(rebuilt)
         try:
-            output_layout = localization_structure_layout_for_tokens(
-                candidate, tokens)
+            output_layout = (
+                localization_structure_layout_for_tokens(candidate, tokens)
+                if tokens else localization_structure_layout(candidate))
             structure_mismatch = int(
                 output_layout["raw_tokens"] != layout["raw_tokens"])
         except BroadQaExternalDataError:

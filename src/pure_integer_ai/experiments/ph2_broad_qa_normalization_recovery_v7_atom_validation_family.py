@@ -37,11 +37,17 @@ NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V1_KIND = (
 NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V1_STATUS = (
     "AUDACITY_ATOM_VALIDATION_CODE_AND_FAMILY_FROZEN_"
     "ZH_CN_LABEL_UNREAD_NOT_RUN")
-NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_KIND = (
+NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V2_KIND = (
     "PH2_BROAD_QA_NORMALIZATION_RECOVERY_V7_"
     "AUDACITY_ATOM_VALIDATION_FAMILY_FREEZE_V2")
-NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_STATUS = (
+NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V2_STATUS = (
     "AUDACITY_ATOM_VALIDATION_CODE_FAMILY_AND_UNIQUE_PUBLICATION_FROZEN_"
+    "ZH_CN_LABEL_UNREAD_NOT_RUN")
+NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_KIND = (
+    "PH2_BROAD_QA_NORMALIZATION_RECOVERY_V7_"
+    "AUDACITY_ATOM_VALIDATION_FAMILY_FREEZE_V3")
+NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_STATUS = (
+    "AUDACITY_ATOM_VALIDATION_EMPTY_TOKEN_FIX_AND_UNIQUE_PUBLICATION_FROZEN_"
     "ZH_CN_LABEL_UNREAD_NOT_RUN")
 
 AUDACITY_ATOM_VALIDATION_SOURCE_MANIFEST_SHA256 = (
@@ -52,7 +58,17 @@ AUDACITY_ATOM_VALIDATION_COMMITMENT_V2_MANIFEST_SHA256 = (
     "528d0d85debd7bb1f991fc735c71d2497ac896ece91e8420c9bc280ca866fef7")
 AUDACITY_ATOM_VALIDATION_FAMILY_V1_MANIFEST_SHA256 = (
     "aac1ad13a868c2948e5588157b8eec0b30670ae35e4ca42e7c58fbbb8e45d4eb")
+AUDACITY_ATOM_VALIDATION_FAMILY_V2_MANIFEST_SHA256 = (
+    "d6fc26bbf86aeeb4af721337f04a5c0dbb28967d8327e1f590ed59f4bf09a5b5")
+AUDACITY_ATOM_VALIDATION_V2_GUARD_SHA256 = (
+    "c831af390d426aba86c4f2016f732901919778ca74ec6623b56fca604e837378")
+AUDACITY_ATOM_VALIDATION_V2_FAILURE_SHA256 = (
+    "f927e20dd5be21f6a58938fbf1692bfb62de37725d614adfc01877667fdc13a5")
+AUDACITY_ATOM_VALIDATION_V2_EXCEPTION_MESSAGE_SHA256 = (
+    "542c6331515b2b49b11275ecce1c04df875b30a1933029a75570deb37662625d")
 AUDACITY_ATOM_VALIDATION_PUBLICATION_RELATIVE_PATH = (
+    "normalization-recovery-v7-audacity-atom-validation-formal-v2")
+AUDACITY_ATOM_VALIDATION_V2_PUBLICATION_RELATIVE_PATH = (
     "normalization-recovery-v7-audacity-atom-validation-formal-v1")
 
 AUDACITY_ATOM_VALIDATION_CODE_FILES = (
@@ -185,6 +201,94 @@ def _validate_family_v1(
             "Audacity atom-validation family v1 lineage 漂移")
 
 
+def _validate_family_v2(
+        value: dict[str, object],
+        *,
+        source_sha256: str,
+        atom_sha256: str,
+        commitment_sha256: str,
+        family_v1_sha256: str,
+        ) -> None:
+    """核对 v2 固定 publication family 与零 label-read lineage。"""
+    reads = value.get("validation_reads")
+    inputs = value.get("inputs")
+    publication = value.get("publication_contract")
+    if (value.get("artifact_kind")
+            != NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V2_KIND
+            or value.get("status")
+            != NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V2_STATUS
+            or value.get("format_version") != 2
+            or not isinstance(reads, dict)
+            or reads.get("validation_run_count") != 0
+            or reads.get("zh_cn_label_read_count") != 0
+            or reads.get("audacity_identity_raw_or_translation_read_count")
+            != 0
+            or not isinstance(inputs, dict)
+            or inputs.get("audacity_source_pack_manifest_sha256")
+            != source_sha256
+            or inputs.get("atom_identifiability_manifest_sha256")
+            != atom_sha256
+            or inputs.get("commitment_v2_manifest_sha256")
+            != commitment_sha256
+            or inputs.get("superseded_family_v1_manifest_sha256")
+            != family_v1_sha256
+            or not isinstance(publication, dict)
+            or publication.get("relative_path")
+            != AUDACITY_ATOM_VALIDATION_V2_PUBLICATION_RELATIVE_PATH
+            or publication.get("alternate_publication_path_allowed") != 0):
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation family v2 lineage 漂移")
+
+
+def _read_failed_v2_publication(
+        directory: str | Path,
+        *,
+        expected_guard_sha256: str,
+        expected_failure_sha256: str,
+        family_v2_sha256: str,
+        ) -> dict[str, object]:
+    """只读 v2 guard/failure，并证明 authorization/label/scoring 未发生。"""
+    root = Path(directory).resolve()
+    expected_names = {
+        "run-000001.guard.json", "run-000001.failure.json"}
+    try:
+        actual_names = {item.name for item in root.iterdir() if item.is_file()}
+        guard_encoded = (root / "run-000001.guard.json").read_bytes()
+        failure_encoded = (root / "run-000001.failure.json").read_bytes()
+        guard = json.loads(guard_encoded)
+        failure = json.loads(failure_encoded)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation v2 failure publication 不可读") from error
+    if (expected_guard_sha256 != AUDACITY_ATOM_VALIDATION_V2_GUARD_SHA256
+            or expected_failure_sha256
+            != AUDACITY_ATOM_VALIDATION_V2_FAILURE_SHA256
+            or actual_names != expected_names
+            or _sha256(guard_encoded) != expected_guard_sha256
+            or _sha256(failure_encoded) != expected_failure_sha256
+            or canonical_json_line(guard) != guard_encoded
+            or canonical_json_line(failure) != failure_encoded
+            or guard.get("family_manifest_sha256") != family_v2_sha256
+            or failure.get("family_manifest_sha256") != family_v2_sha256
+            or failure.get("guard_sha256") != expected_guard_sha256
+            or failure.get("exception_type") != "BroadQaExternalDataError"
+            or failure.get("exception_message_sha256")
+            != AUDACITY_ATOM_VALIDATION_V2_EXCEPTION_MESSAGE_SHA256
+            or failure.get("status")
+            != "FORMAL_RUN_FAILED_AFTER_GUARD_NO_RERUN"):
+        raise BroadQaExternalDataError(
+            "Audacity atom-validation v2 failure lineage 漂移")
+    return {
+        "authorization_publication_exists": 0,
+        "failure_sha256": expected_failure_sha256,
+        "guard_sha256": expected_guard_sha256,
+        "exception_message_sha256": (
+            AUDACITY_ATOM_VALIDATION_V2_EXCEPTION_MESSAGE_SHA256),
+        "score_or_aggregate_exists": 0,
+        "zh_cn_label_read_count": 0,
+    }
+
+
 def _git_text(repository: Path, *arguments: str) -> str:
     """执行只读 Git identity 命令。"""
     try:
@@ -243,6 +347,11 @@ def build_audacity_atom_validation_family_freeze(
         expected_commitment_v2_manifest_sha256: str,
         family_v1_dir: str | Path,
         expected_family_v1_manifest_sha256: str,
+        family_v2_dir: str | Path,
+        expected_family_v2_manifest_sha256: str,
+        failed_v2_publication_dir: str | Path,
+        expected_v2_guard_sha256: str,
+        expected_v2_failure_sha256: str,
         ) -> dict[str, object]:
     """从三份 manifest 与 live pushed code 构造零 label read family。"""
     if (expected_source_manifest_sha256
@@ -252,7 +361,9 @@ def build_audacity_atom_validation_family_freeze(
             or expected_commitment_v2_manifest_sha256
             != AUDACITY_ATOM_VALIDATION_COMMITMENT_V2_MANIFEST_SHA256
             or expected_family_v1_manifest_sha256
-            != AUDACITY_ATOM_VALIDATION_FAMILY_V1_MANIFEST_SHA256):
+            != AUDACITY_ATOM_VALIDATION_FAMILY_V1_MANIFEST_SHA256
+            or expected_family_v2_manifest_sha256
+            != AUDACITY_ATOM_VALIDATION_FAMILY_V2_MANIFEST_SHA256):
         raise BroadQaExternalDataError(
             "Audacity atom-validation family 非正式 predecessor SHA")
     source = _read_manifest_only(
@@ -275,6 +386,21 @@ def build_audacity_atom_validation_family_freeze(
         source_sha256=source["manifest_sha256"],
         atom_sha256=atom["manifest_sha256"],
         commitment_sha256=commitment["manifest_sha256"])
+    family_v2 = _read_manifest_only(
+        family_v2_dir,
+        expected_sha256=expected_family_v2_manifest_sha256,
+        label="superseded family v2 manifest")
+    _validate_family_v2(
+        family_v2,
+        source_sha256=source["manifest_sha256"],
+        atom_sha256=atom["manifest_sha256"],
+        commitment_sha256=commitment["manifest_sha256"],
+        family_v1_sha256=family_v1["manifest_sha256"])
+    failed_v2 = _read_failed_v2_publication(
+        failed_v2_publication_dir,
+        expected_guard_sha256=expected_v2_guard_sha256,
+        expected_failure_sha256=expected_v2_failure_sha256,
+        family_v2_sha256=family_v2["manifest_sha256"])
     repository = Path(repository_root).resolve()
     if not repository.is_dir():
         raise BroadQaExternalDataError(
@@ -298,7 +424,7 @@ def build_audacity_atom_validation_family_freeze(
         "code_files": code_files,
         "code_freeze_sha256": code_sha,
         "denominator": commitment["denominator"],
-        "format_version": 2,
+        "format_version": 3,
         "gates": commitment["gates"],
         "inputs": {
             "atom_identifiability_manifest_sha256": atom["manifest_sha256"],
@@ -308,6 +434,9 @@ def build_audacity_atom_validation_family_freeze(
                 "manifest_sha256"],
             "superseded_family_v1_manifest_sha256": family_v1[
                 "manifest_sha256"],
+            "superseded_family_v2_manifest_sha256": family_v2[
+                "manifest_sha256"],
+            "v2_failure_publication": failed_v2,
         },
         "mastery_claimed": 0,
         "production_enabled": 0,
@@ -317,6 +446,14 @@ def build_audacity_atom_validation_family_freeze(
             "relative_path": AUDACITY_ATOM_VALIDATION_PUBLICATION_RELATIVE_PATH,
             "run_ordinal": 1,
             "v1_per_target_guard_superseded": 1,
+            "v2_failed_publication_superseded": 1,
+        },
+        "revision": {
+            "authorization_or_scoring_threshold_changed": 0,
+            "denominator_or_source_changed": 0,
+            "empty_structure_token_uses_standard_layout_parser": 1,
+            "individual_case_or_zh_cn_label_read_count": 0,
+            "reason": "V2_FAILED_BEFORE_AUTHORIZATION_ON_EMPTY_TOKEN_LEDGER",
         },
         "runtime_program_published": 0,
         "scoring_protocol": {
@@ -335,6 +472,9 @@ def build_audacity_atom_validation_family_freeze(
             "commitment_v2_manifest_read_count": 1,
             "source_pack_manifest_read_count": 1,
             "superseded_family_v1_manifest_read_count": 1,
+            "superseded_family_v2_manifest_read_count": 1,
+            "v2_failure_guard_read_count": 1,
+            "v2_failure_record_read_count": 1,
             "validation_run_count": 0,
             "zh_cn_label_read_count": 0,
         },
@@ -368,7 +508,7 @@ def publish_audacity_atom_validation_family_freeze(
     root = _require_k_root(run_root)
     inputs = tuple(Path(arguments[name]).resolve() for name in (
         "source_pack_dir", "atom_audit_dir", "commitment_v2_dir",
-        "family_v1_dir"))
+        "family_v1_dir", "family_v2_dir", "failed_v2_publication_dir"))
     target = Path(target_dir).resolve()
     if (any(not path.is_dir() or not path.is_relative_to(root)
             for path in inputs)
@@ -408,12 +548,19 @@ __all__ = [
     "AUDACITY_ATOM_VALIDATION_CODE_FILES",
     "AUDACITY_ATOM_VALIDATION_COMMITMENT_V2_MANIFEST_SHA256",
     "AUDACITY_ATOM_VALIDATION_FAMILY_V1_MANIFEST_SHA256",
+    "AUDACITY_ATOM_VALIDATION_FAMILY_V2_MANIFEST_SHA256",
     "AUDACITY_ATOM_VALIDATION_PUBLICATION_RELATIVE_PATH",
+    "AUDACITY_ATOM_VALIDATION_V2_FAILURE_SHA256",
+    "AUDACITY_ATOM_VALIDATION_V2_EXCEPTION_MESSAGE_SHA256",
+    "AUDACITY_ATOM_VALIDATION_V2_GUARD_SHA256",
+    "AUDACITY_ATOM_VALIDATION_V2_PUBLICATION_RELATIVE_PATH",
     "AUDACITY_ATOM_VALIDATION_SOURCE_MANIFEST_SHA256",
     "NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_KIND",
     "NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_STATUS",
     "NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V1_KIND",
     "NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V1_STATUS",
+    "NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V2_KIND",
+    "NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V2_STATUS",
     "build_audacity_atom_validation_family_freeze",
     "publish_audacity_atom_validation_family_freeze",
     "read_audacity_atom_validation_family_freeze",

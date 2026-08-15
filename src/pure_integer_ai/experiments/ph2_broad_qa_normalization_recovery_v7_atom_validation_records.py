@@ -59,6 +59,16 @@ def _layout_profile(value: str) -> tuple[int, ...]:
                  if scalar != "_" and not scalar.isalnum())
 
 
+def _localized_layout(
+        value: str,
+        tokens: tuple[str, ...],
+        ) -> dict[str, object]:
+    """普通文本走标准 parser，非空 ledger 才走 token-guided parser。"""
+    return (
+        localization_structure_layout_for_tokens(value, tokens)
+        if tokens else localization_structure_layout(value))
+
+
 def _held_input_index(
         held_inputs: tuple[dict[str, object], ...],
         ) -> dict[str, dict[str, object]]:
@@ -119,10 +129,8 @@ def derive_audacity_atom_validation_authorizations(
             "PROPOSED_UNIQUE_MULTI_FAMILY_CONSENSUS")
         if not authorized:
             reasons[str(proposal["proposal_decision"])] += 1
-        input_layout = localization_structure_layout_for_tokens(
-            input_text, tokens)
-        proposal_layout = localization_structure_layout_for_tokens(
-            proposal_text, tokens)
+        input_layout = _localized_layout(input_text, tokens)
+        proposal_layout = _localized_layout(proposal_text, tokens)
         source_layout = localization_structure_layout(source)
         if tuple(source_layout["structure_tokens"]) != tokens:
             authorized = False

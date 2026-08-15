@@ -214,6 +214,31 @@ def test_marked_morphology_defers_external_proposal() -> None:
         "MARKED_MORPHOLOGY_UNRESOLVED": 1}
 
 
+def test_plain_external_input_without_token_ledger_can_be_authorized() -> None:
+    """普通 Audacity 文本不应因空 token ledger 触发设施异常。"""
+    observations, fragments, plans = _training()
+    held = ({
+        "format_version": 1,
+        "input_text": "外掛程式",
+        "official_source_text": "Plugin",
+        "pair_id": _id("audacity-plain-plugin"),
+        "record_kind": "NORMALIZATION_RECOVERY_V7_EXTERNAL_HELD_INPUT_V1",
+        "source_family": AUDACITY_SOURCE_FAMILY,
+        "source_policy_scope": AUDACITY_SOURCE_POLICY_SCOPE,
+        "structure_tokens": [],
+    },)
+    authorizations, census = derive_audacity_atom_validation_authorizations(
+        observations=observations,
+        fragments=fragments,
+        plans=plans,
+        held_inputs=held,
+        opencc_routes={},
+        morphology_by_form={"plugin": (("plugin", "N;SG"),)},
+    )
+    assert census["authorized_count"] == 1
+    assert authorizations[0]["authorization_decision"] == "AUTHORIZED"
+
+
 def _write_manifest(path: Path, value: dict[str, object]) -> str:
     """写入规范 synthetic manifest 并返回 SHA。"""
     path.mkdir()
@@ -281,6 +306,47 @@ def test_family_freeze_binds_manifests_code_and_pushed_git(
             "zh_cn_label_read_count": 0,
         },
     })
+    family_v2_dir = tmp_path / "family-v2"
+    family_v2_sha = _write_manifest(family_v2_dir, {
+        "artifact_kind": family.NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V2_KIND,
+        "format_version": 2,
+        "inputs": {
+            "atom_identifiability_manifest_sha256": atom_sha,
+            "audacity_source_pack_manifest_sha256": source_sha,
+            "commitment_v2_manifest_sha256": commitment_sha,
+            "superseded_family_v1_manifest_sha256": family_v1_sha,
+        },
+        "publication_contract": {
+            "alternate_publication_path_allowed": 0,
+            "relative_path": family.AUDACITY_ATOM_VALIDATION_V2_PUBLICATION_RELATIVE_PATH,
+        },
+        "status": family.NORMALIZATION_RECOVERY_V7_ATOM_VALIDATION_FAMILY_V2_STATUS,
+        "validation_reads": {
+            "audacity_identity_raw_or_translation_read_count": 0,
+            "validation_run_count": 0,
+            "zh_cn_label_read_count": 0,
+        },
+    })
+    failed_v2_dir = tmp_path / "formal-v1"
+    failed_v2_dir.mkdir()
+    guard = {
+        "family_manifest_sha256": family_v2_sha,
+        "format_version": 1,
+    }
+    guard_encoded = canonical_json_line(guard)
+    (failed_v2_dir / "run-000001.guard.json").write_bytes(guard_encoded)
+    guard_sha = hashlib.sha256(guard_encoded).hexdigest()
+    failure = {
+        "exception_message_sha256": "e" * 64,
+        "exception_type": "BroadQaExternalDataError",
+        "family_manifest_sha256": family_v2_sha,
+        "format_version": 1,
+        "guard_sha256": guard_sha,
+        "status": "FORMAL_RUN_FAILED_AFTER_GUARD_NO_RERUN",
+    }
+    failure_encoded = canonical_json_line(failure)
+    (failed_v2_dir / "run-000001.failure.json").write_bytes(failure_encoded)
+    failure_sha = hashlib.sha256(failure_encoded).hexdigest()
     monkeypatch.setattr(
         family, "AUDACITY_ATOM_VALIDATION_SOURCE_MANIFEST_SHA256", source_sha)
     monkeypatch.setattr(
@@ -291,6 +357,16 @@ def test_family_freeze_binds_manifests_code_and_pushed_git(
     monkeypatch.setattr(
         family, "AUDACITY_ATOM_VALIDATION_FAMILY_V1_MANIFEST_SHA256",
         family_v1_sha)
+    monkeypatch.setattr(
+        family, "AUDACITY_ATOM_VALIDATION_FAMILY_V2_MANIFEST_SHA256",
+        family_v2_sha)
+    monkeypatch.setattr(
+        family, "AUDACITY_ATOM_VALIDATION_V2_GUARD_SHA256", guard_sha)
+    monkeypatch.setattr(
+        family, "AUDACITY_ATOM_VALIDATION_V2_FAILURE_SHA256", failure_sha)
+    monkeypatch.setattr(
+        family, "AUDACITY_ATOM_VALIDATION_V2_EXCEPTION_MESSAGE_SHA256",
+        "e" * 64)
     monkeypatch.setattr(family, "_require_k_root", lambda value: Path(value))
     monkeypatch.setattr(family, "_repository_identity", lambda _root: {
         "head_commit_sha1": "a" * 40,
@@ -314,6 +390,11 @@ def test_family_freeze_binds_manifests_code_and_pushed_git(
         "expected_commitment_v2_manifest_sha256": commitment_sha,
         "family_v1_dir": family_v1_dir,
         "expected_family_v1_manifest_sha256": family_v1_sha,
+        "family_v2_dir": family_v2_dir,
+        "expected_family_v2_manifest_sha256": family_v2_sha,
+        "failed_v2_publication_dir": failed_v2_dir,
+        "expected_v2_guard_sha256": guard_sha,
+        "expected_v2_failure_sha256": failure_sha,
     }
     published = family.publish_audacity_atom_validation_family_freeze(
         run_root=tmp_path, target_dir=target, **arguments)
@@ -346,7 +427,8 @@ def test_runner_writes_authorization_before_label_and_consumes_failure_identity(
         ) -> None:
     """runner guard/authorization 先于 label，且同一 publication 不可重跑。"""
     roots = {}
-    for name in ("family", "family-v1", "source", "atom", "commitment"):
+    for name in ("family", "family-v1", "family-v2", "formal-v1",
+                 "source", "atom", "commitment"):
         roots[name] = tmp_path / name
         roots[name].mkdir()
     training_roots = []
@@ -419,6 +501,11 @@ def test_runner_writes_authorization_before_label_and_consumes_failure_identity(
         "expected_commitment_v2_manifest_sha256": "6" * 64,
         "family_v1_dir": roots["family-v1"],
         "expected_family_v1_manifest_sha256": "7" * 64,
+        "family_v2_dir": roots["family-v2"],
+        "expected_family_v2_manifest_sha256": "8" * 64,
+        "failed_v2_publication_dir": roots["formal-v1"],
+        "expected_v2_guard_sha256": "9" * 64,
+        "expected_v2_failure_sha256": "a" * 64,
         "training_protocol_dir": training_roots[0],
         "variable_structure_audit_dir": training_roots[1],
         "neutral_semantic_source_audit_dir": training_roots[2],
