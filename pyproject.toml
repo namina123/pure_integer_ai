@@ -49,6 +49,11 @@ package-dir = { "" = "src" }
 where = ["src"]
 include = ["pure_integer_ai*"]
 
+[tool.setuptools.package-data]
+"pure_integer_ai.experiments" = [
+  "ph2_broad_qa_normalization_recovery_v7_vscode_english_binding_ast.mjs",
+]
+
 [tool.setuptools.data-files]
 "share/pure_integer_ai/data/ph2" = [
   "data/ph2/sparse_qa_runtime_snapshot_v1.json",
