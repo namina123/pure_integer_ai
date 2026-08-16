@@ -5,6 +5,8 @@ from dataclasses import replace
 import hashlib
 from pathlib import Path
 
+import pytest
+
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     canonical_json_bytes,
     canonical_json_line,
@@ -16,11 +18,13 @@ from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_family
     PRIVATE_OWNER_ARTIFACT_KIND,
     GenerationGeneralizationCodeFileIdentity,
     GenerationGeneralizationCodeIdentity,
+    GenerationGeneralizationEvaluationFamilyError,
     GenerationGeneralizationPublicDryRunReceipt,
     build_generation_generalization_code_identity,
     build_generation_generalization_evaluation_family_freeze,
     double_scan_generation_generalization_observation_inventory,
     generation_generalization_verdict_contract_sha256,
+    read_generation_generalization_public_dry_run_receipt,
     read_generation_generalization_private_label_owner_receipt,
 )
 from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_observation import (
@@ -118,9 +122,21 @@ def test_family_freeze_binds_double_pass_owner_metadata_and_shared_guard(
         hashlib.sha256(canonical_json_bytes(policy.to_dict())).hexdigest(),
         _sha("public-batch"),
         _sha("public-observations"),
+        tuple(sorted(_sha(f"public-observation-{index}")
+                     for index in range(1, inventory.record_count + 1))),
+        tuple(sorted(_sha(f"public-content-{index}")
+                     for index in range(1, inventory.record_count + 1))),
         inventory.record_count,
         "PASS",
     )
+    assert GenerationGeneralizationPublicDryRunReceipt.from_dict(
+        dry_run.to_dict()) == dry_run
+    dry_run_path = tmp_path / "public-dry-run.receipt.json"
+    dry_run_path.write_bytes(canonical_json_line(dry_run.to_dict()))
+    assert read_generation_generalization_public_dry_run_receipt(
+        dry_run_path) == dry_run
+    dry_run_receipt_sha = hashlib.sha256(
+        dry_run_path.read_bytes()).hexdigest()
     freeze = build_generation_generalization_evaluation_family_freeze(
         public_head_sha1="1" * 40,
         candidate_manifest_relative_path="candidate/manifest.json",
@@ -135,6 +151,9 @@ def test_family_freeze_binds_double_pass_owner_metadata_and_shared_guard(
         private_owner_receipt_relative_path="owner-receipt.json",
         private_owner_receipt_sha256=owner_receipt_sha,
         private_owner=owner,
+        public_dry_run_receipt_relative_path=(
+            "public-preflight/public-dry-run.receipt.json"),
+        public_dry_run_receipt_sha256=dry_run_receipt_sha,
         public_dry_run=dry_run,
     )
     assert freeze["observation_inventory"]["double_pass_equal"] == 1
@@ -143,6 +162,68 @@ def test_family_freeze_binds_double_pass_owner_metadata_and_shared_guard(
     assert freeze["label_read_count_before_prediction_seal"] == 0
     assert freeze["runner_contract"][
         "parallel_private_generation_logic_allowed"] == 0
+    assert freeze["contamination_audit"] == {
+        "formal_public_content_overlap_count": 0,
+        "formal_public_stable_key_overlap_count": 0,
+        "policy": (
+            "FORMAL_OBSERVATIONS_AND_CONTENT_DISJOINT_FROM_PUBLIC_PREFLIGHT"),
+    }
+
+    contaminated = replace(
+        dry_run,
+        observation_stable_key_sha256s=tuple(sorted(
+            item.stable_key_sha256 for item in inventory.records)),
+    )
+    with pytest.raises(
+            GenerationGeneralizationEvaluationFamilyError,
+            match="复用了 public dry-run"):
+        build_generation_generalization_evaluation_family_freeze(
+            public_head_sha1="1" * 40,
+            candidate_manifest_relative_path="candidate/manifest.json",
+            candidate_manifest_sha256=_sha("candidate-manifest"),
+            candidate_manifest_size_bytes=123,
+            candidate_payload_sha256=candidate_sha,
+            candidate_training_artifact_sha256=_sha("train"),
+            code_identity=actual_code,
+            policy=policy,
+            observation_inventory_relative_path="observations/held-out.jsonl",
+            observation_inventory=inventory,
+            private_owner_receipt_relative_path="owner-receipt.json",
+            private_owner_receipt_sha256=owner_receipt_sha,
+            private_owner=owner,
+            public_dry_run_receipt_relative_path=(
+                "public-preflight/public-dry-run.receipt.json"),
+            public_dry_run_receipt_sha256=dry_run_receipt_sha,
+            public_dry_run=contaminated,
+        )
+
+    renamed_public_content = replace(
+        dry_run,
+        observation_content_sha256s=tuple(sorted(
+            item.content_sha256 for item in inventory.records)),
+    )
+    with pytest.raises(
+            GenerationGeneralizationEvaluationFamilyError,
+            match="复用了 public dry-run 内容"):
+        build_generation_generalization_evaluation_family_freeze(
+            public_head_sha1="1" * 40,
+            candidate_manifest_relative_path="candidate/manifest.json",
+            candidate_manifest_sha256=_sha("candidate-manifest"),
+            candidate_manifest_size_bytes=123,
+            candidate_payload_sha256=candidate_sha,
+            candidate_training_artifact_sha256=_sha("train"),
+            code_identity=actual_code,
+            policy=policy,
+            observation_inventory_relative_path="observations/held-out.jsonl",
+            observation_inventory=inventory,
+            private_owner_receipt_relative_path="owner-receipt.json",
+            private_owner_receipt_sha256=owner_receipt_sha,
+            private_owner=owner,
+            public_dry_run_receipt_relative_path=(
+                "public-preflight/public-dry-run.receipt.json"),
+            public_dry_run_receipt_sha256=dry_run_receipt_sha,
+            public_dry_run=renamed_public_content,
+        )
 
     manifest_sha = hashlib.sha256(canonical_json_line(freeze)).hexdigest()
     guard = build_available_guard_for_identity(

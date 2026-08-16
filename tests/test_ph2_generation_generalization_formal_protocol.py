@@ -21,9 +21,6 @@ from pure_integer_ai.experiments.ph2_evaluation_kernel.runtime import (
 from pure_integer_ai.experiments.ph2_evaluation_kernel.records import (
     EvaluationKernelContractError,
 )
-from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_family import (
-    GenerationGeneralizationPublicDryRunReceipt,
-)
 from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_family_identity import (
     GenerationGeneralizationEvaluationFamilyError,
     GenerationGeneralizationPrivateLabelOwnerReceipt,
@@ -167,9 +164,6 @@ def test_formal_runner_publishes_pass_seals_ne_and_rejects_retry(
         },
         "policy_sha256": policy_sha,
     }
-    dry_run = GenerationGeneralizationPublicDryRunReceipt(
-        candidate_sha, code_sha, policy_sha, _sha("dry batch"),
-        _sha("dry inventory"), inventory.record_count, "PASS")
     loaded = SimpleNamespace(pack=SimpleNamespace(sha256=lambda: candidate_sha))
     private_root = tmp_path / "private-label-owner"
     private_root.mkdir()
@@ -269,7 +263,9 @@ def test_formal_runner_publishes_pass_seals_ne_and_rejects_retry(
             "loaded_candidate": loaded,
             "observation_inventory_path": observation_path,
             "private_owner_receipt_path": owner_path,
-            "public_dry_run": dry_run,
+            "public_dry_run_receipt_path": (
+                tmp_path / "public-preflight"
+                / "public-dry-run.receipt.json"),
             "policy": policy,
             "resource_ceiling": budget,
         }

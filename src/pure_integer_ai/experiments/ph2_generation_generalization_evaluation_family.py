@@ -37,6 +37,7 @@ from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_family
     GenerationGeneralizationPrivateLabelOwnerReceipt,
     build_generation_generalization_code_identity,
     double_scan_generation_generalization_observation_inventory,
+    generation_generalization_observation_content_sha256,
     generation_generalization_sha256_bytes,
     generation_generalization_sha256_file,
     read_generation_generalization_private_label_owner_receipt,
@@ -57,7 +58,8 @@ from pure_integer_ai.experiments.train_context import TrainContext
 
 FAMILY_ARTIFACT_KIND = "PH2_GG03_EXECUTABLE_EVALUATION_FAMILY_FREEZE_V1"
 FAMILY_STATUS = "FROZEN_NOT_RUN_LABELS_UNREAD"
-PUBLIC_DRY_RUN_ARTIFACT_KIND = "PH2_GG03_PUBLIC_DRY_RUN_RECEIPT_V1"
+PUBLIC_DRY_RUN_ARTIFACT_KIND = "PH2_GG03_PUBLIC_DRY_RUN_RECEIPT_V2"
+PUBLIC_DRY_RUN_RECEIPT_NAME = "public-dry-run.receipt.json"
 FAMILY_MANIFEST_NAME = "family-freeze.json"
 FAMILY_GUARD_NAME = "guard.available.json"
 FORMAL_PUBLICATION_PATHS = (
@@ -142,6 +144,8 @@ class GenerationGeneralizationPublicDryRunReceipt:
     policy_sha256: str
     batch_sha256: str
     observation_inventory_sha256: str
+    observation_stable_key_sha256s: tuple[str, ...]
+    observation_content_sha256s: tuple[str, ...]
     run_count: int
     status: str
     teacher_call_count: int = 0
@@ -157,6 +161,26 @@ class GenerationGeneralizationPublicDryRunReceipt:
         if type(self.run_count) is not int or self.run_count <= 0:
             raise GenerationGeneralizationEvaluationFamilyError(
                 "GG-03 dry run count 非法")
+        if (not isinstance(self.observation_stable_key_sha256s, tuple)
+                or len(self.observation_stable_key_sha256s) != self.run_count
+                or self.observation_stable_key_sha256s
+                != tuple(sorted(self.observation_stable_key_sha256s))
+                or len(set(self.observation_stable_key_sha256s))
+                != self.run_count):
+            raise GenerationGeneralizationEvaluationFamilyError(
+                "GG-03 dry run Observation stable-key inventory 非法")
+        for item in self.observation_stable_key_sha256s:
+            sha256_text(item, where="GG-03 dry run Observation stable-key SHA")
+        if (not isinstance(self.observation_content_sha256s, tuple)
+                or len(self.observation_content_sha256s) != self.run_count
+                or self.observation_content_sha256s
+                != tuple(sorted(self.observation_content_sha256s))
+                or len(set(self.observation_content_sha256s))
+                != self.run_count):
+            raise GenerationGeneralizationEvaluationFamilyError(
+                "GG-03 dry run Observation content inventory 非法")
+        for item in self.observation_content_sha256s:
+            sha256_text(item, where="GG-03 dry run Observation content SHA")
         if self.status != "PASS":
             raise GenerationGeneralizationEvaluationFamilyError(
                 "GG-03 public dry-run 未 PASS")
@@ -172,11 +196,15 @@ class GenerationGeneralizationPublicDryRunReceipt:
             "batch_sha256": self.batch_sha256,
             "candidate_payload_sha256": self.candidate_payload_sha256,
             "code_identity_sha256": self.code_identity_sha256,
-            "format_version": 1,
+            "format_version": 2,
             "host_learning_write_count": self.host_learning_write_count,
             "label_read_count": self.label_read_count,
             "observation_inventory_sha256": (
                 self.observation_inventory_sha256),
+            "observation_content_sha256s": list(
+                self.observation_content_sha256s),
+            "observation_stable_key_sha256s": list(
+                self.observation_stable_key_sha256s),
             "policy_sha256": self.policy_sha256,
             "run_count": self.run_count,
             "status": self.status,
@@ -192,13 +220,15 @@ class GenerationGeneralizationPublicDryRunReceipt:
                 "artifact_kind", "batch_sha256", "candidate_payload_sha256",
                 "code_identity_sha256", "format_version",
                 "host_learning_write_count", "label_read_count",
-                "observation_inventory_sha256", "policy_sha256",
-                "run_count", "status", "teacher_call_count",
+                "observation_content_sha256s", "observation_inventory_sha256",
+                "policy_sha256",
+                "observation_stable_key_sha256s", "run_count", "status",
+                "teacher_call_count",
                 }):
             raise GenerationGeneralizationEvaluationFamilyError(
                 "GG-03 public dry-run receipt 字段漂移")
         if (value["artifact_kind"] != PUBLIC_DRY_RUN_ARTIFACT_KIND
-                or value["format_version"] != 1):
+                or value["format_version"] != 2):
             raise GenerationGeneralizationEvaluationFamilyError(
                 "GG-03 public dry-run receipt kind/version 漂移")
         return cls(
@@ -207,6 +237,10 @@ class GenerationGeneralizationPublicDryRunReceipt:
             str(value["policy_sha256"]),
             str(value["batch_sha256"]),
             str(value["observation_inventory_sha256"]),
+            tuple(str(item) for item in value[
+                "observation_stable_key_sha256s"]),
+            tuple(str(item) for item in value[
+                "observation_content_sha256s"]),
             value["run_count"],
             str(value["status"]),
             value["teacher_call_count"],
@@ -234,6 +268,9 @@ def build_generation_generalization_public_dry_run_receipt(
             or batch.coverage != INDEPENDENT_VERIFIER_REQUIREMENTS):
         raise GenerationGeneralizationEvaluationFamilyError(
             "GG-03 public dry-run 未闭合六路 hard conjunction")
+    if tuple(item.observation for item in batch.runs) != observations:
+        raise GenerationGeneralizationEvaluationFamilyError(
+            "GG-03 public dry-run batch 与输入 Observation 漂移")
     return GenerationGeneralizationPublicDryRunReceipt(
         loaded.pack.sha256(), code_identity.aggregate_sha256,
         generation_generalization_sha256_bytes(
@@ -242,6 +279,13 @@ def build_generation_generalization_public_dry_run_receipt(
             canonical_json_bytes(list(batch.stable_key()))),
         generation_generalization_sha256_bytes(canonical_json_bytes(
             [item.to_dict() for item in observations])),
+        tuple(sorted(
+            generation_generalization_sha256_bytes(canonical_json_bytes(
+                list(item.stable_key())))
+            for item in observations)),
+        tuple(sorted(
+            generation_generalization_observation_content_sha256(item)
+            for item in observations)),
         len(batch.runs), batch.status,
         sum(item.teacher_call_count for item in batch.runs),
         sum(item.label_read_count for item in batch.runs),
@@ -331,6 +375,8 @@ def build_generation_generalization_evaluation_family_freeze(
         private_owner_receipt_relative_path: str,
         private_owner_receipt_sha256: str,
         private_owner: GenerationGeneralizationPrivateLabelOwnerReceipt,
+        public_dry_run_receipt_relative_path: str,
+        public_dry_run_receipt_sha256: str,
         public_dry_run: GenerationGeneralizationPublicDryRunReceipt,
         ) -> dict[str, object]:
     """从已核验 identity 构造不含路径机密和 private label 的 freeze。"""
@@ -339,7 +385,8 @@ def build_generation_generalization_evaluation_family_freeze(
             ("candidate manifest", candidate_manifest_sha256),
             ("candidate payload", candidate_payload_sha256),
             ("candidate training artifact", candidate_training_artifact_sha256),
-            ("private owner receipt", private_owner_receipt_sha256)):
+            ("private owner receipt", private_owner_receipt_sha256),
+            ("public dry-run receipt", public_dry_run_receipt_sha256)):
         sha256_text(value, where=f"GG-03 family {name}")
     if (type(candidate_manifest_size_bytes) is not int
             or candidate_manifest_size_bytes <= 0):
@@ -348,8 +395,14 @@ def build_generation_generalization_evaluation_family_freeze(
     for where, value in (
             ("GG-03 candidate manifest", candidate_manifest_relative_path),
             ("GG-03 Observation inventory", observation_inventory_relative_path),
-            ("GG-03 private owner receipt", private_owner_receipt_relative_path)):
+            ("GG-03 private owner receipt", private_owner_receipt_relative_path),
+            ("GG-03 public dry-run receipt",
+             public_dry_run_receipt_relative_path)):
         strict_generation_generalization_relative_path(value, where=where)
+    if Path(public_dry_run_receipt_relative_path).name != (
+            PUBLIC_DRY_RUN_RECEIPT_NAME):
+        raise GenerationGeneralizationEvaluationFamilyError(
+            "GG-03 public dry-run receipt 文件名漂移")
     if (private_owner.observation_inventory_sha256
             != observation_inventory.transport_sha256
             or private_owner.label_record_count != observation_inventory.record_count):
@@ -363,6 +416,20 @@ def build_generation_generalization_evaluation_family_freeze(
             or public_dry_run.policy_sha256 != policy_sha):
         raise GenerationGeneralizationEvaluationFamilyError(
             "GG-03 public dry-run 未绑定当前 candidate/code/policy")
+    formal_stable_keys = {
+        item.stable_key_sha256 for item in observation_inventory.records}
+    public_stable_keys = set(
+        public_dry_run.observation_stable_key_sha256s)
+    overlap = formal_stable_keys & public_stable_keys
+    if overlap:
+        raise GenerationGeneralizationEvaluationFamilyError(
+            "GG-03 formal Observation 复用了 public dry-run 输入")
+    formal_content = {
+        item.content_sha256 for item in observation_inventory.records}
+    public_content = set(public_dry_run.observation_content_sha256s)
+    if formal_content & public_content:
+        raise GenerationGeneralizationEvaluationFamilyError(
+            "GG-03 formal Observation 复用了 public dry-run 内容")
     aggregate = _aggregate_contract()
     if private_owner.verdict_contract_sha256 != aggregate[
             "sealed_verdict_identity_sha256"]:
@@ -379,6 +446,12 @@ def build_generation_generalization_evaluation_family_freeze(
             "training_artifact_sha256": candidate_training_artifact_sha256,
         },
         "code_identity": code_identity.to_dict(),
+        "contamination_audit": {
+            "formal_public_content_overlap_count": 0,
+            "formal_public_stable_key_overlap_count": 0,
+            "policy": (
+                "FORMAL_OBSERVATIONS_AND_CONTENT_DISJOINT_FROM_PUBLIC_PREFLIGHT"),
+        },
         "execution_order": list(FORMAL_EXECUTION_ORDER),
         "format_version": 1,
         "formal_run_count": 0,
@@ -402,7 +475,11 @@ def build_generation_generalization_evaluation_family_freeze(
             "owner_receipt_sha256": private_owner_receipt_sha256,
             "status": private_owner.status,
         },
-        "public_dry_run": public_dry_run.to_dict(),
+        "public_dry_run": {
+            **public_dry_run.to_dict(),
+            "receipt_relative_path": public_dry_run_receipt_relative_path,
+            "receipt_sha256": public_dry_run_receipt_sha256,
+        },
         "public_head_sha1": public_head_sha1,
         "runner_contract": {
             "formal_and_public_runner_symbol": (
@@ -432,7 +509,7 @@ def _prepare_generation_generalization_evaluation_family_freeze(
         loaded_candidate: LoadedGenerationCandidatePack,
         observation_inventory_path: str | Path,
         private_owner_receipt_path: str | Path,
-        public_dry_run: GenerationGeneralizationPublicDryRunReceipt,
+        public_dry_run_receipt_path: str | Path,
         policy: GenerationGeneralizationEvaluationPolicy,
         resource_ceiling: GenerationGeneralizationEvaluationBudget,
         ) -> tuple[dict[str, object], str]:
@@ -460,10 +537,23 @@ def _prepare_generation_generalization_evaluation_family_freeze(
     owner_path = _within(
         private_root, private_owner_receipt_path,
         where="GG-03 private owner receipt")
+    public_preflight_root = root / "public-preflight"
+    public_dry_run_path = _within(
+        root, public_dry_run_receipt_path,
+        where="GG-03 public dry-run receipt")
+    if (public_dry_run_path.parent != public_preflight_root
+            or public_dry_run_path.name != PUBLIC_DRY_RUN_RECEIPT_NAME
+            or public_dry_run_path.is_relative_to(private_root)):
+        raise GenerationGeneralizationEvaluationFamilyError(
+            "GG-03 public dry-run receipt 物理布局漂移")
     inventory = double_scan_generation_generalization_observation_inventory(
         observation_path, resource_ceiling=resource_ceiling)
     owner, owner_sha = read_generation_generalization_private_label_owner_receipt(
         owner_path)
+    public_dry_run = read_generation_generalization_public_dry_run_receipt(
+        public_dry_run_path)
+    public_dry_run_sha = generation_generalization_sha256_file(
+        public_dry_run_path)
     code = build_generation_generalization_code_identity(repository)
     freeze = build_generation_generalization_evaluation_family_freeze(
         public_head_sha1=_published_git_head(repository),
@@ -484,6 +574,9 @@ def _prepare_generation_generalization_evaluation_family_freeze(
             owner_path.relative_to(private_root).as_posix()),
         private_owner_receipt_sha256=owner_sha,
         private_owner=owner,
+        public_dry_run_receipt_relative_path=(
+            public_dry_run_path.relative_to(root).as_posix()),
+        public_dry_run_receipt_sha256=public_dry_run_sha,
         public_dry_run=public_dry_run,
     )
     return freeze, owner_sha
@@ -583,6 +676,8 @@ __all__ = [
     "FORMAL_EXECUTION_ORDER",
     "FORMAL_PUBLICATION_PATHS",
     "PRIVATE_OWNER_ARTIFACT_KIND",
+    "PUBLIC_DRY_RUN_ARTIFACT_KIND",
+    "PUBLIC_DRY_RUN_RECEIPT_NAME",
     "GenerationGeneralizationCodeFileIdentity",
     "GenerationGeneralizationCodeIdentity",
     "GenerationGeneralizationEvaluationFamilyError",

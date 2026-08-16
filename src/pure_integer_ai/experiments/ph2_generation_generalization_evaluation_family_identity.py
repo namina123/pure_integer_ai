@@ -20,6 +20,7 @@ from pure_integer_ai.experiments.ph2_generation_generalization_contract import (
 )
 from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_observation import (
     GenerationGeneralizationEvaluationBudget,
+    GenerationGeneralizationEvaluationObservation,
     read_generation_generalization_evaluation_observations,
 )
 from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_runner import (
@@ -60,6 +61,18 @@ def generation_generalization_sha256_file(path: Path) -> str:
         while block := handle.read(1024 * 1024):
             digest.update(block)
     return digest.hexdigest()
+
+
+def generation_generalization_observation_content_sha256(
+        observation: GenerationGeneralizationEvaluationObservation,
+        ) -> str:
+    """忽略可重命名 episode id，冻结 Observation 的实际公开内容。"""
+    if not isinstance(
+            observation, GenerationGeneralizationEvaluationObservation):
+        raise TypeError("GG-03 Observation content identity 类型错误")
+    value = observation.to_dict()
+    del value["episode_id"]
+    return generation_generalization_sha256_bytes(canonical_json_bytes(value))
 
 
 def strict_generation_generalization_relative_path(
@@ -209,6 +222,7 @@ class GenerationGeneralizationObservationRecordIdentity:
     record_sha256: str
     size_bytes: int
     stable_key_sha256: str
+    content_sha256: str
     requirements: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -219,6 +233,8 @@ class GenerationGeneralizationObservationRecordIdentity:
         sha256_text(self.record_sha256, where="GG-03 Observation record SHA")
         sha256_text(
             self.stable_key_sha256, where="GG-03 Observation stable key SHA")
+        sha256_text(
+            self.content_sha256, where="GG-03 Observation content SHA")
         if (not self.requirements
                 or any(item not in INDEPENDENT_VERIFIER_REQUIREMENTS
                        for item in self.requirements)):
@@ -228,6 +244,7 @@ class GenerationGeneralizationObservationRecordIdentity:
     def to_dict(self) -> dict[str, object]:
         return {
             "ordinal": self.ordinal,
+            "content_sha256": self.content_sha256,
             "record_sha256": self.record_sha256,
             "requirements": list(self.requirements),
             "size_bytes": self.size_bytes,
@@ -327,6 +344,7 @@ def scan_generation_generalization_observation_inventory(
             len(line),
             generation_generalization_sha256_bytes(
                 canonical_json_bytes(list(observation.stable_key()))),
+            generation_generalization_observation_content_sha256(observation),
             generation_generalization_evaluation_requirements(observation),
         )
         for ordinal, (line, observation) in enumerate(
@@ -459,6 +477,7 @@ __all__ = [
     "double_scan_generation_generalization_observation_inventory",
     "generation_generalization_sha256_bytes",
     "generation_generalization_sha256_file",
+    "generation_generalization_observation_content_sha256",
     "read_generation_generalization_private_label_owner_receipt",
     "scan_generation_generalization_observation_inventory",
     "strict_generation_generalization_relative_path",

@@ -23,7 +23,6 @@ from pure_integer_ai.experiments.ph2_generation_candidate_pack import (
     LoadedGenerationCandidatePack,
 )
 from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_family import (
-    GenerationGeneralizationPublicDryRunReceipt,
     read_generation_generalization_evaluation_family_freeze,
 )
 from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_family_identity import (
@@ -168,7 +167,7 @@ def run_generation_generalization_formal_evaluation_once(
         loaded_candidate: LoadedGenerationCandidatePack,
         observation_inventory_path: str | Path,
         private_owner_receipt_path: str | Path,
-        public_dry_run: GenerationGeneralizationPublicDryRunReceipt,
+        public_dry_run_receipt_path: str | Path,
         policy: GenerationGeneralizationEvaluationPolicy,
         resource_ceiling: GenerationGeneralizationEvaluationBudget,
         ) -> GenerationGeneralizationFormalPublication:
@@ -184,7 +183,7 @@ def run_generation_generalization_formal_evaluation_once(
         "loaded_candidate": loaded_candidate,
         "observation_inventory_path": observation_inventory_path,
         "private_owner_receipt_path": private_owner_receipt_path,
-        "public_dry_run": public_dry_run,
+        "public_dry_run_receipt_path": public_dry_run_receipt_path,
         "policy": policy,
         "resource_ceiling": resource_ceiling,
     }
