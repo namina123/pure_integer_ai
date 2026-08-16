@@ -441,10 +441,15 @@ class GenerationPostcheckRequest:
             item.candidate_key: item for item in self.source_requirements}
         if len(source_map) != len(self.source_requirements):
             raise ValueError("同一 candidate 不得重复 source requirement")
+        structure = self.execution.surface.preview.request.structure
+        emitted_keys = {
+            key for sentence in structure.syntax.sentences
+            for key in sentence.proposition_keys
+        }
         planned = {
             item.candidate_key: item
-            for item in self.execution.surface.preview.request.structure
-            .propositions.propositions
+            for item in structure.propositions.propositions
+            if item.candidate_key in emitted_keys
         }
         if set(source_map) != set(planned):
             raise ValueError("source requirement 必须逐点覆盖 planned Proposition")

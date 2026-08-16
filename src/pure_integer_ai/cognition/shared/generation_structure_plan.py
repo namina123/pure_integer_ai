@@ -726,12 +726,13 @@ class SyntaxLinearizationObligation:
 
 @dataclass(frozen=True)
 class SyntaxPlan:
-    """句子、slot/value、照应和待线性化义务的完整句法计划。"""
+    """句子、slot/value、照应、抑制项和待线性化义务的完整句法计划。"""
 
     selection_key: tuple[int, ...]
     sentences: tuple[PlannedSentence, ...]
     anaphora: tuple[AnaphoraRequirement, ...]
     linearization: tuple[SyntaxLinearizationObligation, ...]
+    suppressed_candidate_keys: tuple[tuple[int, ...], ...] = ()
 
     def __post_init__(self) -> None:
         _strict_int_tuple(self.selection_key, label="syntax selection key")
@@ -755,6 +756,15 @@ class SyntaxPlan:
                 not isinstance(item, SyntaxLinearizationObligation)
                 for item in self.linearization):
             raise TypeError("syntax linearization 类型错误")
+        if not isinstance(self.suppressed_candidate_keys, tuple):
+            raise TypeError("syntax suppressed candidate keys 必须是 tuple")
+        for key in self.suppressed_candidate_keys:
+            _strict_int_tuple(key, label="syntax suppressed candidate key")
+            if not key:
+                raise ValueError("syntax suppressed candidate key 不能为空")
+        if len(set(self.suppressed_candidate_keys)) != len(
+                self.suppressed_candidate_keys):
+            raise ValueError("syntax suppressed candidate key 不得重复")
         sentence_map = {item.address: item for item in self.sentences}
         if set(item.address for item in self.linearization) != set(sentence_map):
             raise ValueError("每个 planned sentence 必须恰有一个 linearization obligation")
@@ -791,6 +801,8 @@ class SyntaxPlan:
             self.linearization,
             key=lambda item: ordinal_by_sentence[item.address],
         )))
+        object.__setattr__(self, "suppressed_candidate_keys", tuple(sorted(
+            self.suppressed_candidate_keys)))
 
     def stable_key(self) -> tuple[int, ...]:
         """返回 selection、句子、照应和线性化义务完整键。"""
@@ -803,6 +815,9 @@ class SyntaxPlan:
         result.append(len(self.linearization))
         for obligation in self.linearization:
             result.extend(_packed(obligation.stable_key()))
+        result.append(len(self.suppressed_candidate_keys))
+        for key in self.suppressed_candidate_keys:
+            result.extend(_packed(key))
         return tuple(result)
 
 
@@ -894,6 +909,7 @@ def _validate_syntax(
     if syntax.selection_key != selection_key:
         raise ValueError("syntax plan 必须绑定当前 G-01 selection")
     selected_keys = set(selection.selected_candidate_keys)
+    suppressed = set(syntax.suppressed_candidate_keys)
     coverage: list[tuple[int, ...]] = []
     sentence_map = {item.address: item for item in syntax.sentences}
     sentence_ordinal_by_candidate: dict[tuple[int, ...], int] = {}
@@ -915,8 +931,16 @@ def _validate_syntax(
             filler = fillers[key]
             if filler.proposition != candidate.proposition:
                 raise ValueError("syntax slot 丢失 BoundProposition 绑定")
-    if len(coverage) != len(set(coverage)) or set(coverage) != selected_keys:
-        raise ValueError("每个 selected Proposition 必须恰被一个 sentence 覆盖")
+    covered = set(coverage)
+    if len(coverage) != len(covered) or covered.intersection(suppressed):
+        raise ValueError("syntax candidate 不得重复覆盖或同时抑制")
+    if covered.union(suppressed) != selected_keys:
+        raise ValueError("每个 selected Proposition 必须被 sentence 覆盖或显式抑制")
+    if suppressed:
+        if (covered or len(syntax.sentences) != 1
+                or syntax.sentences[0].response_act != selection.stance
+                or discourse.dependencies or syntax.anaphora):
+            raise ValueError("response-act 抑制必须由无命题单句独占承担")
     if not selected_keys and not sentence_map:
         raise ValueError("无 selected Proposition 时仍必须规划 response-act sentence")
     for dependency in discourse.dependencies:

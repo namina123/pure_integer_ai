@@ -14,6 +14,7 @@ from pure_integer_ai.cognition.shared.generation_content import (
 from pure_integer_ai.cognition.shared.generation_structure_plan import (
     DiscoursePlan,
     PlannedSentence,
+    PlannedProposition,
     PropositionPlan,
     SyntaxLinearizationObligation,
     SyntaxPlan,
@@ -145,11 +146,9 @@ class ResponseActGenerationRegistry:
     def resolve(
             self, selection: AnswerContentSelection,
             ) -> ResponseActGenerationTemplate:
-        """为无已选命题的 selection 返回唯一模板，缺失时明确失败。"""
+        """按目标分支和 stance 返回唯一模板，不丢弃 G-01 保留的候选。"""
         if not isinstance(selection, AnswerContentSelection):
             raise TypeError("response act registry 需要 AnswerContentSelection")
-        if selection.selected_candidate_keys:
-            raise ValueError("有已选命题时不得改走 response act 模板")
         branch = selection.request.goal.target_branch
         if branch is None:
             raise ValueError("response act generation 缺少目标 LanguageBranch")
@@ -157,6 +156,13 @@ class ResponseActGenerationRegistry:
         if template is None:
             raise LookupError("当前 branch/stance 没有 response act 模板")
         return template
+
+    def matches(self, selection: AnswerContentSelection) -> bool:
+        """返回当前 selection 是否有显式 response-act 模板。"""
+        if not isinstance(selection, AnswerContentSelection):
+            raise TypeError("response act registry 需要 AnswerContentSelection")
+        branch = selection.request.goal.target_branch
+        return branch is not None and (branch, selection.stance) in self._by_key
 
     def stable_key(self) -> tuple[int, ...]:
         """返回全部 response-act 模板的确定性配置键。"""
@@ -180,15 +186,23 @@ class ResponseActDiscourseRouter:
         self.registry = registry
 
     def plan(self, selection: AnswerContentSelection) -> DiscoursePlan:
-        """有已选命题时委托原 mapper，否则建立空节点但有上下文的篇章计划。"""
-        if selection.selected_candidate_keys:
+        """已注册 stance 保留决策候选节点；其他 stance 委托普通 mapper。"""
+        if not self.registry.matches(selection):
             return self.delegate.plan(selection)
         template = self.registry.resolve(selection)
+        selected = set(selection.selected_candidate_keys)
+        open_questions = tuple(
+            obligation
+            for candidate in selection.request.candidates
+            if candidate.stable_key() in selected
+            and candidate.reasoning is not None
+            for obligation in candidate.reasoning.unresolved
+        )
         return DiscoursePlan(
             selection.stable_key(),
+            selection.selected_candidate_keys,
             (),
-            (),
-            (),
+            open_questions,
             template.context,
         )
 
@@ -210,15 +224,31 @@ class ResponseActPropositionRouter:
             selection: AnswerContentSelection,
             discourse: DiscoursePlan,
             ) -> PropositionPlan:
-        """有已选命题时委托原 mapper，否则核验模板并保留空命题计划。"""
-        if selection.selected_candidate_keys:
+        """已注册 stance 保留决策 Evidence；surface 由 syntax 显式抑制。"""
+        if not self.registry.matches(selection):
             return self.delegate.plan(selection, discourse)
         self.registry.resolve(selection)
         if discourse.selection_key != selection.stable_key():
             raise ValueError("response act proposition 收到漂移 discourse")
-        if discourse.candidate_keys or discourse.dependencies:
-            raise ValueError("response act discourse 不得伪造命题节点或依赖")
-        return PropositionPlan(selection.stable_key(), ())
+        if (discourse.candidate_keys != selection.selected_candidate_keys
+                or discourse.dependencies):
+            raise ValueError("response act discourse 候选或依赖漂移")
+        selected = set(selection.selected_candidate_keys)
+        propositions = tuple(
+            PlannedProposition(
+                candidate.stable_key(),
+                candidate.proposition,
+                candidate.state,
+                candidate.source,
+                candidate.scope,
+                candidate.evidence,
+                candidate.hypotheses,
+                (),
+            )
+            for candidate in selection.request.candidates
+            if candidate.stable_key() in selected
+        )
+        return PropositionPlan(selection.stable_key(), propositions)
 
 
 class ResponseActSyntaxRouter:
@@ -239,16 +269,18 @@ class ResponseActSyntaxRouter:
             discourse: DiscoursePlan,
             propositions: PropositionPlan,
             ) -> SyntaxPlan:
-        """用 stance 本体填入 S-07 槽，使无答案状态真实进入顺序与 surface。"""
-        if selection.selected_candidate_keys:
+        """用注册 stance 本体填槽，使保留候选的非回答状态也进入 surface。"""
+        if not self.registry.matches(selection):
             return self.delegate.plan(selection, discourse, propositions)
         template = self.registry.resolve(selection)
         selection_key = selection.stable_key()
         if (discourse.selection_key != selection_key
                 or propositions.selection_key != selection_key):
             raise ValueError("response act syntax 收到漂移上游计划")
-        if discourse.candidate_keys or propositions.propositions:
-            raise ValueError("response act syntax 不得消费伪造命题")
+        if (discourse.candidate_keys != selection.selected_candidate_keys
+                or {item.candidate_key for item in propositions.propositions}
+                != set(selection.selected_candidate_keys)):
+            raise ValueError("response act syntax 决策候选 Evidence 漂移")
         value = StructureSlotValue(template.slot.slot, selection.stance)
         sentence = PlannedSentence(
             template.sentence,
@@ -278,6 +310,7 @@ class ResponseActSyntaxRouter:
             (sentence,),
             (),
             (obligation,),
+            selection.selected_candidate_keys,
         )
 
 

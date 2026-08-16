@@ -362,6 +362,109 @@ class StructureOrderGraph:
         """返回调用方注入的结构顺序 predicate 协议。"""
         return self._predicates
 
+    def define_structure(
+            self,
+            slots: tuple[StructureSlotDefinition, ...],
+            language_branch: ObjectIdentity,
+            structure_family: ObjectIdentity,
+            *,
+            scope: ScopeIdentity,
+            provenance_kind: int,
+            epistemic_origin: int = 0,
+            content_version: int = 0,
+            qualifiers: tuple[int, ...] = (),
+            ) -> MaterializedStructureOrder:
+        """幂等追加无顺序约束的结构和 slot schema，供单槽结构真实消费。"""
+        if not isinstance(slots, tuple) or not slots:
+            raise ValueError("slots 必须是非空 tuple")
+        if any(not isinstance(item, StructureSlotDefinition) for item in slots):
+            raise TypeError("slots 必须由 StructureSlotDefinition 组成")
+        structure = slots[0].structure
+        if any(item.structure != structure for item in slots):
+            raise ValueError("slot 定义必须属于同一 StructureConcept")
+        if len({item.slot for item in slots}) != len(slots):
+            raise ValueError("同一次定义不得重复 slot")
+        _require_identity(
+            language_branch,
+            where="StructureOrderGraph.define_structure.language_branch",
+            object_kind=OBJECT_LANGUAGE_BRANCH,
+        )
+        _require_identity(
+            structure_family,
+            where="StructureOrderGraph.define_structure.structure_family",
+        )
+        if structure_family.object_kind not in {
+                OBJECT_CONCEPT, OBJECT_STRUCTURE_CONCEPT}:
+            raise ValueError("structure_family 必须是 Concept/StructureConcept")
+        self._validate_structure_metadata(
+            structure,
+            scope=scope,
+            provenance_kind=provenance_kind,
+            epistemic_origin=epistemic_origin,
+            content_version=content_version,
+            qualifiers=qualifiers,
+            where="StructureOrderGraph.define_structure",
+        )
+        self._preflight_structure_identity(
+            structure, language_branch, structure_family)
+        for slot in slots:
+            self._preflight_slot(slot)
+
+        metadata = (
+            scope,
+            provenance_kind,
+            epistemic_origin,
+            content_version,
+            qualifiers,
+        )
+        structure_ref = self._ontology.materialize(structure)
+        self._relate(
+            self._predicates.structure_language,
+            structure_ref,
+            self._ontology.materialize(language_branch),
+            metadata,
+        )
+        self._relate(
+            self._predicates.structure_family,
+            structure_ref,
+            self._ontology.materialize(structure_family),
+            metadata,
+        )
+        for slot_definition in sorted(
+                slots, key=lambda item: item.slot.stable_key()):
+            slot = self._ontology.materialize(slot_definition.slot)
+            self._relate(
+                self._predicates.structure_slot,
+                structure_ref,
+                slot,
+                metadata,
+            )
+            self._relate(
+                self._predicates.slot_role,
+                slot,
+                self._ontology.materialize(slot_definition.role),
+                metadata,
+            )
+            self._relate(
+                self._predicates.slot_value_type,
+                slot,
+                self._ontology.materialize(slot_definition.value_type),
+                metadata,
+            )
+        restored = self.read_structure(structure_ref)
+        expected = tuple(sorted(
+            slots, key=lambda item: item.slot.stable_key()))
+        if (self._ontology.identity_of(restored.language_branch)
+                != language_branch
+                or self._ontology.identity_of(restored.structure_family)
+                != structure_family
+                or tuple(item.definition for item in restored.slots)
+                != expected
+                or restored.constraints):
+            raise StructureOrderTopologyError(
+                "写后恢复的无约束 structure 定义不一致")
+        return restored
+
     def define_constraint(
             self, slots: tuple[StructureSlotDefinition, ...],
             definition: StructureOrderConstraintDefinition, *,
@@ -760,11 +863,35 @@ class StructureOrderGraph:
             epistemic_origin: int, content_version: int,
             qualifiers: tuple[int, ...]) -> None:
         """核验图 assertion 精确使用 H-06 aggregate scope 和开放整数元数据。"""
+        StructureOrderGraph._validate_structure_metadata(
+            definition.structure,
+            scope=scope,
+            provenance_kind=provenance_kind,
+            epistemic_origin=epistemic_origin,
+            content_version=content_version,
+            qualifiers=qualifiers,
+            where="StructureOrderGraph.define_constraint",
+        )
         if not isinstance(scope, ScopeIdentity):
             raise TypeError("scope 必须是 ScopeIdentity")
         if scope != definition.scope:
             raise ValueError("结构顺序定义必须使用 H-06 aggregate scope")
-        if scope.owner != definition.structure.owner:
+
+    @staticmethod
+    def _validate_structure_metadata(
+            structure: ObjectIdentity, *,
+            scope: ScopeIdentity, provenance_kind: int,
+            epistemic_origin: int, content_version: int,
+            qualifiers: tuple[int, ...], where: str) -> None:
+        """核验结构 schema assertion 的 owner 和开放整数元数据。"""
+        _require_identity(
+            structure,
+            where=f"{where}.structure",
+            object_kind=OBJECT_STRUCTURE_CONCEPT,
+        )
+        if not isinstance(scope, ScopeIdentity):
+            raise TypeError("scope 必须是 ScopeIdentity")
+        if scope.owner != structure.owner:
             raise ValueError("结构顺序 scope 与 StructureConcept owner 不一致")
         if not isinstance(qualifiers, tuple):
             raise TypeError("qualifiers 必须是整数 tuple")
@@ -773,7 +900,7 @@ class StructureOrderGraph:
             epistemic_origin,
             content_version,
             *qualifiers,
-            _where="StructureOrderGraph.define_constraint",
+            _where=where,
         )
         if type(provenance_kind) is not int or provenance_kind <= 0:
             raise ValueError("provenance_kind 必须为严格正整数")
@@ -787,7 +914,20 @@ class StructureOrderGraph:
     def _preflight_structure(
             self, definition: StructureOrderConstraintDefinition) -> None:
         """允许追加成员和约束，但拒绝 structure 基础槽的部分或竞争拓扑。"""
-        structure = self._ontology.resolve(definition.structure)
+        self._preflight_structure_identity(
+            definition.structure,
+            definition.language_branch,
+            definition.structure_family,
+        )
+
+    def _preflight_structure_identity(
+            self,
+            structure_identity: ObjectIdentity,
+            language_branch: ObjectIdentity,
+            structure_family: ObjectIdentity,
+            ) -> None:
+        """核验既有 structure 的 language/family 基础槽没有漂移。"""
+        structure = self._ontology.resolve(structure_identity)
         if structure is None:
             return
         language = self._semantic_target_identities(
@@ -803,9 +943,9 @@ class StructureOrderGraph:
                 raise StructureOrderTopologyError(
                     "structure 已有成员但缺少 language/family 基础槽")
             return
-        if language != (definition.language_branch,):
+        if language != (language_branch,):
             raise StructureOrderTopologyError("structure language 发生竞争或漂移")
-        if family != (definition.structure_family,):
+        if family != (structure_family,):
             raise StructureOrderTopologyError("structure family 发生竞争或漂移")
 
     def _preflight_slot(self, definition: StructureSlotDefinition) -> None:

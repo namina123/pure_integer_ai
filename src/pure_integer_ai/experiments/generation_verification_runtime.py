@@ -437,11 +437,27 @@ class GenerationPostcheckRuntime:
         )
 
     @staticmethod
+    def _emitted_propositions(
+            context: _GenerationPostcheckContext,
+            ) -> tuple:
+        """返回实际被 syntax sentence 覆盖的命题，排除显式 response-act 抑制项。"""
+        structure = context.request.execution.surface.preview.request.structure
+        emitted_keys = {
+            key for sentence in structure.syntax.sentences
+            for key in sentence.proposition_keys
+        }
+        return tuple(
+            item for item in structure.propositions.propositions
+            if item.candidate_key in emitted_keys
+        )
+
+    @staticmethod
     def _claim_keys(context: _GenerationPostcheckContext) -> tuple[tuple[int, ...], ...]:
         """返回 planned candidate 键；空内容以本次 execution 键作为复核 claim。"""
-        planned = context.request.execution.surface.preview.request.structure
         keys = tuple(
-            item.candidate_key for item in planned.propositions.propositions)
+            item.candidate_key
+            for item in GenerationPostcheckRuntime._emitted_propositions(
+                context))
         return keys or (context.request.execution.stable_key(),)
 
     @staticmethod
@@ -542,10 +558,9 @@ class GenerationPostcheckRuntime:
         if (context.parsed.observation is None
                 or not self._observation_binding_matches(context)):
             return self._unknown(context, context.parsed.reason)
-        expected_items = context.request.execution.surface.preview.request
         expected = {
             item.candidate_key: item.proposition
-            for item in expected_items.structure.propositions.propositions
+            for item in self._emitted_propositions(context)
         }
         recovered = {
             item.candidate_key: item.proposition
@@ -581,8 +596,7 @@ class GenerationPostcheckRuntime:
         goal = execution.plan.request.goal
         expected = {
             item.candidate_key: (item.source, item.scope)
-            for item in execution.surface.preview.request.structure
-            .propositions.propositions
+            for item in self._emitted_propositions(context)
         }
         recovered = {
             item.candidate_key: (item.source, item.scope)
