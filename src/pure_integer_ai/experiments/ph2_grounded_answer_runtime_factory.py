@@ -26,6 +26,7 @@ from pure_integer_ai.cognition.shared.generation_structure_plan import (
     GenerationSyntaxLayerResolver,
 )
 from pure_integer_ai.cognition.shared.generation_surface import (
+    GenerationSurfaceAttribution,
     GenerationSurfaceProtocol,
 )
 from pure_integer_ai.cognition.shared.identity import (
@@ -144,6 +145,7 @@ class GroundedAnswerRunLocalComponents:
     postcheck_mapper: object
     artifact_verifier: object | None = None
     task_verifier: object | None = None
+    surface_attributions: tuple[GenerationSurfaceAttribution, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.selector, AnswerContentSelector):
@@ -175,6 +177,10 @@ class GroundedAnswerRunLocalComponents:
             raise TypeError("grounded factory question protocol 类型错误")
         if not hasattr(self.postcheck_mapper, "build"):
             raise TypeError("grounded factory postcheck mapper 缺少 build")
+        if (not isinstance(self.surface_attributions, tuple)
+                or any(not isinstance(item, GenerationSurfaceAttribution)
+                       for item in self.surface_attributions)):
+            raise TypeError("grounded factory surface attributions 类型错误")
 
 
 # object-model: value; representation=struct; interop=pending
@@ -437,6 +443,15 @@ class GroundedAnswerRunLocalFactory:
             request.pattern_id,
             self.surface_protocol,
         )
+        if components.surface_attributions:
+            connector = LanguageGenerationConnector(
+                connector.registry,
+                connector.runtime_policy,
+                connector.surface_protocol,
+                components.surface_attributions,
+                connector.discourse_declarations,
+                connector.anaphora_declarations,
+            )
         alias = components.alias_factory.build(variant)
         if not isinstance(alias, AliasRelationRuntime):
             raise TypeError("grounded alias factory 返回类型错误")

@@ -39,6 +39,7 @@ from pure_integer_ai.cognition.shared.generation_structure_plan import (
     GenerationSyntaxLayerResolver,
 )
 from pure_integer_ai.cognition.shared.generation_surface import (
+    GenerationSurfaceAttribution,
     GenerationSurfaceProtocol,
     SurfaceSlotDirective,
 )
@@ -245,6 +246,24 @@ class _ResponseActSurfaceDirectiveMapper:
         ),)
 
 
+# object-model: mapper; state=immutable
+@dataclass(frozen=True, slots=True)
+class _ResponseActSurfaceAttributionMapper:
+    """为单句 response-act 注入 production Core Use 归属。"""
+
+    value: GenerationSurfaceAttribution
+
+    def attribution(
+            self, structure: GenerationStructurePlan,
+            ) -> GenerationSurfaceAttribution:
+        """核验单句结构后返回调用方冻结的 exact attribution。"""
+        if (not isinstance(structure, GenerationStructurePlan)
+                or len(structure.syntax.sentences) != 1):
+            raise GroundedResponseActRunLocalFactoryError(
+                "response-act attribution 只接受单句结构")
+        return self.value
+
+
 # object-model: runtime
 class GroundedResponseActQuestionExecutor:
     """只返回 factory 绑定的同次 planning candidates。"""
@@ -295,6 +314,7 @@ class GroundedResponseActRunLocalComponents:
     source_verifier: object
     task_verifier: object
     question_protocol: QuestionAnswerProtocol
+    surface_attribution: GenerationSurfaceAttribution | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.selector, AnswerContentSelector):
@@ -322,6 +342,10 @@ class GroundedResponseActRunLocalComponents:
                 raise TypeError(f"response-act {label} verifier 缺少 verify")
         if not isinstance(self.question_protocol, QuestionAnswerProtocol):
             raise TypeError("response-act question protocol 类型错误")
+        if (self.surface_attribution is not None
+                and not isinstance(
+                    self.surface_attribution, GenerationSurfaceAttribution)):
+            raise TypeError("response-act surface attribution 类型错误")
 
 
 # object-model: value; representation=struct; interop=pending
@@ -512,6 +536,9 @@ class GroundedResponseActRunLocalFactory:
             _ResponseActExecutionRequestMapper(variant),
             _ResponseActSurfaceDirectiveMapper(
                 variant, components.surface_protocol),
+            (None if components.surface_attribution is None
+             else _ResponseActSurfaceAttributionMapper(
+                 components.surface_attribution)),
         )
         protocol = components.plan_protocol
         structure_protocol = components.structure_protocol
