@@ -19,21 +19,31 @@ def _ts(
         language: str,
         translation: str,
         translation_type: str = "",
+        source_language: str = "",
+        old_source: str = "",
         ) -> bytes:
     """构造一份单 message synthetic TS。"""
     type_text = f' type="{translation_type}"' if translation_type else ""
+    source_text = (
+        f' sourcelanguage="{source_language}"' if source_language else "")
+    old_source_text = f'<oldsource>{old_source}</oldsource>' if old_source else ""
     return (
         '<?xml version="1.0" encoding="utf-8"?>\n'
         '<!DOCTYPE TS>\n'
-        f'<TS version="2.1" language="{language}">'
+        f'<TS version="2.1" language="{language}"{source_text}>'
         '<context><name>Main</name><message id="open">'
-        '<source>Open %1</source><comment>verb</comment>'
+        f'<source>Open %1</source>{old_source_text}<comment>verb</comment>'
         f'<translation{type_text}>{translation}</translation>'
         '</message></context></TS>\n'
     ).encode("utf-8")
 
 
-def _derive(hans: bytes, hant: bytes):
+def _derive(
+        hans: bytes,
+        hant: bytes,
+        *,
+        expected_source_language: str = "",
+        ):
     """用固定 synthetic source identity 调共享 parser。"""
     return derive_normalization_recovery_v8_qt_ts_source_records(
         source_family="SYNTHETIC_PROJECT",
@@ -43,10 +53,12 @@ def _derive(hans: bytes, hant: bytes):
             "domain": "main",
             "zh_Hans": {
                 "expected_language": "zh_CN",
+                "expected_source_language": expected_source_language,
                 "relative_path": "locale/app_zh_CN.ts",
             },
             "zh_Hant": {
                 "expected_language": "zh_TW",
+                "expected_source_language": expected_source_language,
                 "relative_path": "locale/app_zh_TW.ts",
             },
         },),
@@ -75,6 +87,40 @@ def test_v8_qt_ts_parser_preserves_official_source_and_pair_structure(
     assert pair["v8_training_eligible"] == 1
     assert summary["content_outcome"] == "PASS_NONZERO_ACTIVE_COMMON_PAIR"
     assert summary["plain_pair_count"] == 1
+
+
+def test_v8_qt_ts_parser_accepts_only_declared_source_language() -> None:
+    """标准 sourcelanguage 只有在冻结 pair spec 显式声明时才可进入。"""
+    hans = _ts(
+        language="zh_CN", translation="打开 %1", source_language="en")
+    hant = _ts(
+        language="zh_TW", translation="開啟 %1", source_language="en")
+    _files, pairs, summary = _derive(
+        hans, hant, expected_source_language="en")
+    assert len(pairs) == 1
+    assert summary["plain_pair_count"] == 1
+    with pytest.raises(BroadQaExternalDataError, match="root schema"):
+        _derive(hans, hant)
+
+
+def test_v8_qt_ts_parser_accepts_nonsemantic_oldsource_once() -> None:
+    """oldsource 可审计但不替代当前 official source identity。"""
+    _files, pairs, summary = _derive(
+        _ts(language="zh_CN", translation="打开 %1", old_source="Open file"),
+        _ts(language="zh_TW", translation="開啟 %1", old_source="Open file"),
+    )
+    assert len(pairs) == 1
+    assert pairs[0]["official_source_text"] == "Open %1"
+    assert summary["plain_pair_count"] == 1
+    duplicated = _ts(
+        language="zh_CN", translation="打开 %1", old_source="Open file").replace(
+            b"<oldsource>Open file</oldsource>",
+            b"<oldsource>Open file</oldsource><oldsource>Open item</oldsource>")
+    with pytest.raises(BroadQaExternalDataError, match="oldsource"):
+        _derive(
+            duplicated,
+            _ts(language="zh_TW", translation="開啟 %1"),
+        )
 
 
 def test_v8_qt_ts_parser_reports_zero_active_without_relaxing_unfinished(

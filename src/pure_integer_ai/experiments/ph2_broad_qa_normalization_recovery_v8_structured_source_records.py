@@ -97,6 +97,7 @@ def _parse_qt_ts(
         *,
         domain: str,
         expected_language: str,
+        expected_source_language: str,
         locale_role: str,
         source_file_id: str,
         ) -> tuple[dict[tuple[str, ...], dict[str, object]], dict[str, int]]:
@@ -104,6 +105,7 @@ def _parse_qt_ts(
     if (not isinstance(payload, bytes) or not payload
             or not isinstance(domain, str) or not domain
             or not isinstance(expected_language, str) or not expected_language
+            or not isinstance(expected_source_language, str)
             or locale_role not in _LOCALE_ROLES
             or not isinstance(source_file_id, str)
             or len(source_file_id) != 64
@@ -114,9 +116,13 @@ def _parse_qt_ts(
         root = ElementTree.fromstring(payload)
     except ElementTree.ParseError as error:
         raise BroadQaExternalDataError("v8 Qt TS XML parser 失败") from error
+    expected_attributes = {"version", "language"}
+    if expected_source_language:
+        expected_attributes.add("sourcelanguage")
     if (root.tag != "TS" or root.get("version") != "2.1"
             or root.get("language") != expected_language
-            or set(root.attrib) != {"version", "language"}
+            or root.get("sourcelanguage", "") != expected_source_language
+            or set(root.attrib) != expected_attributes
             or any(child.tag not in {"context", "dependencies"}
                    for child in root)):
         raise BroadQaExternalDataError("v8 Qt TS root schema 漂移")
@@ -132,10 +138,17 @@ def _parse_qt_ts(
             counts["message_count"] += 1
             if (set(message.attrib).difference({"id", "numerus"})
                     or any(child.tag not in {
-                        "comment", "extracomment", "location", "source",
-                        "translation", "translatorcomment"}
+                        "comment", "extracomment", "location", "oldsource",
+                        "source", "translation", "translatorcomment"}
                         for child in message)):
                 raise BroadQaExternalDataError("v8 Qt TS message schema 漂移")
+            old_sources = message.findall("oldsource")
+            if len(old_sources) > 1:
+                raise BroadQaExternalDataError(
+                    "v8 Qt TS oldsource 数量漂移")
+            if old_sources:
+                _element_text(
+                    old_sources[0], label="oldsource", allow_empty=False)
             translation = message.find("translation")
             if translation is None:
                 raise BroadQaExternalDataError("v8 Qt TS translation 缺失")
@@ -347,10 +360,17 @@ def derive_normalization_recovery_v8_qt_ts_source_records(
         domains.add(domain)
         for role in _LOCALE_ROLES:
             value = spec.get(role)
+            allowed_keys = {
+                "expected_language", "expected_source_language",
+                "relative_path",
+            }
             if (not isinstance(value, dict)
-                    or set(value) != {"expected_language", "relative_path"}
+                    or set(value).difference(allowed_keys)
+                    or not {"expected_language", "relative_path"}.issubset(value)
                     or not isinstance(value["expected_language"], str)
                     or not value["expected_language"]
+                    or not isinstance(
+                        value.get("expected_source_language", ""), str)
                     or not isinstance(value["relative_path"], str)
                     or not value["relative_path"]):
                 raise BroadQaExternalDataError(
@@ -371,6 +391,8 @@ def derive_normalization_recovery_v8_qt_ts_source_records(
                 payload,
                 domain=domain,
                 expected_language=value["expected_language"],
+                expected_source_language=value.get(
+                    "expected_source_language", ""),
                 locale_role=role,
                 source_file_id=str(record["file_id"]),
             )
