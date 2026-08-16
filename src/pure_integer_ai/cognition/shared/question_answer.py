@@ -96,6 +96,7 @@ class QuestionRequest:
     response_scope: ScopeIdentity
     trace: tuple[int, ...]
     target_branch: ObjectIdentity | None = None
+    authorized_candidate_targets: tuple[BoundProposition, ...] = ()
 
     def __post_init__(self) -> None:
         """核验查询身份、目标来源和知识/回答 scope 没有被混用。"""
@@ -125,6 +126,29 @@ class QuestionRequest:
                     or self.target_branch.object_kind
                     != OBJECT_LANGUAGE_BRANCH):
                 raise ValueError("question target_branch 必须是 LanguageBranch")
+        if (not isinstance(self.authorized_candidate_targets, tuple)
+                or any(not isinstance(item, BoundProposition)
+                       for item in self.authorized_candidate_targets)):
+            raise TypeError(
+                "question authorized candidate targets 类型错误")
+        if self.authorized_candidate_targets:
+            if self.target not in self.authorized_candidate_targets:
+                raise ValueError(
+                    "question target 必须属于 authorized candidate targets")
+            if len(set(self.authorized_candidate_targets)) != len(
+                    self.authorized_candidate_targets):
+                raise ValueError(
+                    "question authorized candidate targets 不得重复")
+            if any(semantic_source(item.template) != source
+                   for item in self.authorized_candidate_targets):
+                raise ValueError(
+                    "question authorized candidate target 来源漂移")
+            object.__setattr__(self, "authorized_candidate_targets", tuple(
+                sorted(
+                    self.authorized_candidate_targets,
+                    key=lambda item: item.stable_key(),
+                )
+            ))
 
     @property
     def source(self):
@@ -146,6 +170,9 @@ class QuestionRequest:
         ]
         if self.target_branch is not None:
             result.extend(_packed(self.target_branch.stable_key()))
+        result.append(len(self.authorized_candidate_targets))
+        for target in self.authorized_candidate_targets:
+            result.extend(_packed(target.stable_key()))
         return tuple(result)
 
 
@@ -199,9 +226,15 @@ class QuestionExecutionResult:
         if any(item.scope != self.query.request.response_scope
                for item in self.candidates):
             raise ValueError("question execution candidate scope 被替换")
-        if any(item.proposition != self.query.request.target
-               for item in self.candidates):
-            raise ValueError("question execution candidate target 被替换")
+        if self.candidates:
+            authorized = (
+                self.query.request.authorized_candidate_targets
+                or (self.query.request.target,)
+            )
+            actual = tuple(item.proposition for item in self.candidates)
+            if len(actual) != len(authorized) or set(actual) != set(authorized):
+                raise ValueError(
+                    "question execution candidate target 未获完整授权")
         _strict_key(self.trace, label="question execution trace")
         object.__setattr__(self, "candidates", tuple(sorted(
             self.candidates, key=lambda item: item.stable_key())))

@@ -119,6 +119,7 @@ class GroundedAnswerReferenceCompileRequest:
     language_branch: ObjectIdentity
     representation_family: tuple[int, ...]
     strategy: str
+    forming_teacher_keys: tuple[tuple[int, ...], ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.episode, GroundedAnswerEpisode):
@@ -144,6 +145,18 @@ class GroundedAnswerReferenceCompileRequest:
         if self.strategy not in REFERENCE_STRATEGIES:
             raise GroundedAnswerReferenceCompileError(
                 "reference compile strategy 未注册")
+        if (not isinstance(self.forming_teacher_keys, tuple)
+                or not self.forming_teacher_keys):
+            raise GroundedAnswerReferenceCompileError(
+                "reference compile 缺少 forming teacher keys")
+        for key in self.forming_teacher_keys:
+            _strict_key(key, where="reference forming teacher key")
+        if len(set(self.forming_teacher_keys)) != len(
+                self.forming_teacher_keys):
+            raise GroundedAnswerReferenceCompileError(
+                "reference forming teacher key 重复")
+        object.__setattr__(self, "forming_teacher_keys", tuple(sorted(
+            self.forming_teacher_keys)))
         course = self.episode.reference_course
         claim_ids = tuple(item.proposition_id for item in self.claims)
         if claim_ids != course.ordered_proposition_ids:
@@ -220,6 +233,8 @@ class GroundedAnswerReferenceCompilation:
     episode_id: str
     strategy: str
     claims: tuple[GroundedAnswerClaimCandidateBinding, ...]
+    planning: GenerationPlanningRequest
+    forming_teacher_keys: tuple[tuple[int, ...], ...]
     sentences: tuple[GroundedAnswerReferenceSentenceCompilation, ...]
     connector: LanguageGenerationConnector
     reference_origin: ObjectIdentity
@@ -238,6 +253,18 @@ class GroundedAnswerReferenceCompilation:
                     for item in self.claims)):
             raise GroundedAnswerReferenceCompileError(
                 "reference compilation claims 非法")
+        if not isinstance(self.planning, GenerationPlanningRequest):
+            raise TypeError("reference compilation planning 类型错误")
+        if self.planning.candidates != tuple(
+                item.candidate for item in self.claims):
+            raise GroundedAnswerReferenceCompileError(
+                "reference compilation planning/candidates 漂移")
+        if (not isinstance(self.forming_teacher_keys, tuple)
+                or not self.forming_teacher_keys
+                or self.forming_teacher_keys != tuple(sorted(
+                    set(self.forming_teacher_keys)))):
+            raise GroundedAnswerReferenceCompileError(
+                "reference compilation forming teacher keys 非规范")
         if (not isinstance(self.sentences, tuple)
                 or len(self.sentences) != 2
                 or any(not isinstance(
@@ -535,6 +562,8 @@ def compile_grounded_answer_reference_connector(
         request.episode.episode_id,
         request.strategy,
         request.claims,
+        request.planning,
+        request.forming_teacher_keys,
         tuple(sentence_compilations),
         connector,
         reference_origin,
