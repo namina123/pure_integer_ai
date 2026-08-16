@@ -11,11 +11,20 @@ from pure_integer_ai.cognition.shared.alias_resolution import (
 from pure_integer_ai.cognition.shared.generation_plan import (
     GenerationPlanningRequest,
 )
+from pure_integer_ai.cognition.shared.generation_structure_plan import (
+    AnaphoraRequirement,
+)
+from pure_integer_ai.cognition.shared.generation_surface import (
+    GenerationSurfaceRequest,
+)
 from pure_integer_ai.cognition.shared.identity import (
     concept_identity,
     minimal_instruction_identity,
     representation_identity,
     structure_concept_identity,
+)
+from pure_integer_ai.cognition.shared.semantic_object import (
+    proposition_identity,
 )
 from pure_integer_ai.cognition.shared.order_hypothesis import (
     OrderHypothesisEngine,
@@ -363,6 +372,9 @@ def test_connector_routes_predicate_and_role_through_active_s07_and_r01():
             filler_representation,
         }
         assert len(run.plan.adoptions) == 2
+        assert all(
+            item.reference_budget is None and not item.reference_use_key
+            for item in request.directives)
         assert alias.runtime.state_key() != before_alias
         assert tuple(order_backend.select("edge", where=None)) == (
             before_legacy_edges)
@@ -371,6 +383,210 @@ def test_connector_routes_predicate_and_role_through_active_s07_and_r01():
     finally:
         if alias is not None:
             alias.close()
+        order_backend.close()
+
+
+def test_connector_reference_policy_drives_g03_and_fails_closed():
+    """生产 mapper 注入 reference 预算，并保留三类 G-03 分型失败。"""
+    order_backend = DictBackend()
+    try:
+        graphs = _graphs(order_backend)
+        engine = OrderHypothesisEngine(_learning_protocol())
+        domain = _domain(variant=97, slot_count=3)
+        promotion = _active_plan(
+            engine,
+            OrderConstraintPromoter(
+                engine, graphs.order_graph, graphs.lifecycle),
+            domain,
+            _pattern(domain, first=1, second=2, kind=97),
+            event=97,
+            instance=97,
+        )
+        role = promotion.slots[2].role
+        filler = concept_identity((_BASE + 30, 1))
+        selection = _selection_with_role(domain.language, role, filler)
+        candidate = selection.request.candidates[0]
+        antecedent = candidate.proposition.template
+        origin = proposition_identity(
+            candidate.source, (_BASE + 30, 6))
+        base = _connector(promotion, selection, role)
+        reference_slot = base.registry.templates[0].slots[0].slot
+        template_policy = base.runtime_policy.templates[0]
+        reference_surface_policy = next(
+            item for item in template_policy.surface
+            if item.slot == reference_slot)
+        reference_budget = AliasRouteSearchBudget(30, 30, 30)
+        with pytest.raises(ValueError, match="必须成对"):
+            replace(
+                reference_surface_policy,
+                reference_budget=reference_budget,
+            )
+        with pytest.raises(ValueError, match="必须成对"):
+            replace(
+                reference_surface_policy,
+                reference_use_key_suffix=(_BASE + 30, 4),
+            )
+        reference_surfaces = tuple(
+            replace(
+                item,
+                surface_budget=reference_budget,
+                reference_budget=reference_budget,
+                reference_use_key_suffix=(_BASE + 30, 5),
+            )
+            if item.slot == reference_slot else item
+            for item in template_policy.surface
+        )
+        reference_runtime = replace(
+            base.runtime_policy,
+            templates=(replace(
+                template_policy,
+                surface=reference_surfaces,
+            ),),
+        )
+        template = base.registry.templates[0]
+        proposition_source = base.registry.value_protocol.proposition_source
+        constant_source = base.registry.value_protocol.constant_source
+        reference_bindings = tuple(
+            replace(
+                item,
+                source=constant_source,
+                constant=origin,
+            )
+            if item.slot == reference_slot else replace(
+                item,
+                source=proposition_source,
+            )
+            if item.source == base.registry.value_protocol.predicate_source
+            else item
+            for item in template.bindings
+        )
+        reference_theory = tuple(
+            replace(
+                item,
+                action=base.surface_protocol.emit_action,
+            )
+            if item.slot == reference_slot else item
+            for item in template.surface
+        )
+        reference_registry = LanguageGenerationConnectorRegistry(
+            base.registry.value_protocol,
+            (replace(
+                template,
+                bindings=reference_bindings,
+                surface=reference_theory,
+            ),),
+        )
+        connector = LanguageGenerationConnector(
+            reference_registry,
+            reference_runtime,
+            base.surface_protocol,
+        )
+        base_structure = connector.structure_planner().plan(selection)
+        sentence = base_structure.syntax.sentences[0]
+        requirement = AnaphoraRequirement(
+            sentence.sentence,
+            reference_slot,
+            selection.selected_candidate_keys[0],
+            minimal_instruction_identity((_BASE + 30, 2)),
+            (_BASE + 30, 3),
+            sentence.instance,
+        )
+        structure = replace(
+            base_structure,
+            syntax=replace(
+                base_structure.syntax,
+                anaphora=(requirement,),
+            ),
+        )
+        execution_planner = _execution_planner(graphs, promotion)
+        execution_mapper = LanguageConnectorExecutionRequestMapper(
+            reference_runtime.order_budget)
+        execution = execution_planner.execute(
+            execution_mapper.build(structure))
+        base_execution = execution_planner.execute(
+            execution_mapper.build(base_structure))
+        mapper = LanguageConnectorSurfaceDirectiveMapper(
+            connector.registry,
+            connector.runtime_policy,
+            connector.surface_protocol,
+        )
+        directives = mapper.plan(
+            structure, execution, domain.language)
+        request = GenerationSurfaceRequest(
+            connector.surface_protocol,
+            structure,
+            execution,
+            domain.language,
+            directives,
+        )
+        reference_directive = next(
+            item for item in directives
+            if item.slot == reference_slot)
+        assert reference_directive.reference_budget == reference_budget
+        assert reference_directive.reference_use_key
+        assert reference_directive.reference_use_key != (
+            reference_directive.surface_use_key)
+
+        surface_only = tuple(
+            replace(
+                item,
+                reference_budget=None,
+                reference_use_key_suffix=(),
+            )
+            if item.slot == reference_slot else item
+            for item in reference_surfaces
+        )
+        surface_only_runtime = replace(
+            reference_runtime,
+            templates=(replace(
+                template_policy,
+                surface=surface_only,
+            ),),
+        )
+        missing_policy_mapper = LanguageConnectorSurfaceDirectiveMapper(
+            reference_registry,
+            surface_only_runtime,
+            base.surface_protocol,
+        )
+        with pytest.raises(ValueError, match="anaphora 与 reference"):
+            missing_policy_mapper.plan(
+                structure, execution, domain.language)
+        with pytest.raises(ValueError, match="anaphora 与 reference"):
+            mapper.plan(
+                base_structure, base_execution, domain.language)
+
+        wrong = proposition_identity(
+            candidate.source, (_BASE + 30, 8))
+        family = (_BASE + 30, 7)
+        realizations = (
+            (origin, representation_identity(family, (0x547D,))),
+            (antecedent, representation_identity(family, (0x56E0,))),
+            (filler, representation_identity(family, (0x679C,))),
+        )
+        cases = (
+            (((origin, antecedent),), None),
+            ((), request.protocol.reference_missing_reason),
+            (((origin, antecedent), (origin, wrong)),
+             request.protocol.reference_ambiguous_reason),
+            (((origin, wrong),), request.protocol.reference_mismatch_reason),
+        )
+        for references, reason in cases:
+            alias = _alias_fixture(
+                domain.language, realizations, references)
+            try:
+                before = alias.runtime.state_key()
+                run = GenerationSurfaceRuntime(alias.runtime).plan(request)
+                if reason is None:
+                    assert run.complete
+                    assert len(run.plan.adoptions) == 4
+                    assert alias.runtime.state_key() != before
+                else:
+                    assert not run.complete
+                    assert run.preview.reason == reason
+                    assert alias.runtime.state_key() == before
+            finally:
+                alias.close()
+    finally:
         order_backend.close()
 
 

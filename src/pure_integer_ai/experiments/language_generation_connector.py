@@ -62,6 +62,9 @@ class LanguageGenerationConnectorError(RuntimeError):
     """课程结构模板缺失、歧义或不能无损绑定当前命题。"""
 
 
+_REFERENCE_USE_KEY_DOMAIN = (1,)
+
+
 @dataclass(frozen=True)
 class LanguageConnectorDiscourseDeclaration:
     """课程或图读取器注入的一次多命题篇章依赖声明。"""
@@ -628,12 +631,14 @@ class LanguageConnectorSurfaceDirective:
 
 @dataclass(frozen=True)
 class LanguageConnectorSurfaceRuntimePolicy:
-    """保存逐槽 trace、R-01 搜索预算和 Use key 后缀。"""
+    """保存逐槽 surface/reference 搜索预算和互异 Use key 后缀。"""
 
     slot: ObjectIdentity
     trace: tuple[int, ...]
     surface_budget: AliasRouteSearchBudget | None
     use_key_suffix: tuple[int, ...]
+    reference_budget: AliasRouteSearchBudget | None = None
+    reference_use_key_suffix: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         _identity(
@@ -650,6 +655,23 @@ class LanguageConnectorSurfaceRuntimePolicy:
             self.use_key_suffix,
             label="connector runtime use key suffix",
         )
+        if (self.reference_budget is not None
+                and not isinstance(self.reference_budget,
+                                   AliasRouteSearchBudget)):
+            raise TypeError("connector runtime reference budget 类型错误")
+        if not isinstance(self.reference_use_key_suffix, tuple):
+            raise TypeError(
+                "connector runtime reference use key suffix 必须是 tuple")
+        if self.reference_use_key_suffix:
+            _strict_key(
+                self.reference_use_key_suffix,
+                label="connector runtime reference use key suffix",
+            )
+        has_reference_budget = self.reference_budget is not None
+        has_reference_suffix = bool(self.reference_use_key_suffix)
+        if has_reference_budget != has_reference_suffix:
+            raise ValueError(
+                "connector runtime reference 预算与 use key 后缀必须成对")
 
     def stable_key(self) -> tuple[int, ...]:
         """返回逐槽运行策略键，不把它并入语言理论身份。"""
@@ -658,11 +680,18 @@ class LanguageConnectorSurfaceRuntimePolicy:
             if self.surface_budget is None
             else self.surface_budget.stable_key()
         )
+        reference_budget_key = (
+            ()
+            if self.reference_budget is None
+            else self.reference_budget.stable_key()
+        )
         return (
             *_packed(self.slot.stable_key()),
             *_packed(self.trace),
             *_packed(budget_key),
             *_packed(self.use_key_suffix),
+            *_packed(reference_budget_key),
+            *_packed(self.reference_use_key_suffix),
         )
 
 
@@ -1353,6 +1382,10 @@ class LanguageConnectorSurfaceDirectiveMapper:
             for candidate in self.registry.selected_candidates(
                 structure.selection)
         }
+        anaphora = {
+            (item.address, item.slot): item
+            for item in structure.syntax.anaphora
+        }
         result = []
         for sentence in structure.syntax.sentences:
             if not isinstance(sentence.instance, GenerationSentenceInstance):
@@ -1384,7 +1417,16 @@ class LanguageConnectorSurfaceDirectiveMapper:
                 emitted = theory.action == self.protocol.emit_action
                 if emitted != (policy.surface_budget is not None):
                     raise ValueError("connector emit/silent 与 R-01 预算不一致")
+                requirement = anaphora.get(
+                    (sentence.instance, value.slot))
+                has_reference_policy = policy.reference_budget is not None
+                if (requirement is None) != (not has_reference_policy):
+                    raise ValueError(
+                        "connector anaphora 与 reference 运行策略不一致")
+                if requirement is not None and not emitted:
+                    raise ValueError("connector anaphora slot 必须声明 emit")
                 use_key = ()
+                reference_use_key = ()
                 if emitted:
                     use_key = (
                         *self.runtime_policy.use_key_namespace,
@@ -1394,6 +1436,16 @@ class LanguageConnectorSurfaceDirectiveMapper:
                         *_packed(value.slot.stable_key()),
                         *_packed(policy.use_key_suffix),
                     )
+                    if requirement is not None:
+                        reference_use_key = (
+                            *self.runtime_policy.use_key_namespace,
+                            *_packed(structure.selection.stable_key()),
+                            *_packed(template.connector.stable_key()),
+                            *_packed(sentence.instance.stable_key()),
+                            *_packed(value.slot.stable_key()),
+                            *_packed(_REFERENCE_USE_KEY_DOMAIN),
+                            *_packed(policy.reference_use_key_suffix),
+                        )
                 result.append(SurfaceSlotDirective(
                     sentence.instance,
                     value.slot,
@@ -1403,6 +1455,8 @@ class LanguageConnectorSurfaceDirectiveMapper:
                     theory.surface_prefix_steps,
                     policy.surface_budget,
                     use_key,
+                    policy.reference_budget,
+                    reference_use_key,
                 ))
         return tuple(result)
 
