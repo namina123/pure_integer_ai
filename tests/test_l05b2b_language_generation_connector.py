@@ -25,6 +25,7 @@ from pure_integer_ai.cognition.shared.identity import (
 )
 from pure_integer_ai.cognition.shared.semantic_object import (
     proposition_identity,
+    role_identity,
 )
 from pure_integer_ai.cognition.shared.order_hypothesis import (
     OrderHypothesisEngine,
@@ -38,6 +39,9 @@ from pure_integer_ai.cognition.shared.structure_order_consumer import (
     StructureOrderConsumer,
     StructureOrderSearchBudget,
 )
+from pure_integer_ai.cognition.shared.structure_order import (
+    StructureSlotDefinition,
+)
 from pure_integer_ai.cognition.shared.typed_binding import BoundRoleBinding
 from pure_integer_ai.cognition.understanding.order_constraint_promotion import (
     OrderConstraintPromoter,
@@ -46,6 +50,9 @@ from pure_integer_ai.experiments.generation_surface_runtime import (
     GenerationSurfaceRuntime,
 )
 from pure_integer_ai.experiments.language_generation_connector import (
+    BoundPropositionAnaphoraDeclaration,
+    BoundPropositionAnaphoraDeclarations,
+    BoundPropositionAnaphoraLink,
     BoundPropositionDiscourseDeclaration,
     BoundPropositionDiscourseDeclarations,
     BoundPropositionDiscourseDependency,
@@ -178,6 +185,145 @@ def test_bound_proposition_discourse_declaration_rebinds_query_scoped_candidates
             LanguageGenerationConnectorError,
             match="同一 BoundProposition 命中多个 selected candidate"):
         provider.declaration(duplicate_selection)
+
+
+def test_anaphora_declaration_injects_runtime_sentence_and_rejects_future():
+    """课程 link 按 exact candidate 集重绑句实例，未来 antecedent 由 G-02 拒绝。"""
+    request, _unused = _request(count=2)
+    branch = _domain(variant=98, slot_count=2).language
+    planning = GenerationPlanningRequest(
+        replace(request.goal, target_branch=branch),
+        request.candidates,
+    )
+    selection, _unused_first, _unused_second = _selection(planning)
+    first, second = planning.candidates
+    value_protocol = LanguageConnectorValueProtocol(*tuple(
+        minimal_instruction_identity((_BASE + 100, index))
+        for index in range(1, 5)
+    ))
+    surface_protocol = _surface_protocol(_BASE + 101)
+    templates = []
+    policies = []
+    sentence_slots = []
+    for index, candidate in enumerate(planning.candidates, start=1):
+        structure = structure_concept_identity((_BASE + 102, index, 1))
+        slot = StructureSlotDefinition(
+            structure,
+            structure_concept_identity((_BASE + 102, index, 2)),
+            role_identity((_BASE + 102, index, 3)),
+            concept_identity((_BASE + 102, index, 4)),
+        )
+        connector_id = structure_concept_identity(
+            (_BASE + 103, index, 1))
+        sentence = structure_concept_identity((_BASE + 103, index, 2))
+        templates.append(LanguageGenerationConnectorTemplate(
+            connector_id,
+            branch,
+            candidate.proposition.structure,
+            candidate.proposition.predicate,
+            sentence,
+            structure,
+            (slot,),
+            (LanguageConnectorSlotBinding(
+                structure_concept_identity((_BASE + 104, index, 1)),
+                slot.slot,
+                value_protocol.proposition_source,
+            ),),
+            structure_concept_identity((_BASE + 104, index, 2)),
+            (),
+            structure_concept_identity((_BASE + 104, index, 3)),
+            (),
+            minimal_instruction_identity((_BASE + 104, index, 4)),
+            minimal_instruction_identity((_BASE + 104, index, 5)),
+            (LanguageConnectorSurfaceDirective(
+                structure_concept_identity((_BASE + 104, index, 6)),
+                slot.slot,
+                surface_protocol.emit_action,
+                minimal_instruction_identity((_BASE + 104, index, 7)),
+                structure_concept_identity((_BASE + 104, index, 8)),
+                (),
+            ),),
+        ))
+        policies.append(LanguageConnectorTemplateRuntimePolicy(
+            connector_id,
+            (LanguageConnectorSurfaceRuntimePolicy(
+                slot.slot,
+                (_BASE + 105, index, 1),
+                AliasRouteSearchBudget(16, 16, 16),
+                (_BASE + 105, index, 2),
+                (AliasRouteSearchBudget(16, 16, 16)
+                 if index == 2 else None),
+                ((_BASE + 105, index, 3) if index == 2 else ()),
+            ),),
+        ))
+        sentence_slots.append((sentence, slot.slot))
+    registry = LanguageGenerationConnectorRegistry(
+        value_protocol, tuple(templates))
+    runtime_policy = LanguageGenerationConnectorRuntimePolicy(
+        (_BASE + 106, 1),
+        StructureOrderSearchBudget(16),
+        tuple(policies),
+    )
+    discourse = BoundPropositionDiscourseDeclarations((
+        BoundPropositionDiscourseDeclaration(
+            (first.proposition, second.proposition),
+            (BoundPropositionDiscourseDependency(
+                first.proposition,
+                second.proposition,
+                structure_concept_identity((_BASE + 107, 1)),
+                minimal_instruction_identity((_BASE + 107, 2)),
+                (_BASE + 107, 3),
+            ),),
+            planning.goal.source,
+            (_BASE + 107, 4),
+        ),
+    ))
+
+    def provider_for(antecedent, referring, sentence_slot, seed):
+        sentence, slot = sentence_slot
+        return BoundPropositionAnaphoraDeclarations((
+            BoundPropositionAnaphoraDeclaration(
+                (first.proposition, second.proposition),
+                (BoundPropositionAnaphoraLink(
+                    antecedent.proposition,
+                    referring.proposition,
+                    sentence,
+                    slot,
+                    minimal_instruction_identity((_BASE + 108, seed, 1)),
+                    (_BASE + 108, seed, 2),
+                ),),
+                planning.goal.source,
+                (_BASE + 108, seed, 3),
+            ),
+        ))
+
+    provider = provider_for(first, second, sentence_slots[1], 1)
+    connector = LanguageGenerationConnector(
+        registry,
+        runtime_policy,
+        surface_protocol,
+        discourse_declarations=discourse,
+        anaphora_declarations=provider,
+    )
+    plan = connector.structure_planner().plan(selection)
+    requirement = plan.syntax.anaphora[0]
+    assert len(plan.syntax.sentences) == 2
+    assert requirement.antecedent_candidate_key == first.stable_key()
+    assert requirement.address == plan.syntax.sentences[1].address
+    assert requirement.slot == sentence_slots[1][1]
+    assert provider.clone_for_evaluation() is not provider
+    assert provider.clone_for_evaluation().state_key() == provider.state_key()
+    assert connector.anaphora_declarations is provider
+    future = provider_for(second, first, sentence_slots[0], 2)
+    future_connector = LanguageGenerationConnector(
+        registry,
+        runtime_policy,
+        surface_protocol,
+        discourse_declarations=discourse,
+        anaphora_declarations=future,
+    )
+    with pytest.raises(ValueError, match="antecedent 不得位于未来"):
+        future_connector.structure_planner().plan(selection)
 
 
 def _connector(

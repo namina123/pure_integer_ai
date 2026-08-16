@@ -17,6 +17,7 @@ from pure_integer_ai.cognition.shared.generation_structure_execution import (
     SentenceStructureExecutionBudget,
 )
 from pure_integer_ai.cognition.shared.generation_structure_plan import (
+    AnaphoraRequirement,
     DiscourseDependency,
     DiscoursePlan,
     GenerationSentenceInstance,
@@ -129,6 +130,307 @@ class LanguageConnectorDiscourseDeclarationProvider(Protocol):
             ) -> "LanguageConnectorDiscourseDeclarationProvider":
         """返回不共享可变读取状态、且保持同一声明配置的评测副本。"""
         ...
+
+
+@dataclass(frozen=True)
+class LanguageConnectorAnaphoraDeclaration:
+    """一次 selection 上来源化、已重绑运行期句实例的照应声明。"""
+
+    candidate_keys: tuple[tuple[int, ...], ...]
+    requirements: tuple[AnaphoraRequirement, ...]
+    source: SourceRef
+    trace: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.candidate_keys, tuple)
+                or not self.candidate_keys):
+            raise ValueError("connector anaphora candidate_keys 必须非空")
+        for key in self.candidate_keys:
+            _strict_key(key, label="connector anaphora candidate key")
+        if len(set(self.candidate_keys)) != len(self.candidate_keys):
+            raise ValueError("connector anaphora candidate key 不得重复")
+        if (not isinstance(self.requirements, tuple)
+                or not self.requirements
+                or any(not isinstance(item, AnaphoraRequirement)
+                       for item in self.requirements)):
+            raise TypeError("connector anaphora requirements 必须非空")
+        addresses = tuple(
+            (item.address, item.slot) for item in self.requirements)
+        if len(set(addresses)) != len(addresses):
+            raise ValueError("connector anaphora sentence/slot 不得重复")
+        if not isinstance(self.source, SourceRef):
+            raise TypeError("connector anaphora source 类型错误")
+        _strict_key(self.trace, label="connector anaphora trace")
+        object.__setattr__(self, "candidate_keys", tuple(sorted(
+            self.candidate_keys)))
+        object.__setattr__(self, "requirements", tuple(sorted(
+            self.requirements, key=lambda item: item.stable_key())))
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回运行候选、requirements、来源和 trace 的完整键。"""
+        result = [len(self.candidate_keys)]
+        for key in self.candidate_keys:
+            result.extend(_packed(key))
+        result.append(len(self.requirements))
+        for requirement in self.requirements:
+            result.extend(_packed(requirement.stable_key()))
+        result.extend(_packed(self.source.stable_key()))
+        result.extend(_packed(self.trace))
+        return tuple(result)
+
+
+class LanguageConnectorAnaphoraDeclarationProvider(Protocol):
+    """按 exact selection 和实际 sentence/slot 返回照应声明。"""
+
+    def declaration(
+            self,
+            selection: AnswerContentSelection,
+            sentences: tuple[PlannedSentence, ...],
+            ) -> LanguageConnectorAnaphoraDeclaration | None:
+        """返回当前 selection 的唯一声明；无匹配时返回空。"""
+        ...
+
+    def state_key(self) -> tuple[int, ...]:
+        """返回不可变课程声明内容键。"""
+        ...
+
+    def clone_for_evaluation(
+            self,
+            ) -> "LanguageConnectorAnaphoraDeclarationProvider":
+        """返回不共享读取状态、内容键相同的评测副本。"""
+        ...
+
+
+@dataclass(frozen=True)
+class BoundPropositionAnaphoraLink:
+    """用课程 BoundProposition 声明 antecedent 与 referring slot。"""
+
+    antecedent: BoundProposition
+    referring: BoundProposition
+    sentence: ObjectIdentity
+    slot: ObjectIdentity
+    instruction: ObjectIdentity
+    trace: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.antecedent, BoundProposition):
+            raise TypeError("anaphora antecedent 必须是 BoundProposition")
+        if not isinstance(self.referring, BoundProposition):
+            raise TypeError("anaphora referring 必须是 BoundProposition")
+        if self.antecedent == self.referring:
+            raise ValueError("anaphora link 不得自环")
+        _identity(
+            self.sentence,
+            label="anaphora link sentence",
+            kind=OBJECT_STRUCTURE_CONCEPT,
+        )
+        _identity(
+            self.slot,
+            label="anaphora link slot",
+            kind=OBJECT_STRUCTURE_CONCEPT,
+        )
+        _identity(
+            self.instruction,
+            label="anaphora link instruction",
+            kind=OBJECT_MINIMAL_INSTRUCTION,
+        )
+        _strict_key(self.trace, label="anaphora link trace")
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回两个命题端点、sentence/slot、指令和 trace。"""
+        return (
+            *_packed(self.antecedent.stable_key()),
+            *_packed(self.referring.stable_key()),
+            *_packed(self.sentence.stable_key()),
+            *_packed(self.slot.stable_key()),
+            *_packed(self.instruction.stable_key()),
+            *_packed(self.trace),
+        )
+
+
+@dataclass(frozen=True)
+class BoundPropositionAnaphoraDeclaration:
+    """保存可跨 query scope 重绑的 Proposition/event 照应课程。"""
+
+    propositions: tuple[BoundProposition, ...]
+    links: tuple[BoundPropositionAnaphoraLink, ...]
+    source: SourceRef
+    trace: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.propositions, tuple)
+                or len(self.propositions) < 2
+                or any(not isinstance(item, BoundProposition)
+                       for item in self.propositions)):
+            raise TypeError("anaphora propositions 必须至少包含两个命题")
+        keys = tuple(item.stable_key() for item in self.propositions)
+        if len(set(keys)) != len(keys):
+            raise ValueError("anaphora proposition 不得重复")
+        if (not isinstance(self.links, tuple) or not self.links
+                or any(not isinstance(item, BoundPropositionAnaphoraLink)
+                       for item in self.links)):
+            raise TypeError("anaphora links 必须是非空课程 tuple")
+        declared = set(self.propositions)
+        if any(item.antecedent not in declared or item.referring not in declared
+               for item in self.links):
+            raise ValueError("anaphora link 端点必须属于声明命题集")
+        addresses = tuple(
+            (item.referring.stable_key(), item.sentence, item.slot)
+            for item in self.links)
+        if len(set(addresses)) != len(addresses):
+            raise ValueError("同一 referring sentence/slot 不得重复声明")
+        if not isinstance(self.source, SourceRef):
+            raise TypeError("anaphora declaration source 类型错误")
+        _strict_key(self.trace, label="anaphora declaration trace")
+        object.__setattr__(self, "propositions", tuple(sorted(
+            self.propositions, key=lambda item: item.stable_key())))
+        object.__setattr__(self, "links", tuple(sorted(
+            self.links, key=lambda item: item.stable_key())))
+
+    @property
+    def proposition_keys(self) -> tuple[tuple[int, ...], ...]:
+        """返回不含运行期 candidate scope 的课程命题键。"""
+        return tuple(item.stable_key() for item in self.propositions)
+
+    def instantiate(
+            self,
+            candidate_keys_by_proposition: dict[
+                tuple[int, ...], tuple[int, ...]],
+            sentences: tuple[PlannedSentence, ...],
+            ) -> LanguageConnectorAnaphoraDeclaration:
+        """按实际候选和句实例重绑 requirements，不按容器位置猜测。"""
+        if set(candidate_keys_by_proposition) != set(self.proposition_keys):
+            raise LanguageGenerationConnectorError(
+                "anaphora declaration 未精确覆盖 selected Proposition")
+        candidate_keys = tuple(candidate_keys_by_proposition.values())
+        if len(set(candidate_keys)) != len(candidate_keys):
+            raise LanguageGenerationConnectorError(
+                "anaphora declaration candidate 映射重复")
+        if (not isinstance(sentences, tuple)
+                or any(not isinstance(item, PlannedSentence)
+                       for item in sentences)):
+            raise TypeError("anaphora declaration sentences 类型错误")
+        sentence_by_candidate = {}
+        for sentence in sentences:
+            if (not isinstance(sentence.instance, GenerationSentenceInstance)
+                    or sentence.proposition_keys
+                    != (sentence.instance.candidate_key,)):
+                raise LanguageGenerationConnectorError(
+                    "anaphora declaration 只接受逐候选运行期句实例")
+            key = sentence.instance.candidate_key
+            if key in sentence_by_candidate:
+                raise LanguageGenerationConnectorError(
+                    "anaphora declaration candidate 重复落入 sentence")
+            sentence_by_candidate[key] = sentence
+        if set(sentence_by_candidate) != set(candidate_keys):
+            raise LanguageGenerationConnectorError(
+                "anaphora declaration sentences 未覆盖 selected candidate")
+        requirements = []
+        for link in self.links:
+            antecedent_key = candidate_keys_by_proposition[
+                link.antecedent.stable_key()]
+            referring_key = candidate_keys_by_proposition[
+                link.referring.stable_key()]
+            sentence = sentence_by_candidate[referring_key]
+            if (sentence.sentence != link.sentence
+                    or link.slot not in {
+                        value.slot for value in sentence.values}):
+                raise LanguageGenerationConnectorError(
+                    "anaphora declaration sentence/slot 与实际模板漂移")
+            requirements.append(AnaphoraRequirement(
+                link.sentence,
+                link.slot,
+                antecedent_key,
+                link.instruction,
+                link.trace,
+                sentence.instance,
+            ))
+        return LanguageConnectorAnaphoraDeclaration(
+            candidate_keys,
+            tuple(requirements),
+            self.source,
+            self.trace,
+        )
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回命题集、links、来源和 trace 的课程内容键。"""
+        result = [len(self.propositions)]
+        for proposition in self.propositions:
+            result.extend(_packed(proposition.stable_key()))
+        result.append(len(self.links))
+        for link in self.links:
+            result.extend(_packed(link.stable_key()))
+        result.extend(_packed(self.source.stable_key()))
+        result.extend(_packed(self.trace))
+        return tuple(result)
+
+
+@dataclass(frozen=True)
+class BoundPropositionAnaphoraDeclarations:
+    """按 exact selected Proposition 集实例化来源化照应课程。"""
+
+    declarations: tuple[BoundPropositionAnaphoraDeclaration, ...]
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.declarations, tuple)
+                or any(not isinstance(
+                    item, BoundPropositionAnaphoraDeclaration)
+                    for item in self.declarations)):
+            raise TypeError("BoundProposition anaphora declarations 类型错误")
+        keys = tuple(item.proposition_keys for item in self.declarations)
+        if len(set(keys)) != len(keys):
+            raise ValueError("同一 BoundProposition 集不得重复声明 anaphora")
+        object.__setattr__(self, "declarations", tuple(sorted(
+            self.declarations, key=lambda item: item.stable_key())))
+
+    def declaration(
+            self,
+            selection: AnswerContentSelection,
+            sentences: tuple[PlannedSentence, ...],
+            ) -> LanguageConnectorAnaphoraDeclaration | None:
+        """只在 selected Proposition 与课程声明一一对应时重绑。"""
+        if not isinstance(selection, AnswerContentSelection):
+            raise TypeError("anaphora provider selection 类型错误")
+        selected_keys = set(selection.selected_candidate_keys)
+        candidates = {
+            item.stable_key(): item
+            for item in selection.request.candidates
+            if item.stable_key() in selected_keys
+        }
+        if set(candidates) != selected_keys:
+            raise LanguageGenerationConnectorError(
+                "anaphora provider selection candidate 不可恢复")
+        candidate_keys_by_proposition = {}
+        for candidate in candidates.values():
+            proposition_key = candidate.proposition.stable_key()
+            if proposition_key in candidate_keys_by_proposition:
+                raise LanguageGenerationConnectorError(
+                    "同一 BoundProposition 命中多个 anaphora candidate")
+            candidate_keys_by_proposition[proposition_key] = (
+                candidate.stable_key())
+        proposition_keys = tuple(sorted(candidate_keys_by_proposition))
+        matches = tuple(
+            item for item in self.declarations
+            if item.proposition_keys == proposition_keys)
+        if len(matches) > 1:
+            raise LanguageGenerationConnectorError(
+                "当前 selected Proposition 存在多个 anaphora 声明")
+        return (
+            None if not matches
+            else matches[0].instantiate(
+                candidate_keys_by_proposition, sentences)
+        )
+
+    def state_key(self) -> tuple[int, ...]:
+        """返回全部不可变 anaphora 课程内容键。"""
+        result = [len(self.declarations)]
+        for declaration in self.declarations:
+            result.extend(_packed(declaration.stable_key()))
+        return tuple(result)
+
+    def clone_for_evaluation(self) -> "BoundPropositionAnaphoraDeclarations":
+        """返回独立不可变容器并保持同一课程内容键。"""
+        return BoundPropositionAnaphoraDeclarations(self.declarations)
 
 
 @dataclass(frozen=True)
@@ -1226,8 +1528,14 @@ class LanguageConnectorPropositionMapper:
 class LanguageConnectorSyntaxMapper:
     """逐候选按课程模板投影为带运行期句实例的 S-07 义务。"""
 
-    def __init__(self, registry: LanguageGenerationConnectorRegistry) -> None:
+    def __init__(
+            self,
+            registry: LanguageGenerationConnectorRegistry,
+            anaphora_declarations:
+            LanguageConnectorAnaphoraDeclarationProvider | None = None,
+            ) -> None:
         self.registry = registry
+        self.anaphora_declarations = anaphora_declarations
 
     def plan(
             self,
@@ -1303,10 +1611,16 @@ class LanguageConnectorSyntaxMapper:
                 candidate.scope,
                 instance,
             ))
+        anaphora = ()
+        if self.anaphora_declarations is not None:
+            declaration = self.anaphora_declarations.declaration(
+                selection, tuple(sentences))
+            if declaration is not None:
+                anaphora = declaration.requirements
         return SyntaxPlan(
             selection.stable_key(),
             tuple(sentences),
-            (),
+            anaphora,
             tuple(obligations),
         )
 
@@ -1583,6 +1897,8 @@ class LanguageGenerationConnector:
             attributions: tuple[GenerationSurfaceAttribution, ...] = (),
             discourse_declarations: LanguageConnectorDiscourseDeclarationProvider
             | None = None,
+            anaphora_declarations:
+            LanguageConnectorAnaphoraDeclarationProvider | None = None,
             ) -> None:
         if not isinstance(registry, LanguageGenerationConnectorRegistry):
             raise TypeError("language generation connector registry 类型错误")
@@ -1595,10 +1911,17 @@ class LanguageGenerationConnector:
                 not hasattr(discourse_declarations, name)
                 for name in ("declaration", "state_key")):
             raise TypeError("language generation connector discourse provider 协议不完整")
+        if anaphora_declarations is not None and any(
+                not hasattr(anaphora_declarations, name)
+                for name in (
+                    "declaration", "state_key", "clone_for_evaluation")):
+            raise TypeError(
+                "language generation connector anaphora provider 协议不完整")
         self.registry = registry
         self.runtime_policy = runtime_policy
         self.surface_protocol = surface_protocol
         self.discourse_declarations = discourse_declarations
+        self.anaphora_declarations = anaphora_declarations
         self.attribution_mapper = LanguageConnectorSurfaceAttributionMapper(
             registry,
             attributions,
@@ -1641,7 +1964,10 @@ class LanguageGenerationConnector:
                 self.discourse_declarations,
             ),
             LanguageConnectorPropositionMapper(),
-            LanguageConnectorSyntaxMapper(self.registry),
+            LanguageConnectorSyntaxMapper(
+                self.registry,
+                self.anaphora_declarations,
+            ),
         )
 
     def surface_request_builder(
@@ -1682,16 +2008,24 @@ class LanguageGenerationConnector:
             0 if self.discourse_declarations is None else 1,
             *(() if self.discourse_declarations is None
               else _packed(self.discourse_declarations.state_key())),
+            0 if self.anaphora_declarations is None else 1,
+            *(() if self.anaphora_declarations is None
+              else _packed(self.anaphora_declarations.state_key())),
         )
 
 
 __all__ = [
+    "BoundPropositionAnaphoraDeclaration",
+    "BoundPropositionAnaphoraDeclarations",
+    "BoundPropositionAnaphoraLink",
     "BoundPropositionDiscourseDeclaration",
     "BoundPropositionDiscourseDeclarations",
     "BoundPropositionDiscourseDependency",
     "LanguageConnectorDiscourseDeclaration",
     "LanguageConnectorDiscourseDeclarationProvider",
     "LanguageConnectorDiscourseMapper",
+    "LanguageConnectorAnaphoraDeclaration",
+    "LanguageConnectorAnaphoraDeclarationProvider",
     "LanguageConnectorExecutionRequestMapper",
     "LanguageConnectorOrdinalDefinition",
     "LanguageConnectorPropositionMapper",
