@@ -33,6 +33,19 @@ VERIFICATION_VIOLATIONS = (
     "FOREIGN_CITATION",
     "UNPLANNED_CITATION",
 )
+REFERENCE_GRANULARITY = "PROPOSITION_EVENT"
+REFERENCE_STRATEGIES = (
+    "ANTECEDENT_REFERENCE",
+    "EXPLICIT_REPETITION",
+)
+REFERENCE_CHALLENGE_KINDS = (
+    "AMBIGUOUS_ANTECEDENT",
+    "FUTURE_ANTECEDENT",
+    "MISSING_REFERENCE_RELATION",
+    "SCOPE_OUTSIDE_ANTECEDENT",
+    "SURFACE_EXTRA_CLAIM",
+    "WRONG_ANTECEDENT",
+)
 
 
 # object-model: exception
@@ -750,6 +763,288 @@ def verify_surface_realization(
 
 # object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
+class GroundedReferenceSurfaceLabel:
+    """一个 accepted surface 上的 teacher-only reference 选择标签。"""
+
+    realization_id: str
+    strategy: str
+    sentence_ordinal: int
+    slot_id: str
+    reference_surface: str
+    span_start: int
+    span_end: int
+
+    def __post_init__(self) -> None:
+        _text(self.realization_id, where="reference_label.realization_id")
+        if self.strategy not in REFERENCE_STRATEGIES:
+            raise GroundedAnswerCourseError(
+                "reference label strategy 未注册")
+        _positive(
+            self.sentence_ordinal,
+            where="reference_label.sentence_ordinal")
+        _text(self.slot_id, where="reference_label.slot_id")
+        _text(
+            self.reference_surface,
+            where="reference_label.reference_surface")
+        if (type(self.span_start) is not int
+                or type(self.span_end) is not int
+                or self.span_start < 0
+                or self.span_end <= self.span_start):
+            raise GroundedAnswerCourseError("reference label span 非法")
+
+    def to_dict(self) -> dict[str, object]:
+        """导出规范 JSON 值。"""
+        return {
+            "realization_id": self.realization_id,
+            "reference_surface": self.reference_surface,
+            "sentence_ordinal": self.sentence_ordinal,
+            "slot_id": self.slot_id,
+            "span_end": self.span_end,
+            "span_start": self.span_start,
+            "strategy": self.strategy,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "GroundedReferenceSurfaceLabel":
+        """从精确 teacher label object 恢复记录。"""
+        raw = _exact(value, frozenset({
+            "realization_id", "reference_surface", "sentence_ordinal",
+            "slot_id", "span_end", "span_start", "strategy",
+        }), where="reference_surface_label")
+        return cls(
+            _text(raw["realization_id"],
+                  where="reference_label.realization_id"),
+            _text(raw["strategy"], where="reference_label.strategy"),
+            raw["sentence_ordinal"],
+            _text(raw["slot_id"], where="reference_label.slot_id"),
+            _text(raw["reference_surface"],
+                  where="reference_label.reference_surface"),
+            raw["span_start"],
+            raw["span_end"],
+        )
+
+
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class GroundedReferenceChallenge:
+    """一个必须 fail closed 的 reference 负挑战类别。"""
+
+    challenge_id: str
+    kind: str
+
+    def __post_init__(self) -> None:
+        _text(self.challenge_id, where="reference_challenge.challenge_id")
+        if self.kind not in REFERENCE_CHALLENGE_KINDS:
+            raise GroundedAnswerCourseError(
+                "reference challenge kind 未注册")
+
+    def to_dict(self) -> dict[str, str]:
+        """导出规范 JSON 值。"""
+        return {
+            "challenge_id": self.challenge_id,
+            "kind": self.kind,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "GroundedReferenceChallenge":
+        """从精确 challenge object 恢复记录。"""
+        raw = _exact(value, frozenset({"challenge_id", "kind"}),
+                     where="reference_challenge")
+        return cls(
+            _text(raw["challenge_id"],
+                  where="reference_challenge.challenge_id"),
+            _text(raw["kind"], where="reference_challenge.kind"),
+        )
+
+
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class GroundedReferenceCourse:
+    """冻结 Proposition/event 级 antecedent、referring origin 与标签。"""
+
+    granularity: str
+    antecedent_proposition_id: str
+    referring_proposition_id: str
+    antecedent_evidence_id: str
+    referring_evidence_id: str
+    source_id: str
+    scope_id: int
+    ordered_proposition_ids: tuple[str, ...]
+    surface_labels: tuple[GroundedReferenceSurfaceLabel, ...]
+    challenges: tuple[GroundedReferenceChallenge, ...]
+
+    def __post_init__(self) -> None:
+        if self.granularity != REFERENCE_GRANULARITY:
+            raise GroundedAnswerCourseError(
+                "reference granularity 只允许 Proposition/event")
+        for name, value in (
+                ("antecedent_proposition_id",
+                 self.antecedent_proposition_id),
+                ("referring_proposition_id", self.referring_proposition_id),
+                ("antecedent_evidence_id", self.antecedent_evidence_id),
+                ("referring_evidence_id", self.referring_evidence_id),
+                ("source_id", self.source_id)):
+            _text(value, where=f"reference_course.{name}")
+        _positive(self.scope_id, where="reference_course.scope_id")
+        if (not isinstance(self.ordered_proposition_ids, tuple)
+                or len(self.ordered_proposition_ids) < 2
+                or any(not isinstance(item, str) or not item
+                       for item in self.ordered_proposition_ids)
+                or len(set(self.ordered_proposition_ids))
+                != len(self.ordered_proposition_ids)):
+            raise GroundedAnswerCourseError(
+                "reference ordered propositions 非法或不足两个")
+        if (not isinstance(self.surface_labels, tuple)
+                or any(not isinstance(item, GroundedReferenceSurfaceLabel)
+                       for item in self.surface_labels)):
+            raise GroundedAnswerCourseError("reference surface labels 类型错误")
+        if (tuple(item.strategy for item in self.surface_labels)
+                != REFERENCE_STRATEGIES):
+            raise GroundedAnswerCourseError(
+                "reference strategies 必须精确覆盖冻结顺序")
+        if (not isinstance(self.challenges, tuple)
+                or any(not isinstance(item, GroundedReferenceChallenge)
+                       for item in self.challenges)
+                or tuple(item.kind for item in self.challenges)
+                != REFERENCE_CHALLENGE_KINDS):
+            raise GroundedAnswerCourseError(
+                "reference challenges 必须精确覆盖六类冻结顺序")
+        challenge_ids = tuple(item.challenge_id for item in self.challenges)
+        if len(set(challenge_ids)) != len(challenge_ids):
+            raise GroundedAnswerCourseError("reference challenge id 重复")
+
+    def validate_episode(self, episode: "GroundedAnswerEpisode") -> None:
+        """把 teacher reference 标签绑定到同一 episode 的真实资料。"""
+        plan = episode.question.answer_plan
+        if plan.response_act != "ANSWER":
+            raise GroundedAnswerCourseError(
+                "reference course 只允许 ANSWER episode")
+        if self.ordered_proposition_ids != plan.ordered_claim_ids:
+            raise GroundedAnswerCourseError(
+                "reference proposition 顺序与 answer plan 漂移")
+        try:
+            antecedent_ordinal = self.ordered_proposition_ids.index(
+                self.antecedent_proposition_id)
+            referring_ordinal = self.ordered_proposition_ids.index(
+                self.referring_proposition_id)
+        except ValueError as error:
+            raise GroundedAnswerCourseError(
+                "reference proposition 不属于 answer plan") from error
+        if antecedent_ordinal >= referring_ordinal:
+            raise GroundedAnswerCourseError(
+                "reference antecedent 必须早于 referring proposition")
+        evidence_by_id = {
+            item.evidence_id: item for item in episode.question.evidence
+        }
+        antecedent = evidence_by_id.get(self.antecedent_evidence_id)
+        referring = evidence_by_id.get(self.referring_evidence_id)
+        if (antecedent is None or referring is None
+                or antecedent.proposition_id
+                != self.antecedent_proposition_id
+                or referring.proposition_id
+                != self.referring_proposition_id):
+            raise GroundedAnswerCourseError(
+                "reference forming Evidence 与 Proposition 不一致")
+        if any(
+                item.source_id != self.source_id
+                or item.scope_id != self.scope_id
+                or not item.support
+                or item.refute
+                for item in (antecedent, referring)):
+            raise GroundedAnswerCourseError(
+                "reference forming Evidence 的 source/scope/direction 漂移")
+        if (self.scope_id != episode.question.evidence_scope_id
+                or self.source_id not in plan.citation_source_ids):
+            raise GroundedAnswerCourseError(
+                "reference course source/scope 不属于当前问题")
+        accepted = {
+            item.realization_id: item for item in episode.surfaces.accepted
+        }
+        if set(accepted) != {
+                item.realization_id for item in self.surface_labels}:
+            raise GroundedAnswerCourseError(
+                "reference labels 必须精确覆盖 accepted realization")
+        expected_sentence = referring_ordinal + 1
+        slot_ids = {item.slot_id for item in self.surface_labels}
+        if len(slot_ids) != 1:
+            raise GroundedAnswerCourseError(
+                "reference strategies 必须竞争同一 sentence slot")
+        for label in self.surface_labels:
+            realization = accepted[label.realization_id]
+            if (realization.claim_ids != self.ordered_proposition_ids
+                    or realization.scope_id
+                    != episode.question.response_scope_id
+                    or self.source_id not in realization.cited_source_ids):
+                raise GroundedAnswerCourseError(
+                    "reference accepted realization 的 claim/source/scope 漂移")
+            if label.sentence_ordinal != expected_sentence:
+                raise GroundedAnswerCourseError(
+                    "reference label sentence order 漂移")
+            if (label.span_end > len(realization.surface)
+                    or realization.surface[
+                        label.span_start:label.span_end]
+                    != label.reference_surface):
+                raise GroundedAnswerCourseError(
+                    "reference label span 与 accepted surface 不一致")
+            first_sentence_end = realization.surface.find("。")
+            if (first_sentence_end < 0
+                    or label.span_start != first_sentence_end + 1):
+                raise GroundedAnswerCourseError(
+                    "reference label 必须从 referring sentence 起始")
+
+    def to_dict(self) -> dict[str, object]:
+        """导出 teacher-only reference 课程。"""
+        return {
+            "antecedent_evidence_id": self.antecedent_evidence_id,
+            "antecedent_proposition_id": self.antecedent_proposition_id,
+            "challenges": [item.to_dict() for item in self.challenges],
+            "granularity": self.granularity,
+            "ordered_proposition_ids": list(self.ordered_proposition_ids),
+            "referring_evidence_id": self.referring_evidence_id,
+            "referring_proposition_id": self.referring_proposition_id,
+            "scope_id": self.scope_id,
+            "source_id": self.source_id,
+            "surface_labels": [
+                item.to_dict() for item in self.surface_labels],
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "GroundedReferenceCourse":
+        """从精确 teacher reference object 恢复课程。"""
+        raw = _exact(value, frozenset({
+            "antecedent_evidence_id", "antecedent_proposition_id",
+            "challenges", "granularity", "ordered_proposition_ids",
+            "referring_evidence_id", "referring_proposition_id", "scope_id",
+            "source_id", "surface_labels",
+        }), where="reference_course")
+        if (not isinstance(raw["surface_labels"], list)
+                or not isinstance(raw["challenges"], list)):
+            raise GroundedAnswerCourseError(
+                "reference surface_labels/challenges 必须是 list")
+        return cls(
+            _text(raw["granularity"],
+                  where="reference_course.granularity"),
+            _text(raw["antecedent_proposition_id"],
+                  where="reference_course.antecedent_proposition_id"),
+            _text(raw["referring_proposition_id"],
+                  where="reference_course.referring_proposition_id"),
+            _text(raw["antecedent_evidence_id"],
+                  where="reference_course.antecedent_evidence_id"),
+            _text(raw["referring_evidence_id"],
+                  where="reference_course.referring_evidence_id"),
+            _text(raw["source_id"], where="reference_course.source_id"),
+            raw["scope_id"],
+            _strings(raw["ordered_proposition_ids"],
+                     where="reference_course.ordered_proposition_ids"),
+            tuple(GroundedReferenceSurfaceLabel.from_dict(item)
+                  for item in raw["surface_labels"]),
+            tuple(GroundedReferenceChallenge.from_dict(item)
+                  for item in raw["challenges"]),
+        )
+
+
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
 class GroundedAnswerEpisode:
     """把问题、会话、split 与多表面资料绑定成一条训练记录。"""
 
@@ -759,6 +1054,7 @@ class GroundedAnswerEpisode:
     question: GroundedQuestionEpisode
     dialogue: DialogueEpisode
     surfaces: SurfaceRealizationSet
+    reference_course: "GroundedReferenceCourse | None" = None
 
     def __post_init__(self) -> None:
         _text(self.episode_id, where="episode_id")
@@ -772,6 +1068,11 @@ class GroundedAnswerEpisode:
             raise GroundedAnswerCourseError("episode dialogue 类型错误")
         if not isinstance(self.surfaces, SurfaceRealizationSet):
             raise GroundedAnswerCourseError("episode surfaces 类型错误")
+        if (self.reference_course is not None
+                and not isinstance(
+                    self.reference_course, GroundedReferenceCourse)):
+            raise GroundedAnswerCourseError(
+                "episode reference_course 类型错误")
         if self.dialogue.turns[-1].surface != self.question.question_surface:
             raise GroundedAnswerCourseError(
                 "dialogue 当前 USER turn 必须等于 question surface")
@@ -781,32 +1082,45 @@ class GroundedAnswerEpisode:
                 } <= set(self.dialogue.active_scope_ids):
             raise GroundedAnswerCourseError(
                 "Evidence/response scope 必须位于 dialogue active scopes")
+        if self.reference_course is not None:
+            self.reference_course.validate_episode(self)
 
     def to_dict(self) -> dict[str, object]:
         """导出规范、可公开的 episode JSON 值。"""
-        return {
+        result = {
             "artifact_kind": ARTIFACT_KIND,
             "clusters": self.clusters.to_dict(),
             "dialogue": self.dialogue.to_dict(),
             "episode_id": self.episode_id,
             "license_id": LICENSE_ID,
             "question": self.question.to_dict(),
-            "schema_version": 1,
+            "schema_version": 2 if self.reference_course is not None else 1,
             "split": self.split,
             "surfaces": self.surfaces.to_dict(),
         }
+        if self.reference_course is not None:
+            result["reference_course"] = self.reference_course.to_dict()
+        return result
 
     @classmethod
     def from_dict(cls, value: Any) -> "GroundedAnswerEpisode":
         """从严格顶层 object 恢复 episode。"""
-        raw = _exact(value, frozenset({
+        if not isinstance(value, dict):
+            raise GroundedAnswerCourseError(
+                "grounded answer episode 字段集合漂移")
+        schema = value.get("schema_version")
+        keys = {
             "artifact_kind", "clusters", "dialogue", "episode_id",
             "license_id", "question", "schema_version", "split", "surfaces",
-        }), where="grounded answer episode")
+        }
+        if schema == 2:
+            keys.add("reference_course")
+        raw = _exact(
+            value, frozenset(keys), where="grounded answer episode")
         if (raw["artifact_kind"] != ARTIFACT_KIND
                 or raw["license_id"] != LICENSE_ID
                 or type(raw["schema_version"]) is not int
-                or raw["schema_version"] != 1):
+                or raw["schema_version"] not in {1, 2}):
             raise GroundedAnswerCourseError(
                 "episode kind/license/schema 漂移")
         return cls(
@@ -816,6 +1130,8 @@ class GroundedAnswerEpisode:
             GroundedQuestionEpisode.from_dict(raw["question"]),
             DialogueEpisode.from_dict(raw["dialogue"]),
             SurfaceRealizationSet.from_dict(raw["surfaces"]),
+            (None if raw["schema_version"] == 1
+             else GroundedReferenceCourse.from_dict(raw["reference_course"])),
         )
 
 
@@ -926,7 +1242,13 @@ __all__ = [
     "GroundedAnswerSplitClusters",
     "GroundedEvidence",
     "GroundedQuestionEpisode",
+    "GroundedReferenceChallenge",
+    "GroundedReferenceCourse",
+    "GroundedReferenceSurfaceLabel",
     "LICENSE_ID",
+    "REFERENCE_CHALLENGE_KINDS",
+    "REFERENCE_GRANULARITY",
+    "REFERENCE_STRATEGIES",
     "RESPONSE_ACTS",
     "RejectedSurfaceRealization",
     "SurfaceRealization",

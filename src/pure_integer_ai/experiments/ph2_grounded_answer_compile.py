@@ -88,7 +88,7 @@ def _teacher_payload(episode: GroundedAnswerEpisode) -> dict[str, object]:
             "verification": verify_surface_realization(
                 episode.question, item.realization).to_dict(),
         })
-    return {
+    payload = {
         "answer_plan": episode.question.answer_plan.to_dict(),
         "minimum_legal_surfaces": episode.surfaces.minimum_legal_surfaces,
         "surface_realizations": {
@@ -97,6 +97,9 @@ def _teacher_payload(episode: GroundedAnswerEpisode) -> dict[str, object]:
         },
         "typed_intent": episode.question.typed_intent,
     }
+    if episode.reference_course is not None:
+        payload["reference_course"] = episode.reference_course.to_dict()
+    return payload
 
 
 def _sample_role(episode: GroundedAnswerEpisode) -> str:

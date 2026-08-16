@@ -9,6 +9,9 @@ import pytest
 
 from pure_integer_ai.experiments.ph2_grounded_answer_course import (
     CARRIER_KINDS,
+    REFERENCE_CHALLENGE_KINDS,
+    REFERENCE_GRANULARITY,
+    REFERENCE_STRATEGIES,
     GroundedAnswerPlan,
     GroundedAnswerCourseError,
     GroundedEvidence,
@@ -55,9 +58,9 @@ def test_train_sample_closes_four_response_acts_and_multi_surface_contract():
     """四类 response act 均有多个合法表面，负例保留分型失败。"""
     episodes = read_grounded_answer_episodes(SAMPLE_PATH)
     audit = audit_grounded_answer_course(episodes)
-    assert audit.episode_count == 4
-    assert audit.accepted_surface_count == 9
-    assert audit.rejected_surface_count == 10
+    assert audit.episode_count == 5
+    assert audit.accepted_surface_count == 11
+    assert audit.rejected_surface_count == 12
     assert {item.question.answer_plan.response_act for item in episodes} == {
         "ANSWER", "UNKNOWN", "CLARIFY", "CONFLICT",
     }
@@ -112,9 +115,9 @@ def test_training_compiler_separates_observation_from_teacher_labels():
     """学生 Observation 不得看到 intent、plan、合法 surface 或负例维度。"""
     episodes = read_grounded_answer_episodes(SAMPLE_PATH)
     bundle = compile_grounded_answer_training_records(SAMPLE_PATH)
-    assert bundle.validation.source_ref_count == 4
-    assert bundle.validation.observation_count == 4
-    assert bundle.validation.teacher_evidence_count == 4
+    assert bundle.validation.source_ref_count == 5
+    assert bundle.validation.observation_count == 5
+    assert bundle.validation.teacher_evidence_count == 5
     assert bundle.validation.evaluator_label_count == 0
     assert bundle.validation.splits == ("train",)
     for episode, observation, teacher in zip(
@@ -124,8 +127,14 @@ def test_training_compiler_separates_observation_from_teacher_labels():
         assert "typed_intent" not in visible
         assert "answer_plan" not in visible
         assert "surface_realizations" not in visible
+        assert "reference_course" not in visible
         assert hidden["typed_intent"] == episode.question.typed_intent
         assert hidden["answer_plan"] == episode.question.answer_plan.to_dict()
+        if episode.reference_course is None:
+            assert "reference_course" not in hidden
+        else:
+            assert hidden["reference_course"] == (
+                episode.reference_course.to_dict())
         visible_text = json.dumps(visible, ensure_ascii=False, sort_keys=True)
         for realization in (
                 *episode.surfaces.accepted,
@@ -141,15 +150,35 @@ def test_training_compiler_is_deterministic_without_writing_artifacts():
     assert all(item.split == "train" for item in first.observations)
 
 
+def test_reference_course_is_teacher_only_and_bound_to_real_surfaces():
+    """双句 reference 标签精确绑定 Evidence、顺序、slot 与表面 span。"""
+    episode = read_grounded_answer_episodes(SAMPLE_PATH)[-1]
+    course = episode.reference_course
+    assert course is not None
+    assert course.granularity == REFERENCE_GRANULARITY
+    assert tuple(item.strategy for item in course.surface_labels) == (
+        REFERENCE_STRATEGIES)
+    assert tuple(item.kind for item in course.challenges) == (
+        REFERENCE_CHALLENGE_KINDS)
+    accepted = {
+        item.realization_id: item for item in episode.surfaces.accepted
+    }
+    for label in course.surface_labels:
+        surface = accepted[label.realization_id].surface
+        assert surface[label.span_start:label.span_end] == (
+            label.reference_surface)
+        assert label.span_start == 14
+
+
 def test_learned_claim_slot_generates_two_surfaces_for_unseen_proposition():
     """已学字面+claim 槽可填入新来源命题，不回放旧实体或唯一答案。"""
     episodes = read_grounded_answer_episodes(SAMPLE_PATH)
     bundle = compile_grounded_answer_training_records(SAMPLE_PATH)
     model, report = learn_grounded_answer_surface_model(bundle)
-    assert report.episode_count == 4
-    assert report.accepted_surface_count == 9
-    assert report.pattern_count == 9
-    assert report.slotted_pattern_count == 3
+    assert report.episode_count == 5
+    assert report.accepted_surface_count == 11
+    assert report.pattern_count == 11
+    assert report.slotted_pattern_count == 5
     assert report.response_act_count == 4
 
     base = episodes[0].question
