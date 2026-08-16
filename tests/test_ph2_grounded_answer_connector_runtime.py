@@ -1,8 +1,6 @@
 """grounded-answer pattern 经真实 connector、executor 与 G-04 的专项。"""
 from __future__ import annotations
 
-from dataclasses import replace
-
 from pure_integer_ai.cognition.shared.generation_content import (
     GenerationContentLayerResolver,
     GenerationStanceLayerResolver,
@@ -13,9 +11,6 @@ from pure_integer_ai.cognition.shared.generation_execution import (
 from pure_integer_ai.cognition.shared.generation_plan import (
     GenerationLayerRegistration,
     GenerationPlanner,
-)
-from pure_integer_ai.cognition.shared.generation_structure_execution import (
-    GenerationStructureExecutionPlanner,
 )
 from pure_integer_ai.cognition.shared.generation_structure_plan import (
     GenerationDiscourseLayerResolver,
@@ -28,22 +23,10 @@ from pure_integer_ai.cognition.shared.question_answer import (
     QuestionRequest,
 )
 from pure_integer_ai.cognition.shared.identity import (
-    concept_identity,
     minimal_instruction_identity,
-    structure_concept_identity,
-)
-from pure_integer_ai.cognition.shared.order_hypothesis import (
-    OrderHypothesisEngine,
 )
 from pure_integer_ai.cognition.shared.representation_rendering import (
     UnicodeRepresentationRenderer,
-)
-from pure_integer_ai.cognition.shared.structure_order_consumer import (
-    StructureOrderConsumer,
-)
-from pure_integer_ai.cognition.understanding.order_constraint_promotion import (
-    OrderConstraintPromoter,
-    StructureOrderPromotionPlan,
 )
 from pure_integer_ai.experiments.generation_surface_runtime import (
     GenerationSurfaceLayerResolver,
@@ -68,6 +51,9 @@ from pure_integer_ai.experiments.ph2_grounded_answer_parser import (
     GroundedAnswerSurfaceParser,
     build_grounded_answer_parser_catalog,
 )
+from pure_integer_ai.experiments.ph2_grounded_answer_order import (
+    install_grounded_answer_order_course,
+)
 from pure_integer_ai.experiments.verification_orchestration import (
     VERDICT_SUPPORT,
 )
@@ -89,17 +75,7 @@ from tests.test_ph2_grounded_answer_course import (
     _connector_question_and_candidate,
 )
 from tests.test_s07_structure_order import (
-    _Domain,
-    _ResolvedRule,
-    _SemanticsResolver,
-    _consumer_protocol,
     _graphs,
-    _learning_protocol,
-    _pattern,
-    _plan,
-    _promote,
-    _semantic_reasons,
-    _support,
 )
 
 
@@ -128,76 +104,14 @@ class _QuestionExecutor:
 def _execution_planner(backend, variant):
     """把编译得到的相邻 part 顺序提升为真实 active S-07 约束。"""
     graphs = _graphs(backend)
-    engine = OrderHypothesisEngine(_learning_protocol())
-    promoter = OrderConstraintPromoter(
-        engine, graphs.order_graph, graphs.lifecycle)
-    domain = _Domain(
-        variant.template.language_branch,
-        concept_identity((_BASE + 1, 1)),
-        structure_concept_identity((_BASE + 1, 2)),
-        variant.template.structure,
-        tuple(item.slot for item in variant.template.slots),
-        concept_identity((_BASE + 1, 3)),
-        concept_identity((_BASE + 1, 4)),
-        concept_identity((_BASE + 1, 5)),
-        concept_identity((_BASE + 1, 6)),
-        concept_identity((_BASE + 1, 7)),
-        concept_identity((_BASE + 1, 8)),
-        variant.template.slots[0].value_type,
+    installation = install_grounded_answer_order_course(
+        variant, graphs.lifecycle)
+    assert len(installation.promotions) == len(variant.order_requirements)
+    assert installation.evidence_count == (
+        len(variant.order_requirements)
+        * len(variant.option.support_teacher_keys)
     )
-    rules = {}
-    for index, requirement in enumerate(
-            variant.order_requirements, start=1):
-        pattern = _pattern(
-            domain,
-            first=index - 1,
-            second=index,
-            kind=_BASE + index,
-        )
-        _evidence, decision = _support(
-            engine, pattern, _BASE + index * 4)
-        base = _plan(
-            engine,
-            pattern,
-            domain,
-            instance=_BASE + index,
-        )
-        definition = replace(
-            base.constraint,
-            constraint=requirement.constraint,
-        )
-        plan = StructureOrderPromotionPlan(
-            variant.template.slots,
-            definition,
-        )
-        _promote(
-            promoter,
-            plan,
-            decision,
-            _BASE + index * 4 + 2,
-        )
-        rules[requirement.constraint] = _ResolvedRule(
-            requirement.before_slot,
-            requirement.after_slot,
-            True,
-            False,
-            0,
-            0,
-            None,
-        )
-    applies, skipped, unknown = _semantic_reasons()
-    consumer = StructureOrderConsumer(
-        graphs.lifecycle,
-        _SemanticsResolver(
-            rules,
-            applies_reason=applies,
-            skipped_reason=skipped,
-            unknown_reason=unknown,
-        ),
-        _consumer_protocol(),
-    )
-    return GenerationStructureExecutionPlanner(
-        graphs.lifecycle, consumer)
+    return installation.execution_planner
 
 
 def test_grounded_variant_runs_through_typed_executor_parser_and_g04():
