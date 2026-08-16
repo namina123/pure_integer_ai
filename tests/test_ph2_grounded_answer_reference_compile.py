@@ -30,6 +30,10 @@ from pure_integer_ai.experiments.ph2_grounded_answer_reference_choice import (
 from pure_integer_ai.experiments.ph2_grounded_answer_reference_episode_use import (
     GroundedAnswerReferenceEpisodeAdoptionLedger,
 )
+from pure_integer_ai.experiments.ph2_grounded_answer_reference_verification import (
+    build_grounded_answer_reference_verifier_protocol,
+    run_grounded_answer_reference_gg02,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_parser import (
     GroundedAnswerParserProtocol,
 )
@@ -38,6 +42,7 @@ from pure_integer_ai.experiments.question_answer_runtime import (
     QuestionAnswerProtocol,
 )
 from pure_integer_ai.experiments.verification_orchestration import (
+    APPLICABILITY_NOT_APPLICABLE,
     VERDICT_SUPPORT,
 )
 from pure_integer_ai.storage.backend import DictBackend
@@ -338,11 +343,19 @@ def _run_reference_strategy(selected_strategy):
         run = installation.runtime.run(request)
         record = GroundedAnswerReferenceEpisodeAdoptionLedger(
             installation).adopt(run)
+        gg02 = run_grounded_answer_reference_gg02(
+            build_grounded_answer_reference_verifier_protocol(
+                (_BASE + 38, 1)),
+            installation,
+            run,
+            record,
+        )
         return (
             reference_selection,
             record,
             renderer.text(run.generation.rendered),
             len(run.generation.surface.adoptions),
+            gg02,
         )
     finally:
         if alias_factory.fixture is not None:
@@ -371,3 +384,25 @@ def test_reference_strategies_form_distinct_actual_uses():
         "北川站东门于2024年启用。北川站东门的启用事项已登记入档。")
     assert antecedent[3] == 6
     assert explicit[3] == 5
+    for completed in (antecedent[4], explicit[4]):
+        assert len(completed.verification.report.results) == 10
+        assert len(completed.attribution.choices) == 5
+        assert len(completed.outcome.outcomes) == 10
+        assert completed.outcome.host_learning_write_count == 0
+        assert completed.outcome.teacher_call_count == 0
+        assert completed.outcome.assessment_consumer_status == (
+            "REQUIRED_NOT_CONNECTED")
+        assert all(
+            item.verdict == VERDICT_SUPPORT
+            for item in completed.verification.report.results
+            if item.applicability != APPLICABILITY_NOT_APPLICABLE)
+    assert len(antecedent[4].verification.claims) == 10
+    assert len(explicit[4].verification.claims) == 9
+    explicit_route = explicit[4].verification.protocol.by_name()[
+        "REFERENCE_UNIQUE_RESOLUTION"].route
+    explicit_unique = next(
+        item for item in explicit[4].verification.report.results
+        if (item.dimension == explicit_route.dimension
+            and item.verifier == explicit_route.verifier))
+    assert explicit_unique.applicability == APPLICABILITY_NOT_APPLICABLE
+    assert explicit_unique.claim_keys == ()
