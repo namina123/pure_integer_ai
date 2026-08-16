@@ -24,6 +24,12 @@ from pure_integer_ai.experiments.ph2_grounded_answer_reference_runtime_factory i
     GroundedAnswerReferenceRunLocalBuild,
     GroundedAnswerReferenceRunLocalFactory,
 )
+from pure_integer_ai.experiments.ph2_grounded_answer_reference_choice import (
+    build_grounded_answer_reference_selection,
+)
+from pure_integer_ai.experiments.ph2_grounded_answer_reference_episode_use import (
+    GroundedAnswerReferenceEpisodeAdoptionLedger,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_parser import (
     GroundedAnswerParserProtocol,
 )
@@ -36,6 +42,7 @@ from pure_integer_ai.experiments.verification_orchestration import (
 )
 from pure_integer_ai.storage.backend import DictBackend
 from pure_integer_ai.experiments.ph2_grounded_answer_course import (
+    REFERENCE_STRATEGIES,
     read_grounded_answer_episodes,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_reference_compile import (
@@ -91,8 +98,8 @@ class _ReferenceAliasFactory:
         return self.fixture.runtime
 
 
-def _reference_compilation():
-    """建立第五条课程对应的双 candidate compilation。"""
+def _reference_selection(selected_strategy="ANTECEDENT_REFERENCE"):
+    """建立第五条课程的完整双策略竞争与先行选择。"""
     episode = read_grounded_answer_episodes(SAMPLE_PATH)[-1]
     request, _unused = _request(count=2)
     branch = language_branch_identity((_BASE, 1))
@@ -108,24 +115,33 @@ def _reference_compilation():
             strict=True,
         )
     )
-    compilation = compile_grounded_answer_reference_connector(
-        GroundedAnswerReferenceCompileRequest(
-            episode,
-            planning,
-            claims,
-            branch,
-            (_BASE, 2),
-            "ANTECEDENT_REFERENCE",
-            ((_BASE, 3),),
-        ),
-        _surface_protocol(_BASE + 1),
+    compilations = tuple(
+        compile_grounded_answer_reference_connector(
+            GroundedAnswerReferenceCompileRequest(
+                episode,
+                planning,
+                claims,
+                branch,
+                (_BASE, 2),
+                strategy,
+                ((_BASE, 3),),
+            ),
+            _surface_protocol(_BASE + 1),
+        )
+        for strategy in REFERENCE_STRATEGIES
     )
-    return episode, planning, branch, compilation
+    selection = build_grounded_answer_reference_selection(
+        compilations,
+        selected_strategy,
+        (_BASE, 4, REFERENCE_STRATEGIES.index(selected_strategy) + 1),
+    )
+    return episode, planning, branch, selection
 
 
 def test_reference_course_compiles_to_two_sentences_and_one_anaphora():
     """第五条 grounded 课程形成逐 Proposition 句和前序 antecedent。"""
-    _episode, planning, _branch, compilation = _reference_compilation()
+    _episode, planning, _branch, reference_selection = _reference_selection()
+    compilation = reference_selection.compilation
     selection, _unused_first, _unused_second = _selection(planning)
 
     plan = compilation.connector.structure_planner().plan(selection)
@@ -144,11 +160,22 @@ def test_reference_course_compiles_to_two_sentences_and_one_anaphora():
     assert requirement.antecedent_candidate_key == (
         planning.candidates[0].stable_key())
     assert compilation.connector.anaphora_declarations is not None
+    explicit = _reference_selection("EXPLICIT_REPETITION")[3]
+    assert tuple(
+        item.strategy for item in reference_selection.options
+    ) == REFERENCE_STRATEGIES
+    assert (reference_selection.choice.competition_key
+            == explicit.choice.competition_key)
+    assert (reference_selection.choice.condition
+            == explicit.choice.condition)
+    assert (reference_selection.choice.selected_object
+            != explicit.choice.selected_object)
 
 
 def test_reference_compilation_runs_two_sentences_through_g04():
     """双句 compilation 经真实 G-02/G-03 输出，并由 parser 恢复两命题。"""
-    _episode, planning, branch, compilation = _reference_compilation()
+    _episode, planning, branch, reference_selection = _reference_selection()
+    compilation = reference_selection.compilation
     selection, selector, _content_protocol = _selection(planning)
     backend = DictBackend()
     alias_factory = _ReferenceAliasFactory(branch)
@@ -192,6 +219,7 @@ def test_reference_compilation_runs_two_sentences_through_g04():
         installation = factory.build(
             GroundedAnswerReferenceRunLocalBuild(
                 compilation,
+                reference_selection,
                 parser_protocol,
                 query_kind,
                 route,
@@ -226,7 +254,120 @@ def test_reference_compilation_runs_two_sentences_through_g04():
         assert installation.order.evidence_count == 3
         assert renderer.text(run.generation.rendered) == (
             "北川站东门于2024年启用。前述启用事项已登记入档。")
+        bundle = GroundedAnswerReferenceEpisodeAdoptionLedger(
+            installation).adopt(run)
+        record = bundle.reference
+        assert record.choice_after.exact_uses == (record.use,)
+        assert record.reference_adoption is not None
+        assert record.recovery.antecedent == (
+            planning.candidates[0].proposition.template)
+        assert len({item.use_key for item in bundle.uses}) == 5
     finally:
         if alias_factory.fixture is not None:
             alias_factory.fixture.close()
         backend.close()
+
+
+def _run_reference_strategy(selected_strategy):
+    """运行一个 selected strategy 并返回 actual reference exact Use。"""
+    _episode, planning, branch, reference_selection = _reference_selection(
+        selected_strategy)
+    compilation = reference_selection.compilation
+    selection, selector, _content_protocol = _selection(planning)
+    backend = DictBackend()
+    alias_factory = _ReferenceAliasFactory(branch)
+    try:
+        graphs = _graphs(backend)
+        renderer_identity = minimal_instruction_identity((_BASE + 30, 1))
+        renderer = UnicodeRepresentationRenderer(
+            (_BASE, 2), renderer_identity)
+        parser_protocol = GroundedAnswerParserProtocol(
+            *tuple(minimal_instruction_identity((_BASE + 31, index))
+                   for index in range(1, 6)),
+            selection.stance,
+        )
+        query_kind = minimal_instruction_identity((_BASE + 32, 1))
+        route = minimal_instruction_identity((_BASE + 32, 2))
+        components = GroundedAnswerRunLocalComponents(
+            selector,
+            _plan_protocol(_BASE + 33),
+            GenerationStructureLayerProtocol(*tuple(
+                minimal_instruction_identity((_BASE + 34, index))
+                for index in range(1, 4)
+            )),
+            alias_factory,
+            renderer,
+            renderer_identity,
+            _postcheck_protocol(),
+            _StaticVerifier(VERDICT_SUPPORT, 1),
+            _StaticVerifier(VERDICT_SUPPORT, 2),
+            QuestionAnswerProtocol(*tuple(
+                minimal_instruction_identity((_BASE + 35, index))
+                for index in range(1, 4)
+            )),
+            EvidenceQuestionPostcheckMapper(
+                (_BASE + 36, 1),
+                citation_required=True,
+                trust_required=True,
+            ),
+        )
+        installation = GroundedAnswerReferenceRunLocalFactory(
+            graphs.lifecycle, components).build(
+                GroundedAnswerReferenceRunLocalBuild(
+                    compilation,
+                    reference_selection,
+                    parser_protocol,
+                    query_kind,
+                    route,
+                    minimal_instruction_identity((_BASE + 37, 1)),
+                    (_BASE + 37, 2),
+                ))
+        candidate = planning.candidates[0]
+        request = QuestionRequest(
+            query_kind,
+            minimal_instruction_identity((_BASE + 32, 3)),
+            planning.goal.goal_kind,
+            planning.goal.proposition,
+            planning.goal.required,
+            candidate.scope,
+            candidate.scope,
+            (_BASE + 32, 4),
+            branch,
+            tuple(item.proposition for item in planning.candidates),
+        )
+        run = installation.runtime.run(request)
+        record = GroundedAnswerReferenceEpisodeAdoptionLedger(
+            installation).adopt(run)
+        return (
+            reference_selection,
+            record,
+            renderer.text(run.generation.rendered),
+            len(run.generation.surface.adoptions),
+        )
+    finally:
+        if alias_factory.fixture is not None:
+            alias_factory.fixture.close()
+        backend.close()
+
+
+def test_reference_strategies_form_distinct_actual_uses():
+    """同一竞争集的两种策略均真实执行，并形成互异 exact Use。"""
+    antecedent = _run_reference_strategy("ANTECEDENT_REFERENCE")
+    explicit = _run_reference_strategy("EXPLICIT_REPETITION")
+
+    assert (antecedent[0].choice.competition_key
+            == explicit[0].choice.competition_key)
+    assert antecedent[1].reference.reference_adoption is not None
+    assert explicit[1].reference.reference_adoption is None
+    assert (antecedent[1].reference.use.use_key
+            != explicit[1].reference.use.use_key)
+    assert antecedent[1].reference.use.use_key.components[0] == 21010
+    assert explicit[1].reference.use.use_key.components[0] == 21010
+    assert len({item.use_key for item in antecedent[1].uses}) == 5
+    assert len({item.use_key for item in explicit[1].uses}) == 5
+    assert antecedent[2] == (
+        "北川站东门于2024年启用。前述启用事项已登记入档。")
+    assert explicit[2] == (
+        "北川站东门于2024年启用。北川站东门的启用事项已登记入档。")
+    assert antecedent[3] == 6
+    assert explicit[3] == 5

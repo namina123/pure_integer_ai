@@ -43,6 +43,9 @@ from pure_integer_ai.experiments.ph2_grounded_answer_parser import (
 from pure_integer_ai.experiments.ph2_grounded_answer_reference_compile import (
     GroundedAnswerReferenceCompilation,
 )
+from pure_integer_ai.experiments.ph2_grounded_answer_reference_choice import (
+    GroundedAnswerReferenceSelection,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_reference_order import (
     GroundedAnswerReferenceOrderInstallation,
     install_grounded_answer_reference_order,
@@ -99,9 +102,10 @@ def _strict_key(value: tuple[int, ...], *, where: str) -> tuple[int, ...]:
 # object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
 class GroundedAnswerReferenceRunLocalBuild:
-    """绑定已编译双句课程与本次 question route。"""
+    """绑定先行 reference selection、已选 compilation 与 question route。"""
 
     compilation: GroundedAnswerReferenceCompilation
+    reference_selection: GroundedAnswerReferenceSelection
     parser_protocol: GroundedAnswerParserProtocol
     query_kind: ObjectIdentity
     route: ObjectIdentity
@@ -112,6 +116,12 @@ class GroundedAnswerReferenceRunLocalBuild:
         if not isinstance(
                 self.compilation, GroundedAnswerReferenceCompilation):
             raise TypeError("reference build compilation 类型错误")
+        if not isinstance(
+                self.reference_selection, GroundedAnswerReferenceSelection):
+            raise TypeError("reference build selection 类型错误")
+        if self.reference_selection.compilation != self.compilation:
+            raise GroundedAnswerReferenceRunLocalFactoryError(
+                "reference build compilation 未来自先行 selection")
         if not isinstance(self.parser_protocol, GroundedAnswerParserProtocol):
             raise TypeError("reference build parser protocol 类型错误")
         for label, value in (
@@ -125,9 +135,10 @@ class GroundedAnswerReferenceRunLocalBuild:
 # object-model: runtime-bundle; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
 class GroundedAnswerReferenceRunLocalInstallation:
-    """双句 connector、R-01、S-07、parser 和 question runtime。"""
+    """先行 reference choice、双句执行、parser 和 question runtime。"""
 
     compilation: GroundedAnswerReferenceCompilation
+    reference_selection: GroundedAnswerReferenceSelection
     alias: AliasRelationRuntime
     order: GroundedAnswerReferenceOrderInstallation
     parser_catalog: GroundedAnswerReferenceParserCatalog
@@ -139,6 +150,12 @@ class GroundedAnswerReferenceRunLocalInstallation:
         if not isinstance(
                 self.compilation, GroundedAnswerReferenceCompilation):
             raise TypeError("reference installation compilation 类型错误")
+        if not isinstance(
+                self.reference_selection, GroundedAnswerReferenceSelection):
+            raise TypeError("reference installation selection 类型错误")
+        if self.reference_selection.compilation != self.compilation:
+            raise GroundedAnswerReferenceRunLocalFactoryError(
+                "reference installation 替换了先行 selection")
         if not isinstance(self.alias, AliasRelationRuntime):
             raise TypeError("reference installation alias 类型错误")
         if not isinstance(
@@ -150,9 +167,13 @@ class GroundedAnswerReferenceRunLocalInstallation:
         if not isinstance(
                 self.parser_catalog, GroundedAnswerReferenceParserCatalog):
             raise TypeError("reference installation parser catalog 类型错误")
-        if self.parser_catalog.compilation != self.compilation:
+        if (self.parser_catalog.candidates != tuple(
+                item.candidate for item in self.compilation.claims)
+                or self.reference_selection.selected.declarative_object
+                not in {item.strategy_object
+                        for item in self.parser_catalog.options}):
             raise GroundedAnswerReferenceRunLocalFactoryError(
-                "reference parser catalog 替换了 compilation")
+                "reference parser catalog 未覆盖完整竞争或 candidates")
         if not isinstance(self.parser, GroundedAnswerReferenceSurfaceParser):
             raise TypeError("reference installation parser 类型错误")
         if self.parser.catalog != self.parser_catalog:
@@ -166,7 +187,7 @@ class GroundedAnswerReferenceRunLocalInstallation:
 
 # object-model: factory
 class GroundedAnswerReferenceRunLocalFactory:
-    """原子装配一个已编译 reference strategy；不接 choice/Use。"""
+    """在先行 reference selection 后原子装配被选 strategy；不接 Use。"""
 
     def __init__(
             self,
@@ -253,6 +274,7 @@ class GroundedAnswerReferenceRunLocalFactory:
         """装配并冻结双 candidate G-00 至 G-04；不形成 GG-01 choice。"""
         if not isinstance(request, GroundedAnswerReferenceRunLocalBuild):
             raise TypeError("reference factory build request 类型错误")
+        reference_selection = request.reference_selection
         compilation = request.compilation
         candidates = tuple(item.candidate for item in compilation.claims)
         components = self.components
@@ -321,7 +343,10 @@ class GroundedAnswerReferenceRunLocalFactory:
             surface_runtime,
         )
         parser_catalog = build_grounded_answer_reference_parser_catalog(
-            compilation, components.renderer_identity)
+            reference_selection.options,
+            selection,
+            components.renderer_identity,
+        )
         parser = GroundedAnswerReferenceSurfaceParser(
             request.parser_protocol, parser_catalog)
         postchecker = GenerationPostcheckRuntime(
@@ -352,6 +377,7 @@ class GroundedAnswerReferenceRunLocalFactory:
         )
         return GroundedAnswerReferenceRunLocalInstallation(
             compilation,
+            reference_selection,
             alias,
             order,
             parser_catalog,
