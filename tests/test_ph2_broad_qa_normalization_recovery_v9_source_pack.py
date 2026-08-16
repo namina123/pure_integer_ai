@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
+    BroadQaExternalDataError,
+)
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v5_localization_structure import (
     git_blob_sha1,
     sha256_hex,
@@ -14,6 +17,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v9_gettext_
     derive_normalization_recovery_v9_gettext_source_records,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v9_source_pack import (
+    materialize_normalization_recovery_v9_source_pairs_after_guard,
     publish_normalization_recovery_v9_source_pack,
     read_normalization_recovery_v9_source_pack,
 )
@@ -154,3 +158,18 @@ def test_v9_source_pack_round_trip_is_label_free(
     assert '"msgstr"' not in encoded
     assert '"zh_hans"' not in encoded
     assert '"zh_hant"' not in encoded
+    with pytest.raises(BroadQaExternalDataError, match="guard后"):
+        materialize_normalization_recovery_v9_source_pairs_after_guard(
+            target,
+            expected_manifest_sha256=published["manifest_sha256"],
+            guard_consumed=0,
+        )
+    guarded_manifest, pairs, summary = (
+        materialize_normalization_recovery_v9_source_pairs_after_guard(
+            target,
+            expected_manifest_sha256=published["manifest_sha256"],
+            guard_consumed=1,
+        ))
+    assert guarded_manifest == manifest
+    assert len(pairs) == 8
+    assert summary["plain_pair_count"] == 8

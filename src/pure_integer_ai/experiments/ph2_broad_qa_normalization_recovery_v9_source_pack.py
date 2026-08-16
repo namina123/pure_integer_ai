@@ -626,6 +626,127 @@ def read_normalization_recovery_v9_source_pack(
     return {**stored, "manifest_sha256": _sha256(encoded)}, parsed_outputs
 
 
+def materialize_normalization_recovery_v9_source_pairs_after_guard(
+        source_dir: str | Path, *,
+        expected_manifest_sha256: str,
+        guard_consumed: int,
+        ) -> tuple[dict[str, object], tuple[dict[str, object], ...],
+                   dict[str, object]]:
+    """只在formal guard后从自包含raw重建并核对完整GIMP pairs。"""
+    if type(guard_consumed) is not int or guard_consumed != 1:
+        raise BroadQaExternalDataError(
+            "v9 GIMP source pairs只能在formal guard后物化")
+    root = Path(source_dir).resolve()
+    expected_names = {
+        "manifest.json", *[name for name, _role, _count in _OUTPUT_FILES]}
+    try:
+        physical = {item.name for item in root.iterdir()}
+        encoded = (root / "manifest.json").read_bytes()
+        stored = json.loads(encoded)
+        payloads = {name: (root / name).read_bytes()
+                    for name, _role, _count in _OUTPUT_FILES}
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BroadQaExternalDataError(
+            "v9 GIMP guard后source pack不可读") from error
+    if (physical != expected_names
+            or _sha256(encoded) != expected_manifest_sha256
+            or not isinstance(stored, dict)
+            or canonical_json_line(stored) != encoded):
+        raise BroadQaExternalDataError(
+            "v9 GIMP guard后source manifest漂移")
+    by_name = {str(item.get("relative_path")): item
+               for item in stored.get("files", [])
+               if isinstance(item, dict)}
+    parsed = {}
+    for name, role, fixed_count in _OUTPUT_FILES:
+        payload = payloads[name]
+        if name.endswith(".jsonl"):
+            try:
+                values = tuple(json.loads(line) for line in payload.splitlines())
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise BroadQaExternalDataError(
+                    f"v9 GIMP guard后{name}不可读") from error
+            if b"".join(canonical_json_line(item) for item in values) != payload:
+                raise BroadQaExternalDataError(
+                    f"v9 GIMP guard后{name}非规范")
+            parsed[name] = values
+            count = len(values)
+        else:
+            count = 0
+        expected_count = fixed_count if fixed_count is not None else count
+        if by_name.get(name) != _artifact_payload(
+                name, role=role, payload=payload, count=expected_count):
+            raise BroadQaExternalDataError(
+                f"v9 GIMP guard后{name} commitment漂移")
+    source_files = parsed["source-files.jsonl"]
+    identities = parsed["pair-identities.jsonl"]
+    census_values = parsed["source-census.jsonl"]
+    stored_summary = stored.get("summary")
+    expected_pair_count = stored_summary.get(
+        "label_free_identity_count") if isinstance(stored_summary, dict) else None
+    if (len(source_files) != 18
+            or type(expected_pair_count) is not int or expected_pair_count <= 0
+            or len(identities) != expected_pair_count
+            or len(census_values) != 1):
+        raise BroadQaExternalDataError("v9 GIMP guard后分母漂移")
+    expected_paths = tuple(sorted(
+        str(item["relative_path"]) for item in source_files))
+    archive_files = _archive_files(payloads[_ARCHIVE_NAME], expected_paths)
+    for item in source_files:
+        payload = archive_files[str(item["relative_path"])]
+        if (len(payload) != item.get("bytes")
+                or git_blob_sha1(payload) != item.get("git_blob_sha1")
+                or sha256_hex(payload) != item.get("sha256")):
+            raise BroadQaExternalDataError(
+                "v9 GIMP guard后archive file identity漂移")
+    locale_records = tuple(item for item in source_files
+                           if item.get("role")
+                           == "TRANSLATION_WITH_OFFICIAL_SOURCE_GETTEXT_PO")
+    by_domain: dict[str, dict[str, str]] = {}
+    for item in locale_records:
+        domain = str(item.get("domain"))
+        role = str(item.get("locale_role"))
+        relative = str(item.get("relative_path"))
+        if role in by_domain.setdefault(domain, {}):
+            raise BroadQaExternalDataError(
+                "v9 GIMP guard后locale domain重复")
+        by_domain[domain][role] = relative
+    if len(by_domain) != 8 or any(
+            set(values) != {"zh_Hans", "zh_Hant"}
+            for values in by_domain.values()):
+        raise BroadQaExternalDataError("v9 GIMP guard后locale roster漂移")
+    specs = tuple({
+        "domain": domain,
+        "zh_Hans": {
+            "expected_language": "zh_CN",
+            "relative_path": values["zh_Hans"],
+        },
+        "zh_Hant": {
+            "expected_language": "zh_TW",
+            "relative_path": values["zh_Hant"],
+        },
+    } for domain, values in sorted(by_domain.items()))
+    locale_payloads = {str(item["relative_path"]): archive_files[
+        str(item["relative_path"])] for item in locale_records}
+    derived_files, pairs, summary = (
+        derive_normalization_recovery_v9_gettext_source_records(
+            source_family="GIMP_PROJECT",
+            source_policy_scope=str(identities[0]["source_policy_scope"]),
+            license_expression="GPL-3.0-or-later",
+            pair_specs=specs,
+            files=locale_payloads,
+        ))
+    census = census_values[0]
+    if (derived_files != locale_records
+            or _identity_records(pairs) != identities
+            or census.get("parser_summary") != summary
+            or census.get("label_free_identity_count") != len(pairs)):
+        raise BroadQaExternalDataError(
+            "v9 GIMP guard后pair/identity/census重派生漂移")
+    return ({**stored, "manifest_sha256": expected_manifest_sha256},
+            pairs, summary)
+
+
 __all__ = [
     "NORMALIZATION_RECOVERY_V9_SOURCE_PACK_KIND",
     "NORMALIZATION_RECOVERY_V9_SOURCE_PACK_STATUS",
@@ -633,4 +754,5 @@ __all__ = [
     "V9_SOURCE_ROSTER_MANIFEST_SHA256",
     "publish_normalization_recovery_v9_source_pack",
     "read_normalization_recovery_v9_source_pack",
+    "materialize_normalization_recovery_v9_source_pairs_after_guard",
 ]
