@@ -29,6 +29,10 @@ from pure_integer_ai.experiments.ph2_grounded_answer_choice_use import (
 from pure_integer_ai.experiments.ph2_grounded_answer_choice import (
     build_grounded_answer_lexical_choice,
 )
+from pure_integer_ai.experiments.ph2_grounded_answer_layer_choice_use import (
+    GroundedAnswerContentTaskAdoptionLedger,
+    GroundedAnswerLayerChoiceUseError,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_parser import (
     GroundedAnswerParserProtocol,
 )
@@ -165,6 +169,8 @@ def test_grounded_variant_runs_through_typed_executor_parser_and_g04():
         run = installation.runtime.run(request)
         ledger = GroundedAnswerLexicalAdoptionLedger(installation)
         lexical_use = ledger.adopt(run)
+        layer_ledger = GroundedAnswerContentTaskAdoptionLedger(installation)
+        layer_uses = layer_ledger.adopt(run)
 
         assert run.complete
         assert run.generation is not None
@@ -198,6 +204,27 @@ def test_grounded_variant_runs_through_typed_executor_parser_and_g04():
                 GroundedAnswerLexicalUseError,
                 match="不得重复登记"):
             ledger.adopt(run)
+        assert layer_uses.content.choice_after.exact_uses == (
+            layer_uses.content.use,)
+        assert layer_uses.task.choice_after.exact_uses == (
+            layer_uses.task.use,)
+        assert layer_uses.content.choice_before.selected_object == (
+            candidate.proposition.template)
+        assert layer_uses.task.choice_before.selected_object == run.status
+        assert layer_uses.content.choice_before.condition.context == (
+            installation.lexical_choice.condition.context)
+        assert layer_uses.task.choice_before.condition.context == (
+            installation.lexical_choice.condition.context)
+        assert len({
+            lexical_use.use.use_key,
+            layer_uses.content.use.use_key,
+            layer_uses.task.use.use_key,
+        }) == 3
+        assert layer_ledger.records == (layer_uses,)
+        with pytest.raises(
+                GroundedAnswerLayerChoiceUseError,
+                match="不得重复登记"):
+            layer_ledger.adopt(run)
         assert installation.alias is alias_factory.fixture.runtime
         assert installation.order.evidence_count == (
             len(installation.variant.order_requirements)

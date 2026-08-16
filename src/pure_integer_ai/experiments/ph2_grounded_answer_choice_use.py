@@ -90,7 +90,7 @@ def _use_key(
     return LosslessIntegerKey(tuple(values))
 
 
-def _actual_execution(
+def grounded_answer_actual_execution(
         variant: GroundedAnswerConnectorVariant,
         planning: GenerationPlanningRequest,
         candidate: GenerationCandidate,
@@ -208,7 +208,7 @@ class GroundedAnswerLexicalUse:
         if not isinstance(self.choice_after, GenerationChoiceHypothesis):
             raise TypeError("grounded lexical use choice_after 类型错误")
 
-        selection, generation, actual_adoptions = _actual_execution(
+        selection, generation, actual_adoptions = grounded_answer_actual_execution(
             self.variant,
             self.planning,
             self.candidate,
@@ -261,7 +261,7 @@ class GroundedAnswerLexicalAdoptionLedger:
         if not isinstance(run, QuestionAnswerRun):
             raise TypeError("grounded lexical ledger run 类型错误")
         installation = self.installation
-        selection, generation, adoptions = _actual_execution(
+        selection, generation, adoptions = grounded_answer_actual_execution(
             installation.variant,
             installation.planning,
             installation.candidate,
@@ -311,4 +311,5 @@ __all__ = [
     "GroundedAnswerLexicalAdoptionLedger",
     "GroundedAnswerLexicalUse",
     "GroundedAnswerLexicalUseError",
+    "grounded_answer_actual_execution",
 ]
