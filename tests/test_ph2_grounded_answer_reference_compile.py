@@ -6,13 +6,31 @@ from pathlib import Path
 from pure_integer_ai.cognition.shared.generation_plan import (
     GenerationPlanningRequest,
 )
+from pure_integer_ai.cognition.shared.candidate_projection import (
+    CandidateProjectionGraph,
+)
+from pure_integer_ai.cognition.shared.candidate_runtime import (
+    CandidateLearningRuntime,
+    CandidateProjectionMetadata,
+)
+from pure_integer_ai.cognition.shared.evidence_candidate import (
+    EVIDENCE_REFUTE,
+    EVIDENCE_SUPPORT,
+    EVIDENCE_UNKNOWN,
+    EvidenceCandidateEngine,
+    EvidenceCandidateProtocol,
+)
 from pure_integer_ai.cognition.shared.generation_structure_plan import (
     GenerationStructureLayerProtocol,
 )
 from pure_integer_ai.cognition.shared.identity import (
+    GLOBAL_OWNER_SCOPE,
+    SourceRef,
+    VersionBundle,
     language_branch_identity,
     minimal_instruction_identity,
 )
+from pure_integer_ai.cognition.shared.scope_identity import document_scope
 from pure_integer_ai.cognition.shared.question_answer import QuestionRequest
 from pure_integer_ai.cognition.shared.representation_rendering import (
     UnicodeRepresentationRenderer,
@@ -34,18 +52,33 @@ from pure_integer_ai.experiments.ph2_grounded_answer_reference_verification impo
     build_grounded_answer_reference_verifier_protocol,
     run_grounded_answer_reference_gg02,
 )
+from pure_integer_ai.experiments.ph2_generation_choice_assessment_consumer import (
+    GenerationChoiceAssessmentConsumer,
+    GenerationChoiceAssessmentConsumerPolicy,
+    assessment_input_stance,
+)
+from pure_integer_ai.experiments.ph2_generation_choice_contract import (
+    GenerationChoiceCandidateMapper,
+)
+from pure_integer_ai.experiments.ph2_generation_choice_outcome_bridge import (
+    build_assessment_inputs,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_parser import (
     GroundedAnswerParserProtocol,
 )
+from pure_integer_ai.experiments.formal_train import make_train_context
 from pure_integer_ai.experiments.question_answer_runtime import (
     EvidenceQuestionPostcheckMapper,
     QuestionAnswerProtocol,
 )
 from pure_integer_ai.experiments.verification_orchestration import (
     APPLICABILITY_NOT_APPLICABLE,
+    VERDICT_REFUTE,
     VERDICT_SUPPORT,
+    VERDICT_UNKNOWN,
 )
 from pure_integer_ai.storage.backend import DictBackend
+from pure_integer_ai.storage.edge_store import EPI_STRUCTURED, SOURCE_BARE_TEXT
 from pure_integer_ai.experiments.ph2_grounded_answer_course import (
     REFERENCE_STRATEGIES,
     read_grounded_answer_episodes,
@@ -69,6 +102,8 @@ from tests.test_g04_generation_postcheck import (
     _protocol as _postcheck_protocol,
 )
 from tests.test_g02_generation_structure_plan import _plan_protocol
+from tests.test_d02_gg01_generation_choice_contract import _candidate_protocol
+from tests.test_r00_relation_closure import _projection_protocol, _verifier
 from tests.test_s07_structure_order import _graphs
 
 
@@ -406,3 +441,108 @@ def test_reference_strategies_form_distinct_actual_uses():
             and item.verifier == explicit_route.verifier))
     assert explicit_unique.applicability == APPLICABILITY_NOT_APPLICABLE
     assert explicit_unique.claim_keys == ()
+
+
+def test_reference_gg02_outcome_updates_h05_once_and_replays_without_writes():
+    """真实五层 outcome 只执行一次 assessment，关闭层 prepare 保持零写。"""
+    layered = _run_reference_strategy("ANTECEDENT_REFERENCE")[4].outcome
+    explicit_layered = _run_reference_strategy("EXPLICIT_REPETITION")[4].outcome
+    support_input = build_assessment_inputs(layered).inputs[0]
+    support_outcome = support_input.outcomes[0]
+    assert assessment_input_stance(support_input) == EVIDENCE_SUPPORT
+    assert assessment_input_stance(replace(
+        support_input,
+        outcomes=(replace(support_outcome, verdict=VERDICT_REFUTE),),
+    )) == EVIDENCE_REFUTE
+    assert assessment_input_stance(replace(
+        support_input,
+        outcomes=(replace(support_outcome, verdict=VERDICT_UNKNOWN),),
+    )) == EVIDENCE_UNKNOWN
+    backend = DictBackend()
+    try:
+        context = make_train_context(backend)
+        aggregate = SourceRef(
+            _BASE + 50, 1, 0, GLOBAL_OWNER_SCOPE, VersionBundle())
+        learning = CandidateLearningRuntime(
+            EvidenceCandidateEngine(EvidenceCandidateProtocol(
+                (_BASE + 50, 2),
+                (_BASE + 50, 3),
+                aggregate,
+                document_scope(aggregate),
+                1,
+            )),
+            CandidateProjectionGraph(
+                context.graph_ontology, _projection_protocol()),
+            _verifier(),
+            CandidateProjectionMetadata(SOURCE_BARE_TEXT, EPI_STRUCTURED),
+        )
+        mapper = GenerationChoiceCandidateMapper(
+            _candidate_protocol(_BASE + 50))
+        verifier_source = SourceRef(
+            _BASE + 50, 4, 0, GLOBAL_OWNER_SCOPE, VersionBundle())
+        consumer = GenerationChoiceAssessmentConsumer(
+            mapper,
+            learning,
+            GenerationChoiceAssessmentConsumerPolicy(
+                verifier_source, (_BASE + 50, 5)),
+        )
+        disabled = GenerationChoiceAssessmentConsumer(
+            mapper,
+            learning,
+            GenerationChoiceAssessmentConsumerPolicy(
+                verifier_source,
+                (_BASE + 50, 6),
+                ("DISCOURSE_REFERENCE_CHOICE",),
+            ),
+        )
+        before_prepare_backend = backend.snapshot()
+        before_prepare_state = learning.state_key()
+
+        prepared = disabled.prepare(layered)
+
+        assert len(prepared) == 4
+        assert all(
+            item.assessment.choice_kind != "DISCOURSE_REFERENCE_CHOICE"
+            for item in prepared)
+        assert backend.snapshot() == before_prepare_backend
+        assert learning.state_key() == before_prepare_state
+
+        first = consumer.apply(layered)
+
+        assert len(first.records) == 5
+        assert first.candidate_registrations == 5
+        assert first.assessment_updates_executed == 5
+        assert first.replayed_updates == 0
+        assert first.teacher_call_count == 0
+        assert first.support_records == 5
+        assert first.refute_records == 0
+        assert first.unknown_records == 0
+        assert all(item.candidate_registered == 1 for item in first.records)
+        assert all(
+            item.learning.verification.stance == EVIDENCE_SUPPORT
+            for item in first.records)
+        assert all(item.learning.projection is not None for item in first.records)
+        assert len({item.stable_key() for item in first.records}) == 5
+
+        explicit = consumer.apply(explicit_layered)
+
+        assert len(explicit.records) == 5
+        assert explicit.candidate_registrations == 1
+        assert explicit.assessment_updates_executed == 5
+        assert explicit.replayed_updates == 0
+        assert explicit.support_records == 5
+        assert explicit.teacher_call_count == 0
+        after_first_backend = backend.snapshot()
+        after_first_state = learning.state_key()
+
+        replay = consumer.apply(layered)
+
+        assert replay.records == first.records
+        assert replay.candidate_registrations == 0
+        assert replay.assessment_updates_executed == 0
+        assert replay.replayed_updates == 5
+        assert replay.teacher_call_count == 0
+        assert backend.snapshot() == after_first_backend
+        assert learning.state_key() == after_first_state
+    finally:
+        backend.close()

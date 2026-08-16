@@ -25,6 +25,10 @@ from pure_integer_ai.cognition.shared.scope_identity import (
     SCOPE_EPISODE,
     SCOPE_QUERY,
     ScopeIdentity,
+    document_scope,
+)
+from pure_integer_ai.cognition.shared.semantic_object import (
+    context_scope_identity,
 )
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.experiments.ph2_dataset_contract import (
@@ -982,6 +986,43 @@ class GenerationChoiceCandidateMapper:
             raise TypeError("choice candidate protocol is invalid")
         self.protocol = protocol
 
+    def competition_key(
+            self, choice: GenerationChoiceHypothesis,
+            ) -> tuple[int, ...]:
+        """返回 H-05 使用的分层竞争组全键。"""
+        if not isinstance(choice, GenerationChoiceHypothesis):
+            raise TypeError("choice hypothesis is invalid")
+        return (
+            *self.protocol.competition_namespace,
+            CHOICE_KINDS.index(choice.choice_kind),
+            *_pack(choice.competition_key),
+            *_pack(choice.condition.context.stable_key()),
+        )
+
+    def candidate_identity(
+            self, choice: GenerationChoiceHypothesis,
+            ) -> ObjectIdentity:
+        """把 GG-01 choice 身份无损投影为图可物化的 Hypothesis 身份。"""
+        if not isinstance(choice, GenerationChoiceHypothesis):
+            raise TypeError("choice hypothesis is invalid")
+        observation = choice.forming_sources[0]
+        return HypothesisKey(
+            self.protocol.candidate_kind.stable_key(),
+            choice.candidate.stable_key(),
+            self.competition_key(choice),
+            document_scope(observation),
+            observation,
+        ).object_identity()
+
+    def context_identity(
+            self, choice: GenerationChoiceHypothesis,
+            ) -> ObjectIdentity:
+        """把 GG-01 抽象 context 无损投影为来源化图 ContextScope。"""
+        if not isinstance(choice, GenerationChoiceHypothesis):
+            raise TypeError("choice hypothesis is invalid")
+        return context_scope_identity(
+            choice.forming_sources[0], choice.condition.context.stable_key())
+
     def definition(
             self, choice: GenerationChoiceHypothesis,
             ) -> EvidenceCandidateDefinition:
@@ -997,20 +1038,15 @@ class GenerationChoiceCandidateMapper:
             CandidateBinding(
                 self.protocol.target_predicate, choice.target_obligation),
             CandidateBinding(
-                self.protocol.context_predicate, choice.condition.context),
+                self.protocol.context_predicate, self.context_identity(choice)),
             CandidateBinding(
                 self.protocol.condition_predicate, choice.condition.condition),
             CandidateBinding(
                 self.protocol.selected_predicate, choice.selected_object),
         )
         return EvidenceCandidateDefinition(
-            choice.candidate,
-            (
-                *self.protocol.competition_namespace,
-                CHOICE_KINDS.index(choice.choice_kind),
-                *_pack(choice.competition_key),
-                *_pack(choice.condition.context.stable_key()),
-            ),
+            self.candidate_identity(choice),
+            self.competition_key(choice),
             bindings,
             choice.forming_sources,
         )

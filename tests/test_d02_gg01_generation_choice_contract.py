@@ -23,6 +23,7 @@ from pure_integer_ai.cognition.shared.identity import (
     minimal_instruction_identity,
     structure_concept_identity,
 )
+from pure_integer_ai.cognition.shared.hypothesis import HypothesisKey
 from pure_integer_ai.cognition.shared.scope_identity import query_scope
 from pure_integer_ai.cognition.shared.semantic_object import (
     context_scope_identity,
@@ -244,7 +245,10 @@ def test_generic_candidate_preflight_accepts_choice_without_any_write():
         assert learning.state_key() == before_runtime
         assert backend.snapshot() == before_backend
         definition = mapper.definition(choice)
-        assert definition.candidate == choice.candidate
+        mapped = HypothesisKey.from_stable_key(
+            definition.candidate.components)
+        assert mapped.candidate_key == choice.candidate.stable_key()
+        assert definition.candidate == mapper.candidate_identity(choice)
         assert definition.forming_sources == choice.forming_sources
         assert len(definition.bindings) == 6
     finally:
