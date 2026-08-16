@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from pure_integer_ai.cognition.shared.generation_content import (
     AnswerContentProtocol,
     AnswerContentSelector,
@@ -39,6 +41,10 @@ from pure_integer_ai.experiments.ph2_grounded_answer_learning import (
 from pure_integer_ai.experiments.ph2_grounded_answer_response_act_compile import (
     GroundedResponseActCompileTarget,
     compile_grounded_response_act_patterns,
+)
+from pure_integer_ai.experiments.ph2_grounded_answer_response_act_choice_use import (
+    GroundedResponseActLexicalAdoptionLedger,
+    GroundedResponseActLexicalUseError,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_response_act_parser import (
     GroundedResponseActParserProtocol,
@@ -199,6 +205,8 @@ def test_clarify_runs_as_learned_response_act_with_selected_candidates():
         )
 
         run = installation.runtime.run(question_request)
+        ledger = GroundedResponseActLexicalAdoptionLedger(installation)
+        lexical_use = ledger.adopt(run)
 
         assert run.complete
         assert run.selection is not None
@@ -220,6 +228,15 @@ def test_clarify_runs_as_learned_response_act_with_selected_candidates():
         assert execution.sentences[0].active_constraints == ()
         assert renderer.text(run.generation.rendered) == learned_literal
         assert len(run.generation.surface.adoptions) == 1
+        assert lexical_use.choice_before == installation.lexical_choice
+        assert lexical_use.adoptions == run.generation.surface.adoptions
+        assert lexical_use.choice_after.exact_uses == (lexical_use.use,)
+        assert lexical_use.use.scope == planning.goal.scope
+        assert ledger.records == (lexical_use,)
+        with pytest.raises(
+                GroundedResponseActLexicalUseError,
+                match="不得重复登记"):
+            ledger.adopt(run)
         assert run.postcheck is not None and run.postcheck.complete
         observation = run.postcheck.parsed.observation
         assert observation is not None

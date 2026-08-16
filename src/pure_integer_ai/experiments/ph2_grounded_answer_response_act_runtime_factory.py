@@ -85,6 +85,9 @@ from pure_integer_ai.experiments.ph2_grounded_answer_response_act_compile import
     GroundedResponseActVariant,
     compile_grounded_response_act_patterns,
 )
+from pure_integer_ai.experiments.ph2_grounded_answer_response_act_choice_use import (
+    build_grounded_response_act_lexical_choice,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_response_act_parser import (
     GroundedResponseActParserCatalog,
     GroundedResponseActParserProtocol,
@@ -96,6 +99,9 @@ from pure_integer_ai.experiments.question_answer_runtime import (
     QuestionAnswerProtocol,
     QuestionAnswerRuntime,
     QuestionRouteRegistration,
+)
+from pure_integer_ai.experiments.ph2_generation_choice_contract import (
+    GenerationChoiceHypothesis,
 )
 
 
@@ -374,9 +380,11 @@ class GroundedResponseActRunLocalInstallation:
 
     compilation: GroundedResponseActCompilation
     variant: GroundedResponseActVariant
+    planning: GenerationPlanningRequest
     alias: AliasRelationRuntime
     parser_catalog: GroundedResponseActParserCatalog
     parser: GroundedResponseActSurfaceParser
+    lexical_choice: GenerationChoiceHypothesis
     executor: TypedGenerationExecutor
     runtime: QuestionAnswerRuntime
 
@@ -386,6 +394,8 @@ class GroundedResponseActRunLocalInstallation:
         if self.compilation.select(self.variant.pattern_id) != self.variant:
             raise GroundedResponseActRunLocalFactoryError(
                 "response-act installation variant 不属于 compilation")
+        if not isinstance(self.planning, GenerationPlanningRequest):
+            raise TypeError("response-act installation planning 类型错误")
         if not isinstance(self.alias, AliasRelationRuntime):
             raise TypeError("response-act installation alias 类型错误")
         if not isinstance(
@@ -393,6 +403,17 @@ class GroundedResponseActRunLocalInstallation:
             raise TypeError("response-act parser catalog 类型错误")
         if not isinstance(self.parser, GroundedResponseActSurfaceParser):
             raise TypeError("response-act parser 类型错误")
+        if not isinstance(self.lexical_choice, GenerationChoiceHypothesis):
+            raise TypeError("response-act lexical choice 类型错误")
+        if (self.lexical_choice.selected_object != self.variant.template.sentence
+                or self.lexical_choice.target_obligation
+                != self.variant.template.stance
+                or self.lexical_choice.authorized_scope
+                != self.planning.goal.scope
+                or self.lexical_choice.exact_uses
+                or self.lexical_choice.typed_outcomes):
+            raise GroundedResponseActRunLocalFactoryError(
+                "response-act installation lexical choice 漂移")
         if not isinstance(self.executor, TypedGenerationExecutor):
             raise TypeError("response-act executor 类型错误")
         if not isinstance(self.runtime, QuestionAnswerRuntime):
@@ -582,12 +603,16 @@ class GroundedResponseActRunLocalFactory:
                 variant, (_NAMESPACE, 3)),
             postchecker=postchecker,
         )
+        lexical_choice = build_grounded_response_act_lexical_choice(
+            variant, request.planning)
         return GroundedResponseActRunLocalInstallation(
             compilation,
             variant,
+            request.planning,
             alias,
             catalog,
             parser,
+            lexical_choice,
             executor,
             runtime,
         )
