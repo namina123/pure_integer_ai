@@ -54,6 +54,29 @@ def _owned_identity(
     )
 
 
+def grounded_answer_generation_context(
+        variant: GroundedAnswerConnectorVariant,
+        candidate: GenerationCandidate,
+        ) -> ObjectIdentity:
+    """建立不含 selected connector 的同次 grounded generation 上下文。"""
+    if not isinstance(variant, GroundedAnswerConnectorVariant):
+        raise TypeError("grounded generation context variant 类型错误")
+    if not isinstance(candidate, GenerationCandidate):
+        raise TypeError("grounded generation context candidate 类型错误")
+    template = variant.template
+    if (candidate.proposition.structure != template.proposition_structure
+            or candidate.proposition.predicate != template.predicate):
+        raise GroundedAnswerChoiceError(
+            "grounded generation context 与 candidate match key 漂移")
+    return _owned_identity(
+        OBJECT_CONTEXT_SCOPE,
+        (*candidate.scope.stable_key(),
+         *candidate.proposition.stable_key(),
+         *template.language_branch.stable_key()),
+        candidate,
+    )
+
+
 def build_grounded_answer_lexical_choice(
         variant: GroundedAnswerConnectorVariant,
         candidate: GenerationCandidate,
@@ -69,11 +92,7 @@ def build_grounded_answer_lexical_choice(
         raise GroundedAnswerChoiceError(
             "lexical choice 与 generation candidate match key 漂移")
     theory_key = template.connector.stable_key()
-    context = _owned_identity(
-        OBJECT_CONTEXT_SCOPE,
-        (*candidate.scope.stable_key(), *theory_key),
-        candidate,
-    )
+    context = grounded_answer_generation_context(variant, candidate)
     condition = concept_identity(
         integer_tuple_fingerprint(
             (*context.stable_key(), *candidate.proposition.stable_key()),
@@ -129,4 +148,5 @@ def build_grounded_answer_lexical_choice(
 __all__ = [
     "GroundedAnswerChoiceError",
     "build_grounded_answer_lexical_choice",
+    "grounded_answer_generation_context",
 ]

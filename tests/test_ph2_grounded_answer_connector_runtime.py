@@ -26,6 +26,9 @@ from pure_integer_ai.experiments.ph2_grounded_answer_choice_use import (
     GroundedAnswerLexicalAdoptionLedger,
     GroundedAnswerLexicalUseError,
 )
+from pure_integer_ai.experiments.ph2_grounded_answer_choice import (
+    build_grounded_answer_lexical_choice,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_parser import (
     GroundedAnswerParserProtocol,
 )
@@ -174,6 +177,15 @@ def test_grounded_variant_runs_through_typed_executor_parser_and_g04():
         assert installation.lexical_choice.selected_object == (
             installation.variant.template.connector)
         assert installation.lexical_choice.exact_uses == ()
+        lexical_alternatives = tuple(
+            build_grounded_answer_lexical_choice(variant, candidate)
+            for variant in installation.compilation.variants
+        )
+        assert len(lexical_alternatives) == 2
+        assert len({
+            item.condition.context for item in lexical_alternatives}) == 1
+        assert len({item.competition_key for item in lexical_alternatives}) == 1
+        assert len({item.selected_object for item in lexical_alternatives}) == 2
         assert lexical_use.run == run
         assert lexical_use.adoptions == run.generation.surface.adoptions
         assert lexical_use.use.scope == candidate.scope
