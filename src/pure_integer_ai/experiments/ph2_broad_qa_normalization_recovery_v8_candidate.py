@@ -405,6 +405,31 @@ def reference_normalization_recovery_v8_candidate_batch(
         for item in queries)
 
 
+def profile_normalization_recovery_v8_candidate_batch(
+        candidate: dict[str, object],
+        queries: tuple[dict[str, object], ...], *,
+        indexed: bool,
+        clock_ns,
+        ) -> tuple[tuple[dict[str, object], ...], tuple[int, ...]]:
+    """保持batch一次校验语义，并记录每条query的整数纳秒耗时。"""
+    if (not isinstance(queries, tuple) or not queries
+            or type(indexed) is not bool or not callable(clock_ns)):
+        raise BroadQaExternalDataError("v8 candidate profile batch 非法")
+    inventories = _validate_candidate(candidate)
+    index = _build_index(inventories) if indexed else None
+    results = []
+    durations = []
+    for query in queries:
+        started = clock_ns()
+        results.append(_execute_one(
+            candidate, query, inventories=inventories, index=index))
+        elapsed = clock_ns() - started
+        if type(elapsed) is not int or elapsed < 0:
+            raise BroadQaExternalDataError("v8 candidate profile clock 非法")
+        durations.append(elapsed)
+    return tuple(results), tuple(durations)
+
+
 def derive_normalization_recovery_v8_candidate_preflight(
         candidate: dict[str, object],
         ) -> dict[str, object]:
@@ -478,5 +503,6 @@ __all__ = [
     "compile_normalization_recovery_v8_candidate",
     "derive_normalization_recovery_v8_candidate_preflight",
     "execute_normalization_recovery_v8_candidate_batch",
+    "profile_normalization_recovery_v8_candidate_batch",
     "reference_normalization_recovery_v8_candidate_batch",
 ]

@@ -11,6 +11,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_candidat
     compile_normalization_recovery_v8_candidate,
     derive_normalization_recovery_v8_candidate_preflight,
     execute_normalization_recovery_v8_candidate_batch,
+    profile_normalization_recovery_v8_candidate_batch,
     reference_normalization_recovery_v8_candidate_batch,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v8_evaluation_commitment import (
@@ -212,3 +213,25 @@ def test_each_batch_validates_candidate_once(
     calls.clear()
     reference_normalization_recovery_v8_candidate_batch(candidate, queries)
     assert len(calls) == 1
+
+
+def test_profiled_batch_preserves_runtime_and_records_query_latency() -> None:
+    """profile入口必须保持indexed/reference结果且不重复校验candidate。"""
+    candidate = _candidate()
+    queries = tuple({
+        "input_text": text,
+        "official_source_text": source,
+        "structure_tokens": [],
+    } for text, source in (("檔案", "Files"), ("未授权文本", "Unknown")))
+    ticks = iter(range(10, 18))
+    indexed, indexed_ns = profile_normalization_recovery_v8_candidate_batch(
+        candidate, queries, indexed=True, clock_ns=lambda: next(ticks))
+    reference, reference_ns = profile_normalization_recovery_v8_candidate_batch(
+        candidate, queries, indexed=False, clock_ns=lambda: next(ticks))
+    assert indexed == execute_normalization_recovery_v8_candidate_batch(
+        candidate, queries)
+    assert reference == reference_normalization_recovery_v8_candidate_batch(
+        candidate, queries)
+    assert indexed == reference
+    assert indexed_ns == (1, 1)
+    assert reference_ns == (1, 1)
