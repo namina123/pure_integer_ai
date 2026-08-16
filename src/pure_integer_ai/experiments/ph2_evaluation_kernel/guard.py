@@ -120,11 +120,25 @@ def build_available_guard(manifest: EvaluationKernelManifest) -> EvaluationOneSh
     """Create the only AVAILABLE guard from a validated immutable manifest."""
     if not isinstance(manifest, EvaluationKernelManifest):
         raise EvaluationKernelContractError("evaluation guard manifest type invalid")
-    return EvaluationOneShotGuard(
+    return build_available_guard_for_identity(
         manifest.sha256(), manifest.family_commitment,
         manifest.owner_binding.owner_receipt_sha256,
         manifest.candidate_artifact_sha256,
         manifest.plugin.semantic_sha256,
+    )
+
+
+def build_available_guard_for_identity(
+        manifest_sha256: str,
+        family_commitment: str,
+        owner_receipt_sha256: str,
+        candidate_artifact_sha256: str,
+        plugin_semantic_sha256: str,
+        ) -> EvaluationOneShotGuard:
+    """按任意不可变 family identity 建立共享的一次性 available guard。"""
+    return EvaluationOneShotGuard(
+        manifest_sha256, family_commitment, owner_receipt_sha256,
+        candidate_artifact_sha256, plugin_semantic_sha256,
         1, "AVAILABLE",
     )
 
@@ -165,5 +179,6 @@ __all__ = [
     "EvaluationOneShotGuard",
     "EvaluationRunIntent",
     "build_available_guard",
+    "build_available_guard_for_identity",
     "consume_guard",
 ]

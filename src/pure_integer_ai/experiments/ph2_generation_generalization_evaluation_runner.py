@@ -367,6 +367,15 @@ class GenerationGeneralizationEvaluationPolicy:
             int(self.trust_required),
         )
 
+    def to_dict(self) -> dict[str, object]:
+        """导出 family freeze 可直接内容锁的完整显式 policy。"""
+        return {
+            "citation_required": int(self.citation_required),
+            "pattern_selection": self.pattern_selection,
+            "reference_strategy": self.reference_strategy,
+            "trust_required": int(self.trust_required),
+        }
+
 
 # object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
@@ -1387,6 +1396,20 @@ def run_generation_generalization_evaluation_batch(
     return GenerationGeneralizationEvaluationBatch(runs)
 
 
+def generation_generalization_evaluation_requirements(
+        observation: GenerationGeneralizationEvaluationObservation,
+        ) -> tuple[str, ...]:
+    """返回单条 label-free Observation 将实际执行的冻结 requirement 集。"""
+    if not isinstance(
+            observation, GenerationGeneralizationEvaluationObservation):
+        raise TypeError("evaluation requirement Observation 类型错误")
+    path = _path_for(observation)
+    expected = _expected_requirements(path, observation)
+    return tuple(
+        requirement for requirement in INDEPENDENT_VERIFIER_REQUIREMENTS
+        if requirement in expected)
+
+
 __all__ = [
     "EVALUATION_ACTUAL_STATUSES",
     "EVALUATION_PATHS",
@@ -1398,6 +1421,7 @@ __all__ = [
     "PATH_ANSWER",
     "PATH_REFERENCE",
     "PATH_RESPONSE_ACT",
+    "generation_generalization_evaluation_requirements",
     "run_generation_generalization_evaluation_actual",
     "run_generation_generalization_evaluation_batch",
 ]
