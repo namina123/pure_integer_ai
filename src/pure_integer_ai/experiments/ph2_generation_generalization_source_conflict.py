@@ -28,6 +28,9 @@ from pure_integer_ai.experiments.ph2_generation_choice_contract import (
     GenerationChoiceHypothesis,
     GenerationChoiceUseRef,
 )
+from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_observation import (
+    GenerationGeneralizationEvaluationObservation,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_course import (
     GroundedAnswerEpisode,
 )
@@ -42,6 +45,10 @@ from pure_integer_ai.experiments.verification_orchestration import (
     VerificationReport,
     VerifierRegistration,
 )
+
+
+_ExecutableEpisode = (
+    GroundedAnswerEpisode | GenerationGeneralizationEvaluationObservation)
 
 
 # object-model: exception
@@ -93,7 +100,7 @@ class GenerationGeneralizationSourceConflictProtocol:
 class GenerationGeneralizationSourceConflictInput:
     """课程冲突 Evidence 与一次 actual response-act 输出的完整只读输入。"""
 
-    episode: GroundedAnswerEpisode
+    episode: _ExecutableEpisode
     planning: GroundedResponseActPlanningBuild
     choice: GenerationChoiceHypothesis
     use: GenerationChoiceUseRef
@@ -104,7 +111,10 @@ class GenerationGeneralizationSourceConflictInput:
         init=False, repr=False, compare=False, default=())
 
     def __post_init__(self) -> None:
-        if not isinstance(self.episode, GroundedAnswerEpisode):
+        if not isinstance(self.episode, (
+                GroundedAnswerEpisode,
+                GenerationGeneralizationEvaluationObservation,
+                )):
             raise TypeError("source-conflict episode 类型错误")
         if not isinstance(self.planning, GroundedResponseActPlanningBuild):
             raise TypeError("source-conflict planning 类型错误")
@@ -155,8 +165,14 @@ class GenerationGeneralizationSourceConflictInput:
 
     def _build_stable_key(self) -> tuple[int, ...]:
         """在构造完成时形成不依赖对象地址的内容引用。"""
-        episode = self.episode.episode_id.encode("utf-8")
-        values = [len(episode), *episode]
+        if isinstance(
+                self.episode,
+                GenerationGeneralizationEvaluationObservation):
+            observation = self.episode.stable_key()
+            values = [len(observation), *observation]
+        else:
+            episode = self.episode.episode_id.encode("utf-8")
+            values = [len(episode), *episode]
         for key in (
                 self.planning.stable_key(),
                 self.choice.stable_key(),

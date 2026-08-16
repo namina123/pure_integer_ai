@@ -21,6 +21,9 @@ from pure_integer_ai.experiments.ph2_generation_choice_contract import (
     GenerationChoiceHypothesis,
     GenerationChoiceUseRef,
 )
+from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_observation import (
+    GenerationGeneralizationEvaluationObservation,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_course import (
     GroundedAnswerEpisode,
 )
@@ -42,6 +45,8 @@ ANSWER_REQUIREMENTS = (
     "INDEPENDENT_UNDERSTANDING_READBACK",
     "LEGAL_OBJECT_COMPOSITION",
 )
+_ExecutableEpisode = (
+    GroundedAnswerEpisode | GenerationGeneralizationEvaluationObservation)
 
 
 # object-model: exception
@@ -117,7 +122,7 @@ class GenerationGeneralizationAnswerVerificationInput:
     """一项 ANSWER case 的 actual choice/Use、execution 和 G-04 readback。"""
 
     requirement: str
-    episode: GroundedAnswerEpisode
+    episode: _ExecutableEpisode
     planning: GroundedResponseActPlanningBuild
     choice: GenerationChoiceHypothesis
     use: GenerationChoiceUseRef
@@ -131,7 +136,10 @@ class GenerationGeneralizationAnswerVerificationInput:
         if self.requirement not in ANSWER_REQUIREMENTS:
             raise GenerationGeneralizationAnswerVerificationError(
                 "ANSWER verification requirement 未注册")
-        if (not isinstance(self.episode, GroundedAnswerEpisode)
+        if (not isinstance(self.episode, (
+                GroundedAnswerEpisode,
+                GenerationGeneralizationEvaluationObservation,
+                ))
                 or self.episode.question.answer_plan.response_act != "ANSWER"):
             raise GenerationGeneralizationAnswerVerificationError(
                 "ANSWER verification episode 非法")
@@ -187,6 +195,10 @@ class GenerationGeneralizationAnswerVerificationInput:
     def _build_stable_key(self) -> tuple[int, ...]:
         """在构造完成时保存完整 choice/Use/output/readback 引用。"""
         values = [ANSWER_REQUIREMENTS.index(self.requirement) + 1]
+        if isinstance(
+                self.episode,
+                GenerationGeneralizationEvaluationObservation):
+            values.extend(_pack(self.episode.stable_key()))
         for key in (
                 self.planning.stable_key(),
                 self.choice.stable_key(),
