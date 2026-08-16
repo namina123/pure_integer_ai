@@ -49,6 +49,17 @@ from pure_integer_ai.experiments.ph2_grounded_answer_course import (
 from pure_integer_ai.experiments.ph2_grounded_answer_choice_use import (
     GroundedAnswerLexicalAdoptionLedger,
 )
+from pure_integer_ai.experiments.ph2_grounded_answer_reference_episode_use import (
+    GroundedAnswerReferenceEpisodeAdoptionLedger,
+)
+from pure_integer_ai.experiments.ph2_grounded_answer_reference_runtime_factory import (
+    GroundedAnswerReferenceRunLocalInstallation,
+)
+from pure_integer_ai.experiments.ph2_grounded_answer_reference_verification import (
+    GroundedAnswerReferenceVerifierProtocol,
+    build_grounded_answer_reference_verifier_protocol,
+    verify_grounded_answer_reference_layers,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_runtime_factory import (
     GroundedAnswerRunLocalInstallation,
 )
@@ -80,6 +91,12 @@ _RESPONSE_ACT_REQUIREMENTS = (
     "COMMUNICATIVE_TASK",
     "SOURCE_UNCERTAINTY_CITATION",
 )
+_REFERENCE_REQUIREMENT_ROUTES = {
+    "ADDRESSEE_RECOVERABILITY": (
+        "REFERENCE_UNIQUE_RESOLUTION", "DISCOURSE_REFERENCE_CHOICE"),
+    "STRUCTURE_SLOT_ORDER": (
+        "STRUCTURE_EXECUTION", "PROPOSITION_STRUCTURE_CHOICE"),
+}
 
 
 # object-model: exception
@@ -111,6 +128,20 @@ def default_answer_verification_protocol(
         minimal_instruction_identity((_NAMESPACE, 21, 3)),
         minimal_instruction_identity((_NAMESPACE, 21, 4)),
     )
+
+
+def default_reference_verification_protocol(
+        requirement: str,
+        ) -> GroundedAnswerReferenceVerifierProtocol:
+    """为两项 reference requirement 返回互异的真实分层 route。"""
+    if requirement not in _REFERENCE_REQUIREMENT_ROUTES:
+        raise GenerationGeneralizationTrainRehearsalError(
+            "reference rehearsal requirement 不受支持")
+    return build_grounded_answer_reference_verifier_protocol((
+        _NAMESPACE,
+        40,
+        INDEPENDENT_VERIFIER_REQUIREMENTS.index(requirement) + 1,
+    ))
 
 
 def _report_result(
@@ -215,7 +246,7 @@ class GenerationGeneralizationTrainRehearsalItem:
         """只在 actual parse 成功且本 requirement applicable/support 时为一。"""
         result = self.verification.result
         return int(
-            self.postcheck.parsed.succeeded
+            self.postcheck.complete
             and result.applicability == APPLICABILITY_APPLICABLE
             and result.verdict == VERDICT_SUPPORT
             and result.operational_failure is None
@@ -460,12 +491,93 @@ def rehearse_grounded_answer_case(
     return item, run
 
 
+def rehearse_grounded_answer_reference_case(
+        course: GenerationGeneralizationExecutableTrainCourse,
+        requirement: str,
+        planning: GroundedResponseActPlanningBuild,
+        installation: GroundedAnswerReferenceRunLocalInstallation,
+        request: QuestionRequest,
+        *,
+        verification_protocol: (
+            GroundedAnswerReferenceVerifierProtocol | None) = None,
+        ) -> tuple[GenerationGeneralizationTrainRehearsalItem, QuestionAnswerRun]:
+    """运行一项双命题 reference case，并选择其独立真实 verifier route。"""
+    if requirement not in _REFERENCE_REQUIREMENT_ROUTES:
+        raise GenerationGeneralizationTrainRehearsalError(
+            "reference rehearsal requirement 不受支持")
+    if not isinstance(
+            course, GenerationGeneralizationExecutableTrainCourse):
+        raise TypeError("reference rehearsal course 类型错误")
+    case = course.case_for_requirement(requirement)
+    episode = course.episode_for(case)
+    compilation = installation.compilation
+    if (not isinstance(planning, GroundedResponseActPlanningBuild)
+            or planning.episode != episode
+            or compilation.episode_id != episode.episode_id
+            or compilation.planning != planning.planning
+            or installation.reference_selection.selected.strategy
+            != case.reference_strategy
+            or case.runtime_family != "REFERENCE_MULTI_PROPOSITION"
+            or case.response_act != "ANSWER"):
+        raise GenerationGeneralizationTrainRehearsalError(
+            "reference rehearsal course/planning/installation 漂移")
+    if not isinstance(request, QuestionRequest):
+        raise TypeError("reference rehearsal request 类型错误")
+    run = installation.runtime.run(request)
+    uses = GroundedAnswerReferenceEpisodeAdoptionLedger(
+        installation).adopt(run)
+    if (run.generation is None or run.postcheck is None
+            or not run.generation.complete):
+        raise GenerationGeneralizationTrainRehearsalError(
+            "reference rehearsal 未形成完整 actual run")
+    protocol = verification_protocol or default_reference_verification_protocol(
+        requirement)
+    layer_verification = verify_grounded_answer_reference_layers(
+        protocol, installation, run, uses)
+    verifier_name, choice_kind = _REFERENCE_REQUIREMENT_ROUTES[requirement]
+    route = protocol.by_name()[verifier_name].route
+    result = _report_result(
+        layer_verification.report, route.dimension, route.verifier)
+    if not result.claim_keys:
+        raise GenerationGeneralizationTrainRehearsalError(
+            "reference rehearsal verifier 缺 actual input claim")
+    records = {
+        "DISCOURSE_REFERENCE_CHOICE": uses.reference,
+        "PROPOSITION_STRUCTURE_CHOICE": uses.structure,
+    }
+    selected = records[choice_kind]
+    execution = run.generation
+    postcheck = run.postcheck
+    parse_request = GenerationSurfaceParseRequest.from_execution(execution)
+    verification = GenerationGeneralizationIndependentVerification(
+        requirement,
+        LosslessIntegerKey(result.claim_keys[0]),
+        result,
+    )
+    item = GenerationGeneralizationTrainRehearsalItem(
+        case,
+        episode,
+        selected.choice_after,
+        selected.use,
+        execution,
+        parse_request,
+        postcheck,
+        (postcheck.report, layer_verification.report),
+        verification,
+        (_NAMESPACE, 50,
+         INDEPENDENT_VERIFIER_REQUIREMENTS.index(requirement) + 1),
+    )
+    return item, run
+
+
 __all__ = [
     "GenerationGeneralizationTrainRehearsal",
     "GenerationGeneralizationTrainRehearsalError",
     "GenerationGeneralizationTrainRehearsalItem",
     "default_answer_verification_protocol",
+    "default_reference_verification_protocol",
     "default_source_conflict_protocol",
     "rehearse_grounded_answer_case",
+    "rehearse_grounded_answer_reference_case",
     "rehearse_grounded_response_act_case",
 ]

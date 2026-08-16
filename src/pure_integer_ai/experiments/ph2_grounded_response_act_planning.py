@@ -373,6 +373,9 @@ def _evidence_records(
 def _compile_grounded_generation_planning(
         episode: GroundedAnswerEpisode,
         language_branch: ObjectIdentity,
+        *,
+        planning_order: tuple[str, ...] | None = None,
+        independent_propositions: bool = False,
         ) -> GroundedResponseActPlanningBuild:
     """从 typed grounded Evidence 建立 ANSWER/CLARIFY/CONFLICT planning。"""
     if not isinstance(episode, GroundedAnswerEpisode):
@@ -404,13 +407,22 @@ def _compile_grounded_generation_planning(
     proposition_ids = tuple(sorted({
         item.proposition_id for item in episode.question.evidence}))
     bound = _bound_propositions(episode, aggregate, proposition_ids)
-    competition = _fingerprint(
+    shared_competition = _fingerprint(
         episode.episode_id,
         episode.question.typed_intent,
         domain="grounded.response.act.candidate.competition.v1",
     )
     candidate_bindings = []
     for proposition_id in proposition_ids:
+        competition = (
+            _fingerprint(
+                episode.episode_id,
+                episode.question.typed_intent,
+                proposition_id,
+                domain="grounded.answer.reference.candidate.competition.v1",
+            )
+            if independent_propositions else shared_competition
+        )
         forming_sources = tuple(sorted({
             sources[item.source_id]
             for item in episode.question.evidence
@@ -446,7 +458,16 @@ def _compile_grounded_generation_planning(
                 records,
             ),
         ))
-    candidates = tuple(item.candidate for item in candidate_bindings)
+    by_proposition = {
+        item.proposition_id: item.candidate for item in candidate_bindings}
+    if planning_order is None:
+        planning_order = proposition_ids
+    if (not isinstance(planning_order, tuple)
+            or planning_order != tuple(dict.fromkeys(planning_order))
+            or set(planning_order) != set(proposition_ids)):
+        raise GroundedResponseActPlanningError(
+            "grounded planning order 必须精确覆盖全部 Proposition")
+    candidates = tuple(by_proposition[item] for item in planning_order)
     goal = AnswerGenerationGoal(
         minimal_instruction_identity((_NAMESPACE, 19, *_fingerprint(
             episode.question.typed_intent,
@@ -497,11 +518,36 @@ def compile_grounded_answer_planning(
     return _compile_grounded_generation_planning(episode, language_branch)
 
 
+def compile_grounded_answer_reference_planning(
+        episode: GroundedAnswerEpisode,
+        language_branch: ObjectIdentity,
+        ) -> GroundedResponseActPlanningBuild:
+    """接受双命题 reference ANSWER，并保留课程声明的命题先后序。"""
+    if (not isinstance(episode, GroundedAnswerEpisode)
+            or episode.question.answer_plan.response_act != "ANSWER"
+            or episode.reference_course is None):
+        raise GroundedResponseActPlanningError(
+            "grounded reference planning 只接受 reference ANSWER")
+    course = episode.reference_course
+    if (len(course.ordered_proposition_ids) != 2
+            or course.ordered_proposition_ids
+            != episode.question.answer_plan.ordered_claim_ids):
+        raise GroundedResponseActPlanningError(
+            "grounded reference planning 必须精确覆盖两个有序 claim")
+    return _compile_grounded_generation_planning(
+        episode,
+        language_branch,
+        planning_order=course.ordered_proposition_ids,
+        independent_propositions=True,
+    )
+
+
 __all__ = [
     "GroundedEvidenceSourceBinding",
     "GroundedResponseActCandidateBinding",
     "GroundedResponseActPlanningBuild",
     "GroundedResponseActPlanningError",
     "compile_grounded_answer_planning",
+    "compile_grounded_answer_reference_planning",
     "compile_grounded_response_act_planning",
 ]
