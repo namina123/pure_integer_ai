@@ -78,6 +78,7 @@ class LearnedSurfacePattern:
     claim_count: int
     parts: tuple[SurfacePatternPart, ...]
     support_episode_ids: tuple[str, ...]
+    support_teacher_keys: tuple[tuple[int, ...], ...]
 
     def __post_init__(self) -> None:
         _positive(self.pattern_id, where="pattern_id")
@@ -105,6 +106,15 @@ class LearnedSurfacePattern:
                     set(self.support_episode_ids)))):
             raise GroundedAnswerLearningError(
                 "pattern support episode 非规范")
+        if (not isinstance(self.support_teacher_keys, tuple)
+                or not self.support_teacher_keys
+                or any(not isinstance(key, tuple) or not key
+                       or any(type(value) is not int for value in key)
+                       for key in self.support_teacher_keys)
+                or self.support_teacher_keys != tuple(sorted(
+                    set(self.support_teacher_keys)))):
+            raise GroundedAnswerLearningError(
+                "pattern support teacher Evidence 非规范")
 
     def stable_value(self) -> dict[str, object]:
         """返回不含支持计数的 pattern 结构值。"""
@@ -226,7 +236,8 @@ def learn_grounded_answer_surface_model(
         raise TypeError("surface learner bundle 类型错误")
     observations = {item.stable_key: item for item in bundle.observations}
     supports: dict[
-        tuple[str, str, int, tuple[tuple[object, ...], ...]], set[str]
+        tuple[str, str, int, tuple[tuple[object, ...], ...]],
+        tuple[set[str], set[tuple[int, ...]]],
     ] = {}
     accepted_count = 0
     for teacher in bundle.teacher_evidence:
@@ -273,11 +284,15 @@ def learn_grounded_answer_surface_model(
             part_key = tuple(tuple(item.stable_value()) for item in parts)
             signature = (
                 response_act, carrier_kind, len(ordered_claim_ids), part_key)
-            supports.setdefault(signature, set()).add(episode_id)
+            episode_ids, teacher_keys = supports.setdefault(
+                signature, (set(), set()))
+            episode_ids.add(episode_id)
+            teacher_keys.add(tuple(teacher.stable_key.components))
             accepted_count += 1
     patterns = []
-    for signature, episode_ids in supports.items():
+    for signature, support in supports.items():
         response_act, carrier_kind, claim_count, part_key = signature
+        episode_ids, teacher_keys = support
         parts = tuple(SurfacePatternPart(
             str(item[0]), str(item[1]), int(item[2])) for item in part_key)
         stable_value = {
@@ -293,6 +308,7 @@ def learn_grounded_answer_surface_model(
             claim_count,
             parts,
             tuple(sorted(episode_ids)),
+            tuple(sorted(teacher_keys)),
         ))
     model = GroundedAnswerSurfaceModel(tuple(sorted(
         patterns, key=lambda item: item.pattern_id)))

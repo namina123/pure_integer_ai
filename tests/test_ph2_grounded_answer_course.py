@@ -23,6 +23,29 @@ from pure_integer_ai.experiments.ph2_grounded_answer_learning import (
     learn_grounded_answer_surface_model,
     realize_grounded_answer_surfaces,
 )
+from pure_integer_ai.experiments.ph2_grounded_answer_connector import (
+    GroundedAnswerConnectorError,
+    GroundedAnswerConnectorTarget,
+    build_grounded_answer_connector,
+    compile_grounded_answer_connectors,
+)
+from pure_integer_ai.experiments.ph2_grounded_answer_parser import (
+    GroundedAnswerParserProtocol,
+    GroundedAnswerSurfaceParser,
+    build_grounded_answer_parser_catalog,
+)
+from pure_integer_ai.cognition.shared.generation_plan import (
+    GenerationPlanningRequest,
+)
+from pure_integer_ai.cognition.shared.generation_verification import (
+    GenerationSurfaceParseRequest,
+)
+from pure_integer_ai.cognition.shared.identity import (
+    language_branch_identity,
+    minimal_instruction_identity,
+)
+from tests.test_g02_generation_structure_plan import _request
+from tests.test_g03_generation_surface import _surface_protocol
 
 
 SAMPLE_PATH = Path("data/ph2/grounded_answer_train_v1.jsonl.sample")
@@ -183,3 +206,132 @@ def test_learned_nonanswer_patterns_remain_domain_neutral():
                for item in generated)
     assert all(verify_surface_realization(question, item).passed
                for item in generated)
+
+
+def _connector_question_and_candidate():
+    """建立未见 claim、typed candidate 和共享 connector 编译输入。"""
+    episodes = read_grounded_answer_episodes(SAMPLE_PATH)
+    model, _ = learn_grounded_answer_surface_model(
+        compile_grounded_answer_training_records(SAMPLE_PATH))
+    base = episodes[0].question
+    question = replace(
+        base,
+        context_surface="云岭站运行档案记载：西门于2026年启用。",
+        question_surface="云岭站西门何时启用？",
+        evidence_scope_id=301,
+        response_scope_id=401,
+        evidence=(GroundedEvidence(
+            "ev-new-year",
+            "p-new-year",
+            "src-new-station-record",
+            301,
+            "云岭站西门于2026年启用",
+            "西门于2026年启用",
+            1,
+            0,
+        ),),
+        answer_plan=GroundedAnswerPlan(
+            "ANSWER",
+            ("p-new-year",),
+            ("p-new-year",),
+            (),
+            ("src-new-station-record",),
+        ),
+    )
+    request, _unused = _request(count=1)
+    branch = language_branch_identity((20916, 900, 1))
+    planning = GenerationPlanningRequest(
+        replace(request.goal, target_branch=branch),
+        request.candidates,
+    )
+    return model, question, planning, planning.candidates[0], branch
+
+
+def test_grounded_patterns_compile_to_explicit_single_template_variants():
+    """多个合法 pattern 必须显式选择，且每个模板保留 literal/claim 分槽。"""
+    model, question, _planning, candidate, branch = (
+        _connector_question_and_candidate())
+    surface_protocol = _surface_protocol(20916)
+    compilation = compile_grounded_answer_connectors(
+        model,
+        question,
+        GroundedAnswerConnectorTarget(
+            candidate.proposition, branch, (20916, 901)),
+        surface_protocol,
+    )
+    assert len(compilation.variants) == 2
+    assert all(item.option.support_teacher_keys
+               for item in compilation.variants)
+    assert all(len(item.template.slots) >= 2
+               for item in compilation.variants)
+    assert all(sum(
+        binding.source == compilation.value_protocol.proposition_source
+        for binding in item.template.bindings) == 1
+        for item in compilation.variants)
+    other_request, _unused = _request(count=2)
+    other_candidate = other_request.candidates[1]
+    other = compile_grounded_answer_connectors(
+        model,
+        question,
+        GroundedAnswerConnectorTarget(
+            other_candidate.proposition, branch, (20916, 901)),
+        surface_protocol,
+    )
+    assert {item.template.connector for item in compilation.variants}.isdisjoint(
+        {item.template.connector for item in other.variants})
+    selected = compilation.variants[0]
+    variant, connector = build_grounded_answer_connector(
+        compilation, selected.option.pattern_id, surface_protocol)
+    assert variant == selected
+    assert connector.registry.templates == (selected.template,)
+    with pytest.raises(GroundedAnswerConnectorError, match="不属于"):
+        build_grounded_answer_connector(
+            compilation, 999999999, surface_protocol)
+
+
+def test_restricted_parser_recovers_claim_and_classifies_surface_damage():
+    """parser 只凭 units/catalog 恢复命题，并分型遗漏、重复和未知损坏。"""
+    model, question, _planning, candidate, branch = (
+        _connector_question_and_candidate())
+    surface_protocol = _surface_protocol(20917)
+    compilation = compile_grounded_answer_connectors(
+        model,
+        question,
+        GroundedAnswerConnectorTarget(
+            candidate.proposition, branch, (20917, 901)),
+        surface_protocol,
+    )
+    renderer = minimal_instruction_identity((20917, 902, 1))
+    catalog = build_grounded_answer_parser_catalog(
+        compilation, candidate, renderer)
+    protocol = GroundedAnswerParserProtocol(*tuple(
+        minimal_instruction_identity((20917, 903, index))
+        for index in range(1, 7)
+    ))
+    parser = GroundedAnswerSurfaceParser(protocol, catalog)
+    grammar = catalog.grammars[0]
+    request = GenerationSurfaceParseRequest(
+        renderer,
+        grammar.units,
+        branch,
+        candidate.source,
+        candidate.scope,
+    )
+
+    parsed = parser.parse(request)
+
+    assert parsed.succeeded
+    assert parsed.observation.representations == grammar.representations
+    assert parsed.observation.propositions[0].proposition == (
+        candidate.proposition)
+    claim = next(
+        item.units for item in grammar.slots
+        if item.part_kind == "CLAIM")
+    missing = parser.parse(replace(request, units=(0x3002,)))
+    duplicate = parser.parse(replace(
+        request, units=(*grammar.units, *claim)))
+    damaged = parser.parse(replace(
+        request, units=(*grammar.units[:-1], 0xFF01)))
+    assert missing.reason == protocol.missing_claim
+    assert duplicate.reason == protocol.duplicate_claim
+    assert damaged.reason == protocol.no_match
