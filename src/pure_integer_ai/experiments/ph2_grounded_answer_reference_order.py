@@ -92,7 +92,7 @@ def _learning_protocol(
     source = SourceRef(
         _NAMESPACE,
         theory,
-        len(compilation.forming_teacher_keys),
+        len(compilation.forming_evidence_keys),
         branch.owner,
         branch.versions,
     )
@@ -207,7 +207,7 @@ class GroundedAnswerReferenceOrderInstallation:
                 "reference order 未逐约束晋升")
         expected_evidence = (
             requirement_count
-            * len(self.compilation.forming_teacher_keys)
+            * len(self.compilation.forming_evidence_keys)
         )
         if self.evidence_count != expected_evidence:
             raise GroundedAnswerReferenceOrderError(
@@ -287,10 +287,10 @@ def install_grounded_answer_reference_order(
             )
             before_is_first = requirement.before_slot == pattern.first_slot
             for teacher_index, teacher_key in enumerate(
-                    compilation.forming_teacher_keys, start=1):
+                    compilation.forming_evidence_keys, start=1):
                 occurrence_base = (
                     (requirement_index - 1)
-                    * len(compilation.forming_teacher_keys)
+                    * len(compilation.forming_evidence_keys)
                     + teacher_index
                 ) * 2
                 observation = OrderObservation(

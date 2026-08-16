@@ -55,6 +55,9 @@ from pure_integer_ai.crosscut.determinism.fingerprint import (
 from pure_integer_ai.experiments.ph2_grounded_answer_course import (
     GroundedAnswerEpisode,
 )
+from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_observation import (
+    GenerationGeneralizationEvaluationObservation,
+)
 
 
 _NAMESPACE = 20965
@@ -63,6 +66,18 @@ _NAMESPACE = 20965
 # object-model: exception
 class GroundedResponseActPlanningError(ValueError):
     """grounded Evidence 不能无损形成 response-act planning。"""
+
+
+_ExecutableEpisode = (
+    GroundedAnswerEpisode | GenerationGeneralizationEvaluationObservation)
+
+
+def _is_executable_episode(value: object) -> bool:
+    """只接受 TRAIN 完整 episode 或 held-out label-free Observation。"""
+    return isinstance(value, (
+        GroundedAnswerEpisode,
+        GenerationGeneralizationEvaluationObservation,
+    ))
 
 
 def _text_values(*values: str) -> tuple[int, ...]:
@@ -149,7 +164,7 @@ class GroundedResponseActCandidateBinding:
 class GroundedResponseActPlanningBuild:
     """一条 episode、来源映射和 typed planning 的不可变编译结果。"""
 
-    episode: GroundedAnswerEpisode
+    episode: _ExecutableEpisode
     language_branch: ObjectIdentity
     aggregate_source: SourceRef
     response_scope: ScopeIdentity
@@ -160,7 +175,7 @@ class GroundedResponseActPlanningBuild:
         init=False, repr=False, compare=False, default=())
 
     def __post_init__(self) -> None:
-        if not isinstance(self.episode, GroundedAnswerEpisode):
+        if not _is_executable_episode(self.episode):
             raise TypeError("response-act planning episode 类型错误")
         if (not isinstance(self.language_branch, ObjectIdentity)
                 or self.language_branch.object_kind != OBJECT_LANGUAGE_BRANCH):
@@ -253,7 +268,7 @@ class GroundedResponseActPlanningBuild:
         return tuple(values)
 
 
-def _source_ref(episode: GroundedAnswerEpisode, source_id: str) -> SourceRef:
+def _source_ref(episode: _ExecutableEpisode, source_id: str) -> SourceRef:
     """按 episode/source_id 建立不依赖文本内容的来源身份。"""
     return SourceRef(
         _NAMESPACE,
@@ -266,7 +281,7 @@ def _source_ref(episode: GroundedAnswerEpisode, source_id: str) -> SourceRef:
     )
 
 
-def _aggregate_source(episode: GroundedAnswerEpisode) -> SourceRef:
+def _aggregate_source(episode: _ExecutableEpisode) -> SourceRef:
     """为一次问答建立显式 aggregate 运行来源。"""
     return SourceRef(
         _NAMESPACE,
@@ -280,7 +295,7 @@ def _aggregate_source(episode: GroundedAnswerEpisode) -> SourceRef:
 
 
 def _bound_propositions(
-        episode: GroundedAnswerEpisode,
+        episode: _ExecutableEpisode,
         aggregate: SourceRef,
         proposition_ids: tuple[str, ...],
         ) -> dict[str, object]:
@@ -322,7 +337,7 @@ def _bound_propositions(
 
 
 def _evidence_records(
-        episode: GroundedAnswerEpisode,
+        episode: _ExecutableEpisode,
         proposition_id: str,
         definition: EvidenceCandidateDefinition,
         sources: dict[str, SourceRef],
@@ -371,18 +386,19 @@ def _evidence_records(
 
 
 def _compile_grounded_generation_planning(
-        episode: GroundedAnswerEpisode,
+        episode: _ExecutableEpisode,
         language_branch: ObjectIdentity,
         *,
         planning_order: tuple[str, ...] | None = None,
         independent_propositions: bool = False,
         ) -> GroundedResponseActPlanningBuild:
     """从 typed grounded Evidence 建立 ANSWER/CLARIFY/CONFLICT planning。"""
-    if not isinstance(episode, GroundedAnswerEpisode):
+    if not _is_executable_episode(episode):
         raise TypeError("response-act planning episode 类型错误")
-    if episode.split != "train":
+    if (isinstance(episode, GroundedAnswerEpisode)
+            and episode.split != "train"):
         raise GroundedResponseActPlanningError(
-            "response-act planning 只接受 TRAIN episode")
+            "response-act planning 拒绝携 surface label 的非 TRAIN episode")
     if episode.question.answer_plan.response_act not in {
             "ANSWER", "CLARIFY", "CONFLICT"}:
         raise GroundedResponseActPlanningError(
@@ -491,11 +507,11 @@ def _compile_grounded_generation_planning(
 
 
 def compile_grounded_response_act_planning(
-        episode: GroundedAnswerEpisode,
+        episode: _ExecutableEpisode,
         language_branch: ObjectIdentity,
         ) -> GroundedResponseActPlanningBuild:
     """只接受 CLARIFY/CONFLICT，并建立真实 non-answer planning。"""
-    if (not isinstance(episode, GroundedAnswerEpisode)
+    if (not _is_executable_episode(episode)
             or episode.question.answer_plan.response_act
             not in {"CLARIFY", "CONFLICT"}):
         raise GroundedResponseActPlanningError(
@@ -504,11 +520,11 @@ def compile_grounded_response_act_planning(
 
 
 def compile_grounded_answer_planning(
-        episode: GroundedAnswerEpisode,
+        episode: _ExecutableEpisode,
         language_branch: ObjectIdentity,
         ) -> GroundedResponseActPlanningBuild:
     """只接受单命题 ANSWER episode，并建立 aggregate typed planning。"""
-    if (not isinstance(episode, GroundedAnswerEpisode)
+    if (not _is_executable_episode(episode)
             or episode.question.answer_plan.response_act != "ANSWER"):
         raise GroundedResponseActPlanningError(
             "grounded answer planning 只接受 ANSWER")
@@ -519,11 +535,11 @@ def compile_grounded_answer_planning(
 
 
 def compile_grounded_answer_reference_planning(
-        episode: GroundedAnswerEpisode,
+        episode: _ExecutableEpisode,
         language_branch: ObjectIdentity,
         ) -> GroundedResponseActPlanningBuild:
     """接受双命题 reference ANSWER，并保留课程声明的命题先后序。"""
-    if (not isinstance(episode, GroundedAnswerEpisode)
+    if (not _is_executable_episode(episode)
             or episode.question.answer_plan.response_act != "ANSWER"
             or episode.reference_course is None):
         raise GroundedResponseActPlanningError(

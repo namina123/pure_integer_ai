@@ -248,8 +248,8 @@ class GroundedAnswerReferenceSelection:
             if (current.episode_id != base.episode_id
                     or current.planning != base.planning
                     or current.claims != base.claims
-                    or current.forming_teacher_keys
-                    != base.forming_teacher_keys):
+                    or current.forming_evidence_keys
+                    != base.forming_evidence_keys):
                 raise GroundedAnswerReferenceChoiceError(
                     "reference strategies 未共享同一课程/planning/candidates")
         if (self.antecedent_candidates != expected_antecedents

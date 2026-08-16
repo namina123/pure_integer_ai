@@ -1,4 +1,4 @@
-"""把 teacher-frozen Proposition/event reference 课程编译为多句 connector。"""
+"""把 evidence-bound Proposition/event reference 输入编译为多句 connector。"""
 from __future__ import annotations
 
 import hashlib
@@ -60,6 +60,9 @@ from pure_integer_ai.experiments.ph2_grounded_answer_course import (
     REFERENCE_STRATEGIES,
     GroundedAnswerEpisode,
 )
+from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_observation import (
+    GenerationGeneralizationEvaluationObservation,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_learning import (
     PATTERN_CLAIM,
     PATTERN_LITERAL,
@@ -67,6 +70,16 @@ from pure_integer_ai.experiments.ph2_grounded_answer_learning import (
 
 
 _NAMESPACE = 20960
+_ExecutableEpisode = (
+    GroundedAnswerEpisode | GenerationGeneralizationEvaluationObservation)
+
+
+def _is_executable_episode(value: object) -> bool:
+    """只接受 TRAIN 完整 episode 或 held-out label-free Observation。"""
+    return isinstance(value, (
+        GroundedAnswerEpisode,
+        GenerationGeneralizationEvaluationObservation,
+    ))
 
 
 # object-model: exception
@@ -111,22 +124,22 @@ class GroundedAnswerClaimCandidateBinding:
 # object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
 class GroundedAnswerReferenceCompileRequest:
-    """冻结一条 schema v2 课程、完整 planning 与显式 claim 映射。"""
+    """冻结一条 reference 输入、完整 planning 与显式 claim 映射。"""
 
-    episode: GroundedAnswerEpisode
+    episode: _ExecutableEpisode
     planning: GenerationPlanningRequest
     claims: tuple[GroundedAnswerClaimCandidateBinding, ...]
     language_branch: ObjectIdentity
     representation_family: tuple[int, ...]
     strategy: str
-    forming_teacher_keys: tuple[tuple[int, ...], ...]
+    forming_evidence_keys: tuple[tuple[int, ...], ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.episode, GroundedAnswerEpisode):
+        if not _is_executable_episode(self.episode):
             raise TypeError("reference compile episode 类型错误")
         if self.episode.reference_course is None:
             raise GroundedAnswerReferenceCompileError(
-                "reference compile 缺少 teacher-frozen 课程")
+                "reference compile 缺少 reference 输入")
         if not isinstance(self.planning, GenerationPlanningRequest):
             raise TypeError("reference compile planning 类型错误")
         if (not isinstance(self.claims, tuple)
@@ -145,18 +158,18 @@ class GroundedAnswerReferenceCompileRequest:
         if self.strategy not in REFERENCE_STRATEGIES:
             raise GroundedAnswerReferenceCompileError(
                 "reference compile strategy 未注册")
-        if (not isinstance(self.forming_teacher_keys, tuple)
-                or not self.forming_teacher_keys):
+        if (not isinstance(self.forming_evidence_keys, tuple)
+                or not self.forming_evidence_keys):
             raise GroundedAnswerReferenceCompileError(
-                "reference compile 缺少 forming teacher keys")
-        for key in self.forming_teacher_keys:
-            _strict_key(key, where="reference forming teacher key")
-        if len(set(self.forming_teacher_keys)) != len(
-                self.forming_teacher_keys):
+                "reference compile 缺少 forming evidence keys")
+        for key in self.forming_evidence_keys:
+            _strict_key(key, where="reference forming evidence key")
+        if len(set(self.forming_evidence_keys)) != len(
+                self.forming_evidence_keys):
             raise GroundedAnswerReferenceCompileError(
-                "reference forming teacher key 重复")
-        object.__setattr__(self, "forming_teacher_keys", tuple(sorted(
-            self.forming_teacher_keys)))
+                "reference forming evidence key 重复")
+        object.__setattr__(self, "forming_evidence_keys", tuple(sorted(
+            self.forming_evidence_keys)))
         course = self.episode.reference_course
         claim_ids = tuple(item.proposition_id for item in self.claims)
         if claim_ids != course.ordered_proposition_ids:
@@ -234,7 +247,7 @@ class GroundedAnswerReferenceCompilation:
     strategy: str
     claims: tuple[GroundedAnswerClaimCandidateBinding, ...]
     planning: GenerationPlanningRequest
-    forming_teacher_keys: tuple[tuple[int, ...], ...]
+    forming_evidence_keys: tuple[tuple[int, ...], ...]
     sentences: tuple[GroundedAnswerReferenceSentenceCompilation, ...]
     connector: LanguageGenerationConnector
     reference_origin: ObjectIdentity
@@ -259,12 +272,12 @@ class GroundedAnswerReferenceCompilation:
                 item.candidate for item in self.claims):
             raise GroundedAnswerReferenceCompileError(
                 "reference compilation planning/candidates 漂移")
-        if (not isinstance(self.forming_teacher_keys, tuple)
-                or not self.forming_teacher_keys
-                or self.forming_teacher_keys != tuple(sorted(
-                    set(self.forming_teacher_keys)))):
+        if (not isinstance(self.forming_evidence_keys, tuple)
+                or not self.forming_evidence_keys
+                or self.forming_evidence_keys != tuple(sorted(
+                    set(self.forming_evidence_keys)))):
             raise GroundedAnswerReferenceCompileError(
-                "reference compilation forming teacher keys 非规范")
+                "reference compilation forming evidence keys 非规范")
         if (not isinstance(self.sentences, tuple)
                 or len(self.sentences) != 2
                 or any(not isinstance(
@@ -288,7 +301,7 @@ class GroundedAnswerReferenceCompilation:
             raise TypeError("reference slot 类型错误")
 
 
-def _claim_texts(episode: GroundedAnswerEpisode) -> dict[str, str]:
+def _claim_texts(episode: _ExecutableEpisode) -> dict[str, str]:
     """恢复每个 required Proposition 的唯一 Evidence claim text。"""
     grouped: dict[str, set[str]] = {}
     for evidence in episode.question.evidence:
@@ -307,15 +320,20 @@ def _claim_texts(episode: GroundedAnswerEpisode) -> dict[str, str]:
 def _surface_label(
         request: GroundedAnswerReferenceCompileRequest,
         ) -> tuple[str, str]:
-    """返回 selected strategy 的 reference surface 与 accepted id。"""
+    """返回 selected strategy 的 reference surface 与可选训练 id。"""
     course = request.episode.reference_course
+    if isinstance(
+            request.episode, GenerationGeneralizationEvaluationObservation):
+        assert course is not None
+        return course.surface_for(request.strategy), ""
+    assert course is not None
     matches = tuple(
         item for item in course.surface_labels
         if item.strategy == request.strategy
     )
     if len(matches) != 1:
         raise GroundedAnswerReferenceCompileError(
-            "reference strategy 未唯一绑定 teacher label")
+            "reference strategy 未唯一绑定训练资源")
     return matches[0].reference_surface, matches[0].realization_id
 
 
@@ -327,17 +345,18 @@ def _sentence_parts(
     first_id, second_id = (
         item.proposition_id for item in request.claims)
     reference_surface, realization_id = _surface_label(request)
-    accepted = {
-        item.realization_id: item.surface
-        for item in request.episode.surfaces.accepted
-    }
     expected = (
         claim_texts[first_id] + "。"
         + reference_surface + claim_texts[second_id] + "。"
     )
-    if accepted.get(realization_id) != expected:
-        raise GroundedAnswerReferenceCompileError(
-            "首个 reference compiler 只接受冻结的双句 claim/reference 形状")
+    if isinstance(request.episode, GroundedAnswerEpisode):
+        accepted = {
+            item.realization_id: item.surface
+            for item in request.episode.surfaces.accepted
+        }
+        if accepted.get(realization_id) != expected:
+            raise GroundedAnswerReferenceCompileError(
+                "reference compiler 只接受冻结的双句 claim/reference 形状")
     return (
         ((PATTERN_CLAIM, claim_texts[first_id]),
          (PATTERN_LITERAL, "。")),
@@ -563,7 +582,7 @@ def compile_grounded_answer_reference_connector(
         request.strategy,
         request.claims,
         request.planning,
-        request.forming_teacher_keys,
+        request.forming_evidence_keys,
         tuple(sentence_compilations),
         connector,
         reference_origin,
