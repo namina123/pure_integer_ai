@@ -12,6 +12,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v10_source_expansion_observation_pack import (
     publish_normalization_recovery_v10_source_expansion_observation_pack,
+    read_normalization_recovery_v10_source_expansion_observation_aggregate,
     read_normalization_recovery_v10_source_expansion_observation_pack,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import (
@@ -199,6 +200,13 @@ def test_v10_expanded_observation_round_trip_preserves_old_and_tamper(
         state[1]["qbittorrent-observations.jsonl"])
     assert len(outputs["mixxx-observations.jsonl"]) == 1
     assert len(outputs["mumble-observations.jsonl"]) == 1
+    aggregate, aggregate_outputs = (
+        read_normalization_recovery_v10_source_expansion_observation_aggregate(
+            target,
+            expected_manifest_sha256=str(published["manifest_sha256"]),
+        ))
+    assert aggregate == manifest
+    assert aggregate_outputs == outputs
     with pytest.raises(BroadQaExternalDataError, match="input/target path"):
         _publish(tmp_path, inputs, target)
 

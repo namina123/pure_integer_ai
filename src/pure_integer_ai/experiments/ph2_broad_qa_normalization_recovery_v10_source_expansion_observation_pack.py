@@ -413,10 +413,67 @@ def read_normalization_recovery_v10_source_expansion_observation_pack(
     return {**stored, "manifest_sha256": _sha256(encoded)}, stored_outputs
 
 
+def read_normalization_recovery_v10_source_expansion_observation_aggregate(
+        observation_dir: str | Path,
+        *,
+        expected_manifest_sha256: str,
+        ) -> tuple[
+            dict[str, object], dict[str, tuple[dict[str, object], ...]]]:
+    """只按sealed commitments回读五family Observation，不重开source pack。"""
+    root = Path(observation_dir).resolve()
+    path = root / "manifest.json"
+    try:
+        encoded = path.read_bytes()
+        stored = json.loads(encoded)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BroadQaExternalDataError(
+            "v10 expanded observation aggregate manifest 不可读") from error
+    if (_sha256(encoded) != expected_manifest_sha256
+            or not isinstance(stored, dict)
+            or canonical_json_line(stored) != encoded
+            or stored.get("artifact_kind")
+            != V10_SOURCE_EXPANSION_OBSERVATION_PACK_KIND):
+        raise BroadQaExternalDataError(
+            "v10 expanded observation aggregate identity 漂移")
+    files = {
+        str(item.get("relative_path")): item
+        for item in stored.get("files", []) if isinstance(item, dict)
+    }
+    expected_names = {name for name, _role in _OUTPUT_FILES}
+    try:
+        physical = tuple(root.iterdir())
+    except OSError as error:
+        raise BroadQaExternalDataError(
+            "v10 expanded observation aggregate inventory 不可读") from error
+    if ({item.name for item in physical} != {"manifest.json", *expected_names}
+            or any(item.is_dir() for item in physical)
+            or set(files) != expected_names):
+        raise BroadQaExternalDataError(
+            "v10 expanded observation aggregate inventory 漂移")
+    outputs = {}
+    for name, role in _OUTPUT_FILES:
+        values = _read_jsonl(root / name, label=role)
+        if files[name] != _artifact(root / name, role=role, count=len(values)):
+            raise BroadQaExternalDataError(
+                "v10 expanded observation aggregate file 漂移")
+        outputs[name] = values
+    census = outputs["observation-census.jsonl"]
+    if (len(outputs["family-census.jsonl"]) != 5
+            or len(census) != 1
+            or stored.get("summary") != {
+                key: value for key, value in census[0].items()
+                if key not in {"format_version", "record_kind"}
+            }):
+        raise BroadQaExternalDataError(
+            "v10 expanded observation aggregate census 漂移")
+    return {**stored, "manifest_sha256": _sha256(encoded)}, outputs
+
+
 __all__ = [
     "V10_FIVE_FAMILY_AUDIT_MANIFEST_SHA256",
     "V10_SOURCE_EXPANSION_OBSERVATION_PACK_KIND",
     "V10_SOURCE_EXPANSION_OBSERVATION_PACK_STATUS",
     "publish_normalization_recovery_v10_source_expansion_observation_pack",
+    "read_normalization_recovery_v10_source_expansion_observation_aggregate",
     "read_normalization_recovery_v10_source_expansion_observation_pack",
 ]
