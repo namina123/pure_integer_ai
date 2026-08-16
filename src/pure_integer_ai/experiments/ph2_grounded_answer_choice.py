@@ -115,6 +115,7 @@ def build_grounded_answer_lexical_choice(
     )
     competition_key = integer_tuple_fingerprint(
         (*candidate.proposition.template.stable_key(),
+         *template.structure.stable_key(),
          *choice_condition.stable_key()),
         domain="grounded.answer.lexical.competition.v1",
     )

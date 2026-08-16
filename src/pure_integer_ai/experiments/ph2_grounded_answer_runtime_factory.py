@@ -63,8 +63,10 @@ from pure_integer_ai.experiments.ph2_grounded_answer_connector import (
     GroundedAnswerConnectorCompilation,
     GroundedAnswerConnectorTarget,
     GroundedAnswerConnectorVariant,
+    GroundedAnswerStructureSelection,
     build_grounded_answer_connector,
     compile_grounded_answer_connectors,
+    select_grounded_answer_structure,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_course import (
     GroundedQuestionEpisode,
@@ -185,6 +187,7 @@ class GroundedAnswerRunLocalBuild:
     target: GroundedAnswerConnectorTarget
     planning: GenerationPlanningRequest
     candidate: GenerationCandidate
+    structure_id: int
     pattern_id: int
     parser_protocol: GroundedAnswerParserProtocol
     query_kind: ObjectIdentity
@@ -215,6 +218,9 @@ class GroundedAnswerRunLocalBuild:
         if self.planning.goal.target_branch != self.target.language_branch:
             raise GroundedAnswerRunLocalFactoryError(
                 "grounded target branch 与 planning goal 漂移")
+        if type(self.structure_id) is not int or self.structure_id <= 0:
+            raise GroundedAnswerRunLocalFactoryError(
+                "grounded build structure id 非法")
         if type(self.pattern_id) is not int or self.pattern_id <= 0:
             raise GroundedAnswerRunLocalFactoryError(
                 "grounded build pattern id 非法")
@@ -271,6 +277,7 @@ class GroundedAnswerRunLocalInstallation:
     """显式 variant 到 QuestionAnswerRuntime 的完整同次装配。"""
 
     compilation: GroundedAnswerConnectorCompilation
+    structure_selection: GroundedAnswerStructureSelection
     variant: GroundedAnswerConnectorVariant
     planning: GenerationPlanningRequest
     candidate: GenerationCandidate
@@ -287,6 +294,16 @@ class GroundedAnswerRunLocalInstallation:
         if not isinstance(
                 self.compilation, GroundedAnswerConnectorCompilation):
             raise TypeError("grounded installation compilation 类型错误")
+        if not isinstance(
+                self.structure_selection, GroundedAnswerStructureSelection):
+            raise TypeError("grounded installation structure selection 类型错误")
+        if (self.structure_selection.options != self.compilation.structures
+                or self.structure_selection.selected.structure_id
+                != self.variant.option.structure_id
+                or self.variant.option.pattern_id not in (
+                    self.structure_selection.selected.pattern_ids)):
+            raise GroundedAnswerRunLocalFactoryError(
+                "grounded installation structure/lexical 选择次序漂移")
         if not isinstance(self.variant, GroundedAnswerConnectorVariant):
             raise TypeError("grounded installation variant 类型错误")
         if self.compilation.select(
@@ -412,8 +429,14 @@ class GroundedAnswerRunLocalFactory:
             request.target,
             self.surface_protocol,
         )
+        structure_selection = select_grounded_answer_structure(
+            compilation, request.structure_id)
         variant, connector = build_grounded_answer_connector(
-            compilation, request.pattern_id, self.surface_protocol)
+            compilation,
+            structure_selection.selected.structure_id,
+            request.pattern_id,
+            self.surface_protocol,
+        )
         alias = components.alias_factory.build(variant)
         if not isinstance(alias, AliasRelationRuntime):
             raise TypeError("grounded alias factory 返回类型错误")
@@ -517,6 +540,7 @@ class GroundedAnswerRunLocalFactory:
             variant, request.candidate)
         return GroundedAnswerRunLocalInstallation(
             compilation,
+            structure_selection,
             variant,
             request.planning,
             request.candidate,

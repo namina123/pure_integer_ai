@@ -29,9 +29,16 @@ from pure_integer_ai.experiments.ph2_grounded_answer_choice_use import (
 from pure_integer_ai.experiments.ph2_grounded_answer_choice import (
     build_grounded_answer_lexical_choice,
 )
+from pure_integer_ai.experiments.ph2_grounded_answer_learning import (
+    surface_pattern_structure_id,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_layer_choice_use import (
     GroundedAnswerContentTaskAdoptionLedger,
     GroundedAnswerLayerChoiceUseError,
+)
+from pure_integer_ai.experiments.ph2_grounded_answer_structure_choice_use import (
+    GroundedAnswerStructureAdoptionLedger,
+    GroundedAnswerStructureChoiceUseError,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_parser import (
     GroundedAnswerParserProtocol,
@@ -147,6 +154,7 @@ def test_grounded_variant_runs_through_typed_executor_parser_and_g04():
             target,
             planning,
             candidate,
+            surface_pattern_structure_id(selected_pattern),
             selected_pattern.pattern_id,
             parser_protocol,
             query_kind,
@@ -171,6 +179,8 @@ def test_grounded_variant_runs_through_typed_executor_parser_and_g04():
         lexical_use = ledger.adopt(run)
         layer_ledger = GroundedAnswerContentTaskAdoptionLedger(installation)
         layer_uses = layer_ledger.adopt(run)
+        structure_ledger = GroundedAnswerStructureAdoptionLedger(installation)
+        structure_use = structure_ledger.adopt(run)
 
         assert run.complete
         assert run.generation is not None
@@ -187,11 +197,25 @@ def test_grounded_variant_runs_through_typed_executor_parser_and_g04():
             build_grounded_answer_lexical_choice(variant, candidate)
             for variant in installation.compilation.variants
         )
-        assert len(lexical_alternatives) == 2
+        assert len(lexical_alternatives) == 3
         assert len({
             item.condition.context for item in lexical_alternatives}) == 1
-        assert len({item.competition_key for item in lexical_alternatives}) == 1
-        assert len({item.selected_object for item in lexical_alternatives}) == 2
+        selected_structure_alternatives = tuple(
+            item for item, variant in zip(
+                lexical_alternatives,
+                installation.compilation.variants,
+                strict=True,
+            )
+            if variant.option.structure_id
+            == installation.variant.option.structure_id
+        )
+        assert len(selected_structure_alternatives) == 2
+        assert len({
+            item.competition_key
+            for item in selected_structure_alternatives}) == 1
+        assert len({
+            item.selected_object
+            for item in selected_structure_alternatives}) == 2
         assert lexical_use.run == run
         assert lexical_use.adoptions == run.generation.surface.adoptions
         assert lexical_use.use.scope == candidate.scope
@@ -219,7 +243,18 @@ def test_grounded_variant_runs_through_typed_executor_parser_and_g04():
             lexical_use.use.use_key,
             layer_uses.content.use.use_key,
             layer_uses.task.use.use_key,
-        }) == 3
+            structure_use.use.use_key,
+        }) == 4
+        assert structure_use.choice_before.selected_object == (
+            installation.structure_selection.selected.structure)
+        assert structure_use.choice_before.condition.context == (
+            installation.lexical_choice.condition.context)
+        assert structure_use.choice_after.exact_uses == (structure_use.use,)
+        assert structure_ledger.records == (structure_use,)
+        with pytest.raises(
+                GroundedAnswerStructureChoiceUseError,
+                match="不得重复登记"):
+            structure_ledger.adopt(run)
         assert layer_ledger.records == (layer_uses,)
         with pytest.raises(
                 GroundedAnswerLayerChoiceUseError,

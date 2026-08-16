@@ -126,6 +126,30 @@ class LearnedSurfacePattern:
         }
 
 
+def surface_pattern_structure_key(
+        pattern: LearnedSurfacePattern,
+        ) -> tuple[tuple[int, int], ...]:
+    """返回忽略 literal 内容、保留 part/claim 序的结构键。"""
+    if not isinstance(pattern, LearnedSurfacePattern):
+        raise TypeError("surface pattern structure key 类型错误")
+    return tuple(
+        (0, 0) if part.kind == PATTERN_LITERAL
+        else (1, part.claim_ordinal)
+        for part in pattern.parts
+    )
+
+
+def surface_pattern_structure_id(pattern: LearnedSurfacePattern) -> int:
+    """为 response act、载体、claim 数和 part 形状生成稳定结构身份。"""
+    structure = {
+        "carrier_kind": pattern.carrier_kind,
+        "claim_count": pattern.claim_count,
+        "parts": [list(item) for item in surface_pattern_structure_key(pattern)],
+        "response_act": pattern.response_act,
+    }
+    return _pattern_id(structure)
+
+
 # object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
 class GroundedAnswerSurfaceModel:
@@ -402,4 +426,6 @@ __all__ = [
     "SurfacePatternPart",
     "learn_grounded_answer_surface_model",
     "realize_grounded_answer_surfaces",
+    "surface_pattern_structure_id",
+    "surface_pattern_structure_key",
 ]

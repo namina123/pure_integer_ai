@@ -51,6 +51,8 @@ from pure_integer_ai.experiments.ph2_grounded_answer_learning import (
     LearnedSurfacePattern,
     PATTERN_CLAIM,
     PATTERN_LITERAL,
+    surface_pattern_structure_id,
+    surface_pattern_structure_key,
 )
 
 
@@ -91,6 +93,21 @@ def _template_id(
         "predicate": list(target.proposition.predicate.stable_key()),
         "proposition_structure": list(
             target.proposition.structure.stable_key()),
+        "version": 1,
+    })
+
+
+def _structure_template_id(
+        pattern: LearnedSurfacePattern,
+        target: "GroundedAnswerConnectorTarget",
+        ) -> int:
+    """按 part 形状与 connector match key 生成共享结构理论身份。"""
+    return _stable_id({
+        "branch": list(target.language_branch.stable_key()),
+        "predicate": list(target.proposition.predicate.stable_key()),
+        "proposition_structure": list(
+            target.proposition.structure.stable_key()),
+        "structure_id": surface_pattern_structure_id(pattern),
         "version": 1,
     })
 
@@ -198,6 +215,8 @@ class GroundedAnswerPatternOption:
 
     choice_id: int
     pattern_id: int
+    structure_id: int
+    structure_key: tuple[tuple[int, int], ...]
     connector: ObjectIdentity
     support_episode_ids: tuple[str, ...]
     support_teacher_keys: tuple[tuple[int, ...], ...]
@@ -207,6 +226,14 @@ class GroundedAnswerPatternOption:
             raise GroundedAnswerConnectorError("pattern choice id 非法")
         if type(self.pattern_id) is not int or self.pattern_id <= 0:
             raise GroundedAnswerConnectorError("pattern id 非法")
+        if type(self.structure_id) is not int or self.structure_id <= 0:
+            raise GroundedAnswerConnectorError("pattern structure id 非法")
+        if (not isinstance(self.structure_key, tuple)
+                or not self.structure_key
+                or any(not isinstance(item, tuple) or len(item) != 2
+                       or any(type(value) is not int for value in item)
+                       for item in self.structure_key)):
+            raise GroundedAnswerConnectorError("pattern structure key 非法")
         if not isinstance(self.connector, ObjectIdentity):
             raise TypeError("pattern option connector 类型错误")
         if (not self.support_episode_ids
@@ -222,6 +249,110 @@ class GroundedAnswerPatternOption:
                 or self.support_teacher_keys != tuple(sorted(
                     set(self.support_teacher_keys)))):
             raise GroundedAnswerConnectorError("pattern option 缺少形成追溯")
+
+
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class GroundedAnswerStructureOption:
+    """一个可先于 lexical variant 显式选择的 surface 结构候选。"""
+
+    structure_id: int
+    structure_key: tuple[tuple[int, int], ...]
+    structure: ObjectIdentity
+    sentence: ObjectIdentity
+    slots: tuple[StructureSlotDefinition, ...]
+    pattern_ids: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.structure_id) is not int or self.structure_id <= 0:
+            raise GroundedAnswerConnectorError("structure option id 非法")
+        if (not isinstance(self.structure_key, tuple)
+                or not self.structure_key
+                or len(self.structure_key) != len(self.slots)
+                or any(not isinstance(item, tuple) or len(item) != 2
+                       or any(type(value) is not int for value in item)
+                       for item in self.structure_key)):
+            raise GroundedAnswerConnectorError("structure option key 非法")
+        for label, value in (
+                ("structure", self.structure), ("sentence", self.sentence)):
+            if (not isinstance(value, ObjectIdentity)
+                    or value.object_kind != OBJECT_STRUCTURE_CONCEPT):
+                raise TypeError(f"structure option {label} 类型错误")
+        if (not isinstance(self.slots, tuple) or not self.slots
+                or any(not isinstance(item, StructureSlotDefinition)
+                       or item.structure != self.structure
+                       for item in self.slots)):
+            raise GroundedAnswerConnectorError("structure option slots 非法")
+        if (not isinstance(self.pattern_ids, tuple) or not self.pattern_ids
+                or any(type(value) is not int or value <= 0
+                       for value in self.pattern_ids)
+                or self.pattern_ids != tuple(sorted(set(self.pattern_ids)))):
+            raise GroundedAnswerConnectorError(
+                "structure option pattern ids 非规范")
+
+    def choice_key(self) -> tuple[int, ...]:
+        """返回不随 lexical 成员增减变化的结构本体竞争键。"""
+        values = [self.structure_id, len(self.structure_key)]
+        for item in self.structure_key:
+            values.extend(item)
+        values.extend((
+            len(self.structure.stable_key()), *self.structure.stable_key(),
+            len(self.sentence.stable_key()), *self.sentence.stable_key(),
+            len(self.slots),
+        ))
+        for slot in self.slots:
+            for identity in (
+                    slot.structure, slot.slot, slot.role, slot.value_type):
+                key = identity.stable_key()
+                values.extend((len(key), *key))
+        return tuple(values)
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回结构本体键与本次 compilation 的 lexical 成员。"""
+        choice = self.choice_key()
+        return (
+            len(choice),
+            *choice,
+            len(self.pattern_ids),
+            *self.pattern_ids,
+        )
+
+
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class GroundedAnswerStructureSelection:
+    """完整结构竞争集与调用者显式采用的唯一结构。"""
+
+    options: tuple[GroundedAnswerStructureOption, ...]
+    selected: GroundedAnswerStructureOption
+    trace: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.options, tuple) or not self.options
+                or any(not isinstance(item, GroundedAnswerStructureOption)
+                       for item in self.options)):
+            raise TypeError("grounded structure selection options 类型错误")
+        ids = tuple(item.structure_id for item in self.options)
+        if ids != tuple(sorted(ids)) or len(set(ids)) != len(ids):
+            raise GroundedAnswerConnectorError(
+                "grounded structure options 非唯一递增")
+        if self.selected not in self.options:
+            raise GroundedAnswerConnectorError(
+                "grounded selected structure 不属于竞争集")
+        if (not isinstance(self.trace, tuple) or not self.trace
+                or any(type(value) is not int for value in self.trace)):
+            raise GroundedAnswerConnectorError(
+                "grounded structure selection trace 非法")
+
+    def stable_key(self) -> tuple[int, ...]:
+        """返回全部结构候选、selected option 与显式选择 trace。"""
+        values = [len(self.options)]
+        for option in self.options:
+            key = option.stable_key()
+            values.extend((len(key), *key))
+        selected = self.selected.stable_key()
+        values.extend((len(selected), *selected, len(self.trace), *self.trace))
+        return tuple(values)
 
 
 # object-model: value; representation=struct; interop=pending
@@ -272,11 +403,21 @@ class GroundedAnswerConnectorCompilation:
     """保存共同读取协议和全部可显式选择的合法 variant。"""
 
     value_protocol: LanguageConnectorValueProtocol
+    structures: tuple[GroundedAnswerStructureOption, ...]
     variants: tuple[GroundedAnswerConnectorVariant, ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.value_protocol, LanguageConnectorValueProtocol):
             raise TypeError("grounded connector value protocol 类型错误")
+        if (not isinstance(self.structures, tuple) or not self.structures
+                or any(not isinstance(item, GroundedAnswerStructureOption)
+                       for item in self.structures)):
+            raise GroundedAnswerConnectorError("grounded structures 不能为空")
+        structure_ids = tuple(item.structure_id for item in self.structures)
+        if (structure_ids != tuple(sorted(structure_ids))
+                or len(set(structure_ids)) != len(structure_ids)):
+            raise GroundedAnswerConnectorError(
+                "grounded structure id 非唯一递增")
         if (not isinstance(self.variants, tuple) or not self.variants
                 or any(not isinstance(item, GroundedAnswerConnectorVariant)
                        for item in self.variants)):
@@ -284,6 +425,23 @@ class GroundedAnswerConnectorCompilation:
         ids = tuple(item.option.pattern_id for item in self.variants)
         if ids != tuple(sorted(ids)) or len(set(ids)) != len(ids):
             raise GroundedAnswerConnectorError("grounded variant id 非唯一递增")
+        for structure in self.structures:
+            variants = tuple(
+                item for item in self.variants
+                if item.option.structure_id == structure.structure_id)
+            if (tuple(item.option.pattern_id for item in variants)
+                    != structure.pattern_ids
+                    or any(item.option.structure_key != structure.structure_key
+                           or item.template.structure != structure.structure
+                           or item.template.sentence != structure.sentence
+                           or item.template.slots != structure.slots
+                           for item in variants)):
+                raise GroundedAnswerConnectorError(
+                    "grounded structure option 与 lexical variants 漂移")
+        if {item.option.structure_id for item in self.variants} != set(
+                structure_ids):
+            raise GroundedAnswerConnectorError(
+                "grounded structure 未精确覆盖 variants")
 
     def select(self, pattern_id: int) -> GroundedAnswerConnectorVariant:
         """按调用者显式给出的 pattern identity 返回唯一 variant。"""
@@ -296,6 +454,36 @@ class GroundedAnswerConnectorCompilation:
             raise GroundedAnswerConnectorError(
                 "selected pattern 不属于当前 grounded compilation")
         return matches[0]
+
+    def select_structure(
+            self, structure_id: int,
+            ) -> GroundedAnswerStructureOption:
+        """按调用者显式 identity 返回唯一 structure option。"""
+        if type(structure_id) is not int or structure_id <= 0:
+            raise GroundedAnswerConnectorError("selected structure id 非法")
+        matches = tuple(
+            item for item in self.structures
+            if item.structure_id == structure_id)
+        if len(matches) != 1:
+            raise GroundedAnswerConnectorError(
+                "selected structure 不属于当前 grounded compilation")
+        return matches[0]
+
+    def select_within_structure(
+            self,
+            structure_id: int,
+            pattern_id: int,
+            ) -> GroundedAnswerConnectorVariant:
+        """先核验 structure，再只在其 lexical 成员中采用 pattern。"""
+        structure = self.select_structure(structure_id)
+        if pattern_id not in structure.pattern_ids:
+            raise GroundedAnswerConnectorError(
+                "selected pattern 不属于已选 grounded structure")
+        variant = self.select(pattern_id)
+        if variant.option.structure_id != structure.structure_id:
+            raise GroundedAnswerConnectorError(
+                "selected pattern structure identity 漂移")
+        return variant
 
 
 def _value_protocol() -> LanguageConnectorValueProtocol:
@@ -317,14 +505,17 @@ def _variant(
     claim_text = _claim_text(question)
     pattern_key = (
         _NAMESPACE, 2, pattern.pattern_id, _template_id(pattern, target))
+    structure_id = surface_pattern_structure_id(pattern)
+    structure_key = (
+        _NAMESPACE, 3, structure_id, _structure_template_id(pattern, target))
     connector = structure_concept_identity((*pattern_key, 1))
-    structure = structure_concept_identity((*pattern_key, 2))
-    value_type = concept_identity((*pattern_key, 3))
+    structure = structure_concept_identity((*structure_key, 1))
+    value_type = concept_identity((*structure_key, 2))
     slots = tuple(
         StructureSlotDefinition(
             structure,
-            structure_concept_identity((*pattern_key, 10, index)),
-            role_identity((*pattern_key, 11, index)),
+            structure_concept_identity((*structure_key, 10, index)),
+            role_identity((*structure_key, 11, index)),
             value_type,
         )
         for index, _part in enumerate(pattern.parts, start=1)
@@ -380,7 +571,7 @@ def _variant(
         ))
     orders = tuple(
         GroundedAnswerOrderRequirement(
-            structure_concept_identity((*pattern_key, 60, index)),
+            structure_concept_identity((*structure_key, 60, index)),
             before.slot,
             after.slot,
         )
@@ -392,16 +583,16 @@ def _variant(
         target.language_branch,
         target.proposition.structure,
         target.proposition.predicate,
-        structure_concept_identity((*pattern_key, 4)),
+        structure_concept_identity((*structure_key, 3)),
         structure,
         slots,
         tuple(bindings),
-        structure_concept_identity((*pattern_key, 5)),
+        structure_concept_identity((*structure_key, 4)),
         tuple(item.constraint for item in orders),
-        structure_concept_identity((*pattern_key, 6)),
+        structure_concept_identity((*structure_key, 5)),
         (),
-        minimal_instruction_identity((*pattern_key, 7)),
-        minimal_instruction_identity((*pattern_key, 8)),
+        minimal_instruction_identity((*structure_key, 6)),
+        minimal_instruction_identity((*structure_key, 7)),
         tuple(directives),
     )
     policy = LanguageGenerationConnectorRuntimePolicy(
@@ -413,12 +604,37 @@ def _variant(
     option = GroundedAnswerPatternOption(
         _choice_id(pattern, target),
         pattern.pattern_id,
+        structure_id,
+        surface_pattern_structure_key(pattern),
         connector,
         pattern.support_episode_ids,
         pattern.support_teacher_keys,
     )
     return GroundedAnswerConnectorVariant(
         option, template, policy, tuple(aliases), orders)
+
+
+def _structure_options(
+        variants: tuple[GroundedAnswerConnectorVariant, ...],
+        ) -> tuple[GroundedAnswerStructureOption, ...]:
+    """把同一 part 形状的 lexical variants 汇入共享结构候选。"""
+    groups: dict[int, list[GroundedAnswerConnectorVariant]] = {}
+    for variant in variants:
+        groups.setdefault(variant.option.structure_id, []).append(variant)
+    options = []
+    for structure_id, members in groups.items():
+        ordered = tuple(sorted(
+            members, key=lambda item: item.option.pattern_id))
+        first = ordered[0]
+        options.append(GroundedAnswerStructureOption(
+            structure_id,
+            first.option.structure_key,
+            first.template.structure,
+            first.template.sentence,
+            first.template.slots,
+            tuple(item.option.pattern_id for item in ordered),
+        ))
+    return tuple(sorted(options, key=lambda item: item.structure_id))
 
 
 def compile_grounded_answer_connectors(
@@ -459,11 +675,32 @@ def compile_grounded_answer_connectors(
         ),
         key=lambda item: item.option.pattern_id,
     ))
-    return GroundedAnswerConnectorCompilation(value_protocol, variants)
+    return GroundedAnswerConnectorCompilation(
+        value_protocol, _structure_options(variants), variants)
+
+
+def select_grounded_answer_structure(
+        compilation: GroundedAnswerConnectorCompilation,
+        structure_id: int,
+        ) -> GroundedAnswerStructureSelection:
+    """显式采用一个结构竞争项，供 lexical 选择和 syntax mapper 消费。"""
+    if not isinstance(compilation, GroundedAnswerConnectorCompilation):
+        raise TypeError("grounded structure compilation 类型错误")
+    selected = compilation.select_structure(structure_id)
+    trace = (
+        _NAMESPACE,
+        90,
+        structure_id,
+        len(compilation.structures),
+        *(item.structure_id for item in compilation.structures),
+    )
+    return GroundedAnswerStructureSelection(
+        compilation.structures, selected, trace)
 
 
 def build_grounded_answer_connector(
         compilation: GroundedAnswerConnectorCompilation,
+        structure_id: int,
         pattern_id: int,
         surface_protocol: GenerationSurfaceProtocol,
         ) -> tuple[GroundedAnswerConnectorVariant, LanguageGenerationConnector]:
@@ -472,7 +709,7 @@ def build_grounded_answer_connector(
         raise TypeError("grounded connector compilation 类型错误")
     if not isinstance(surface_protocol, GenerationSurfaceProtocol):
         raise TypeError("grounded connector surface protocol 类型错误")
-    variant = compilation.select(pattern_id)
+    variant = compilation.select_within_structure(structure_id, pattern_id)
     connector = LanguageGenerationConnector(
         LanguageGenerationConnectorRegistry(
             compilation.value_protocol,
@@ -492,6 +729,9 @@ __all__ = [
     "GroundedAnswerConnectorVariant",
     "GroundedAnswerOrderRequirement",
     "GroundedAnswerPatternOption",
+    "GroundedAnswerStructureOption",
+    "GroundedAnswerStructureSelection",
     "build_grounded_answer_connector",
     "compile_grounded_answer_connectors",
+    "select_grounded_answer_structure",
 ]

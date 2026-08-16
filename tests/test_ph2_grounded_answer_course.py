@@ -56,7 +56,7 @@ def test_train_sample_closes_four_response_acts_and_multi_surface_contract():
     episodes = read_grounded_answer_episodes(SAMPLE_PATH)
     audit = audit_grounded_answer_course(episodes)
     assert audit.episode_count == 4
-    assert audit.accepted_surface_count == 8
+    assert audit.accepted_surface_count == 9
     assert audit.rejected_surface_count == 10
     assert {item.question.answer_plan.response_act for item in episodes} == {
         "ANSWER", "UNKNOWN", "CLARIFY", "CONFLICT",
@@ -147,9 +147,9 @@ def test_learned_claim_slot_generates_two_surfaces_for_unseen_proposition():
     bundle = compile_grounded_answer_training_records(SAMPLE_PATH)
     model, report = learn_grounded_answer_surface_model(bundle)
     assert report.episode_count == 4
-    assert report.accepted_surface_count == 8
-    assert report.pattern_count == 8
-    assert report.slotted_pattern_count == 2
+    assert report.accepted_surface_count == 9
+    assert report.pattern_count == 9
+    assert report.slotted_pattern_count == 3
     assert report.response_act_count == 4
 
     base = episodes[0].question
@@ -181,6 +181,7 @@ def test_learned_claim_slot_generates_two_surfaces_for_unseen_proposition():
     assert {item.surface for item in generated} == {
         "云岭站西门于2026年启用。",
         "档案显示，云岭站西门于2026年启用。",
+        "记录表明，云岭站西门于2026年启用。",
     }
     assert all("北川站" not in item.surface for item in generated)
     assert all(verify_surface_realization(question, item).passed
@@ -259,7 +260,10 @@ def test_grounded_patterns_compile_to_explicit_single_template_variants():
             candidate.proposition, branch, (20916, 901)),
         surface_protocol,
     )
-    assert len(compilation.variants) == 2
+    assert len(compilation.variants) == 3
+    assert len(compilation.structures) == 2
+    assert sorted(len(item.pattern_ids) for item in compilation.structures) == [
+        1, 2]
     assert all(item.option.support_teacher_keys
                for item in compilation.variants)
     assert all(len(item.template.slots) >= 2
@@ -281,12 +285,30 @@ def test_grounded_patterns_compile_to_explicit_single_template_variants():
         {item.template.connector for item in other.variants})
     selected = compilation.variants[0]
     variant, connector = build_grounded_answer_connector(
-        compilation, selected.option.pattern_id, surface_protocol)
+        compilation,
+        selected.option.structure_id,
+        selected.option.pattern_id,
+        surface_protocol,
+    )
     assert variant == selected
     assert connector.registry.templates == (selected.template,)
     with pytest.raises(GroundedAnswerConnectorError, match="不属于"):
         build_grounded_answer_connector(
-            compilation, 999999999, surface_protocol)
+            compilation,
+            selected.option.structure_id,
+            999999999,
+            surface_protocol,
+        )
+    other_structure = next(
+        item for item in compilation.structures
+        if item.structure_id != selected.option.structure_id)
+    with pytest.raises(GroundedAnswerConnectorError, match="不属于已选"):
+        build_grounded_answer_connector(
+            compilation,
+            other_structure.structure_id,
+            selected.option.pattern_id,
+            surface_protocol,
+        )
 
 
 def test_restricted_parser_recovers_claim_and_classifies_surface_damage():
