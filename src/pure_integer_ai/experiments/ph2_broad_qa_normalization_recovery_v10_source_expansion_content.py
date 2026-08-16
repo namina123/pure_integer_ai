@@ -257,9 +257,69 @@ def read_normalization_recovery_v10_source_expansion_content(
     return {**stored, "manifest_sha256": _sha256(encoded)}, stored_outputs
 
 
+def read_normalization_recovery_v10_source_expansion_content_aggregate(
+        source_dir: str | Path,
+        *,
+        expected_manifest_sha256: str,
+        ) -> tuple[
+            dict[str, object], dict[str, tuple[dict[str, object], ...]]]:
+    """只核验sealed aggregate，不重新读取roster、raw或旧Observation。"""
+    root = Path(source_dir).resolve()
+    expected_names = {
+        "manifest.json",
+        *[name for name, _ in V10_SOURCE_EXPANSION_CONTENT_OUTPUT_FILES],
+    }
+    try:
+        physical = tuple(root.iterdir())
+        encoded = (root / "manifest.json").read_bytes()
+        stored = json.loads(encoded)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BroadQaExternalDataError(
+            "v10 source content aggregate 不可读") from error
+    if ({item.name for item in physical} != expected_names
+            or any(item.is_dir() for item in physical)
+            or _sha256(encoded) != expected_manifest_sha256
+            or not isinstance(stored, dict)
+            or canonical_json_line(stored) != encoded
+            or stored.get("artifact_kind")
+            != V10_SOURCE_EXPANSION_CONTENT_ARTIFACT_KIND):
+        raise BroadQaExternalDataError(
+            "v10 source content aggregate identity 漂移")
+    commitments = {
+        str(item.get("relative_path")): item
+        for item in stored.get("files", []) if isinstance(item, dict)
+    }
+    if set(commitments) != {
+            name for name, _ in V10_SOURCE_EXPANSION_CONTENT_OUTPUT_FILES}:
+        raise BroadQaExternalDataError(
+            "v10 source content aggregate file inventory 漂移")
+    outputs = {}
+    for name, role in V10_SOURCE_EXPANSION_CONTENT_OUTPUT_FILES:
+        values = _read_jsonl(root / name, label=role)
+        if commitments[name] != _artifact(
+                root / name, role=role, count=len(values)):
+            raise BroadQaExternalDataError(
+                "v10 source content aggregate file identity 漂移")
+        outputs[name] = values
+    family = outputs["source-content.jsonl"]
+    cross = outputs["source-cross-overlap.jsonl"]
+    census = outputs["source-census.jsonl"]
+    if (len(family) != 2 or len(cross) != 1 or len(census) != 1
+            or {str(item.get("source_family")) for item in family}
+            != {"MIXXX_PROJECT", "MUMBLE_PROJECT"}
+            or stored.get("summary") != {
+                key: value for key, value in census[0].items()
+                if key not in {"format_version", "record_kind"}
+            }):
+        raise BroadQaExternalDataError(
+            "v10 source content aggregate census 漂移")
+    return {**stored, "manifest_sha256": _sha256(encoded)}, outputs
+
+
 __all__ = [
     "V10_SOURCE_EXPANSION_CONTENT_ARTIFACT_KIND",
     "V10_SOURCE_EXPANSION_CONTENT_STATUS",
     "publish_normalization_recovery_v10_source_expansion_content",
     "read_normalization_recovery_v10_source_expansion_content",
+    "read_normalization_recovery_v10_source_expansion_content_aggregate",
 ]

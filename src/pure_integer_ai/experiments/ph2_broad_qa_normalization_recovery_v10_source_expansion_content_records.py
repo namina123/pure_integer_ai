@@ -539,9 +539,32 @@ def read_normalization_recovery_v10_source_expansion_content_state(
     )
 
 
+def read_normalization_recovery_v10_candidate_payloads(
+        roster_record: dict[str, object],
+        source_root: str | Path,
+        ) -> dict[str, bytes]:
+    """公开逐blob核验入口，供后继source pack从raw重派生。"""
+    return _read_candidate_payloads(
+        roster_record, Path(source_root).resolve())
+
+
+def derive_normalization_recovery_v10_candidate_source_records(
+        roster_record: dict[str, object],
+        payloads: dict[str, bytes],
+        ) -> tuple[
+            tuple[dict[str, object], ...],
+            tuple[dict[str, object], ...],
+            dict[str, object],
+        ]:
+    """公开固定family parser入口，供source pack与Observation共享。"""
+    return _parse_candidate(roster_record, payloads)
+
+
 __all__ = [
     "V10_SOURCE_EXPANSION_CONTENT_OUTPUT_FILES",
     "V10_SOURCE_EXPANSION_ROSTER_MANIFEST_SHA256",
+    "derive_normalization_recovery_v10_candidate_source_records",
     "derive_normalization_recovery_v10_source_expansion_content",
+    "read_normalization_recovery_v10_candidate_payloads",
     "read_normalization_recovery_v10_source_expansion_content_state",
 ]

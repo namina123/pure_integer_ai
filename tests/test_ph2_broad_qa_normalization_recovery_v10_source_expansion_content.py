@@ -13,6 +13,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v10_source_expansion_content import (
     publish_normalization_recovery_v10_source_expansion_content,
     read_normalization_recovery_v10_source_expansion_content,
+    read_normalization_recovery_v10_source_expansion_content_aggregate,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v10_source_expansion_content_records import (
     derive_normalization_recovery_v10_source_expansion_content,
@@ -136,6 +137,13 @@ def test_v10_source_expansion_content_round_trip_and_tamper(
     )
     assert reread == published
     assert len(outputs["source-content.jsonl"]) == 2
+    aggregate, aggregate_outputs = (
+        read_normalization_recovery_v10_source_expansion_content_aggregate(
+            target,
+            expected_manifest_sha256=published["manifest_sha256"],
+        ))
+    assert aggregate == published
+    assert aggregate_outputs == outputs
     with pytest.raises(BroadQaExternalDataError, match="input/target"):
         publish_normalization_recovery_v10_source_expansion_content(
             run_root=tmp_path,
