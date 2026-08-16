@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from pure_integer_ai.cognition.shared.generation_plan import (
     GenerationPlanningRequest,
 )
@@ -17,6 +19,7 @@ from pure_integer_ai.cognition.shared.evidence_candidate import (
     EVIDENCE_REFUTE,
     EVIDENCE_SUPPORT,
     EVIDENCE_UNKNOWN,
+    EvidenceCandidateError,
     EvidenceCandidateEngine,
     EvidenceCandidateProtocol,
 )
@@ -30,7 +33,12 @@ from pure_integer_ai.cognition.shared.identity import (
     language_branch_identity,
     minimal_instruction_identity,
 )
+from pure_integer_ai.cognition.shared.hypothesis import HypothesisLedger
 from pure_integer_ai.cognition.shared.scope_identity import document_scope
+from pure_integer_ai.cognition.shared.training_hypothesis import (
+    TrainingHypothesisEventSink,
+    TrainingHypothesisHistoryProtocol,
+)
 from pure_integer_ai.cognition.shared.question_answer import QuestionRequest
 from pure_integer_ai.cognition.shared.representation_rendering import (
     UnicodeRepresentationRenderer,
@@ -67,6 +75,7 @@ from pure_integer_ai.experiments.ph2_grounded_answer_parser import (
     GroundedAnswerParserProtocol,
 )
 from pure_integer_ai.experiments.formal_train import make_train_context
+from pure_integer_ai.experiments.evaluation_isolation import clone_backend
 from pure_integer_ai.experiments.question_answer_runtime import (
     EvidenceQuestionPostcheckMapper,
     QuestionAnswerProtocol,
@@ -443,8 +452,8 @@ def test_reference_strategies_form_distinct_actual_uses():
     assert explicit_unique.claim_keys == ()
 
 
-def test_reference_gg02_outcome_updates_h05_once_and_replays_without_writes():
-    """真实五层 outcome 只执行一次 assessment，关闭层 prepare 保持零写。"""
+def test_reference_gg02_outcome_updates_h05_and_restores_without_writes():
+    """真实五层 assessment 可从持久 history 和 clone 幂等恢复。"""
     layered = _run_reference_strategy("ANTECEDENT_REFERENCE")[4].outcome
     explicit_layered = _run_reference_strategy("EXPLICIT_REPETITION")[4].outcome
     support_input = build_assessment_inputs(layered).inputs[0]
@@ -459,22 +468,38 @@ def test_reference_gg02_outcome_updates_h05_once_and_replays_without_writes():
         outcomes=(replace(support_outcome, verdict=VERDICT_UNKNOWN),),
     )) == EVIDENCE_UNKNOWN
     backend = DictBackend()
+    cloned_backend = None
     try:
         context = make_train_context(backend)
         aggregate = SourceRef(
             _BASE + 50, 1, 0, GLOBAL_OWNER_SCOPE, VersionBundle())
+        evidence_protocol = EvidenceCandidateProtocol(
+            (_BASE + 50, 2),
+            (_BASE + 50, 3),
+            aggregate,
+            document_scope(aggregate),
+            1,
+        )
+        history_protocol = TrainingHypothesisHistoryProtocol(
+            (_BASE + 50, 7),
+            evidence_protocol.hypothesis_kind_key,
+            evidence_protocol.aggregate_source,
+            evidence_protocol.aggregate_scope,
+        )
+        assert context.training_candidate_history is not None
+        history_sink = TrainingHypothesisEventSink(
+            context.training_candidate_history, history_protocol)
+        projection_metadata = CandidateProjectionMetadata(
+            SOURCE_BARE_TEXT, EPI_STRUCTURED)
         learning = CandidateLearningRuntime(
-            EvidenceCandidateEngine(EvidenceCandidateProtocol(
-                (_BASE + 50, 2),
-                (_BASE + 50, 3),
-                aggregate,
-                document_scope(aggregate),
-                1,
-            )),
+            EvidenceCandidateEngine(
+                evidence_protocol,
+                ledger=HypothesisLedger(history_sink),
+            ),
             CandidateProjectionGraph(
                 context.graph_ontology, _projection_protocol()),
             _verifier(),
-            CandidateProjectionMetadata(SOURCE_BARE_TEXT, EPI_STRUCTURED),
+            projection_metadata,
         )
         mapper = GenerationChoiceCandidateMapper(
             _candidate_protocol(_BASE + 50))
@@ -507,6 +532,22 @@ def test_reference_gg02_outcome_updates_h05_once_and_replays_without_writes():
         assert backend.snapshot() == before_prepare_backend
         assert learning.state_key() == before_prepare_state
 
+        forming_source = layered.episode.choices[0].choice.forming_sources[0]
+        atomicity_probe = GenerationChoiceAssessmentConsumer(
+            mapper,
+            learning,
+            GenerationChoiceAssessmentConsumerPolicy(
+                forming_source, (_BASE + 50, 8)),
+        )
+        before_failed_backend = backend.snapshot()
+        before_failed_state = learning.state_key()
+
+        with pytest.raises(EvidenceCandidateError, match="forming observation"):
+            atomicity_probe.apply(layered)
+
+        assert backend.snapshot() == before_failed_backend
+        assert learning.state_key() == before_failed_state
+
         first = consumer.apply(layered)
 
         assert len(first.records) == 5
@@ -537,12 +578,112 @@ def test_reference_gg02_outcome_updates_h05_once_and_replays_without_writes():
 
         replay = consumer.apply(layered)
 
-        assert replay.records == first.records
+        assert tuple(item.learning for item in replay.records) == tuple(
+            item.learning for item in first.records)
+        assert all(item.candidate_registered == 0 for item in replay.records)
         assert replay.candidate_registrations == 0
         assert replay.assessment_updates_executed == 0
         assert replay.replayed_updates == 5
         assert replay.teacher_call_count == 0
         assert backend.snapshot() == after_first_backend
         assert learning.state_key() == after_first_state
+
+        restored_learning = CandidateLearningRuntime.restore_for_training_graph(
+            evidence_protocol,
+            learning.graph,
+            _verifier(),
+            projection_metadata,
+            context.training_candidate_history,
+            history_protocol,
+        )
+        restored = GenerationChoiceAssessmentConsumer(
+            mapper, restored_learning, consumer.policy)
+        before_restore_replay = backend.snapshot()
+        restored_state = restored_learning.state_key()
+
+        restored_replay = restored.apply(layered)
+
+        assert restored_replay.candidate_registrations == 0
+        assert restored_replay.assessment_updates_executed == 0
+        assert restored_replay.replayed_updates == 5
+        assert tuple(
+            item.learning for item in restored_replay.records) == tuple(
+                item.learning for item in first.records)
+        assert backend.snapshot() == before_restore_replay
+        assert restored_learning.state_key() == restored_state
+
+        cloned_backend = clone_backend(backend)
+        cloned_context = make_train_context(cloned_backend)
+        assert cloned_context.training_candidate_history is not None
+        cloned_learning = CandidateLearningRuntime.restore_for_training_graph(
+            evidence_protocol,
+            CandidateProjectionGraph(
+                cloned_context.graph_ontology, _projection_protocol()),
+            _verifier(),
+            projection_metadata,
+            cloned_context.training_candidate_history,
+            history_protocol,
+        )
+        cloned = GenerationChoiceAssessmentConsumer(
+            mapper, cloned_learning, consumer.policy)
+        clone_snapshot = cloned_backend.snapshot()
+        clone_state = cloned_learning.state_key()
+
+        cloned_replay = cloned.apply(layered)
+
+        assert cloned_replay.candidate_registrations == 0
+        assert cloned_replay.assessment_updates_executed == 0
+        assert cloned_replay.replayed_updates == 5
+        assert cloned_backend.snapshot() == clone_snapshot
+        assert cloned_learning.state_key() == clone_state
+
+        prepared_item = consumer.prepare(layered)[0]
+        persisted = consumer._history_by_event()[prepared_item.event_key]
+        with pytest.raises(
+                ValueError, match="event_key|event key|prediction"):
+            consumer._recover_update(
+                prepared_item,
+                replace(
+                    persisted,
+                    prediction=replace(
+                        persisted.prediction,
+                        event_key=(*persisted.prediction.event_key, 999),
+                    ),
+                ),
+            )
+        with pytest.raises(
+                ValueError, match="verification|outcome"):
+            consumer._recover_update(
+                prepared_item,
+                replace(
+                    persisted,
+                    verification=replace(
+                        persisted.verification,
+                        trace=(*persisted.verification.trace, 999),
+                    ),
+                ),
+            )
+        with pytest.raises(ValueError, match="相邻 H-04 decision"):
+            consumer._recover_update(
+                prepared_item,
+                replace(
+                    persisted,
+                    evidence=replace(
+                        persisted.evidence,
+                        timestamp_seq=persisted.evidence.timestamp_seq + 1000,
+                    ),
+                ),
+            )
+        hypothesis = learning.hypothesis_for_candidate(
+            mapper.candidate_identity(prepared_item.attribution.choice))
+        decision = next(
+            item for item in learning.engine.resolver.decision_history(
+                hypothesis)
+            if item.timestamp_seq == persisted.evidence.timestamp_seq + 1)
+        with pytest.raises(ValueError, match="projection.*逻辑序"):
+            consumer._projection_for_decision(
+                hypothesis, decision, persisted.evidence.timestamp_seq + 1)
     finally:
+        if cloned_backend is not None:
+            cloned_backend.close()
         backend.close()
