@@ -309,6 +309,30 @@ def load_normalization_recovery_v10_precision_material(
     return base_candidate, controls, safety, cases, opencc_routes, opencc_census
 
 
+def load_normalization_recovery_v10_precision_observations(
+        *, observation_dir: Path,
+        expected_observation_manifest_sha256: str,
+        ) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
+    """回读保留原始identity的三家冻结TRAIN Observation。"""
+    manifest = _read_manifest(
+        observation_dir,
+        expected_sha256=expected_observation_manifest_sha256,
+        label="observation pack")
+    observations = tuple(
+        item for name in _OBSERVATION_FILES
+        for item in _read_committed_jsonl(
+            observation_dir, manifest, name,
+            label=f"observation {name}"))
+    expected_count = manifest.get("summary", {}).get(
+        "observation_count") if isinstance(
+            manifest.get("summary"), dict) else None
+    if (type(expected_count) is not int
+            or expected_count != len(observations)):
+        raise BroadQaExternalDataError(
+            "v10 feasibility observation denominator 漂移")
+    return manifest, observations
+
+
 def _derive(
         *,
         base_candidate_dir: Path,
@@ -796,6 +820,7 @@ __all__ = [
     "NORMALIZATION_RECOVERY_V10_PRECISION_FEASIBILITY_V2_KIND",
     "NORMALIZATION_RECOVERY_V10_PRECISION_FEASIBILITY_V2_STATUS",
     "load_normalization_recovery_v10_precision_material",
+    "load_normalization_recovery_v10_precision_observations",
     "publish_normalization_recovery_v10_precision_feasibility",
     "publish_normalization_recovery_v10_precision_feasibility_v2",
     "read_normalization_recovery_v10_precision_feasibility",
