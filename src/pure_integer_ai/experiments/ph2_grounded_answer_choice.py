@@ -140,7 +140,7 @@ def build_grounded_answer_lexical_choice(
         candidate.proposition.template,
         choice_condition,
         template.connector,
-        (forming_source,),
+        (candidate.source, forming_source),
         competition_key,
         candidate.scope,
     )

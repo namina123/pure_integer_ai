@@ -1,6 +1,9 @@
 """grounded-answer pattern 经真实 connector、executor 与 G-04 的专项。"""
 from __future__ import annotations
 
+from dataclasses import replace
+from pathlib import Path
+
 import pytest
 
 from pure_integer_ai.cognition.shared.generation_structure_plan import (
@@ -10,6 +13,7 @@ from pure_integer_ai.cognition.shared.question_answer import (
     QuestionRequest,
 )
 from pure_integer_ai.cognition.shared.identity import (
+    language_branch_identity,
     minimal_instruction_identity,
 )
 from pure_integer_ai.cognition.shared.representation_rendering import (
@@ -21,6 +25,7 @@ from pure_integer_ai.experiments.question_answer_runtime import (
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_connector import (
     GroundedAnswerConnectorTarget,
+    compile_grounded_answer_connectors,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_choice_use import (
     GroundedAnswerLexicalAdoptionLedger,
@@ -29,7 +34,11 @@ from pure_integer_ai.experiments.ph2_grounded_answer_choice_use import (
 from pure_integer_ai.experiments.ph2_grounded_answer_choice import (
     build_grounded_answer_lexical_choice,
 )
+from pure_integer_ai.experiments.ph2_grounded_answer_compile import (
+    compile_grounded_answer_training_records,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_learning import (
+    learn_grounded_answer_surface_model,
     surface_pattern_structure_id,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_layer_choice_use import (
@@ -48,7 +57,27 @@ from pure_integer_ai.experiments.ph2_grounded_answer_runtime_factory import (
     GroundedAnswerRunLocalComponents,
     GroundedAnswerRunLocalFactory,
 )
+from pure_integer_ai.experiments.ph2_grounded_answer_verification import (
+    GroundedAnswerEvidenceSourceVerifier,
+    GroundedAnswerStructureVerifier,
+)
+from pure_integer_ai.experiments.ph2_generation_generalization_executable_train_course import (
+    read_generation_generalization_executable_train_course,
+)
+from pure_integer_ai.experiments.ph2_generation_generalization_executable_train_rehearsal import (
+    GenerationGeneralizationTrainRehearsal,
+    default_answer_verification_protocol,
+    rehearse_grounded_answer_case,
+)
+from pure_integer_ai.experiments.ph2_generation_generalization_answer_verification import (
+    GenerationGeneralizationAnswerVerificationInput,
+    run_generation_generalization_answer_verification,
+)
+from pure_integer_ai.experiments.ph2_grounded_response_act_planning import (
+    compile_grounded_answer_planning,
+)
 from pure_integer_ai.experiments.verification_orchestration import (
+    VERDICT_REFUTE,
     VERDICT_SUPPORT,
 )
 from pure_integer_ai.storage.backend import DictBackend
@@ -74,6 +103,9 @@ from tests.test_s07_structure_order import (
 
 
 _BASE = 20930
+_GROUNDED_SAMPLE = Path("data/ph2/grounded_answer_train_v1.jsonl.sample")
+_CASE_SAMPLE = Path(
+    "data/ph2/generation_generalization_executable_train_case_v1.jsonl.sample")
 
 
 class _AliasFactory:
@@ -271,3 +303,165 @@ def test_grounded_variant_runs_through_typed_executor_parser_and_g04():
         if alias_factory.fixture is not None:
             alias_factory.fixture.close()
         backend.close()
+
+
+def _rehearse_answer_requirement(requirement, offset):
+    """用真实结构/来源 verifier 运行一项 catalog ANSWER rehearsal。"""
+    course = read_generation_generalization_executable_train_course(
+        _CASE_SAMPLE, _GROUNDED_SAMPLE)
+    case = course.case_for_requirement(requirement)
+    episode = course.episode_for(case)
+    model, _report = learn_grounded_answer_surface_model(
+        compile_grounded_answer_training_records(_GROUNDED_SAMPLE))
+    branch = language_branch_identity((_BASE, 100, offset))
+    planning_build = compile_grounded_answer_planning(episode, branch)
+    planning = planning_build.planning
+    candidate = planning.candidates[0]
+    selection, selector, _content_protocol = _selection(planning)
+    surface_protocol = _surface_protocol(_BASE + 110 + offset)
+    family = (_BASE, 120, offset)
+    target = GroundedAnswerConnectorTarget(
+        candidate.proposition, branch, family)
+    compilation = compile_grounded_answer_connectors(
+        model, episode.question, target, surface_protocol)
+    selected = compilation.variants[0]
+    backend = DictBackend()
+    alias_factory = _AliasFactory(branch)
+    try:
+        graphs = _graphs(backend)
+        renderer_identity = minimal_instruction_identity(
+            (_BASE, 130, offset))
+        renderer = UnicodeRepresentationRenderer(family, renderer_identity)
+        query_kind = minimal_instruction_identity((_BASE, 140 + offset, 1))
+        route = minimal_instruction_identity((_BASE, 140 + offset, 2))
+        components = GroundedAnswerRunLocalComponents(
+            selector,
+            _plan_protocol(_BASE + 150 + offset),
+            GenerationStructureLayerProtocol(*tuple(
+                minimal_instruction_identity(
+                    (_BASE, 160 + offset, index))
+                for index in range(1, 4)
+            )),
+            alias_factory,
+            renderer,
+            renderer_identity,
+            _postcheck_protocol(),
+            GroundedAnswerStructureVerifier(
+                minimal_instruction_identity((_BASE, 170 + offset, 1)),
+                minimal_instruction_identity((_BASE, 170 + offset, 2)),
+            ),
+            GroundedAnswerEvidenceSourceVerifier(
+                minimal_instruction_identity((_BASE, 180 + offset, 1)),
+                minimal_instruction_identity((_BASE, 180 + offset, 2)),
+            ),
+            QuestionAnswerProtocol(*tuple(
+                minimal_instruction_identity(
+                    (_BASE, 190 + offset, index))
+                for index in range(1, 4)
+            )),
+            EvidenceQuestionPostcheckMapper(
+                (_BASE, 200 + offset, 1),
+                citation_required=True,
+                trust_required=True,
+            ),
+        )
+        installation = GroundedAnswerRunLocalFactory(
+            surface_protocol, graphs.lifecycle, components).build(
+                GroundedAnswerRunLocalBuild(
+                    model,
+                    episode.question,
+                    target,
+                    planning,
+                    candidate,
+                    selected.option.structure_id,
+                    selected.option.pattern_id,
+                    GroundedAnswerParserProtocol(
+                        *tuple(minimal_instruction_identity(
+                            (_BASE, 210 + offset, index))
+                               for index in range(1, 6)),
+                        selection.stance,
+                    ),
+                    query_kind,
+                    route,
+                    minimal_instruction_identity(
+                        (_BASE, 220 + offset, 1)),
+                    (_BASE, 220 + offset, 2),
+                ))
+        request = QuestionRequest(
+            query_kind,
+            minimal_instruction_identity((_BASE, 230 + offset, 1)),
+            planning.goal.goal_kind,
+            planning.goal.proposition,
+            planning.goal.required,
+            planning.goal.scope,
+            planning.goal.scope,
+            (_BASE, 230 + offset, 2),
+            branch,
+        )
+        item, run = rehearse_grounded_answer_case(
+            course, requirement, planning_build, installation, request)
+        return course, planning_build, item, run
+    finally:
+        if alias_factory.fixture is not None:
+            alias_factory.fixture.close()
+        backend.close()
+
+
+def test_answer_catalog_rehearses_readback_and_legal_composition():
+    """单命题 ANSWER 的 readback 与 structure choice 使用独立 actual routes。"""
+    course, readback_planning, readback, readback_run = (
+        _rehearse_answer_requirement(
+            "INDEPENDENT_UNDERSTANDING_READBACK", 1))
+    same_course, legal_planning, legal, legal_run = (
+        _rehearse_answer_requirement("LEGAL_OBJECT_COMPOSITION", 2))
+    assert same_course == course
+
+    partial = GenerationGeneralizationTrainRehearsal(
+        course, (readback, legal))
+    assert partial.complete == 0
+    assert readback.passed == 1
+    assert legal.passed == 1
+    assert readback.choice.choice_kind == "LEXICAL_REALIZATION_CHOICE"
+    assert legal.choice.choice_kind == "PROPOSITION_STRUCTURE_CHOICE"
+    assert readback.verification.input_key != legal.verification.input_key
+    assert (readback.verification.result.dimension,
+            readback.verification.result.verifier) != (
+                legal.verification.result.dimension,
+                legal.verification.result.verifier)
+    assert readback_run.complete and legal_run.complete
+    assert readback_planning.aggregate_source in readback.choice.forming_sources
+    assert legal_planning.aggregate_source in legal.choice.forming_sources
+    for run in (readback_run, legal_run):
+        source_result = next(
+            item for item in run.postcheck.report.results
+            if item.dimension == run.postcheck.protocol.source_dimension)
+        structure_result = next(
+            item for item in run.postcheck.report.results
+            if item.dimension == run.postcheck.protocol.structure_dimension)
+        assert source_result.verdict == VERDICT_SUPPORT
+        assert structure_result.verdict == VERDICT_SUPPORT
+
+    observation = readback.postcheck.parsed.observation
+    assert observation is not None
+    broken_postcheck = replace(
+        readback.postcheck,
+        parsed=replace(
+            readback.postcheck.parsed,
+            observation=replace(observation, propositions=()),
+        ),
+    )
+    protocol = default_answer_verification_protocol()
+    broken_report = run_generation_generalization_answer_verification(
+        protocol,
+        GenerationGeneralizationAnswerVerificationInput(
+            "INDEPENDENT_UNDERSTANDING_READBACK",
+            readback.source_episode,
+            readback_planning,
+            readback.choice,
+            readback.use,
+            readback.execution,
+            readback.parse_request,
+            broken_postcheck,
+        ),
+    )
+    assert broken_report.results[0].verdict == VERDICT_REFUTE

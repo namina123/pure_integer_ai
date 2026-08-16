@@ -157,9 +157,9 @@ class GroundedAnswerParserGrammar:
                        for item in self.cited_sources)
                 or len(set(self.cited_sources)) != len(self.cited_sources)):
             raise GroundedAnswerParserError("parser cited source 非规范")
-        if self.source not in self.cited_sources:
+        if not self.cited_sources:
             raise GroundedAnswerParserError(
-                "首轮 parser citation 必须覆盖显式运行 source")
+                "首轮 parser citation 必须保留 actual Evidence source")
         if (not isinstance(self.support_teacher_keys, tuple)
                 or not self.support_teacher_keys
                 or any(not isinstance(key, tuple) or not key

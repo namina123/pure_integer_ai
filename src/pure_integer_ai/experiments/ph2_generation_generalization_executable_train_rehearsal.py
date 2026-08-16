@@ -22,6 +22,12 @@ from pure_integer_ai.experiments.ph2_generation_choice_contract import (
     GenerationChoiceUseRef,
     LosslessIntegerKey,
 )
+from pure_integer_ai.experiments.ph2_generation_generalization_answer_verification import (
+    ANSWER_REQUIREMENTS,
+    GenerationGeneralizationAnswerVerificationInput,
+    GenerationGeneralizationAnswerVerificationProtocol,
+    run_generation_generalization_answer_verification,
+)
 from pure_integer_ai.experiments.ph2_generation_generalization_contract import (
     INDEPENDENT_VERIFIER_REQUIREMENTS,
 )
@@ -40,11 +46,20 @@ from pure_integer_ai.experiments.ph2_generation_generalization_source_conflict i
 from pure_integer_ai.experiments.ph2_grounded_answer_course import (
     GroundedAnswerEpisode,
 )
+from pure_integer_ai.experiments.ph2_grounded_answer_choice_use import (
+    GroundedAnswerLexicalAdoptionLedger,
+)
+from pure_integer_ai.experiments.ph2_grounded_answer_runtime_factory import (
+    GroundedAnswerRunLocalInstallation,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_response_act_choice_use import (
     GroundedResponseActLexicalAdoptionLedger,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_response_act_runtime_factory import (
     GroundedResponseActRunLocalInstallation,
+)
+from pure_integer_ai.experiments.ph2_grounded_answer_structure_choice_use import (
+    GroundedAnswerStructureAdoptionLedger,
 )
 from pure_integer_ai.experiments.ph2_grounded_response_act_planning import (
     GroundedResponseActPlanningBuild,
@@ -80,6 +95,21 @@ def default_source_conflict_protocol(
         ProtocolKey((_NAMESPACE, 2)),
         minimal_instruction_identity((_NAMESPACE, 3, 1)),
         minimal_instruction_identity((_NAMESPACE, 3, 2)),
+    )
+
+
+def default_answer_verification_protocol(
+        ) -> GenerationGeneralizationAnswerVerificationProtocol:
+    """返回 readback/legal 两条独立且互异的公开 route。"""
+    return GenerationGeneralizationAnswerVerificationProtocol(
+        ProtocolKey((_NAMESPACE, 20, 1)),
+        ProtocolKey((_NAMESPACE, 20, 2)),
+        ProtocolKey((_NAMESPACE, 20, 3)),
+        ProtocolKey((_NAMESPACE, 20, 4)),
+        minimal_instruction_identity((_NAMESPACE, 21, 1)),
+        minimal_instruction_identity((_NAMESPACE, 21, 2)),
+        minimal_instruction_identity((_NAMESPACE, 21, 3)),
+        minimal_instruction_identity((_NAMESPACE, 21, 4)),
     )
 
 
@@ -348,10 +378,94 @@ def rehearse_grounded_response_act_case(
     return item, run
 
 
+def rehearse_grounded_answer_case(
+        course: GenerationGeneralizationExecutableTrainCourse,
+        requirement: str,
+        planning: GroundedResponseActPlanningBuild,
+        installation: GroundedAnswerRunLocalInstallation,
+        request: QuestionRequest,
+        *,
+        verification_protocol: (
+            GenerationGeneralizationAnswerVerificationProtocol | None) = None,
+        ) -> tuple[GenerationGeneralizationTrainRehearsalItem, QuestionAnswerRun]:
+    """运行一项单命题 ANSWER case，并形成 requirement-specific report。"""
+    if requirement not in ANSWER_REQUIREMENTS:
+        raise GenerationGeneralizationTrainRehearsalError(
+            "grounded ANSWER rehearsal requirement 不受支持")
+    if not isinstance(
+            course, GenerationGeneralizationExecutableTrainCourse):
+        raise TypeError("grounded ANSWER rehearsal course 类型错误")
+    case = course.case_for_requirement(requirement)
+    episode = course.episode_for(case)
+    if (not isinstance(planning, GroundedResponseActPlanningBuild)
+            or planning.episode != episode
+            or installation.planning != planning.planning
+            or installation.candidate
+            != planning.candidate_bindings[0].candidate
+            or case.response_act != "ANSWER"):
+        raise GenerationGeneralizationTrainRehearsalError(
+            "grounded ANSWER course/planning/installation 漂移")
+    if not isinstance(request, QuestionRequest):
+        raise TypeError("grounded ANSWER rehearsal request 类型错误")
+    run = installation.runtime.run(request)
+    lexical = GroundedAnswerLexicalAdoptionLedger(installation).adopt(run)
+    if (run.generation is None or run.postcheck is None
+            or not run.generation.complete):
+        raise GenerationGeneralizationTrainRehearsalError(
+            "grounded ANSWER rehearsal 未形成完整 actual run")
+    if requirement == "LEGAL_OBJECT_COMPOSITION":
+        selected = GroundedAnswerStructureAdoptionLedger(
+            installation).adopt(run)
+        choice = selected.choice_after
+        use = selected.use
+    else:
+        choice = lexical.choice_after
+        use = lexical.use
+    execution = run.generation
+    postcheck = run.postcheck
+    parse_request = GenerationSurfaceParseRequest.from_execution(execution)
+    protocol = verification_protocol or default_answer_verification_protocol()
+    answer_input = GenerationGeneralizationAnswerVerificationInput(
+        requirement,
+        episode,
+        planning,
+        choice,
+        use,
+        execution,
+        parse_request,
+        postcheck,
+    )
+    report = run_generation_generalization_answer_verification(
+        protocol, answer_input)
+    dimension, verifier = protocol.route(requirement)
+    result = _report_result(report, dimension, verifier)
+    verification = GenerationGeneralizationIndependentVerification(
+        requirement,
+        LosslessIntegerKey(result.claim_keys[0]),
+        result,
+    )
+    item = GenerationGeneralizationTrainRehearsalItem(
+        case,
+        episode,
+        choice,
+        use,
+        execution,
+        parse_request,
+        postcheck,
+        (postcheck.report, report),
+        verification,
+        (_NAMESPACE, 30,
+         INDEPENDENT_VERIFIER_REQUIREMENTS.index(requirement) + 1),
+    )
+    return item, run
+
+
 __all__ = [
     "GenerationGeneralizationTrainRehearsal",
     "GenerationGeneralizationTrainRehearsalError",
     "GenerationGeneralizationTrainRehearsalItem",
+    "default_answer_verification_protocol",
     "default_source_conflict_protocol",
+    "rehearse_grounded_answer_case",
     "rehearse_grounded_response_act_case",
 ]

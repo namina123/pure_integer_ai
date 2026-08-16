@@ -126,7 +126,7 @@ def _base_choice(
         candidate.proposition.template,
         condition,
         selected.structure,
-        (source,),
+        (candidate.source, source),
         competition_key,
         candidate.scope,
     )

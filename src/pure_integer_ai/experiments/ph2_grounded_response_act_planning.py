@@ -1,4 +1,4 @@
-"""把 grounded non-answer episode 编译为保留来源归因的 typed planning。"""
+"""把 grounded episode 编译为保留来源归因的 typed planning。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -370,19 +370,20 @@ def _evidence_records(
     return tuple(records)
 
 
-def compile_grounded_response_act_planning(
+def _compile_grounded_generation_planning(
         episode: GroundedAnswerEpisode,
         language_branch: ObjectIdentity,
         ) -> GroundedResponseActPlanningBuild:
-    """从 typed grounded Evidence 建立可供 CLARIFY/CONFLICT 的真实 planning。"""
+    """从 typed grounded Evidence 建立 ANSWER/CLARIFY/CONFLICT planning。"""
     if not isinstance(episode, GroundedAnswerEpisode):
         raise TypeError("response-act planning episode 类型错误")
     if episode.split != "train":
         raise GroundedResponseActPlanningError(
             "response-act planning 只接受 TRAIN episode")
-    if episode.question.answer_plan.response_act not in {"CLARIFY", "CONFLICT"}:
+    if episode.question.answer_plan.response_act not in {
+            "ANSWER", "CLARIFY", "CONFLICT"}:
         raise GroundedResponseActPlanningError(
-            "response-act planning 只接受 CLARIFY/CONFLICT")
+            "grounded planning response act 未注册")
     if (not isinstance(language_branch, ObjectIdentity)
             or language_branch.object_kind != OBJECT_LANGUAGE_BRANCH):
         raise GroundedResponseActPlanningError("language branch 非法")
@@ -468,10 +469,39 @@ def compile_grounded_response_act_planning(
     )
 
 
+def compile_grounded_response_act_planning(
+        episode: GroundedAnswerEpisode,
+        language_branch: ObjectIdentity,
+        ) -> GroundedResponseActPlanningBuild:
+    """只接受 CLARIFY/CONFLICT，并建立真实 non-answer planning。"""
+    if (not isinstance(episode, GroundedAnswerEpisode)
+            or episode.question.answer_plan.response_act
+            not in {"CLARIFY", "CONFLICT"}):
+        raise GroundedResponseActPlanningError(
+            "response-act planning 只接受 CLARIFY/CONFLICT")
+    return _compile_grounded_generation_planning(episode, language_branch)
+
+
+def compile_grounded_answer_planning(
+        episode: GroundedAnswerEpisode,
+        language_branch: ObjectIdentity,
+        ) -> GroundedResponseActPlanningBuild:
+    """只接受单命题 ANSWER episode，并建立 aggregate typed planning。"""
+    if (not isinstance(episode, GroundedAnswerEpisode)
+            or episode.question.answer_plan.response_act != "ANSWER"):
+        raise GroundedResponseActPlanningError(
+            "grounded answer planning 只接受 ANSWER")
+    if len({item.proposition_id for item in episode.question.evidence}) != 1:
+        raise GroundedResponseActPlanningError(
+            "首轮 grounded answer planning 只接受单命题 episode")
+    return _compile_grounded_generation_planning(episode, language_branch)
+
+
 __all__ = [
     "GroundedEvidenceSourceBinding",
     "GroundedResponseActCandidateBinding",
     "GroundedResponseActPlanningBuild",
     "GroundedResponseActPlanningError",
+    "compile_grounded_answer_planning",
     "compile_grounded_response_act_planning",
 ]
