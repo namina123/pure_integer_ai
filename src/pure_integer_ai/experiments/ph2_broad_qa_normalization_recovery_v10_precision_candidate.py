@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import Counter
 import hashlib
 
@@ -792,31 +793,82 @@ def _validate_candidate_v2(
     return inventories
 
 
+def _ordered_reference(
+        records: list[dict[str, object]], key_builder, *, label: str,
+        ) -> tuple[tuple[object, ...], tuple[dict[str, object], ...]]:
+    """构造独立于 dict 索引的排序键 reference，并拒绝重复键。"""
+    pairs = sorted(
+        ((key_builder(record), record) for record in records),
+        key=lambda item: item[0])
+    keys = tuple(item[0] for item in pairs)
+    if any(keys[index - 1] == keys[index] for index in range(1, len(keys))):
+        raise BroadQaExternalDataError(
+            f"v10 precision v2 {label} reference key 冲突")
+    return keys, tuple(item[1] for item in pairs)
+
+
+def _build_reference_index(
+        inventories: dict[str, list[dict[str, object]]],
+        ) -> dict[
+            str,
+            tuple[tuple[object, ...], tuple[dict[str, object], ...]],
+        ]:
+    """为 v2 reference 构造三个有序键表，避免全分母线性扫描。"""
+    return {
+        "IDENTITY_VETO": _ordered_reference(
+            inventories["identity_veto_rules"],
+            lambda item: item["input_text"], label="identity"),
+        "ORTHOGRAPHIC_WHOLE_INPUT": _ordered_reference(
+            inventories["orthographic_whole_input_rules"],
+            lambda item: item["input_text"], label="orthographic"),
+        "SOURCE_CONDITIONED_LEXICAL_ATOM": _ordered_reference(
+            inventories["source_conditioned_rules"],
+            lambda item: (
+                item["official_source_text"], item["input_text"]),
+            label="source-conditioned"),
+    }
+
+
+def _reference_lookup(
+        reference: tuple[
+            tuple[object, ...], tuple[dict[str, object], ...]],
+        key: object,
+        ) -> dict[str, object] | None:
+    """在排序键 reference 中二分查找唯一规则。"""
+    keys, records = reference
+    index = bisect_left(keys, key)
+    return records[index] if index < len(keys) and keys[index] == key else None
+
+
 def _execute_one_v2(
         candidate: dict[str, object], query_value: dict[str, object], *,
         inventories: dict[str, list[dict[str, object]]],
         index: dict[str, dict[object, dict[str, object]]] | None,
+        reference_index: dict[
+            str,
+            tuple[tuple[object, ...], tuple[dict[str, object], ...]],
+        ] | None,
         ) -> dict[str, object]:
     """执行 source-only commit，并把 identity/orthographic 保留为非提交 trace。"""
     query = _query(query_value)
     source = str(query["official_source_text"])
     input_text = str(query["input_text"])
-    if index is None:
-        identity = _reference_match(
-            inventories["identity_veto_rules"],
-            lambda item: item["input_text"] == input_text)
-        lexical = _reference_match(
-            inventories["source_conditioned_rules"],
-            lambda item: item["official_source_text"] == source
-            and item["input_text"] == input_text)
-        orthographic = _reference_match(
-            inventories["orthographic_whole_input_rules"],
-            lambda item: item["input_text"] == input_text)
-    else:
+    if index is not None and reference_index is None:
         identity = index["IDENTITY_VETO"].get(input_text)
         lexical = index["SOURCE_CONDITIONED_LEXICAL_ATOM"].get(
             (source, input_text))
         orthographic = index["ORTHOGRAPHIC_WHOLE_INPUT"].get(input_text)
+    elif reference_index is not None and index is None:
+        identity = _reference_lookup(
+            reference_index["IDENTITY_VETO"], input_text)
+        lexical = _reference_lookup(
+            reference_index["SOURCE_CONDITIONED_LEXICAL_ATOM"],
+            (source, input_text))
+        orthographic = _reference_lookup(
+            reference_index["ORTHOGRAPHIC_WHOLE_INPUT"], input_text)
+    else:
+        raise BroadQaExternalDataError(
+            "v10 precision v2 executor index 模式非法")
     if identity is not None:
         return _result(
             candidate, query, behavior="UNKNOWN",
@@ -861,7 +913,8 @@ def execute_normalization_recovery_v10_precision_candidate_v2_batch(
     inventories = _validate_candidate_v2(candidate)
     index = _build_index(inventories)
     return tuple(_execute_one_v2(
-        candidate, item, inventories=inventories, index=index)
+        candidate, item, inventories=inventories, index=index,
+        reference_index=None)
         for item in queries)
 
 
@@ -869,13 +922,45 @@ def reference_normalization_recovery_v10_precision_candidate_v2_batch(
         candidate: dict[str, object],
         queries: tuple[dict[str, object], ...],
         ) -> tuple[dict[str, object], ...]:
-    """用线性扫描批量执行 v2 独立 reference。"""
+    """用排序键二分查找批量执行 v2 独立 reference。"""
     if not isinstance(queries, tuple) or not queries:
         raise BroadQaExternalDataError("v10 precision v2 reference 为空")
     inventories = _validate_candidate_v2(candidate)
+    reference_index = _build_reference_index(inventories)
     return tuple(_execute_one_v2(
-        candidate, item, inventories=inventories, index=None)
+        candidate, item, inventories=inventories, index=None,
+        reference_index=reference_index)
         for item in queries)
+
+
+def profile_normalization_recovery_v10_precision_candidate_v2_batch(
+        candidate: dict[str, object],
+        queries: tuple[dict[str, object], ...], *,
+        indexed: bool,
+        clock_ns,
+        ) -> tuple[tuple[dict[str, object], ...], tuple[int, ...]]:
+    """保持一次候选校验，并记录每条 v2 query 的整数纳秒耗时。"""
+    if (not isinstance(queries, tuple) or not queries
+            or type(indexed) is not bool or not callable(clock_ns)):
+        raise BroadQaExternalDataError(
+            "v10 precision v2 profile batch 非法")
+    inventories = _validate_candidate_v2(candidate)
+    index = _build_index(inventories) if indexed else None
+    reference_index = (
+        None if indexed else _build_reference_index(inventories))
+    results = []
+    durations = []
+    for query in queries:
+        started = clock_ns()
+        results.append(_execute_one_v2(
+            candidate, query, inventories=inventories, index=index,
+            reference_index=reference_index))
+        elapsed = clock_ns() - started
+        if type(elapsed) is not int or elapsed < 0:
+            raise BroadQaExternalDataError(
+                "v10 precision v2 profile clock 非法")
+        durations.append(elapsed)
+    return tuple(results), tuple(durations)
 
 
 def derive_normalization_recovery_v10_precision_v2_preflight(
@@ -1119,5 +1204,6 @@ __all__ = [
     "execute_normalization_recovery_v10_precision_candidate_batch",
     "reference_normalization_recovery_v10_precision_candidate_batch",
     "execute_normalization_recovery_v10_precision_candidate_v2_batch",
+    "profile_normalization_recovery_v10_precision_candidate_v2_batch",
     "reference_normalization_recovery_v10_precision_candidate_v2_batch",
 ]

@@ -29,6 +29,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v10_precisi
     derive_normalization_recovery_v10_precision_v2_training_audit,
     execute_normalization_recovery_v10_precision_candidate_batch,
     execute_normalization_recovery_v10_precision_candidate_v2_batch,
+    profile_normalization_recovery_v10_precision_candidate_v2_batch,
     reference_normalization_recovery_v10_precision_candidate_batch,
     reference_normalization_recovery_v10_precision_candidate_v2_batch,
 )
@@ -453,6 +454,32 @@ def test_precision_v2_only_source_route_can_commit() -> None:
     )
     assert audit["outcomes"] == {
         "EXACT": 1, "UNKNOWN": 3, "WRONG": 0, "MISMATCH": 0}
+
+
+def test_precision_v2_profile_keeps_single_validation_batch_semantics() -> None:
+    """profile 的 indexed/reference 结果必须一致且只产生整数耗时。"""
+    candidate = _candidate_v2()
+    queries = (
+        _query("版本", "Version"),
+        _query("词0", "Source 0"),
+        _query("檔案", "Files"),
+        _query("未知", "Unknown"),
+    )
+
+    def clock():
+        clock.value += 10
+        return clock.value
+
+    clock.value = 0
+    indexed, indexed_durations = (
+        profile_normalization_recovery_v10_precision_candidate_v2_batch(
+            candidate, queries, indexed=True, clock_ns=clock))
+    reference, reference_durations = (
+        profile_normalization_recovery_v10_precision_candidate_v2_batch(
+            candidate, queries, indexed=False, clock_ns=clock))
+    assert indexed == reference
+    assert indexed_durations == (10, 10, 10, 10)
+    assert reference_durations == indexed_durations
 
 
 def test_precision_source_loso_rebuilds_without_held_output() -> None:
