@@ -479,10 +479,68 @@ def read_normalization_recovery_v10_five_family_audit(
     return {**stored, "manifest_sha256": _sha256(encoded)}, stored_outputs
 
 
+def read_normalization_recovery_v10_five_family_audit_aggregate(
+        audit_dir: str | Path,
+        *,
+        expected_manifest_sha256: str,
+        ) -> tuple[
+            dict[str, object], dict[str, tuple[dict[str, object], ...]]]:
+    """只按sealed commitments回读audit aggregate，不重开五份来源。"""
+    root = Path(audit_dir).resolve()
+    path = root / "manifest.json"
+    try:
+        encoded = path.read_bytes()
+        stored = json.loads(encoded)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BroadQaExternalDataError(
+            "v10 five-family aggregate manifest 不可读") from error
+    if (_sha256(encoded) != expected_manifest_sha256
+            or not isinstance(stored, dict)
+            or canonical_json_line(stored) != encoded
+            or stored.get("artifact_kind") != V10_FIVE_FAMILY_AUDIT_KIND):
+        raise BroadQaExternalDataError(
+            "v10 five-family aggregate manifest identity 漂移")
+    files = {
+        str(item.get("relative_path")): item
+        for item in stored.get("files", []) if isinstance(item, dict)
+    }
+    expected_names = {name for name, _role in _OUTPUT_FILES}
+    try:
+        physical = tuple(root.iterdir())
+    except OSError as error:
+        raise BroadQaExternalDataError(
+            "v10 five-family aggregate inventory 不可读") from error
+    if ({item.name for item in physical} != {"manifest.json", *expected_names}
+            or any(item.is_dir() for item in physical)
+            or set(files) != expected_names):
+        raise BroadQaExternalDataError(
+            "v10 five-family aggregate inventory 漂移")
+    outputs = {}
+    for name, role in _OUTPUT_FILES:
+        values = _read_jsonl(root / name, label=role)
+        if files[name] != _artifact(
+                root / name, role=role, count=len(values)):
+            raise BroadQaExternalDataError(
+                "v10 five-family aggregate file identity 漂移")
+        outputs[name] = values
+    census = outputs["audit-census.jsonl"]
+    if (len(outputs["family-census.jsonl"]) != 5
+            or len(outputs["pairwise-overlap.jsonl"]) != 10
+            or len(census) != 1
+            or stored.get("summary") != {
+                key: value for key, value in census[0].items()
+                if key not in {"format_version", "record_kind"}
+            }):
+        raise BroadQaExternalDataError(
+            "v10 five-family aggregate census 漂移")
+    return {**stored, "manifest_sha256": _sha256(encoded)}, outputs
+
+
 __all__ = [
     "V10_FIVE_FAMILY_AUDIT_KIND",
     "V10_FIVE_FAMILY_AUDIT_PASS_STATUS",
     "V10_FIVE_FAMILY_AUDIT_REJECTED_STATUS",
     "publish_normalization_recovery_v10_five_family_audit",
     "read_normalization_recovery_v10_five_family_audit",
+    "read_normalization_recovery_v10_five_family_audit_aggregate",
 ]

@@ -13,6 +13,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_external_data import (
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v10_source_expansion_five_family_audit import (
     publish_normalization_recovery_v10_five_family_audit,
     read_normalization_recovery_v10_five_family_audit,
+    read_normalization_recovery_v10_five_family_audit_aggregate,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_normalization_recovery_v10_source_expansion_five_family_audit_records import (
     V10_FIVE_FAMILY_AUDIT_FAMILIES,
@@ -173,6 +174,13 @@ def test_v10_five_family_audit_round_trip_collision_and_tamper(
     assert len(outputs["family-census.jsonl"]) == 5
     assert len(outputs["pairwise-overlap.jsonl"]) == 10
     assert len(outputs["source-input-collisions.jsonl"]) == 1
+    aggregate, aggregate_outputs = (
+        read_normalization_recovery_v10_five_family_audit_aggregate(
+            target,
+            expected_manifest_sha256=str(published["manifest_sha256"]),
+        ))
+    assert aggregate == manifest
+    assert aggregate_outputs == outputs
     with pytest.raises(BroadQaExternalDataError, match="input/target path"):
         _publish(tmp_path, inputs, target)
 
