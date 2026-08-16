@@ -167,7 +167,7 @@ def build_grounded_response_act_lexical_choice(
         variant.template.stance,
         choice_condition,
         variant.template.sentence,
-        (forming_source,),
+        (goal.source, forming_source),
         competition_key,
         goal.scope,
     )

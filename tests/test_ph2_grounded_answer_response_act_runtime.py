@@ -56,10 +56,27 @@ from pure_integer_ai.experiments.ph2_grounded_answer_response_act_runtime_factor
     GroundedResponseActRunLocalComponents,
     GroundedResponseActRunLocalFactory,
 )
+from pure_integer_ai.experiments.ph2_generation_generalization_executable_train_course import (
+    read_generation_generalization_executable_train_course,
+)
+from pure_integer_ai.experiments.ph2_generation_generalization_executable_train_rehearsal import (
+    GenerationGeneralizationTrainRehearsal,
+    default_source_conflict_protocol,
+    rehearse_grounded_response_act_case,
+)
+from pure_integer_ai.experiments.ph2_generation_generalization_source_conflict import (
+    GenerationGeneralizationSourceConflictInput,
+    run_generation_generalization_source_conflict_verification,
+)
+from pure_integer_ai.experiments.ph2_grounded_response_act_planning import (
+    compile_grounded_response_act_planning,
+)
 from pure_integer_ai.experiments.question_answer_runtime import (
     QuestionAnswerProtocol,
 )
 from pure_integer_ai.experiments.verification_orchestration import (
+    APPLICABILITY_NOT_APPLICABLE,
+    VERDICT_REFUTE,
     VERDICT_SUPPORT,
 )
 from pure_integer_ai.storage.backend import DictBackend
@@ -76,6 +93,8 @@ from tests.test_s07_structure_order import _graphs
 
 _BASE = 20963
 _SAMPLE = Path("data/ph2/grounded_answer_train_v1.jsonl.sample")
+_CASE_SAMPLE = Path(
+    "data/ph2/generation_generalization_executable_train_case_v1.jsonl.sample")
 
 
 class _AliasFactory:
@@ -251,3 +270,173 @@ def test_clarify_runs_as_learned_response_act_with_selected_candidates():
         if alias_factory.fixture is not None:
             alias_factory.fixture.close()
         backend.close()
+
+
+def _rehearse_response_act(requirement, response_act, offset):
+    """用 catalog episode、aggregate planning 和真实 runtime 运行一项 rehearsal。"""
+    course = read_generation_generalization_executable_train_course(
+        _CASE_SAMPLE, _SAMPLE)
+    case = course.case_for_requirement(requirement)
+    episode = course.episode_for(case)
+    model, _report = learn_grounded_answer_surface_model(
+        compile_grounded_answer_training_records(_SAMPLE))
+    branch = language_branch_identity((_BASE, 100, offset))
+    planning_build = compile_grounded_response_act_planning(episode, branch)
+    planning = planning_build.planning
+    content_protocol = AnswerContentProtocol(*tuple(
+        minimal_instruction_identity((_BASE, 101 + offset, index))
+        for index in range(1, 6)
+    ))
+    policy_protocol = EvidenceAnswerPolicyProtocol(*tuple(
+        minimal_instruction_identity((_BASE, 111 + offset, index))
+        for index in range(1, 5)
+    ))
+    selector = AnswerContentSelector(
+        content_protocol,
+        EvidenceAnswerPolicy(content_protocol, policy_protocol),
+    )
+    stance = getattr(content_protocol, response_act.lower())
+    target = GroundedResponseActCompileTarget(
+        response_act,
+        stance,
+        branch,
+        (_BASE, 120, offset),
+    )
+    compilation = compile_grounded_response_act_patterns(model, target)
+    selected_pattern = compilation.variants[0]
+    backend = DictBackend()
+    alias_factory = _AliasFactory(branch)
+    try:
+        graphs = _graphs(backend)
+        renderer_identity = minimal_instruction_identity(
+            (_BASE, 121, offset))
+        renderer = UnicodeRepresentationRenderer(
+            target.representation_family, renderer_identity)
+        components = GroundedResponseActRunLocalComponents(
+            selector,
+            _plan_protocol(_BASE + 130 + offset),
+            GenerationStructureLayerProtocol(*tuple(
+                minimal_instruction_identity(
+                    (_BASE, 140 + offset, index))
+                for index in range(1, 4)
+            )),
+            _surface_protocol(_BASE + 150 + offset),
+            alias_factory,
+            renderer,
+            renderer_identity,
+            _postcheck_protocol(),
+            GroundedResponseActStructureVerifier(
+                minimal_instruction_identity((_BASE, 160 + offset, 1)),
+                minimal_instruction_identity((_BASE, 160 + offset, 2)),
+            ),
+            _StaticVerifier(VERDICT_SUPPORT, 20 + offset),
+            GroundedResponseActTaskVerifier(
+                minimal_instruction_identity((_BASE, 170 + offset, 1)),
+                minimal_instruction_identity((_BASE, 170 + offset, 2)),
+            ),
+            QuestionAnswerProtocol(*tuple(
+                minimal_instruction_identity(
+                    (_BASE, 180 + offset, index))
+                for index in range(1, 4)
+            )),
+        )
+        query_kind = minimal_instruction_identity((_BASE, 190 + offset, 1))
+        route = minimal_instruction_identity((_BASE, 190 + offset, 2))
+        installation = GroundedResponseActRunLocalFactory(
+            graphs.lifecycle, components).build(
+                GroundedResponseActRunLocalBuild(
+                    model,
+                    episode.question,
+                    target,
+                    planning,
+                    selected_pattern.pattern_id,
+                    GroundedResponseActParserProtocol(*tuple(
+                        minimal_instruction_identity(
+                            (_BASE, 200 + offset, index))
+                        for index in range(1, 4)
+                    )),
+                    query_kind,
+                    route,
+                    minimal_instruction_identity(
+                        (_BASE, 210 + offset, 1)),
+                    (_BASE, 210 + offset, 2),
+                ))
+        request = QuestionRequest(
+            query_kind,
+            minimal_instruction_identity((_BASE, 220 + offset, 1)),
+            planning.goal.goal_kind,
+            planning.goal.proposition,
+            planning.goal.required,
+            planning.goal.scope,
+            planning.goal.scope,
+            (_BASE, 220 + offset, 2),
+            branch,
+            tuple(item.proposition for item in planning.candidates),
+        )
+        item, run = rehearse_grounded_response_act_case(
+            course, requirement, planning_build, installation, request)
+        return course, planning_build, item, run
+    finally:
+        if alias_factory.fixture is not None:
+            alias_factory.fixture.close()
+        backend.close()
+
+
+def test_response_act_catalog_rehearses_task_and_cross_source_conflict():
+    """CLARIFY 与真实跨来源 CONFLICT 各形成独立 actual requirement 结果。"""
+    course, clarify_planning, clarify, clarify_run = _rehearse_response_act(
+        "COMMUNICATIVE_TASK", "CLARIFY", 1)
+    same_course, conflict_planning, conflict, conflict_run = (
+        _rehearse_response_act(
+            "SOURCE_UNCERTAINTY_CITATION", "CONFLICT", 2))
+    assert same_course == course
+
+    partial = GenerationGeneralizationTrainRehearsal(
+        course, (clarify, conflict))
+    assert clarify.passed == 1
+    assert conflict.passed == 1
+    assert partial.complete == 0
+    assert clarify.verification.result.dimension == (
+        clarify_run.postcheck.protocol.task_dimension)
+    assert conflict.verification.result.dimension != (
+        conflict_run.postcheck.protocol.source_dimension)
+    g04_source = next(
+        item for item in conflict_run.postcheck.report.results
+        if item.dimension == conflict_run.postcheck.protocol.source_dimension)
+    assert g04_source.applicability == APPLICABILITY_NOT_APPLICABLE
+    assert len(conflict_planning.source_bindings) == 2
+    candidate = conflict_planning.candidate_bindings[0].candidate
+    assert candidate.state.support and candidate.state.refute
+    assert len({
+        item.hypothesis.observation for item in candidate.evidence}) == 2
+    assert conflict_planning.aggregate_source in conflict.choice.forming_sources
+    assert clarify_planning.aggregate_source in clarify.choice.forming_sources
+    assert conflict.verification.input_key.components == (
+        conflict.verification.result.claim_keys[0])
+
+    observation = conflict.postcheck.parsed.observation
+    assert observation is not None
+    biased_postcheck = replace(
+        conflict.postcheck,
+        parsed=replace(
+            conflict.postcheck.parsed,
+            observation=replace(
+                observation,
+                cited_sources=(conflict_planning.source_bindings[0].source,),
+            ),
+        ),
+    )
+    protocol = default_source_conflict_protocol()
+    biased_report = run_generation_generalization_source_conflict_verification(
+        protocol,
+        GenerationGeneralizationSourceConflictInput(
+            conflict.source_episode,
+            conflict_planning,
+            conflict.choice,
+            conflict.use,
+            conflict.execution,
+            conflict.parse_request,
+            biased_postcheck,
+        ),
+    )
+    assert biased_report.results[0].verdict == VERDICT_REFUTE
