@@ -63,14 +63,17 @@ FAMILY_GUARD_NAME = "guard.available.json"
 FORMAL_PUBLICATION_PATHS = (
     "run.intent.json",
     "run.outcome.json",
+    "predictions.seal.json",
     "publication/aggregate.json",
+    "publication/decision.json",
     "publication/runtime_receipt.json",
     "publication/failure_seal.json",
 )
 FORMAL_EXECUTION_ORDER = (
-    "VERIFY_FAMILY_AND_AVAILABLE_GUARD",
-    "READ_LABEL_FREE_OBSERVATIONS",
+    "VERIFY_FAMILY_AND_LABEL_FREE_INVENTORY",
+    "VERIFY_AVAILABLE_GUARD",
     "CONSUME_UNIQUE_GUARD_AND_PUBLISH_INTENT",
+    "MATERIALIZE_LABEL_FREE_OBSERVATIONS",
     "RUN_SHARED_E05D_RUNNER_WITHOUT_LABELS",
     "SEAL_PREDICTIONS_AND_RUNTIME_AUDIT",
     "READ_PRIVATE_LABELS",
@@ -180,6 +183,37 @@ class GenerationGeneralizationPublicDryRunReceipt:
             "teacher_call_count": self.teacher_call_count,
         }
 
+    @classmethod
+    def from_dict(
+            cls, value: object,
+            ) -> "GenerationGeneralizationPublicDryRunReceipt":
+        """从精确 canonical object 恢复 public dry-run receipt。"""
+        if (not isinstance(value, dict) or set(value) != {
+                "artifact_kind", "batch_sha256", "candidate_payload_sha256",
+                "code_identity_sha256", "format_version",
+                "host_learning_write_count", "label_read_count",
+                "observation_inventory_sha256", "policy_sha256",
+                "run_count", "status", "teacher_call_count",
+                }):
+            raise GenerationGeneralizationEvaluationFamilyError(
+                "GG-03 public dry-run receipt 字段漂移")
+        if (value["artifact_kind"] != PUBLIC_DRY_RUN_ARTIFACT_KIND
+                or value["format_version"] != 1):
+            raise GenerationGeneralizationEvaluationFamilyError(
+                "GG-03 public dry-run receipt kind/version 漂移")
+        return cls(
+            str(value["candidate_payload_sha256"]),
+            str(value["code_identity_sha256"]),
+            str(value["policy_sha256"]),
+            str(value["batch_sha256"]),
+            str(value["observation_inventory_sha256"]),
+            value["run_count"],
+            str(value["status"]),
+            value["teacher_call_count"],
+            value["label_read_count"],
+            value["host_learning_write_count"],
+        )
+
 
 def build_generation_generalization_public_dry_run_receipt(
         host_ctx: TrainContext,
@@ -237,6 +271,14 @@ def publish_generation_generalization_public_dry_run_receipt(
         **receipt.to_dict(),
         "receipt_sha256": generation_generalization_sha256_file(target),
     }
+
+
+def read_generation_generalization_public_dry_run_receipt(
+        path: str | Path,
+        ) -> GenerationGeneralizationPublicDryRunReceipt:
+    """严格回读 K 盘 public dry-run receipt。"""
+    return GenerationGeneralizationPublicDryRunReceipt.from_dict(
+        read_canonical_object(path))
 
 
 def _threshold_contract() -> dict[str, object]:
@@ -556,6 +598,7 @@ __all__ = [
     "publish_generation_generalization_evaluation_family_freeze",
     "publish_generation_generalization_public_dry_run_receipt",
     "read_generation_generalization_evaluation_family_freeze",
+    "read_generation_generalization_public_dry_run_receipt",
     "read_generation_generalization_private_label_owner_receipt",
     "require_generation_generalization_k_run_root",
     "scan_generation_generalization_observation_inventory",

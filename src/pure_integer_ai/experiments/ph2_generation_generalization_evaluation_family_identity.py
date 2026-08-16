@@ -31,6 +31,7 @@ PRIVATE_OWNER_ARTIFACT_KIND = "PH2_GG03_PRIVATE_LABEL_OWNER_RECEIPT_V1"
 _CODE_ROOT_MODULES = (
     "pure_integer_ai.experiments.ph2_generation_generalization_evaluation_family",
     "pure_integer_ai.experiments.ph2_generation_generalization_evaluation_runner",
+    "pure_integer_ai.experiments.ph2_generation_generalization_formal_runner",
 )
 _OWNER_FIELDS = {
     "artifact_kind", "format_version", "label_commitment_sha256",

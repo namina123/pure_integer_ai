@@ -138,7 +138,22 @@ def consume_evaluation_family_guard(
         manifest: EvaluationKernelManifest,
         ) -> EvaluationRunIntent:
     """Consume AVAILABLE before any decompressed private record is requested."""
+    if not isinstance(manifest, EvaluationKernelManifest):
+        raise EvaluationKernelContractError("evaluation guard manifest type invalid")
+    return consume_evaluation_guard_once(
+        family_root, build_available_guard(manifest))
+
+
+def consume_evaluation_guard_once(
+        family_root: str | Path,
+        expected_available: EvaluationOneShotGuard,
+        ) -> EvaluationRunIntent:
+    """按共享 guard identity 原子占用任意 family 的唯一 formal run。"""
     root = _existing_family_root(family_root)
+    if (not isinstance(expected_available, EvaluationOneShotGuard)
+            or expected_available.state != "AVAILABLE"):
+        raise EvaluationKernelContractError(
+            "evaluation expected available guard invalid")
     available_path = root / EVALUATION_GUARD_AVAILABLE
     consumed_path = root / EVALUATION_GUARD_CONSUMED
     intent_path = root / EVALUATION_RUN_INTENT
@@ -146,12 +161,12 @@ def consume_evaluation_family_guard(
             or intent_path.exists()):
         raise EvaluationKernelContractError("evaluation family guard already consumed")
     available = _guard_at(root, EVALUATION_GUARD_AVAILABLE)
-    if available != build_available_guard(manifest):
+    if available != expected_available:
         raise EvaluationKernelContractError("evaluation available guard identity drifted")
     consumed, intent = consume_guard(available)
     write_immutable_json(consumed.to_dict(), consumed_path)
-    available_path.unlink()
     write_immutable_json(intent.to_dict(), intent_path)
+    available_path.unlink()
     if _guard_at(root, EVALUATION_GUARD_CONSUMED) != consumed:
         raise EvaluationKernelContractError("evaluation consumed guard readback drifted")
     if read_canonical_object(intent_path) != intent.to_dict():
@@ -164,11 +179,27 @@ def verify_evaluation_family_consumed(
         manifest: EvaluationKernelManifest,
         ) -> EvaluationRunIntent:
     """Fail closed unless consumed guard and intent form one exact lineage."""
+    if not isinstance(manifest, EvaluationKernelManifest):
+        raise EvaluationKernelContractError("evaluation guard manifest type invalid")
+    return verify_evaluation_guard_consumed(
+        family_root, build_available_guard(manifest))
+
+
+def verify_evaluation_guard_consumed(
+        family_root: str | Path,
+        expected_available: EvaluationOneShotGuard,
+        ) -> EvaluationRunIntent:
+    """回验任意 family 的 consumed guard 与 immutable intent 唯一 lineage。"""
     root = _existing_family_root(family_root)
+    if (not isinstance(expected_available, EvaluationOneShotGuard)
+            or expected_available.state != "AVAILABLE"):
+        raise EvaluationKernelContractError(
+            "evaluation expected available guard invalid")
     if (root / EVALUATION_GUARD_AVAILABLE).exists():
         raise EvaluationKernelContractError("evaluation available guard still exists")
     consumed = _guard_at(root, EVALUATION_GUARD_CONSUMED)
-    if consumed.state != "CONSUMED" or consumed.manifest_sha256 != manifest.sha256():
+    expected_consumed, expected_intent = consume_guard(expected_available)
+    if consumed != expected_consumed:
         raise EvaluationKernelContractError("evaluation consumed guard drifted")
     raw = read_canonical_object(root / EVALUATION_RUN_INTENT)
     intent = EvaluationRunIntent(
@@ -178,8 +209,8 @@ def verify_evaluation_family_consumed(
         raw.get("run_id", 0),
         str(raw.get("state", "")),
     )
-    if (intent.to_dict() != raw or intent.consumed_guard_sha256 != consumed.sha256()
-            or intent.family_commitment != manifest.family_commitment):
+    if (intent.to_dict() != raw or intent != expected_intent
+            or intent.consumed_guard_sha256 != consumed.sha256()):
         raise EvaluationKernelContractError("evaluation consumed lineage drifted")
     return intent
 
@@ -367,10 +398,12 @@ __all__ = [
     "EvaluationFamilyPublication",
     "EvaluationRecordLoader",
     "consume_evaluation_family_guard",
+    "consume_evaluation_guard_once",
     "preflight_evaluation_family",
     "publish_evaluation_family_formal_ready",
     "publish_evaluation_family",
     "read_evaluation_family_manifest",
     "run_evaluation_family_once",
     "verify_evaluation_family_consumed",
+    "verify_evaluation_guard_consumed",
 ]
