@@ -272,6 +272,8 @@ class GroundedAnswerRunLocalInstallation:
 
     compilation: GroundedAnswerConnectorCompilation
     variant: GroundedAnswerConnectorVariant
+    planning: GenerationPlanningRequest
+    candidate: GenerationCandidate
     connector: LanguageGenerationConnector
     alias: AliasRelationRuntime
     order: GroundedAnswerOrderInstallation
@@ -291,6 +293,19 @@ class GroundedAnswerRunLocalInstallation:
                 self.variant.option.pattern_id) != self.variant:
             raise GroundedAnswerRunLocalFactoryError(
                 "grounded installation variant 不属于 compilation")
+        if not isinstance(self.planning, GenerationPlanningRequest):
+            raise TypeError("grounded installation planning 类型错误")
+        if not isinstance(self.candidate, GenerationCandidate):
+            raise TypeError("grounded installation candidate 类型错误")
+        if (self.planning.candidates != (self.candidate,)
+                or self.candidate.proposition.structure
+                != self.variant.template.proposition_structure
+                or self.candidate.proposition.predicate
+                != self.variant.template.predicate
+                or self.planning.goal.target_branch
+                != self.variant.template.language_branch):
+            raise GroundedAnswerRunLocalFactoryError(
+                "grounded installation 冻结 planning/candidate 与 variant 漂移")
         if not isinstance(self.connector, LanguageGenerationConnector):
             raise TypeError("grounded installation connector 类型错误")
         if self.connector.registry.templates != (self.variant.template,):
@@ -503,6 +518,8 @@ class GroundedAnswerRunLocalFactory:
         return GroundedAnswerRunLocalInstallation(
             compilation,
             variant,
+            request.planning,
+            request.candidate,
             connector,
             alias,
             order,

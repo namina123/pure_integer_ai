@@ -1,6 +1,8 @@
 """grounded-answer pattern 经真实 connector、executor 与 G-04 的专项。"""
 from __future__ import annotations
 
+import pytest
+
 from pure_integer_ai.cognition.shared.generation_structure_plan import (
     GenerationStructureLayerProtocol,
 )
@@ -19,6 +21,10 @@ from pure_integer_ai.experiments.question_answer_runtime import (
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_connector import (
     GroundedAnswerConnectorTarget,
+)
+from pure_integer_ai.experiments.ph2_grounded_answer_choice_use import (
+    GroundedAnswerLexicalAdoptionLedger,
+    GroundedAnswerLexicalUseError,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_parser import (
     GroundedAnswerParserProtocol,
@@ -154,6 +160,8 @@ def test_grounded_variant_runs_through_typed_executor_parser_and_g04():
         )
 
         run = installation.runtime.run(request)
+        ledger = GroundedAnswerLexicalAdoptionLedger(installation)
+        lexical_use = ledger.adopt(run)
 
         assert run.complete
         assert run.generation is not None
@@ -166,6 +174,18 @@ def test_grounded_variant_runs_through_typed_executor_parser_and_g04():
         assert installation.lexical_choice.selected_object == (
             installation.variant.template.connector)
         assert installation.lexical_choice.exact_uses == ()
+        assert lexical_use.run == run
+        assert lexical_use.adoptions == run.generation.surface.adoptions
+        assert lexical_use.use.scope == candidate.scope
+        assert lexical_use.use.selection_key.components != (
+            selected_pattern.pattern_id,)
+        assert lexical_use.choice_after.exact_uses == (lexical_use.use,)
+        assert lexical_use.choice_after.typed_outcomes == ()
+        assert ledger.records == (lexical_use,)
+        with pytest.raises(
+                GroundedAnswerLexicalUseError,
+                match="不得重复登记"):
+            ledger.adopt(run)
         assert installation.alias is alias_factory.fixture.runtime
         assert installation.order.evidence_count == (
             len(installation.variant.order_requirements)
