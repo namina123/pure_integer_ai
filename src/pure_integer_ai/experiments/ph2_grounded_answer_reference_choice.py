@@ -22,6 +22,9 @@ from pure_integer_ai.experiments.ph2_generation_choice_contract import (
     GenerationChoiceCondition,
     GenerationChoiceHypothesis,
 )
+from pure_integer_ai.experiments.ph2_generation_choice_assessment_selector import (
+    GenerationChoiceAssessmentSelection,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_course import (
     REFERENCE_STRATEGIES,
 )
@@ -513,10 +516,53 @@ def build_grounded_answer_reference_selection(
     )
 
 
+def apply_grounded_answer_reference_assessment_selection(
+        selections: tuple[GroundedAnswerReferenceSelection, ...],
+        assessment: GenerationChoiceAssessmentSelection,
+        ) -> GroundedAnswerReferenceSelection:
+    """把通用 assessment 选择映回同一有限 reference competition。"""
+    if (not isinstance(selections, tuple)
+            or len(selections) != len(REFERENCE_STRATEGIES)
+            or any(not isinstance(item, GroundedAnswerReferenceSelection)
+                   for item in selections)):
+        raise GroundedAnswerReferenceChoiceError(
+            "reference assessment adapter 必须接收完整 strategy selections")
+    if not isinstance(assessment, GenerationChoiceAssessmentSelection):
+        raise TypeError("reference assessment selection 类型错误")
+    by_strategy = {item.selected.strategy: item for item in selections}
+    if (len(by_strategy) != len(REFERENCE_STRATEGIES)
+            or set(by_strategy) != set(REFERENCE_STRATEGIES)):
+        raise GroundedAnswerReferenceChoiceError(
+            "reference assessment selections 未覆盖冻结策略")
+    ordered = tuple(by_strategy[item] for item in REFERENCE_STRATEGIES)
+    base = ordered[0]
+    if any(
+            item.options != base.options
+            or item.antecedent_candidates != base.antecedent_candidates
+            or item.referring_candidate != base.referring_candidate
+            or item.structure_selection != base.structure_selection
+            or item.lexical_selection != base.lexical_selection
+            or item.source != base.source
+            or item.scope != base.scope
+            or item.context != base.context
+            or item.choice.condition != base.choice.condition
+            or item.choice.competition_key != base.choice.competition_key
+            for item in ordered[1:]):
+        raise GroundedAnswerReferenceChoiceError(
+            "reference assessment selections 不属于同一 competition")
+    choices = tuple(item.choice for item in ordered)
+    if assessment.options != choices:
+        raise GroundedAnswerReferenceChoiceError(
+            "reference assessment option 分母或顺序漂移")
+    return next(
+        item for item in ordered if item.choice == assessment.selected)
+
+
 __all__ = [
     "GroundedAnswerReferenceChoiceError",
     "GroundedAnswerReferenceLayerSelection",
     "GroundedAnswerReferenceSelection",
     "GroundedAnswerReferenceStrategy",
+    "apply_grounded_answer_reference_assessment_selection",
     "build_grounded_answer_reference_selection",
 ]

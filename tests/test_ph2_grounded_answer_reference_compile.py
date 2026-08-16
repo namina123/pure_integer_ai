@@ -51,6 +51,7 @@ from pure_integer_ai.experiments.ph2_grounded_answer_reference_runtime_factory i
     GroundedAnswerReferenceRunLocalFactory,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_reference_choice import (
+    apply_grounded_answer_reference_assessment_selection,
     build_grounded_answer_reference_selection,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_reference_episode_use import (
@@ -66,7 +67,12 @@ from pure_integer_ai.experiments.ph2_generation_choice_assessment_consumer impor
     assessment_input_stance,
 )
 from pure_integer_ai.experiments.ph2_generation_choice_contract import (
+    CHOICE_KINDS,
     GenerationChoiceCandidateMapper,
+)
+from pure_integer_ai.experiments.ph2_generation_choice_assessment_selector import (
+    GenerationChoiceAssessmentSelectorPolicy,
+    select_generation_choice_by_assessment,
 )
 from pure_integer_ai.experiments.ph2_generation_choice_outcome_bridge import (
     build_assessment_inputs,
@@ -185,6 +191,69 @@ def _reference_selection(selected_strategy="ANTECEDENT_REFERENCE"):
         (_BASE, 4, REFERENCE_STRATEGIES.index(selected_strategy) + 1),
     )
     return episode, planning, branch, selection
+
+
+def _reference_assessment_runtime(namespace):
+    """仅启用 discourse-reference 层的 H-05 assessment owner。"""
+    backend = DictBackend()
+    context = make_train_context(backend)
+    aggregate = SourceRef(
+        namespace, 1, 0, GLOBAL_OWNER_SCOPE, VersionBundle())
+    evidence_protocol = EvidenceCandidateProtocol(
+        (namespace, 2),
+        (namespace, 3),
+        aggregate,
+        document_scope(aggregate),
+        1,
+    )
+    history_protocol = TrainingHypothesisHistoryProtocol(
+        (namespace, 7),
+        evidence_protocol.hypothesis_kind_key,
+        evidence_protocol.aggregate_source,
+        evidence_protocol.aggregate_scope,
+    )
+    assert context.training_candidate_history is not None
+    history_sink = TrainingHypothesisEventSink(
+        context.training_candidate_history, history_protocol)
+    learning = CandidateLearningRuntime(
+        EvidenceCandidateEngine(
+            evidence_protocol,
+            ledger=HypothesisLedger(history_sink),
+        ),
+        CandidateProjectionGraph(
+            context.graph_ontology, _projection_protocol()),
+        _verifier(),
+        CandidateProjectionMetadata(SOURCE_BARE_TEXT, EPI_STRUCTURED),
+    )
+    mapper = GenerationChoiceCandidateMapper(_candidate_protocol(namespace))
+    verifier_source = SourceRef(
+        namespace, 4, 0, GLOBAL_OWNER_SCOPE, VersionBundle())
+    consumer = GenerationChoiceAssessmentConsumer(
+        mapper,
+        learning,
+        GenerationChoiceAssessmentConsumerPolicy(
+            verifier_source,
+            (namespace, 5),
+            tuple(
+                item for item in CHOICE_KINDS
+                if item != "DISCOURSE_REFERENCE_CHOICE"),
+        ),
+    )
+    return backend, mapper, learning, consumer
+
+
+def _with_reference_verdict(report, verdict):
+    """只改写 READY discourse-reference outcome 的测试 verdict。"""
+    return replace(
+        report,
+        outcomes=tuple(
+            replace(item, verdict=verdict)
+            if (item.choice_kind == "DISCOURSE_REFERENCE_CHOICE"
+                and item.assessment_ready)
+            else item
+            for item in report.outcomes
+        ),
+    )
 
 
 def test_reference_course_compiles_to_two_sentences_and_one_anaphora():
@@ -317,10 +386,13 @@ def test_reference_compilation_runs_two_sentences_through_g04():
         backend.close()
 
 
-def _run_reference_strategy(selected_strategy):
+def _run_reference_strategy(selected_strategy, prepared=None):
     """运行一个 selected strategy 并返回 actual reference exact Use。"""
-    _episode, planning, branch, reference_selection = _reference_selection(
-        selected_strategy)
+    if prepared is None:
+        prepared = _reference_selection(selected_strategy)
+    _episode, planning, branch, reference_selection = prepared
+    if reference_selection.selected.strategy != selected_strategy:
+        raise ValueError("prepared reference strategy 与请求漂移")
     compilation = reference_selection.compilation
     selection, selector, _content_protocol = _selection(planning)
     backend = DictBackend()
@@ -450,6 +522,106 @@ def test_reference_strategies_form_distinct_actual_uses():
             and item.verifier == explicit_route.verifier))
     assert explicit_unique.applicability == APPLICABILITY_NOT_APPLICABLE
     assert explicit_unique.claim_keys == ()
+
+
+def test_reference_assessment_selector_changes_next_actual_use():
+    """唯一 active assessment 在 syntax 前替换 baseline 并改变实际 Use。"""
+    antecedent_prepared = _reference_selection("ANTECEDENT_REFERENCE")
+    antecedent_selection = antecedent_prepared[3]
+    explicit_selection = build_grounded_answer_reference_selection(
+        tuple(item.compilation for item in antecedent_selection.options),
+        "EXPLICIT_REPETITION",
+        (_BASE, 4, 2),
+    )
+    explicit_prepared = (*antecedent_prepared[:3], explicit_selection)
+    antecedent = _run_reference_strategy(
+        "ANTECEDENT_REFERENCE", antecedent_prepared)
+    explicit = _run_reference_strategy(
+        "EXPLICIT_REPETITION", explicit_prepared)
+    reference_selections = (antecedent[0], explicit[0])
+    choices = tuple(item.choice for item in reference_selections)
+    baseline = antecedent[0].choice
+
+    backend, mapper, learning, consumer = _reference_assessment_runtime(
+        _BASE + 60)
+    try:
+        refuted = consumer.apply(_with_reference_verdict(
+            antecedent[4].outcome, VERDICT_REFUTE))
+        supported = consumer.apply(explicit[4].outcome)
+
+        assert len(refuted.records) == 1
+        assert refuted.refute_records == 1
+        assert len(supported.records) == 1
+        assert supported.support_records == 1
+        assessment = select_generation_choice_by_assessment(
+            mapper,
+            learning,
+            GenerationChoiceAssessmentSelectorPolicy((_BASE + 60, 8)),
+            choices,
+            baseline,
+        )
+        assert assessment.reason == "UNIQUE_ACTIVE_ASSESSMENT"
+        assert assessment.ne == 0
+        assert tuple(
+            item.state for item in assessment.candidate_projections
+        ) == ("REGISTERED_INACTIVE", "ACTIVE")
+        selected = apply_grounded_answer_reference_assessment_selection(
+            reference_selections, assessment)
+        assert selected is explicit[0]
+        next_run = _run_reference_strategy(
+            "EXPLICIT_REPETITION",
+            (*explicit_prepared[:3], selected),
+        )
+        assert next_run[0] is selected
+        assert next_run[1].reference.choice_before == selected.choice
+        assert next_run[1].reference.use.use_key != (
+            antecedent[1].reference.use.use_key)
+        assert next_run[2] == (
+            "北川站东门于2024年启用。北川站东门的启用事项已登记入档。")
+    finally:
+        backend.close()
+
+    fallback_backend, fallback_mapper, fallback_learning, fallback_consumer = (
+        _reference_assessment_runtime(_BASE + 70))
+    try:
+        fallback_consumer.apply(antecedent[4].outcome)
+        fallback_consumer.apply(explicit[4].outcome)
+        multiple = select_generation_choice_by_assessment(
+            fallback_mapper,
+            fallback_learning,
+            GenerationChoiceAssessmentSelectorPolicy((_BASE + 70, 8)),
+            choices,
+            baseline,
+        )
+        assert multiple.reason == "MULTIPLE_ACTIVE_BASELINE_NE"
+        assert multiple.ne == 1
+        assert multiple.selected is baseline
+        assert sum(
+            item.active for item in multiple.candidate_projections) == 2
+        assert apply_grounded_answer_reference_assessment_selection(
+            reference_selections, multiple) is antecedent[0]
+
+        before_backend = fallback_backend.snapshot()
+        before_learning = fallback_learning.state_key()
+        disabled = select_generation_choice_by_assessment(
+            fallback_mapper,
+            fallback_learning,
+            GenerationChoiceAssessmentSelectorPolicy(
+                (_BASE + 70, 9),
+                ("DISCOURSE_REFERENCE_CHOICE",),
+            ),
+            choices,
+            baseline,
+        )
+        assert disabled.reason == "DISABLED_BASELINE"
+        assert disabled.selected is baseline
+        assert all(
+            item.state == "NOT_READ_DISABLED"
+            for item in disabled.candidate_projections)
+        assert fallback_backend.snapshot() == before_backend
+        assert fallback_learning.state_key() == before_learning
+    finally:
+        fallback_backend.close()
 
 
 def test_reference_gg02_outcome_updates_h05_and_restores_without_writes():
