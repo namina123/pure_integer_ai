@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import traceback
 
 from pure_integer_ai.experiments.ph2_d03_contract_core import (
     canonical_json_bytes,
@@ -36,6 +37,7 @@ from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_observ
     read_generation_generalization_evaluation_observations,
 )
 from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_runner import (
+    GenerationGeneralizationEvaluationBatchRunError,
     GenerationGeneralizationEvaluationPolicy,
     run_generation_generalization_evaluation_batch,
 )
@@ -43,6 +45,7 @@ from pure_integer_ai.experiments.ph2_generation_generalization_formal_labels imp
     read_generation_generalization_private_labels_after_guard,
 )
 from pure_integer_ai.experiments.ph2_generation_generalization_formal_protocol import (
+    FORMAL_FAILURE_DIAGNOSTIC_ARTIFACT_KIND,
     GenerationGeneralizationFormalAggregate,
     GenerationGeneralizationPredictionSeal,
     build_generation_generalization_formal_aggregate,
@@ -60,6 +63,7 @@ FORMAL_AGGREGATE_NAME = "aggregate.json"
 FORMAL_DECISION_NAME = "decision.json"
 FORMAL_RUNTIME_RECEIPT_NAME = "runtime_receipt.json"
 FORMAL_FAILURE_SEAL_NAME = "failure_seal.json"
+FORMAL_FAILURE_DIAGNOSTIC_NAME = "failure_diagnostic.json"
 
 
 # object-model: value; representation=struct; interop=pending
@@ -72,6 +76,7 @@ class GenerationGeneralizationFormalPublication:
     runtime_receipt: dict[str, object] | None
     failure_seal: dict[str, object] | None
     prediction_seal: GenerationGeneralizationPredictionSeal | None
+    failure_diagnostic: dict[str, object] | None
 
     def __post_init__(self) -> None:
         if not isinstance(self.aggregate, GenerationGeneralizationFormalAggregate):
@@ -84,6 +89,50 @@ class GenerationGeneralizationFormalPublication:
                 and (self.runtime_receipt is not None or self.failure_seal is None)):
             raise GenerationGeneralizationEvaluationFamilyError(
                 "GG-03 non-PASS publication 投影漂移")
+        if ((self.aggregate.failure_phase != "NONE")
+                != (self.failure_diagnostic is not None)):
+            raise GenerationGeneralizationEvaluationFamilyError(
+                "GG-03 operational diagnostic 投影漂移")
+
+
+def _safe_failure_diagnostic(
+        error: Exception, *, phase: str,
+        ) -> dict[str, object]:
+    """剥离异常消息和输入，只保留公开代码位置与 batch 边界。"""
+    root = error
+    while root.__cause__ is not None:
+        root = root.__cause__
+    frames = tuple({
+        "file": Path(item.filename).name,
+        "function": item.name,
+        "line": item.lineno,
+    } for item in traceback.extract_tb(root.__traceback__))
+    leaf = frames[-1] if frames else {
+        "file": "UNAVAILABLE",
+        "function": "UNAVAILABLE",
+        "line": 0,
+    }
+    batch = (
+        error if isinstance(
+            error, GenerationGeneralizationEvaluationBatchRunError)
+        else None)
+    return {
+        "artifact_kind": FORMAL_FAILURE_DIAGNOSTIC_ARTIFACT_KIND,
+        "evaluation_path": (
+            "UNAVAILABLE" if batch is None else batch.evaluation_path),
+        "exception_type": (
+            f"{type(root).__module__}.{type(root).__qualname__}"),
+        "failure_phase": phase,
+        "format_version": 1,
+        "leaf_file": leaf["file"],
+        "leaf_function": leaf["function"],
+        "leaf_line": leaf["line"],
+        "message_or_input_field_count": 0,
+        "observation_ordinal": (
+            0 if batch is None else batch.observation_ordinal),
+        "traceback_shape_sha256": generation_generalization_sha256_bytes(
+            canonical_json_bytes(frames)),
+    }
 
 
 def _publication_paths(family: Path) -> tuple[Path, ...]:
@@ -102,6 +151,7 @@ def _publish_formal_result(
         *,
         phase: str,
         prediction: GenerationGeneralizationPredictionSeal | None,
+        diagnostic: dict[str, object] | None,
         ) -> GenerationGeneralizationFormalPublication:
     """以 publication 目录事务发布 aggregate 与唯一 receipt/seal。"""
     if any(path.exists() for path in (
@@ -109,14 +159,23 @@ def _publish_formal_result(
             family / FORMAL_OUTCOME_NAME)):
         raise GenerationGeneralizationEvaluationFamilyError(
             "GG-03 formal publication 已存在")
-    decision, receipt, failure = build_generation_generalization_publication(
-        aggregate)
     temporary = Path(tempfile.mkdtemp(
         prefix=".gg03-publication-building-", dir=family)).resolve()
     outcome_temporary = family / ".run.outcome.building.json"
     try:
         write_immutable_json(
             aggregate.to_dict(), temporary / FORMAL_AGGREGATE_NAME)
+        diagnostic_sha = None
+        if diagnostic is not None:
+            diagnostic_path = temporary / FORMAL_FAILURE_DIAGNOSTIC_NAME
+            write_immutable_json(diagnostic, diagnostic_path)
+            diagnostic_sha = generation_generalization_sha256_bytes(
+                diagnostic_path.read_bytes())
+        decision, receipt, failure = (
+            build_generation_generalization_publication(
+                aggregate,
+                failure_diagnostic_sha256=diagnostic_sha,
+            ))
         write_immutable_json(
             decision, temporary / FORMAL_DECISION_NAME)
         if receipt is not None:
@@ -129,6 +188,8 @@ def _publish_formal_result(
             "aggregate_sha256": aggregate.sha256(),
             "artifact_kind": "PH2_GG03_FORMAL_RUN_OUTCOME_V1",
             "failure_phase": aggregate.failure_phase,
+            "failure_diagnostic_sha256": (
+                "0" * 64 if diagnostic_sha is None else diagnostic_sha),
             "format_version": 1,
             "phase": phase,
             "prediction_seal_sha256": (
@@ -153,7 +214,7 @@ def _publish_formal_result(
         raise GenerationGeneralizationEvaluationFamilyError(
             "GG-03 formal publication 回读漂移")
     return GenerationGeneralizationFormalPublication(
-        aggregate, decision, receipt, failure, prediction)
+        aggregate, decision, receipt, failure, prediction, diagnostic)
 
 
 def run_generation_generalization_formal_evaluation_once(
@@ -217,6 +278,7 @@ def run_generation_generalization_formal_evaluation_once(
 
     phase = "GUARD_CONSUMED"
     prediction = None
+    diagnostic = None
     label_read_count = 0
     label_record_count = 0
     label_transport_bytes = 0
@@ -274,7 +336,8 @@ def run_generation_generalization_formal_evaluation_once(
             label_transport_bytes=label_transport_bytes,
         )
         phase = "COMPLETE"
-    except Exception:
+    except Exception as error:
+        diagnostic = _safe_failure_diagnostic(error, phase=phase)
         verify_evaluation_guard_consumed(family_root, expected_guard)
         aggregate = build_generation_generalization_unavailable_aggregate(
             inventory,
@@ -291,13 +354,19 @@ def run_generation_generalization_formal_evaluation_once(
         )
         phase = "SEALED_NE"
     return _publish_formal_result(
-        family_root, aggregate, phase=phase, prediction=prediction)
+        family_root,
+        aggregate,
+        phase=phase,
+        prediction=prediction,
+        diagnostic=diagnostic,
+    )
 
 
 __all__ = [
     "FORMAL_AGGREGATE_NAME",
     "FORMAL_DECISION_NAME",
     "FORMAL_FAILURE_SEAL_NAME",
+    "FORMAL_FAILURE_DIAGNOSTIC_NAME",
     "FORMAL_OUTCOME_NAME",
     "FORMAL_RUNTIME_RECEIPT_NAME",
     "PREDICTION_SEAL_NAME",

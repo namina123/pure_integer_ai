@@ -10,6 +10,7 @@ import pytest
 
 from pure_integer_ai.experiments.ph2_d03_contract_core import (
     canonical_json_bytes,
+    read_canonical_object,
     write_immutable_json,
 )
 from pure_integer_ai.experiments.ph2_evaluation_kernel.guard import (
@@ -31,6 +32,7 @@ from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_observ
     GenerationGeneralizationEvaluationObservation,
 )
 from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_runner import (
+    GenerationGeneralizationEvaluationBatchRunError,
     GenerationGeneralizationEvaluationPolicy,
 )
 from pure_integer_ai.experiments.ph2_generation_generalization_formal_labels import (
@@ -274,6 +276,7 @@ def test_formal_runner_publishes_pass_seals_ne_and_rejects_retry(
         assert passed.aggregate.status == "PASS"
         assert passed.runtime_receipt is not None
         assert passed.failure_seal is None
+        assert passed.failure_diagnostic is None
         assert (current_family["path"] / "publication"
                 / "runtime_receipt.json").is_file()
         with pytest.raises(
@@ -301,12 +304,54 @@ def test_formal_runner_publishes_pass_seals_ne_and_rejects_retry(
         assert unavailable.aggregate.failure_phase == "PRIVATE_LABEL_READ"
         assert unavailable.runtime_receipt is None
         assert unavailable.failure_seal is not None
+        assert unavailable.failure_diagnostic is not None
         assert (current_family["path"] / "publication"
                 / "failure_seal.json").is_file()
+        diagnostic_path = (
+            current_family["path"] / "publication"
+            / "failure_diagnostic.json")
+        assert diagnostic_path.is_file()
+        diagnostic = read_canonical_object(diagnostic_path)
+        assert diagnostic["failure_phase"] == "PRIVATE_LABEL_READ"
+        assert diagnostic["observation_ordinal"] == 0
+        assert diagnostic["evaluation_path"] == "UNAVAILABLE"
+        assert diagnostic["message_or_input_field_count"] == 0
+        assert "synthetic private label unavailable" not in str(diagnostic)
+        assert unavailable.failure_seal[
+            "failure_diagnostic_sha256"] == hashlib.sha256(
+                diagnostic_path.read_bytes()).hexdigest()
         with pytest.raises(
                 GenerationGeneralizationEvaluationFamilyError,
                 match="formal outputs"):
             formal_runner.run_generation_generalization_formal_evaluation_once(
                 host, family_dir=current_family["path"], **arguments)
+
+        current_family["path"] = prepare_family("candidate-ne-family")
+
+        def unavailable_candidate(*_args, **_kwargs):
+            try:
+                raise RuntimeError("private observation text must not escape")
+            except RuntimeError as cause:
+                raise GenerationGeneralizationEvaluationBatchRunError(
+                    2, "RESPONSE_ACT") from cause
+
+        monkeypatch.setattr(
+            formal_runner,
+            "run_generation_generalization_evaluation_batch",
+            unavailable_candidate,
+        )
+        candidate_unavailable = (
+            formal_runner.run_generation_generalization_formal_evaluation_once(
+                host, family_dir=current_family["path"], **arguments))
+        assert candidate_unavailable.aggregate.status == "NE"
+        assert candidate_unavailable.aggregate.failure_phase == "CANDIDATE_RUN"
+        assert candidate_unavailable.aggregate.label_read_count == 0
+        candidate_diagnostic = candidate_unavailable.failure_diagnostic
+        assert candidate_diagnostic is not None
+        assert candidate_diagnostic["observation_ordinal"] == 2
+        assert candidate_diagnostic["evaluation_path"] == "RESPONSE_ACT"
+        assert candidate_diagnostic["exception_type"] == "builtins.RuntimeError"
+        assert "private observation text" not in str(candidate_diagnostic)
+        assert not (current_family["path"] / "predictions.seal.json").exists()
     finally:
         backend.close()

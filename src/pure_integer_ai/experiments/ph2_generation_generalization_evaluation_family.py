@@ -53,6 +53,9 @@ from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_runner
     GenerationGeneralizationEvaluationPolicy,
     run_generation_generalization_evaluation_batch,
 )
+from pure_integer_ai.experiments.ph2_generation_generalization_formal_protocol import (
+    FORMAL_FAILURE_DIAGNOSTIC_ARTIFACT_KIND,
+)
 from pure_integer_ai.experiments.train_context import TrainContext
 
 
@@ -70,6 +73,7 @@ FORMAL_PUBLICATION_PATHS = (
     "publication/decision.json",
     "publication/runtime_receipt.json",
     "publication/failure_seal.json",
+    "publication/failure_diagnostic.json",
 )
 FORMAL_EXECUTION_ORDER = (
     "VERIFY_FAMILY_AND_LABEL_FREE_INVENTORY",
@@ -344,6 +348,20 @@ def _aggregate_contract() -> dict[str, object]:
         "aggregate_statuses": ["PASS", "FAIL", "NE"],
         "failure_seal_statuses": ["FAIL", "NE"],
         "immutable_paths": list(FORMAL_PUBLICATION_PATHS),
+        "operational_failure_diagnostic": {
+            "artifact_kind": FORMAL_FAILURE_DIAGNOSTIC_ARTIFACT_KIND,
+            "message_or_input_field_count": 0,
+            "required_fields": [
+                "evaluation_path",
+                "exception_type",
+                "failure_phase",
+                "leaf_file",
+                "leaf_function",
+                "leaf_line",
+                "observation_ordinal",
+                "traceback_shape_sha256",
+            ],
+        },
         "requirement_order": list(INDEPENDENT_VERIFIER_REQUIREMENTS),
         "runtime_receipt_statuses": ["PASS"],
         "surface_or_label_fields_public": 0,

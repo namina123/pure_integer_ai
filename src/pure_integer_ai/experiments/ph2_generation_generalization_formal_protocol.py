@@ -32,6 +32,8 @@ PREDICTION_SEAL_ARTIFACT_KIND = "PH2_GG03_FORMAL_PREDICTION_SEAL_V1"
 FORMAL_AGGREGATE_ARTIFACT_KIND = "PH2_GG03_FORMAL_AGGREGATE_V1"
 FORMAL_RUNTIME_RECEIPT_ARTIFACT_KIND = "PH2_GG03_FORMAL_RUNTIME_RECEIPT_V1"
 FORMAL_FAILURE_SEAL_ARTIFACT_KIND = "PH2_GG03_FORMAL_FAILURE_SEAL_V1"
+FORMAL_FAILURE_DIAGNOSTIC_ARTIFACT_KIND = (
+    "PH2_GG03_FORMAL_FAILURE_DIAGNOSTIC_V1")
 PREDICTION_SEAL_STATUS = "PREDICTIONS_SEALED_LABELS_UNREAD"
 
 
@@ -435,11 +437,24 @@ def build_generation_generalization_unavailable_aggregate(
 
 def build_generation_generalization_publication(
         aggregate: GenerationGeneralizationFormalAggregate,
+        *,
+        failure_diagnostic_sha256: str | None = None,
         ) -> tuple[dict[str, object], dict[str, object] | None,
                    dict[str, object] | None]:
     """PASS 只发布 receipt；FAIL/NE 只发布最小 failure seal。"""
     if not isinstance(aggregate, GenerationGeneralizationFormalAggregate):
         raise TypeError("GG-03 publication aggregate 类型错误")
+    operational_failure = aggregate.failure_phase != "NONE"
+    if operational_failure:
+        if failure_diagnostic_sha256 is None:
+            raise GenerationGeneralizationEvaluationFamilyError(
+                "GG-03 operational failure 缺安全 diagnostic")
+        sha256_text(
+            failure_diagnostic_sha256,
+            where="GG-03 failure diagnostic SHA")
+    elif failure_diagnostic_sha256 is not None:
+        raise GenerationGeneralizationEvaluationFamilyError(
+            "GG-03 capability publication 不得携 operational diagnostic")
     decision = {
         "aggregate_sha256": aggregate.sha256(),
         "artifact_kind": "PH2_GG03_FORMAL_PUBLICATION_DECISION_V1",
@@ -449,6 +464,8 @@ def build_generation_generalization_publication(
             else "failure_seal.json"),
         "status": aggregate.status,
     }
+    if failure_diagnostic_sha256 is not None:
+        decision["failure_diagnostic_sha256"] = failure_diagnostic_sha256
     receipt = None
     failure = None
     if aggregate.status == "PASS":
@@ -470,11 +487,15 @@ def build_generation_generalization_publication(
             "format_version": 1,
             "status": aggregate.status,
         }
+        if failure_diagnostic_sha256 is not None:
+            failure["failure_diagnostic_sha256"] = (
+                failure_diagnostic_sha256)
     return decision, receipt, failure
 
 
 __all__ = [
     "FORMAL_AGGREGATE_ARTIFACT_KIND",
+    "FORMAL_FAILURE_DIAGNOSTIC_ARTIFACT_KIND",
     "FORMAL_FAILURE_SEAL_ARTIFACT_KIND",
     "FORMAL_RUNTIME_RECEIPT_ARTIFACT_KIND",
     "PREDICTION_SEAL_ARTIFACT_KIND",

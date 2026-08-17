@@ -206,6 +206,21 @@ class GenerationGeneralizationEvaluationRunnerError(RuntimeError):
     """candidate、Observation、actual path 或隔离审计发生漂移。"""
 
 
+# object-model: exception
+class GenerationGeneralizationEvaluationBatchRunError(
+        GenerationGeneralizationEvaluationRunnerError):
+    """携带安全 ordinal/path 的 batch 单条运行失败，不转发输入或异常消息。"""
+
+    def __init__(self, observation_ordinal: int, evaluation_path: str) -> None:
+        if type(observation_ordinal) is not int or observation_ordinal <= 0:
+            raise ValueError("evaluation batch failure ordinal 非法")
+        if evaluation_path not in EVALUATION_PATHS:
+            raise ValueError("evaluation batch failure path 非法")
+        self.observation_ordinal = observation_ordinal
+        self.evaluation_path = evaluation_path
+        super().__init__("evaluation batch item failed")
+
+
 def _pack(value: tuple[int, ...]) -> tuple[int, ...]:
     """给开放整数键增加长度边界。"""
     return len(value), *value
@@ -1388,12 +1403,16 @@ def run_generation_generalization_evaluation_batch(
                 for item in observations)):
         raise TypeError("evaluation batch observations 类型错误")
     policy = policy or GenerationGeneralizationEvaluationPolicy()
-    runs = tuple(
-        run_generation_generalization_evaluation_actual(
-            host_ctx, loaded, observation, policy)
-        for observation in observations
-    )
-    return GenerationGeneralizationEvaluationBatch(runs)
+    runs = []
+    for ordinal, observation in enumerate(observations, start=1):
+        path = _path_for(observation)
+        try:
+            runs.append(run_generation_generalization_evaluation_actual(
+                host_ctx, loaded, observation, policy))
+        except Exception as error:
+            raise GenerationGeneralizationEvaluationBatchRunError(
+                ordinal, path) from error
+    return GenerationGeneralizationEvaluationBatch(tuple(runs))
 
 
 def generation_generalization_evaluation_requirements(
@@ -1415,6 +1434,7 @@ __all__ = [
     "EVALUATION_PATHS",
     "GenerationGeneralizationEvaluationActualRun",
     "GenerationGeneralizationEvaluationBatch",
+    "GenerationGeneralizationEvaluationBatchRunError",
     "GenerationGeneralizationEvaluationPolicy",
     "GenerationGeneralizationEvaluationRequirementEvidence",
     "GenerationGeneralizationEvaluationRunnerError",

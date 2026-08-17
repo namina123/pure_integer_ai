@@ -67,6 +67,19 @@ The owner receipt must bind:
 Do not overwrite or regenerate an owner receipt. A correction requires a fresh
 evaluation root and a new family.
 
+## Operational Failure Diagnostics
+
+The sealed verdict contract includes an optional immutable
+`publication/failure_diagnostic.json` for operational failures. It contains only
+the frozen failure phase, batch ordinal, public evaluation path, exception type,
+public code leaf location, and a traceback-shape SHA-256. It contains no exception
+message, Observation text, generated surface, label, or private path. Its transport
+SHA-256 is bound by the failure seal.
+
+A diagnostic never authorizes a retry, label access before a prediction seal, or
+reuse of a consumed family. A corrected runner requires a new code identity, public
+preflight, owner receipt, and family.
+
 ## Candidate-Side Readback
 
 Before family freeze, the candidate-side process may only:

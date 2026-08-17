@@ -5,6 +5,11 @@ import hashlib
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
+from pure_integer_ai.experiments import (
+    ph2_generation_generalization_evaluation_runner as evaluation_runner,
+)
 from pure_integer_ai.experiments.ph2_generation_candidate_pack import (
     build_generation_candidate_pack,
     publish_generation_candidate_pack,
@@ -19,6 +24,7 @@ from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_observ
 )
 from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_runner import (
     GenerationGeneralizationEvaluationBatch,
+    GenerationGeneralizationEvaluationBatchRunError,
     run_generation_generalization_evaluation_actual,
     run_generation_generalization_evaluation_batch,
 )
@@ -153,3 +159,28 @@ def test_evaluation_runner_executes_three_paths_and_aggregates_pass_fail_ne(
             "SOURCE_UNCERTAINTY_CITATION") == "NE"
     finally:
         backend.close()
+
+
+def test_evaluation_batch_failure_records_boundary_without_forwarding_message(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """batch 异常只暴露 ordinal/path，保留 cause 供安全诊断器取代码位置。"""
+    observations = _observations()
+
+    def fail_actual(*_args, **_kwargs):
+        raise RuntimeError("private observation text must not escape")
+
+    monkeypatch.setattr(
+        evaluation_runner,
+        "run_generation_generalization_evaluation_actual",
+        fail_actual,
+    )
+    with pytest.raises(
+            GenerationGeneralizationEvaluationBatchRunError) as caught:
+        run_generation_generalization_evaluation_batch(
+            object(), object(), observations)
+    assert caught.value.observation_ordinal == 1
+    assert caught.value.evaluation_path in {
+        "ANSWER", "RESPONSE_ACT", "REFERENCE"}
+    assert str(caught.value) == "evaluation batch item failed"
+    assert "private observation" not in str(caught.value)
+    assert isinstance(caught.value.__cause__, RuntimeError)
