@@ -31,6 +31,11 @@ from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_runner
     run_generation_generalization_evaluation_actual,
     run_generation_generalization_evaluation_batch,
 )
+from pure_integer_ai.experiments.ph2_generation_generalization_semantic_labels import (
+    build_actual_generation_generalization_semantic_projection,
+    build_expected_generation_generalization_semantic_projection,
+    build_generation_generalization_semantic_label_record,
+)
 from pure_integer_ai.experiments.ph2_grounded_answer_compile import (
     compile_grounded_answer_training_records,
 )
@@ -200,6 +205,15 @@ def test_evaluation_runner_executes_three_paths_and_aggregates_pass_fail_ne(
                    for run in batch.runs)
         assert all(item.status == "PASS" for item in batch.evidence)
         assert all(run.surface_text for run in batch.runs)
+        for run in batch.runs:
+            actual_semantic = (
+                build_actual_generation_generalization_semantic_projection(run))
+            expected_semantic = (
+                build_expected_generation_generalization_semantic_projection(
+                    run.observation))
+            assert actual_semantic == expected_semantic
+            assert build_generation_generalization_semantic_label_record(
+                run.observation).verdict_for_projection(actual_semantic) == "PASS"
         assert all(run.teacher_call_count == 0
                    and run.label_read_count == 0
                    and run.host_learning_write_count == 0
