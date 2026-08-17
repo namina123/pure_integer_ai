@@ -180,9 +180,6 @@ class GroundedAnswerReferenceCompileRequest:
                 or set(candidates) != set(self.planning.candidates)):
             raise GroundedAnswerReferenceCompileError(
                 "claim binding 必须精确覆盖 planning candidates")
-        if self.planning.candidates != candidates:
-            raise GroundedAnswerReferenceCompileError(
-                "planning candidates 必须使用显式 claim 顺序")
         if self.planning.goal.target_branch != self.language_branch:
             raise GroundedAnswerReferenceCompileError(
                 "planning goal branch 与 reference compile 漂移")
@@ -268,8 +265,8 @@ class GroundedAnswerReferenceCompilation:
                 "reference compilation claims 非法")
         if not isinstance(self.planning, GenerationPlanningRequest):
             raise TypeError("reference compilation planning 类型错误")
-        if self.planning.candidates != tuple(
-                item.candidate for item in self.claims):
+        if set(self.planning.candidates) != {
+                item.candidate for item in self.claims}:
             raise GroundedAnswerReferenceCompileError(
                 "reference compilation planning/candidates 漂移")
         if (not isinstance(self.forming_evidence_keys, tuple)
@@ -299,6 +296,11 @@ class GroundedAnswerReferenceCompilation:
             raise TypeError("reference origin 类型错误")
         if not isinstance(self.reference_slot, ObjectIdentity):
             raise TypeError("reference slot 类型错误")
+
+    @property
+    def ordered_candidates(self) -> tuple[GenerationCandidate, ...]:
+        """按显式 claim 顺序返回候选，不借用无序 planning 容器顺序。"""
+        return tuple(item.candidate for item in self.claims)
 
 
 def _claim_texts(episode: _ExecutableEpisode) -> dict[str, str]:

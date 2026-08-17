@@ -1231,6 +1231,10 @@ def _reference_actual(
         structure_verifier=GroundedAnswerReferenceStructureVerifier(
             _instruction(run_id, 62, 1),
             _instruction(run_id, 62, 2),
+            tuple(
+                item.stable_key()
+                for item in selection.compilation.ordered_candidates
+            ),
         ),
         source_verifier=GroundedAnswerReferenceEvidenceSourceVerifier(
             _instruction(run_id, 63, 1),

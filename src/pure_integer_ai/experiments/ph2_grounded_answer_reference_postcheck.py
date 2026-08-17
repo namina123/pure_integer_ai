@@ -44,11 +44,22 @@ class GroundedAnswerReferenceStructureVerifier:
 
     matched_reason: ObjectIdentity
     mismatched_reason: ObjectIdentity
+    ordered_candidate_keys: tuple[tuple[int, ...], ...]
 
     def __post_init__(self) -> None:
         _instruction(self.matched_reason, where="reference structure match")
         _instruction(
             self.mismatched_reason, where="reference structure mismatch")
+        if (not isinstance(self.ordered_candidate_keys, tuple)
+                or len(self.ordered_candidate_keys) != 2
+                or any(
+                    not isinstance(key, tuple)
+                    or not key
+                    or any(type(value) is not int for value in key)
+                    for key in self.ordered_candidate_keys)
+                or len(set(self.ordered_candidate_keys)) != 2):
+            raise GroundedAnswerReferencePostcheckError(
+                "reference structure 显式 candidate 顺序非法")
 
     def verify(
             self,
@@ -60,7 +71,9 @@ class GroundedAnswerReferenceStructureVerifier:
         execution = request.postcheck.execution
         structure = execution.surface.preview.request.structure
         planning = execution.plan.request
-        expected = tuple(item.stable_key() for item in planning.candidates)
+        expected = self.ordered_candidate_keys
+        planning_keys = tuple(
+            item.stable_key() for item in planning.candidates)
         sentences = structure.syntax.sentences
         emitted = tuple(
             key for sentence in sentences for key in sentence.proposition_keys)
@@ -73,12 +86,13 @@ class GroundedAnswerReferenceStructureVerifier:
         )
         matches = (
             len(expected) == 2
+            and set(expected) == set(planning_keys)
             and set(structure.selection.selected_candidate_keys)
             == set(expected)
             and len(sentences) == 2
             and all(len(item.proposition_keys) == 1 for item in sentences)
             and emitted == expected
-            and proposition_keys == expected
+            and set(proposition_keys) == set(expected)
             and structure.syntax.suppressed_candidate_keys == ()
             and request.observation.structure_payload == expected_payload
             and execution.surface.preview.request.execution.complete

@@ -138,6 +138,10 @@ def _rehearse_reference_requirement(requirement: str, offset: int):
         structure_verifier = GroundedAnswerReferenceStructureVerifier(
             minimal_instruction_identity((_BASE, 60, offset, 1)),
             minimal_instruction_identity((_BASE, 60, offset, 2)),
+            tuple(
+                item.stable_key()
+                for item in reference_selection.compilation.ordered_candidates
+            ),
         )
         source_verifier = GroundedAnswerReferenceEvidenceSourceVerifier(
             minimal_instruction_identity((_BASE, 70, offset, 1)),

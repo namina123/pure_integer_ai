@@ -7,6 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from pure_integer_ai.cognition.shared.identity import (
+    language_branch_identity,
+)
 from pure_integer_ai.experiments import (
     ph2_generation_generalization_evaluation_runner as evaluation_runner,
 )
@@ -37,6 +40,9 @@ from pure_integer_ai.experiments.ph2_grounded_answer_course import (
 from pure_integer_ai.experiments.ph2_grounded_answer_learning import (
     learn_grounded_answer_surface_model,
 )
+from pure_integer_ai.experiments.ph2_grounded_response_act_planning import (
+    compile_grounded_answer_reference_planning,
+)
 from pure_integer_ai.experiments.train_context import make_train_context
 from pure_integer_ai.experiments.verification_orchestration import (
     VERDICT_REFUTE,
@@ -57,7 +63,7 @@ def _observations():
         if item.question.answer_plan.response_act in {
             "ANSWER", "CLARIFY", "CONFLICT"}
     )
-    return tuple(
+    observations = tuple(
         GenerationGeneralizationEvaluationObservation.from_held_out_episode(
             replace(
                 item,
@@ -68,6 +74,33 @@ def _observations():
         )
         for index, item in enumerate(selected, start=1)
     )
+    result = []
+    for observation in observations:
+        reference = observation.reference_course
+        if reference is None:
+            result.append(observation)
+            continue
+        ordered = tuple(reversed(reference.ordered_proposition_ids))
+        result.append(replace(
+            observation,
+            episode_id=f"{observation.episode_id}-reversed-reference-order",
+            question=replace(
+                observation.question,
+                answer_plan=replace(
+                    observation.question.answer_plan,
+                    ordered_claim_ids=ordered,
+                ),
+            ),
+            reference_course=replace(
+                reference,
+                antecedent_proposition_id=reference.referring_proposition_id,
+                referring_proposition_id=reference.antecedent_proposition_id,
+                antecedent_evidence_id=reference.referring_evidence_id,
+                referring_evidence_id=reference.antecedent_evidence_id,
+                ordered_proposition_ids=ordered,
+            ),
+        ))
+    return tuple(result)
 
 
 def _refute_first_requirement(batch):
@@ -113,6 +146,16 @@ def test_evaluation_runner_executes_three_paths_and_aggregates_pass_fail_ne(
         host = make_train_context(backend)
         baseline = backend.snapshot()
         observations = _observations()
+        reference = next(
+            item for item in observations if item.reference_course is not None)
+        reference_planning = compile_grounded_answer_reference_planning(
+            reference, language_branch_identity((22061, 1)))
+        explicit_order = tuple(
+            reference_planning.candidate_for(proposition_id)
+            for proposition_id
+            in reference.reference_course.ordered_proposition_ids
+        )
+        assert reference_planning.planning.candidates != explicit_order
         batch = run_generation_generalization_evaluation_batch(
             host, loaded, observations)
 

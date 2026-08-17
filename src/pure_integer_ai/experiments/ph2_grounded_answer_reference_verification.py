@@ -377,7 +377,7 @@ def verify_grounded_answer_reference_layers(
     scope = installation.reference_selection.scope
     records = _record_by_kind(uses)
     planning = installation.compilation.planning
-    candidates = planning.candidates
+    candidates = installation.compilation.ordered_candidates
     expected_candidate_keys = tuple(item.stable_key() for item in candidates)
     observation = run.postcheck.parsed.observation
     recovered_keys = tuple(
