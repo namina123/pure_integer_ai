@@ -101,6 +101,14 @@ _SEMANTIC_CODE_ROOT_MODULES = (
 )
 
 
+def build_generation_generalization_semantic_code_identity(
+        repository_root: str | Path,
+        ) -> GenerationGeneralizationCodeIdentity:
+    """按 V2 semantic roots 冻结完整公开 Python import 闭包。"""
+    return build_generation_generalization_code_identity_for_roots(
+        repository_root, _SEMANTIC_CODE_ROOT_MODULES)
+
+
 def _threshold_contract() -> dict[str, object]:
     """冻结无分数阈值的六路逻辑 hard conjunction。"""
     return {
@@ -347,8 +355,7 @@ def _prepare_generation_generalization_semantic_family_freeze(
             public_dry_run_path))
     public_dry_run_sha = generation_generalization_sha256_file(
         public_dry_run_path)
-    code = build_generation_generalization_code_identity_for_roots(
-        repository, _SEMANTIC_CODE_ROOT_MODULES)
+    code = build_generation_generalization_semantic_code_identity(repository)
     freeze = build_generation_generalization_semantic_evaluation_family_freeze(
         public_head_sha1=_published_git_head(repository),
         candidate_manifest_relative_path=(
@@ -475,6 +482,7 @@ __all__ = [
     "SEMANTIC_FAMILY_STATUS",
     "SEMANTIC_FORMAL_EXECUTION_ORDER",
     "SEMANTIC_FORMAL_PUBLICATION_PATHS",
+    "build_generation_generalization_semantic_code_identity",
     "build_generation_generalization_semantic_evaluation_family_freeze",
     "publish_generation_generalization_semantic_evaluation_family_freeze",
     "read_generation_generalization_semantic_evaluation_family_freeze",

@@ -256,8 +256,8 @@ def test_semantic_family_publication_is_immutable_and_strictly_readable(
     )
     monkeypatch.setattr(
         semantic_family,
-        "build_generation_generalization_code_identity_for_roots",
-        lambda _repository, _roots: code,
+        "build_generation_generalization_semantic_code_identity",
+        lambda _repository: code,
     )
     arguments = {
         "repository_root": tmp_path,

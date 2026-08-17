@@ -26,14 +26,14 @@ from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_observ
     GenerationGeneralizationEvaluationBudget,
     GenerationGeneralizationEvaluationObservation,
 )
-from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_family_identity import (
-    build_generation_generalization_code_identity_for_roots,
-)
 from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_runner import (
     GenerationGeneralizationEvaluationBatch,
     GenerationGeneralizationEvaluationBatchRunError,
     run_generation_generalization_evaluation_actual,
     run_generation_generalization_evaluation_batch,
+)
+from pure_integer_ai.experiments.ph2_generation_generalization_semantic_family import (
+    build_generation_generalization_semantic_code_identity,
 )
 from pure_integer_ai.experiments.ph2_generation_generalization_semantic_labels import (
     build_actual_generation_generalization_semantic_projection,
@@ -64,12 +64,6 @@ from pure_integer_ai.storage.backend import DictBackend
 
 _SAMPLE = Path("data/ph2/grounded_answer_train_v1.jsonl.sample")
 _REPOSITORY = Path(__file__).resolve().parents[1]
-_SEMANTIC_CODE_ROOTS = (
-    "pure_integer_ai.experiments.ph2_generation_generalization_evaluation_runner",
-    "pure_integer_ai.experiments.ph2_generation_generalization_semantic_family",
-    "pure_integer_ai.experiments.ph2_generation_generalization_semantic_formal_runner",
-    "pure_integer_ai.experiments.ph2_generation_generalization_semantic_preflight",
-)
 
 
 def _observations():
@@ -235,8 +229,8 @@ def test_evaluation_runner_executes_three_paths_and_aggregates_pass_fail_ne(
         assert len({run.evaluation_owner_key for run in batch.runs}) == 4
         assert backend.snapshot() == baseline
 
-        semantic_code = build_generation_generalization_code_identity_for_roots(
-            _REPOSITORY, _SEMANTIC_CODE_ROOTS)
+        semantic_code = build_generation_generalization_semantic_code_identity(
+            _REPOSITORY)
         semantic_paths = {item.relative_path for item in semantic_code.files}
         assert any(path.endswith(
             "ph2_generation_generalization_semantic_formal_runner.py")
