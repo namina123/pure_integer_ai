@@ -40,8 +40,7 @@ def _strict_key(value: tuple[int, ...], *, where: str) -> tuple[int, ...]:
     '''核验并返回可直接比较的完整整数键。'''
     if not isinstance(value, tuple) or not value:
         raise ValueError(f'{where} 必须是非空整数 tuple')
-    assert_int(*value, _where=where)
-    if any(type(component) is not int for component in value):
+    if set(map(type, value)) != {int}:
         raise TypeError(f'{where} 必须只含严格 int')
     return value
 

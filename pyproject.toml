@@ -67,6 +67,7 @@ include = ["pure_integer_ai*"]
   "data/ph2/broad_qa_interactive_development_receipt_v1.json",
   "data/ph2/broad_qa_question_slots_v1.json",
   "data/ph2/grounded_answer_train_v1.jsonl.sample",
+  "data/ph2/generation_generalization_public_stress_v1.jsonl",
   "data/ph2/authored_primitive_atomic_bridge_map_generalization_v1.jsonl.sample",
   "data/ph2/authored_primitive_atomic_bridge_map_three_role_v1.jsonl.sample",
   "data/ph2/authored_primitive_atomic_bridge_seed_generalization_v1.jsonl.sample",

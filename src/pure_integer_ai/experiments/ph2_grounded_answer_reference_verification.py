@@ -244,10 +244,10 @@ class GroundedAnswerReferenceLayerVerification:
             raise GroundedAnswerReferenceVerificationError(
                 "reference verifier claim 跨维度复用")
         reported = {
-            LosslessIntegerKey(key)
+            key
             for result in self.report.results
             for key in result.claim_keys}
-        if reported != set(claim_keys):
+        if reported != {item.components for item in claim_keys}:
             raise GroundedAnswerReferenceVerificationError(
                 "reference verifier report 与 claim artifact 漂移")
         by_kind = {kind: 0 for kind in CHOICE_KINDS}

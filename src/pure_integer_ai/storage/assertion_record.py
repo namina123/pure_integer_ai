@@ -58,6 +58,7 @@ ASSERTION_QUALIFIER_COLUMNS = [
     ("ordinal", TYPE_INT),
     ("qualifier_value", TYPE_INT),
 ]
+_INSERT_BATCH_SIZE = 4096
 
 
 class AssertionRecordError(RuntimeError):
@@ -275,12 +276,7 @@ class AssertionRecordStore:
             raise AssertionRecordIncompleteError(
                 f"assertion hash={record.identity_hash} 存在孤儿 qualifier")
 
-        for ordinal, value in self._overflow_qualifiers(record.qualifiers):
-            self._backend.insert(ASSERTION_QUALIFIER_TABLE, {
-                "identity_hash": record.identity_hash,
-                "ordinal": ordinal,
-                "qualifier_value": value,
-            })
+        self._insert_overflow_qualifiers(record)
         self._backend.insert(ASSERTION_RECORD_TABLE, record.to_row())
         if self.read(record.identity_hash) != record:
             raise AssertionRecordIncompleteError("assertion record 写后核验失败")
@@ -300,14 +296,24 @@ class AssertionRecordStore:
                 raise AssertionRecordCollisionError(
                     f"assertion hash={record.identity_hash} 命中不同正规化记录")
             return
+        self._insert_overflow_qualifiers(record)
+        self._backend.insert(ASSERTION_RECORD_TABLE, record.to_row())
+        self._records_by_hash[record.identity_hash] = record
+
+    def _insert_overflow_qualifiers(self, record: AssertionRecord) -> None:
+        """按有界批次保序写入一个断言的全部 overflow qualifier。"""
+        batch = []
         for ordinal, value in self._overflow_qualifiers(record.qualifiers):
-            self._backend.insert(ASSERTION_QUALIFIER_TABLE, {
+            batch.append({
                 "identity_hash": record.identity_hash,
                 "ordinal": ordinal,
                 "qualifier_value": value,
             })
-        self._backend.insert(ASSERTION_RECORD_TABLE, record.to_row())
-        self._records_by_hash[record.identity_hash] = record
+            if len(batch) == _INSERT_BATCH_SIZE:
+                self._backend.insert_many(ASSERTION_QUALIFIER_TABLE, batch)
+                batch.clear()
+        if batch:
+            self._backend.insert_many(ASSERTION_QUALIFIER_TABLE, batch)
 
     def read_optional(self, identity_hash: int) -> AssertionRecord | None:
         """读取可选记录；完全不存在返回空，任一孤儿或半写状态失败。"""

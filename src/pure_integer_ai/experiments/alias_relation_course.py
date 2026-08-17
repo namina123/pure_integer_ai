@@ -583,14 +583,47 @@ class AliasRelationCourseLoader:
         """核验版本和内容锁，经隔离全链预演后幂等写入正式 Core。"""
         if not isinstance(ctx, TrainContext):
             raise TypeError("relation course ctx 类型错误")
+        self._validate_manifest()
+        prepared = self._preflight_host(ctx)
+        self._preflight_isolated()
+        return self._load_prepared(ctx, prepared)
+
+    def load_for_isolated_evaluation(
+            self, ctx: TrainContext,
+            ) -> LoadedAliasRelationCourse:
+        """在已验证的外层评测沙箱中加载，避免再次复制完整后端预演。"""
+        if not isinstance(ctx, TrainContext):
+            raise TypeError("relation course ctx 类型错误")
+        owner = ctx.scope_owner
+        if owner is None:
+            raise AliasRelationCourseError(
+                "relation course evaluation 快速路径缺少 scope owner")
+        active_session = ctx.work_memory.active_session_scope
+        if active_session is None:
+            raise AliasRelationCourseError(
+                "relation course evaluation 快速路径缺少 active session")
+        if active_session.owner != owner:
+            raise AliasRelationCourseError(
+                "relation course evaluation owner 与 active session 不一致")
+        self._validate_manifest()
+        prepared = self._preflight_host(ctx)
+        return self._load_prepared(ctx, prepared)
+
+    def _validate_manifest(self) -> None:
+        """统一核验不可变课程 transport 身份和 schema 版本。"""
         digest = self.manifest.sha256()
         if digest != self.expected_sha256:
             raise AliasRelationCourseError("relation course 内容哈希漂移")
         if self.manifest.schema_version != _COURSE_SCHEMA_VERSION:
             raise AliasRelationCourseError(
                 "relation course schema 版本不受支持")
-        prepared = self._preflight_host(ctx)
-        self._preflight_isolated()
+
+    def _load_prepared(
+            self,
+            ctx: TrainContext,
+            prepared: _PreflightCourseState,
+            ) -> LoadedAliasRelationCourse:
+        """消费只读宿主预检结果，并返回绑定当前图的课程 owner。"""
         alias, report = self._apply(ctx, prepared)
         return LoadedAliasRelationCourse(
             alias,

@@ -71,6 +71,9 @@ class StorageBackend(Protocol):
     def ensure_index(self, table: str, columns: tuple[str, ...],
                      *, defer_indexes: bool = False) -> None: ...
     def insert(self, table: str, row: dict[str, Any]) -> None: ...
+    def insert_many(
+            self, table: str, rows: Iterable[dict[str, Any]],
+            ) -> None: ...
     def update(self, table: str, where: dict[str, Any],
                set_: dict[str, Any]) -> int: ...
     def select(self, table: str, where: dict[str, Any] | None = None,
@@ -280,6 +283,41 @@ class _BaseBackend:
             _sid = row.get("space_id_from")
             if _sid is not None:
                 self._isa_edge_gen[_sid] = self._isa_edge_gen.get(_sid, 0) + 1
+
+    def insert_many(
+            self,
+            table: str,
+            rows: Iterable[dict[str, Any]],
+            ) -> None:
+        """批量执行同表插入，并在任一物理写前完成全部公共闸门核验。"""
+        items = tuple(rows)
+        if not items:
+            return
+        m = self._meta(table)
+        require_write_allowed(table, "insert")
+        self._require_owner_write_allowed(table, m, items)
+        telemetry = active_backend_telemetry()
+        allow_text = any(t == TYPE_TEXT for t in m["col_types"].values())
+        for row in items:
+            _validate_row(row, allow_text=allow_text)
+        disc.check_write(table, "insert", m["discipline"], m["core"])
+        try:
+            self._do_insert_many(table, items)
+        except BaseException:
+            if telemetry is not None:
+                telemetry.record("insert", table, failed=True)
+            raise
+        self._table_write_epochs[table] += len(items)
+        if telemetry is not None:
+            telemetry.record("insert", table, rows=len(items))
+        if table == "edge":
+            for row in items:
+                if row.get("edge_type") != EDGE_IS_A:
+                    continue
+                space_id = row.get("space_id_from")
+                if space_id is not None:
+                    self._isa_edge_gen[space_id] = (
+                        self._isa_edge_gen.get(space_id, 0) + 1)
 
     def update(self, table: str, where: dict[str, Any],
                set_: dict[str, Any]) -> int:
@@ -524,6 +562,9 @@ class _BaseBackend:
     def _do_create_table(self, table, columns): raise NotImplementedError
     def _do_ensure_index(self, table, columns, *, defer_indexes=False): raise NotImplementedError
     def _do_insert(self, table, row): raise NotImplementedError
+    def _do_insert_many(self, table, rows):
+        for row in rows:
+            self._do_insert(table, row)
     def _do_update(self, table, where, set_): raise NotImplementedError
     def _do_select(self, table, where, where_gt, order_by, descending, limit): raise NotImplementedError
     def _do_count(self, table, where): raise NotImplementedError
@@ -643,6 +684,26 @@ class DictBackend(_BaseBackend):
             # 追加到每索引桶尾·保桶内序 == 插入序（与 rebuild 等价·增量维护）
             for cols, bucket in idx.items():
                 bucket.setdefault(self._row_idx_key(r, cols), []).append(r)
+
+    def _do_insert_many(self, table, rows):
+        copied = [dict(row) for row in rows]
+        self._data[table].extend(copied)
+        idx = self._idx.get(table)
+        if idx:
+            for cols, bucket in idx.items():
+                if len(cols) == 1:
+                    first = cols[0]
+                    for row in copied:
+                        bucket.setdefault((row.get(first),), []).append(row)
+                elif len(cols) == 2:
+                    first, second = cols
+                    for row in copied:
+                        bucket.setdefault((
+                            row.get(first), row.get(second)), []).append(row)
+                else:
+                    for row in copied:
+                        bucket.setdefault(
+                            self._row_idx_key(row, cols), []).append(row)
 
     def _do_update(self, table, where, set_):
         data = self._data[table]
@@ -810,6 +871,17 @@ class SQLiteBackend(_BaseBackend):
         self._conn.execute(
             f"INSERT INTO {self._q(table)} ({cols}) VALUES ({ph})",
             tuple(row.values()),
+        )
+
+    def _do_insert_many(self, table, rows):
+        columns = tuple(rows[0])
+        if any(set(row) != set(columns) for row in rows):
+            return super()._do_insert_many(table, rows)
+        cols = ", ".join(self._q(column) for column in columns)
+        placeholders = ", ".join("?" for _ in columns)
+        self._conn.executemany(
+            f"INSERT INTO {self._q(table)} ({cols}) VALUES ({placeholders})",
+            tuple(tuple(row[column] for column in columns) for row in rows),
         )
 
     def _do_update(self, table, where, set_):

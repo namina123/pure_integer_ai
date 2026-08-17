@@ -126,10 +126,9 @@ class LosslessIntegerKey:
         if not isinstance(self.components, tuple) or not self.components:
             raise GenerationChoiceContractError(
                 "lossless integer key must be a non-empty tuple")
-        if any(type(value) is not int for value in self.components):
+        if set(map(type, self.components)) != {int}:
             raise GenerationChoiceContractError(
                 "lossless integer key must use strict integers")
-        assert_int(*self.components, _where="LosslessIntegerKey.components")
 
     def to_list(self) -> list[int]:
         return list(self.components)

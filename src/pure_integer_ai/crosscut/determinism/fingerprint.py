@@ -5,6 +5,21 @@ import hashlib
 
 
 INTEGER_TUPLE_FINGERPRINT_VERSION = 1
+_SMALL_INTEGER_MIN = -128
+_SMALL_INTEGER_MAX = 255
+
+
+def _canonical_integer_bytes(value: int) -> bytes:
+    """返回单个严格整数现役长度前缀与有符号大端编码。"""
+    size = max(1, (value.bit_length() + 8) // 8)
+    return size.to_bytes(8, "big") + value.to_bytes(
+        size, "big", signed=True)
+
+
+_SMALL_INTEGER_ENCODINGS = tuple(
+    _canonical_integer_bytes(value)
+    for value in range(_SMALL_INTEGER_MIN, _SMALL_INTEGER_MAX + 1)
+)
 
 
 def integer_tuple_fingerprint(
@@ -26,10 +41,11 @@ def integer_tuple_fingerprint(
     for index, value in enumerate(values):
         if type(value) is not int:
             raise TypeError(f"fingerprint values[{index}] 必须是严格整数")
-        size = max(1, (value.bit_length() + 8) // 8)
-        encoded = value.to_bytes(size, "big", signed=True)
-        digest.update(size.to_bytes(8, "big"))
-        digest.update(encoded)
+        if _SMALL_INTEGER_MIN <= value <= _SMALL_INTEGER_MAX:
+            digest.update(
+                _SMALL_INTEGER_ENCODINGS[value - _SMALL_INTEGER_MIN])
+        else:
+            digest.update(_canonical_integer_bytes(value))
     return (
         INTEGER_TUPLE_FINGERPRINT_VERSION,
         len(values),

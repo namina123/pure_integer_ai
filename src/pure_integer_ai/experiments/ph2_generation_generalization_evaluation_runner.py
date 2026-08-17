@@ -927,6 +927,7 @@ def _answer_actual(
         loaded.pack,
         ctx,
         visible_evidence_keys=_visible_evidence_keys(planning),
+        disposable_evaluation=True,
     )
     components = GroundedAnswerRunLocalComponents(
         selector=protocols.selector,
@@ -1051,7 +1052,7 @@ def _response_act_actual(
     selected = min(compilation.variants, key=lambda item: item.pattern_id)
     production_purpose = _instruction(run_id, 50, 1)
     alias_factory = ProductionGenerationAliasRuntimeFactory(
-        loaded.pack, ctx)
+        loaded.pack, ctx, disposable_evaluation=True)
     components = GroundedResponseActRunLocalComponents(
         selector=protocols.selector,
         plan_protocol=protocols.plan,
@@ -1218,7 +1219,7 @@ def _reference_actual(
         (_NAMESPACE, run_id, 61),
     )
     alias_factory = ProductionGenerationAliasRuntimeFactory(
-        loaded.pack, ctx)
+        loaded.pack, ctx, disposable_evaluation=True)
     components = GroundedAnswerRunLocalComponents(
         selector=protocols.selector,
         plan_protocol=protocols.plan,

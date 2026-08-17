@@ -4,6 +4,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
+
 from pure_integer_ai.cognition.shared.alias_resolution import (
     AliasRouteSearchBudget,
 )
@@ -12,7 +14,13 @@ from pure_integer_ai.cognition.shared.identity import (
     language_branch_identity,
     minimal_instruction_identity,
 )
-from pure_integer_ai.experiments.evaluation_isolation import clone_backend
+from pure_integer_ai.experiments.alias_relation_course import (
+    AliasRelationCourseError,
+)
+from pure_integer_ai.experiments.evaluation_isolation import (
+    clone_backend,
+    isolated_evaluation,
+)
 from pure_integer_ai.experiments.ph2_generation_candidate_alias_runtime import (
     ProductionGenerationAliasRuntimeFactory,
 )
@@ -168,3 +176,46 @@ def test_candidate_pack_roundtrips_and_rebuilds_all_alias_inputs(tmp_path):
             reference_compilation.claims[0].candidate.proposition.template)
     finally:
         reference_backend.close()
+
+
+def test_candidate_alias_factory_disposable_mode_requires_evaluation_scope():
+    """generation factory 不得在普通 context 误用免二次沙箱模式。"""
+    model, question, planning, candidate, branch = (
+        _connector_question_and_candidate())
+    training_sha = hashlib.sha256(_SAMPLE.read_bytes()).hexdigest()
+    pack = build_generation_candidate_pack(model, training_sha)
+    surface_protocol = _surface_protocol(_BASE + 20)
+    compilation = compile_grounded_answer_connectors(
+        model,
+        question,
+        GroundedAnswerConnectorTarget(
+            candidate.proposition, branch, (_BASE, 21)),
+        surface_protocol,
+    )
+    variant = compilation.variants[0]
+    host_backend = DictBackend()
+    try:
+        host_ctx = make_train_context(host_backend)
+        invalid = ProductionGenerationAliasRuntimeFactory(
+            pack,
+            host_ctx,
+            visible_evidence_keys=(candidate.stable_key(),),
+            disposable_evaluation=True,
+        )
+        with pytest.raises(AliasRelationCourseError, match="scope owner"):
+            invalid.build(variant)
+
+        with isolated_evaluation(
+                host_ctx, label="candidate-alias-disposable") as eval_ctx:
+            factory = ProductionGenerationAliasRuntimeFactory(
+                pack,
+                eval_ctx,
+                visible_evidence_keys=(candidate.stable_key(),),
+                disposable_evaluation=True,
+            )
+            cloned = factory.clone_for_evaluation(eval_ctx)
+            assert cloned.disposable_evaluation is True
+            runtime = factory.build(variant)
+            _assert_realizations(runtime, branch, variant.aliases)
+    finally:
+        host_backend.close()

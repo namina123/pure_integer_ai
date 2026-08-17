@@ -74,6 +74,7 @@ GRAPH_HYPOTHESIS_GROUP_COMPONENT_COLUMNS = [
 ]
 
 _GROUP_HASHER = Hasher("graph_hypothesis_group.v1")
+_INSERT_BATCH_SIZE = 4096
 
 
 class GraphObjectIdentityError(RuntimeError):
@@ -652,12 +653,19 @@ class GraphObjectIdentityStore:
             self, identity_hash: int,
             overflow: tuple[tuple[int, int], ...]) -> None:
         """按原逻辑 ordinal 追加对象 overflow 组件。"""
+        batch = []
         for ordinal, value in overflow:
-            self._backend.insert(GRAPH_OBJECT_COMPONENT_TABLE, {
+            batch.append({
                 "identity_hash": identity_hash,
                 "component_ordinal": ordinal,
                 "component_value": value,
             })
+            if len(batch) == _INSERT_BATCH_SIZE:
+                self._backend.insert_many(
+                    GRAPH_OBJECT_COMPONENT_TABLE, batch)
+                batch.clear()
+        if batch:
+            self._backend.insert_many(GRAPH_OBJECT_COMPONENT_TABLE, batch)
 
     def _decode_generic(
             self, identity_hash: int, component_size: int,

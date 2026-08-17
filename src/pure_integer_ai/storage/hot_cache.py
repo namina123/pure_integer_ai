@@ -76,6 +76,11 @@ class HotCache:
         self._b.insert(table, row)
         self.invalidate(table)
 
+    def insert_many(self, table: str, rows) -> None:
+        """批量写透传，并在整批完成后只失效一次同表缓存。"""
+        self._b.insert_many(table, rows)
+        self.invalidate(table)
+
     def update(self, table: str, where: dict[str, Any],
                set_: dict[str, Any]) -> int:
         n = self._b.update(table, where, set_)

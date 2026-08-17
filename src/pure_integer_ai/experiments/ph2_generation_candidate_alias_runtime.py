@@ -220,6 +220,7 @@ class ProductionGenerationAliasRuntimeFactory:
             ctx: TrainContext,
             *,
             visible_evidence_keys: tuple[tuple[int, ...], ...] = (),
+            disposable_evaluation: bool = False,
             ) -> None:
         if not isinstance(pack, GenerationCandidatePack):
             raise TypeError("production generation alias pack 类型错误")
@@ -230,9 +231,12 @@ class ProductionGenerationAliasRuntimeFactory:
                 visible_evidence_keys, where="factory visible evidence")
         elif not isinstance(visible_evidence_keys, tuple):
             raise TypeError("factory visible evidence 必须是 tuple")
+        if type(disposable_evaluation) is not bool:
+            raise TypeError("factory disposable_evaluation 必须是 bool")
         self.pack = pack
         self.ctx = ctx
         self.visible_evidence_keys = visible_evidence_keys
+        self.disposable_evaluation = disposable_evaluation
         self._request: GenerationCandidateAliasCourseRequest | None = None
         self._loaded: LoadedAliasRelationCourse | None = None
 
@@ -256,8 +260,11 @@ class ProductionGenerationAliasRuntimeFactory:
         if self._loaded is None:
             manifest = build_generation_candidate_alias_manifest(
                 self.pack, request)
-            self._loaded = AliasRelationCourseLoader(
-                manifest, manifest.sha256()).load(self.ctx)
+            loader = AliasRelationCourseLoader(manifest, manifest.sha256())
+            self._loaded = (
+                loader.load_for_isolated_evaluation(self.ctx)
+                if self.disposable_evaluation else loader.load(self.ctx)
+            )
             self._request = request
         return self._loaded.alias
 
@@ -274,6 +281,7 @@ class ProductionGenerationAliasRuntimeFactory:
             self.pack,
             ctx,
             visible_evidence_keys=self.visible_evidence_keys,
+            disposable_evaluation=self.disposable_evaluation,
         )
 
     def state_key(self) -> tuple:
@@ -284,6 +292,7 @@ class ProductionGenerationAliasRuntimeFactory:
         return (
             self.pack.sha256(),
             self.visible_evidence_keys,
+            1 if self.disposable_evaluation else 0,
             request_key,
             loader_key,
         )

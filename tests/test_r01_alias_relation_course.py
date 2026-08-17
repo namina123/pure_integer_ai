@@ -30,7 +30,10 @@ from pure_integer_ai.experiments.alias_relation_course import (
     AliasRelationCourseRecognition,
     AliasRelationStatementMetadata,
 )
-from pure_integer_ai.experiments.evaluation_isolation import clone_backend
+from pure_integer_ai.experiments.evaluation_isolation import (
+    clone_backend,
+    isolated_evaluation,
+)
 from pure_integer_ai.experiments.train_context import make_train_context
 from pure_integer_ai.storage.backend import DictBackend, SQLiteBackend
 from pure_integer_ai.storage.edge_store import EPI_STRUCTURED, SOURCE_BARE_TEXT
@@ -286,6 +289,48 @@ def test_relation_course_batch_preflight_avoids_per_entry_owner_clone(
         assert clone_count <= 12
     finally:
         backend.close()
+
+
+def test_relation_course_isolated_evaluation_fast_path_is_guarded_and_equal(
+        monkeypatch):
+    """快速路径只接受外层隔离 owner/session，且不改变课程结果。"""
+    manifest = _manifest(variant=7)
+    loader = AliasRelationCourseLoader(manifest, manifest.sha256())
+    normal_backend = DictBackend()
+    host_backend = DictBackend()
+    try:
+        normal_ctx = make_train_context(normal_backend)
+        calls = 0
+        original = AliasRelationCourseLoader._preflight_isolated
+
+        def counted(self):
+            """统计普通入口仍执行完整独立预演。"""
+            nonlocal calls
+            calls += 1
+            return original(self)
+
+        monkeypatch.setattr(
+            AliasRelationCourseLoader, "_preflight_isolated", counted)
+        normal = loader.load(normal_ctx)
+        assert calls == 1
+
+        with pytest.raises(AliasRelationCourseError, match="scope owner"):
+            loader.load_for_isolated_evaluation(
+                make_train_context(host_backend))
+
+        host_ctx = make_train_context(host_backend)
+        with isolated_evaluation(
+                host_ctx, label="r01-course-fast-path") as eval_ctx:
+            active_session = eval_ctx.work_memory.active_session_scope
+            assert active_session is not None
+            assert active_session.owner == eval_ctx.scope_owner
+            isolated = loader.load_for_isolated_evaluation(eval_ctx)
+            assert calls == 1
+            assert isolated.report == normal.report
+            assert isolated.alias.state_key() == normal.alias.state_key()
+    finally:
+        host_backend.close()
+        normal_backend.close()
 
 
 def test_relation_course_rejects_forming_timestamp_drift_before_write():
