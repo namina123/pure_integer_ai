@@ -306,7 +306,7 @@ def _ambiguous_competitions(
         candidates,
         required: LogicEvidenceState,
         ) -> tuple[frozenset[tuple[int, ...]], ...]:
-    """找出同 competition+scope 下多个可回答命题，禁止按稳定序私选。"""
+    """找出同 competition+aggregate query 下多个可回答命题。"""
     grouped: dict[tuple[int, ...], set[tuple[int, ...]]] = {}
     for candidate in candidates:
         if (not _satisfies(candidate.state, required)
@@ -315,8 +315,10 @@ def _ambiguous_competitions(
         proposition_key = candidate.proposition.stable_key()
         for hypothesis in candidate.hypotheses:
             competition = (
+                *_packed(hypothesis.hypothesis_kind),
                 *_packed(hypothesis.competition_key),
-                *_packed(hypothesis.scope.stable_key()),
+                *_packed(candidate.source.stable_key()),
+                *_packed(candidate.scope.stable_key()),
             )
             grouped.setdefault(competition, set()).add(proposition_key)
     return tuple(sorted(

@@ -339,10 +339,14 @@ class GroundedQuestionEpisode:
                             for support, refute in aggregate.values())):
             raise GroundedAnswerCourseError(
                 "CONFLICT plan 缺少双向 Evidence")
-        if (self.answer_plan.response_act == "CLARIFY"
-                and len(answerable) < 2):
-            raise GroundedAnswerCourseError(
-                "CLARIFY plan 缺少多个可回答候选")
+        if self.answer_plan.response_act == "CLARIFY":
+            if any(support and refute
+                   for support, refute in aggregate.values()):
+                raise GroundedAnswerCourseError(
+                    "CLARIFY plan 不得包含冲突 Evidence")
+            if len(answerable) < 2:
+                raise GroundedAnswerCourseError(
+                    "CLARIFY plan 缺少多个可回答候选")
 
     def to_dict(self) -> dict[str, object]:
         """导出规范 JSON 值。"""

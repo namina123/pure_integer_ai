@@ -401,24 +401,20 @@ def _grouped_states(
 def _ambiguous_propositions(
         request: GenerationPlanningRequest,
         ) -> frozenset[tuple[int, ...]]:
-    """从 Evidence Hypothesis 完整竞争边界识别满足目标的多命题歧义。"""
-    candidate_by_hypothesis = {
-        hypothesis: candidate
-        for candidate in request.candidates
-        for hypothesis in candidate.hypotheses
-    }
+    """在 aggregate query 边界内按 Hypothesis competition 识别多命题歧义。"""
     grouped: dict[tuple, set[tuple[int, ...]]] = {}
-    for hypothesis, candidate in candidate_by_hypothesis.items():
+    for candidate in request.candidates:
         if not _satisfies(candidate.state, request.goal.required):
             continue
-        competition = (
-            hypothesis.hypothesis_kind,
-            hypothesis.competition_key,
-            hypothesis.observation,
-            hypothesis.scope,
-        )
-        grouped.setdefault(competition, set()).add(
-            candidate.proposition.stable_key())
+        proposition = candidate.proposition.stable_key()
+        for hypothesis in candidate.hypotheses:
+            competition = (
+                hypothesis.hypothesis_kind,
+                hypothesis.competition_key,
+                candidate.source,
+                candidate.scope,
+            )
+            grouped.setdefault(competition, set()).add(proposition)
     ambiguous: set[tuple[int, ...]] = set()
     for propositions in grouped.values():
         if len(propositions) > 1:

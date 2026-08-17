@@ -76,6 +76,38 @@ def _observations():
     )
     result = []
     for observation in observations:
+        if observation.question.answer_plan.response_act == "CLARIFY":
+            proposition_ids = tuple(dict.fromkeys(
+                item.proposition_id for item in observation.question.evidence))
+            second = proposition_ids[1]
+            evidence = tuple(reversed(tuple(
+                replace(
+                    item,
+                    evidence_id=f"public-e05-clarify-{index}",
+                    source_id=(
+                        "public-e05-clarify-source-b"
+                        if item.proposition_id == second
+                        else "public-e05-clarify-source-a"),
+                    scope_id=613,
+                )
+                for index, item in enumerate(
+                    observation.question.evidence, start=1)
+            )))
+            result.append(replace(
+                observation,
+                episode_id=f"{observation.episode_id}-source-scope-id-order",
+                question=replace(
+                    observation.question,
+                    evidence_scope_id=613,
+                    response_scope_id=713,
+                    evidence=evidence,
+                ),
+                dialogue=replace(
+                    observation.dialogue,
+                    active_scope_ids=(613, 713),
+                ),
+            ))
+            continue
         reference = observation.reference_course
         if reference is None:
             result.append(observation)

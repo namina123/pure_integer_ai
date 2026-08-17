@@ -69,6 +69,38 @@ def test_train_sample_closes_four_response_acts_and_multi_surface_contract():
     assert {"MARKDOWN", "HTML", "CODE", "TABLE"} <= CARRIER_KINDS
 
 
+def test_clarify_plan_rejects_hidden_conflict_before_runtime():
+    """CLARIFY 不能夹带会使 G-01 必然改判 CONFLICT 的第三候选。"""
+    base = next(
+        item.question for item in read_grounded_answer_episodes(SAMPLE_PATH)
+        if item.question.answer_plan.response_act == "CLARIFY")
+    conflict = (
+        GroundedEvidence(
+            "ev-clarify-conflict-support",
+            "p-clarify-conflict",
+            "src-clarify-conflict-a",
+            base.evidence_scope_id,
+            "第三候选处于开放状态",
+            "来源甲记录第三候选处于开放状态",
+            1,
+            0,
+        ),
+        GroundedEvidence(
+            "ev-clarify-conflict-refute",
+            "p-clarify-conflict",
+            "src-clarify-conflict-b",
+            base.evidence_scope_id,
+            "第三候选处于开放状态",
+            "来源乙否认第三候选处于开放状态",
+            0,
+            1,
+        ),
+    )
+
+    with pytest.raises(GroundedAnswerCourseError, match="不得包含冲突"):
+        replace(base, evidence=(*base.evidence, *conflict))
+
+
 def test_declared_negative_dimensions_are_recomputed_not_trusted():
     """每个 rejected surface 的失败维度由 typed plan 重新计算。"""
     for episode in read_grounded_answer_episodes(SAMPLE_PATH):

@@ -272,6 +272,60 @@ def test_clarify_runs_as_learned_response_act_with_selected_candidates():
         backend.close()
 
 
+def test_clarify_competes_in_aggregate_scope_across_source_local_evidence():
+    """来源、来源 scope、Evidence id 与输入顺序变化不得把 CLARIFY 私选成 ANSWER。"""
+    base = next(
+        item for item in read_grounded_answer_episodes(_SAMPLE)
+        if item.question.answer_plan.response_act == "CLARIFY")
+    proposition_ids = tuple(dict.fromkeys(
+        item.proposition_id for item in base.question.evidence))
+    second = proposition_ids[1]
+    evidence = tuple(reversed(tuple(
+        replace(
+            item,
+            evidence_id=f"public-cross-source-{index}",
+            source_id=(
+                "public-clarify-source-b"
+                if item.proposition_id == second
+                else "public-clarify-source-a"),
+            scope_id=303,
+        )
+        for index, item in enumerate(base.question.evidence, start=1)
+    )))
+    question = replace(
+        base.question,
+        evidence_scope_id=303,
+        response_scope_id=403,
+        evidence=evidence,
+    )
+    episode = replace(
+        base,
+        episode_id="public-clarify-cross-source-scope-id-order-v1",
+        question=question,
+        dialogue=replace(base.dialogue, active_scope_ids=(303, 403)),
+    )
+    branch = language_branch_identity((_BASE, 300))
+    planning = compile_grounded_response_act_planning(episode, branch)
+    content = AnswerContentProtocol(*tuple(
+        minimal_instruction_identity((_BASE, 301, index))
+        for index in range(1, 6)))
+    policy = EvidenceAnswerPolicyProtocol(*tuple(
+        minimal_instruction_identity((_BASE, 302, index))
+        for index in range(1, 5)))
+
+    selection = AnswerContentSelector(
+        content, EvidenceAnswerPolicy(content, policy)).select(
+            planning.planning)
+
+    assert len({
+        hypothesis.observation
+        for candidate in planning.planning.candidates
+        for hypothesis in candidate.hypotheses
+    }) == 2
+    assert selection.stance == content.clarify
+    assert len(selection.selected_candidate_keys) == 2
+
+
 def _rehearse_response_act(requirement, response_act, offset):
     """用 catalog episode、aggregate planning 和真实 runtime 运行一项 rehearsal。"""
     course = read_generation_generalization_executable_train_course(
