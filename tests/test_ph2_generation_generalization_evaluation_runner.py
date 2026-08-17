@@ -286,6 +286,74 @@ def test_evaluation_runner_executes_three_paths_and_aggregates_pass_fail_ne(
         backend.close()
 
 
+def test_conflict_verifier_accepts_sources_with_mixed_stances(tmp_path):
+    """冲突来源可同时支持与反驳，但仍必须保留全部来源归属。"""
+    model, _report = learn_grounded_answer_surface_model(
+        compile_grounded_answer_training_records(_SAMPLE))
+    pack = build_generation_candidate_pack(
+        model, hashlib.sha256(_SAMPLE.read_bytes()).hexdigest())
+    published = publish_generation_candidate_pack(pack, tmp_path / "candidate")
+    loaded = read_generation_candidate_pack(
+        published.pack_root, expected_sha256=pack.sha256())
+    conflict = next(
+        item for item in _observations()
+        if item.question.answer_plan.response_act == "CONFLICT")
+    supporting, refuting = conflict.question.evidence
+    variants = (
+        replace(
+            conflict,
+            episode_id=f"{conflict.episode_id}-one-source-mixed",
+            question=replace(
+                conflict.question,
+                evidence=(replace(supporting, refute=1), refuting),
+            ),
+        ),
+        replace(
+            conflict,
+            episode_id=f"{conflict.episode_id}-all-sources-mixed",
+            question=replace(
+                conflict.question,
+                evidence=(
+                    replace(supporting, refute=1),
+                    replace(refuting, support=1),
+                ),
+            ),
+        ),
+    )
+
+    backend = DictBackend()
+    try:
+        host = make_train_context(backend)
+        baseline = backend.snapshot()
+        for observation in variants:
+            support_sources = {
+                item.source_id for item in observation.question.evidence
+                if item.support
+            }
+            refute_sources = {
+                item.source_id for item in observation.question.evidence
+                if item.refute
+            }
+            assert support_sources & refute_sources
+            assert len(support_sources | refute_sources) == 2
+
+            run = run_generation_generalization_evaluation_actual(
+                host, loaded, observation)
+            assert run.runtime_status == "PASS_EVALUATION_ACTUAL_CONJUNCTION"
+            assert next(
+                item.status for item in run.requirements
+                if item.requirement == "SOURCE_UNCERTAINTY_CITATION"
+            ) == "PASS"
+            assert (
+                build_actual_generation_generalization_semantic_projection(run)
+                == build_expected_generation_generalization_semantic_projection(
+                    observation)
+            )
+            assert backend.snapshot() == baseline
+    finally:
+        backend.close()
+
+
 def test_evaluation_batch_failure_records_boundary_without_forwarding_message(
         monkeypatch: pytest.MonkeyPatch) -> None:
     """batch 异常只暴露 ordinal/path，保留 cause 供安全诊断器取代码位置。"""

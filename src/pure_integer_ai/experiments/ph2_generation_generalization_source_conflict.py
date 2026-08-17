@@ -210,8 +210,7 @@ class GenerationGeneralizationSourceConflictVerifier:
             item.source_id for item in question.evidence if item.refute}
         if len(proposition_ids) != 1 or len(source_ids) < 2:
             return False
-        if (not support_source_ids or not refute_source_ids
-                or not support_source_ids.isdisjoint(refute_source_ids)):
+        if not support_source_ids or not refute_source_ids:
             return False
         proposition_id = next(iter(proposition_ids))
         candidate = request.planning.candidate_for(proposition_id)
