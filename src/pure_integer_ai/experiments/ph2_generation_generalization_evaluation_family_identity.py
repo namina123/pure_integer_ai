@@ -178,15 +178,23 @@ def _imported_modules(path: Path) -> tuple[str, ...]:
     return tuple(sorted(modules))
 
 
-def build_generation_generalization_code_identity(
+def build_generation_generalization_code_identity_for_roots(
         repository_root: str | Path,
+        root_modules: tuple[str, ...],
         ) -> GenerationGeneralizationCodeIdentity:
-    """递归冻结 E-05D runner 与 family 自身的公开 import 闭包。"""
+    """递归冻结一组显式公开根模块的完整 import 闭包。"""
     repository = Path(repository_root).resolve()
     if not repository.is_dir():
         raise GenerationGeneralizationEvaluationFamilyError(
             "GG-03 code repository root 非法")
-    pending = list(_CODE_ROOT_MODULES)
+    if (not isinstance(root_modules, tuple) or not root_modules
+            or len(set(root_modules)) != len(root_modules)
+            or any(not isinstance(item, str)
+                   or not item.startswith("pure_integer_ai.")
+                   for item in root_modules)):
+        raise GenerationGeneralizationEvaluationFamilyError(
+            "GG-03 code closure root modules 非法")
+    pending = list(root_modules)
     visited: set[Path] = set()
     while pending:
         module = pending.pop()
@@ -211,6 +219,14 @@ def build_generation_generalization_code_identity(
         generation_generalization_sha256_bytes(canonical_json_bytes(
             [item.to_dict() for item in files])),
     )
+
+
+def build_generation_generalization_code_identity(
+        repository_root: str | Path,
+        ) -> GenerationGeneralizationCodeIdentity:
+    """按原 V1 根集合冻结 E-05D runner 与 family import 闭包。"""
+    return build_generation_generalization_code_identity_for_roots(
+        repository_root, _CODE_ROOT_MODULES)
 
 
 # object-model: value; representation=struct; interop=pending
@@ -474,6 +490,7 @@ __all__ = [
     "GenerationGeneralizationObservationRecordIdentity",
     "GenerationGeneralizationPrivateLabelOwnerReceipt",
     "build_generation_generalization_code_identity",
+    "build_generation_generalization_code_identity_for_roots",
     "double_scan_generation_generalization_observation_inventory",
     "generation_generalization_sha256_bytes",
     "generation_generalization_sha256_file",

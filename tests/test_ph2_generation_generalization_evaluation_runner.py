@@ -12,6 +12,7 @@ from pure_integer_ai.cognition.shared.identity import (
 )
 from pure_integer_ai.experiments import (
     ph2_generation_generalization_evaluation_runner as evaluation_runner,
+    ph2_generation_generalization_semantic_preflight as semantic_preflight,
 )
 from pure_integer_ai.experiments.ph2_generation_candidate_pack import (
     build_generation_candidate_pack,
@@ -25,6 +26,9 @@ from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_observ
     GenerationGeneralizationEvaluationBudget,
     GenerationGeneralizationEvaluationObservation,
 )
+from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_family_identity import (
+    build_generation_generalization_code_identity_for_roots,
+)
 from pure_integer_ai.experiments.ph2_generation_generalization_evaluation_runner import (
     GenerationGeneralizationEvaluationBatch,
     GenerationGeneralizationEvaluationBatchRunError,
@@ -35,6 +39,9 @@ from pure_integer_ai.experiments.ph2_generation_generalization_semantic_labels i
     build_actual_generation_generalization_semantic_projection,
     build_expected_generation_generalization_semantic_projection,
     build_generation_generalization_semantic_label_record,
+)
+from pure_integer_ai.experiments.ph2_generation_generalization_semantic_preflight import (
+    build_generation_generalization_semantic_public_dry_run_receipt,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_compile import (
     compile_grounded_answer_training_records,
@@ -56,6 +63,13 @@ from pure_integer_ai.storage.backend import DictBackend
 
 
 _SAMPLE = Path("data/ph2/grounded_answer_train_v1.jsonl.sample")
+_REPOSITORY = Path(__file__).resolve().parents[1]
+_SEMANTIC_CODE_ROOTS = (
+    "pure_integer_ai.experiments.ph2_generation_generalization_evaluation_runner",
+    "pure_integer_ai.experiments.ph2_generation_generalization_semantic_family",
+    "pure_integer_ai.experiments.ph2_generation_generalization_semantic_formal_runner",
+    "pure_integer_ai.experiments.ph2_generation_generalization_semantic_preflight",
+)
 
 
 def _observations():
@@ -168,7 +182,7 @@ def _refute_first_requirement(batch):
 
 
 def test_evaluation_runner_executes_three_paths_and_aggregates_pass_fail_ne(
-        tmp_path):
+        tmp_path, monkeypatch: pytest.MonkeyPatch):
     """四条 actual run 六路 PASS；改写 refute 为 FAIL；缺路为 NE。"""
     model, _report = learn_grounded_answer_surface_model(
         compile_grounded_answer_training_records(_SAMPLE))
@@ -220,6 +234,34 @@ def test_evaluation_runner_executes_three_paths_and_aggregates_pass_fail_ne(
                    for run in batch.runs)
         assert len({run.evaluation_owner_key for run in batch.runs}) == 4
         assert backend.snapshot() == baseline
+
+        semantic_code = build_generation_generalization_code_identity_for_roots(
+            _REPOSITORY, _SEMANTIC_CODE_ROOTS)
+        semantic_paths = {item.relative_path for item in semantic_code.files}
+        assert any(path.endswith(
+            "ph2_generation_generalization_semantic_formal_runner.py")
+            for path in semantic_paths)
+        assert any(path.endswith(
+            "ph2_generation_generalization_semantic_protocol.py")
+            for path in semantic_paths)
+        monkeypatch.setattr(
+            semantic_preflight,
+            "run_generation_generalization_evaluation_batch",
+            lambda *_args, **_kwargs: batch,
+        )
+        semantic_receipt = (
+            build_generation_generalization_semantic_public_dry_run_receipt(
+                host,
+                loaded,
+                observations,
+                code_identity=semantic_code,
+            ))
+        assert semantic_receipt.status == "PASS"
+        assert semantic_receipt.run_count == len(batch.runs)
+        assert semantic_receipt.semantic_projection_inventory_sha256
+        assert semantic_receipt.teacher_call_count == 0
+        assert semantic_receipt.label_read_count == 0
+        assert semantic_receipt.host_learning_write_count == 0
 
         answer = next(
             item for item in observations

@@ -1,4 +1,4 @@
-"""GG-03 open-surface semantic labels and candidate-independent projections."""
+"""GG-03 开放表面语义标签与候选无关的 typed projection。"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -72,7 +72,7 @@ def _text_ids(
 # object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True, order=True)
 class GenerationGeneralizationSemanticProjection:
-    """A surface-independent answer meaning recovered from visible output."""
+    """从可见输出恢复、且不依赖具体措辞的回答语义。"""
 
     carrier_kind: str
     response_act: str
@@ -138,7 +138,7 @@ class GenerationGeneralizationSemanticProjection:
 def semantic_projection_from_realization(
         realization: SurfaceRealization,
         ) -> GenerationGeneralizationSemanticProjection:
-    """Drop wording and realization identity while preserving typed meaning."""
+    """去除措辞和 realization identity，同时保留 typed meaning。"""
     if not isinstance(realization, SurfaceRealization):
         raise TypeError("GG-03 semantic realization 类型错误")
     return GenerationGeneralizationSemanticProjection(
@@ -154,7 +154,7 @@ def build_expected_generation_generalization_semantic_projection(
         observation: GenerationGeneralizationEvaluationObservation,
         *, carrier_kind: str = "PLAIN_TEXT",
         ) -> GenerationGeneralizationSemanticProjection:
-    """Build the owner-side meaning commitment without selecting a candidate."""
+    """不选择 candidate，直接构造 owner 侧预期语义 commitment。"""
     if not isinstance(
             observation, GenerationGeneralizationEvaluationObservation):
         raise TypeError("GG-03 semantic Observation 类型错误")
@@ -184,7 +184,7 @@ def build_actual_generation_generalization_semantic_projection(
         run: GenerationGeneralizationEvaluationActualRun,
         *, carrier_kind: str = "PLAIN_TEXT",
         ) -> GenerationGeneralizationSemanticProjection | None:
-    """Project parsed output into the same owner-side typed meaning domain."""
+    """把 parsed output 投影到与 owner 预期相同的 typed meaning 域。"""
     if not isinstance(run, GenerationGeneralizationEvaluationActualRun):
         raise TypeError("GG-03 semantic actual run 类型错误")
     parsed = run.postcheck.parsed
@@ -229,7 +229,7 @@ def build_actual_generation_generalization_semantic_projection(
 # object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True, order=True)
 class GenerationGeneralizationSemanticLabelRecord:
-    """Private expected-meaning commitment for one held-out Observation."""
+    """一条 held-out Observation 的 private 预期语义 commitment。"""
 
     observation_stable_key_sha256: str
     expected_semantic_sha256: str
@@ -266,15 +266,27 @@ class GenerationGeneralizationSemanticLabelRecord:
             self,
             projection: GenerationGeneralizationSemanticProjection | None,
             ) -> str:
-        """Return PASS for equality, FAIL for a different meaning, NE if absent."""
+        """相等返回 PASS，语义不同返回 FAIL，projection 缺失返回 NE。"""
         if projection is None:
-            return "NE"
+            return self.verdict_for_projection_sha256(None)
         if not isinstance(
                 projection, GenerationGeneralizationSemanticProjection):
             raise TypeError("GG-03 semantic predicted projection 类型错误")
+        return self.verdict_for_projection_sha256(projection.sha256())
+
+    def verdict_for_projection_sha256(
+            self, projection_sha256: str | None,
+            ) -> str:
+        """按 seal 中的 projection identity 返回 PASS/FAIL/NE。"""
+        if projection_sha256 is None:
+            return "NE"
+        sha256_text(
+            projection_sha256,
+            where="GG-03 predicted semantic projection SHA",
+        )
         return (
             "PASS"
-            if projection.sha256() == self.expected_semantic_sha256
+            if projection_sha256 == self.expected_semantic_sha256
             else "FAIL"
         )
 
@@ -303,7 +315,7 @@ def build_generation_generalization_semantic_label_record(
         observation: GenerationGeneralizationEvaluationObservation,
         *, carrier_kind: str = "PLAIN_TEXT",
         ) -> GenerationGeneralizationSemanticLabelRecord:
-    """Build an owner commitment from meaning fields, never from candidate output."""
+    """只从预期语义字段构造 owner commitment，不读取 candidate output。"""
     expected = build_expected_generation_generalization_semantic_projection(
         observation, carrier_kind=carrier_kind)
     return GenerationGeneralizationSemanticLabelRecord(
@@ -315,7 +327,7 @@ def build_generation_generalization_semantic_label_record(
 
 
 def generation_generalization_semantic_verdict_contract_sha256() -> str:
-    """Freeze the V2 PASS/FAIL/NE rule independently from any wording."""
+    """冻结独立于具体措辞的 V2 PASS/FAIL/NE 规则。"""
     return generation_generalization_sha256_bytes(canonical_json_bytes({
         "expected_label_kind": SEMANTIC_LABEL_ARTIFACT_KIND,
         "fail_condition": "PARSED_SEMANTIC_PROJECTION_DIFFERS",
