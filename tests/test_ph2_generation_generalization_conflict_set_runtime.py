@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import replace
 
 import pytest
@@ -230,3 +231,29 @@ def test_conflict_set_postcheck_rejects_actual_support_only_candidate():
             strict=True,
         )
     )
+
+
+def test_conflict_set_postcheck_rejects_reversed_actual_sentence_order():
+    planning, compilation = _compile()
+    run_plan = deepcopy(_execute(planning, compilation))
+    syntax = run_plan.preview.request.structure.syntax
+    object.__setattr__(syntax, "sentences", tuple(reversed(syntax.sentences)))
+    parsed = parse_conflict_set_generation_plan(compilation, run_plan)
+    assert parsed.status == "FAIL"
+    assert parsed.projection is not None
+    assert parsed.projection.claim_ids == tuple(
+        reversed(compilation.plan.claim_ids))
+
+
+def test_conflict_set_postcheck_reports_actual_slot_drift_as_ne():
+    planning, compilation = _compile()
+    run_plan = deepcopy(_execute(planning, compilation))
+    sentence = run_plan.preview.request.structure.syntax.sentences[0]
+    claim_slot = compilation.sentences[0].claim_slot
+    claim_value = next(
+        item for item in sentence.values if item.slot == claim_slot)
+    object.__setattr__(claim_value, "filler",
+                       compilation.sentences[1].claim_filler)
+    parsed = parse_conflict_set_generation_plan(compilation, run_plan)
+    assert parsed.status == "NE"
+    assert parsed.projection is None
