@@ -141,9 +141,11 @@ def parse_conflict_set_sentences(
     }))
     claim_states = tuple(
         (item.claim_id, item.support, item.refute) for item in sentences)
+    claim_source_ids = tuple(
+        (item.claim_id, item.source_ids) for item in sentences)
     actual = ConflictSetSemanticProjection(
         "CONFLICT_SET", "CONFLICT_SET", plan.scope_id, claim_ids,
-        claim_states, source_ids)
+        claim_states, claim_source_ids, source_ids)
     expected = plan.projection
     status = evaluate_conflict_set_projection(expected, actual)
     return ConflictSetSurfaceParseResult(status, actual, count)

@@ -121,6 +121,7 @@ class ConflictSetSemanticProjection:
     scope_id: int
     claim_ids: tuple[str, ...]
     claim_states: tuple[tuple[str, int, int], ...]
+    claim_source_ids: tuple[tuple[str, tuple[str, ...]], ...]
     cited_source_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -150,17 +151,44 @@ class ConflictSetSemanticProjection:
         if tuple(item[0] for item in self.claim_states) != self.claim_ids:
             raise ConflictSetContractError(
                 "projection claim_states must follow claim_ids exactly")
+        if (not isinstance(self.claim_source_ids, tuple)
+                or len(self.claim_source_ids) != len(self.claim_ids)
+                or tuple(item[0] for item in self.claim_source_ids)
+                != self.claim_ids):
+            raise ConflictSetContractError(
+                "projection claim_source_ids must follow claim_ids exactly")
+        for claim_id, source_ids in self.claim_source_ids:
+            _text(claim_id, where="projection.claim_source_ids.claim_id")
+            if source_ids != _canonical_ids(
+                    source_ids,
+                    where="projection.claim_source_ids.source_ids"):
+                raise ConflictSetContractError(
+                    "projection claim source ids must be canonical")
+            if not source_ids:
+                raise ConflictSetContractError(
+                    "projection claim source ids must be non-empty")
         canonical = _canonical_ids(
             self.cited_source_ids, where="projection.cited_source_ids")
         if self.cited_source_ids != canonical:
             raise ConflictSetContractError(
                 "projection cited_source_ids must be canonical")
+        if set(self.cited_source_ids) != {
+                source_id
+                for _claim_id, source_ids in self.claim_source_ids
+                for source_id in source_ids
+        }:
+            raise ConflictSetContractError(
+                "projection cited sources must close claim source ids")
 
     def to_dict(self) -> dict[str, object]:
         return {
             "carrier_kind": self.carrier_kind,
             "cited_source_ids": list(self.cited_source_ids),
             "claim_ids": list(self.claim_ids),
+            "claim_source_ids": [
+                {"claim_id": claim_id, "source_ids": list(source_ids)}
+                for claim_id, source_ids in self.claim_source_ids
+            ],
             "claim_states": [
                 {
                     "claim_id": claim_id,
@@ -231,6 +259,10 @@ class ConflictSetPlan:
             self.scope_id,
             self.claim_ids,
             tuple((claim_id, 1, 1) for claim_id in self.claim_ids),
+            tuple((
+                claim.claim_id,
+                claim.source_ids,
+            ) for claim in self.claims),
             tuple(sorted({
                 item.source_id for item in self.evidence})),
         )
