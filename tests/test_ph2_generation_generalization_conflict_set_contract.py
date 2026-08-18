@@ -2,9 +2,13 @@
 import pytest
 
 from pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_contract import (
+    CONFLICT_SET_FAIL,
+    CONFLICT_SET_NE,
+    CONFLICT_SET_PASS,
     ConflictSetContractError,
     ConflictSetEvidence,
     build_conflict_set_plan,
+    evaluate_conflict_set_projection,
 )
 
 
@@ -72,3 +76,24 @@ def test_conflict_set_rejects_scope_drift_and_uncovered_claim() -> None:
             claim_ids=("claim-a", "claim-b", "claim-c"),
             evidence=_evidence(),
         )
+
+
+def test_conflict_set_projection_has_explicit_pass_fail_ne() -> None:
+    plan = build_conflict_set_plan(
+        scope_id=901,
+        claim_ids=("claim-b", "claim-a"),
+        evidence=_evidence(),
+    )
+    expected = plan.projection
+    assert evaluate_conflict_set_projection(expected, expected) == CONFLICT_SET_PASS
+    assert evaluate_conflict_set_projection(
+        expected,
+        type(expected)(
+            expected.carrier_kind,
+            expected.response_act,
+            expected.scope_id,
+            tuple(reversed(expected.claim_ids)),
+            expected.cited_source_ids,
+        ),
+    ) == CONFLICT_SET_FAIL
+    assert evaluate_conflict_set_projection(expected, None) == CONFLICT_SET_NE

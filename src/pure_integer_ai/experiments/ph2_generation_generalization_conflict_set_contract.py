@@ -11,6 +11,9 @@ from typing import Iterable
 
 
 _RESPONSE_ACT = "CONFLICT_SET"
+CONFLICT_SET_PASS = "PASS"
+CONFLICT_SET_FAIL = "FAIL"
+CONFLICT_SET_NE = "NE"
 
 
 class ConflictSetContractError(ValueError):
@@ -247,11 +250,29 @@ def build_conflict_set_plan(
     return ConflictSetPlan(scope_id, claim_ids, tuple(claims), evidence)
 
 
+def evaluate_conflict_set_projection(
+        expected: ConflictSetSemanticProjection,
+        actual: ConflictSetSemanticProjection | None,
+        ) -> str:
+    """Classify a complete actual projection without reading surface text."""
+    if not isinstance(expected, ConflictSetSemanticProjection):
+        raise TypeError("expected projection type is invalid")
+    if actual is None:
+        return CONFLICT_SET_NE
+    if not isinstance(actual, ConflictSetSemanticProjection):
+        raise TypeError("actual projection type is invalid")
+    return CONFLICT_SET_PASS if actual == expected else CONFLICT_SET_FAIL
+
+
 __all__ = [
+    "CONFLICT_SET_FAIL",
+    "CONFLICT_SET_NE",
+    "CONFLICT_SET_PASS",
     "ConflictSetClaim",
     "ConflictSetContractError",
     "ConflictSetEvidence",
     "ConflictSetPlan",
     "ConflictSetSemanticProjection",
     "build_conflict_set_plan",
+    "evaluate_conflict_set_projection",
 ]
