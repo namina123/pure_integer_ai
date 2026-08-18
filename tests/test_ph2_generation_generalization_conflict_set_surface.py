@@ -54,4 +54,13 @@ def test_conflict_set_parser_distinguishes_order_and_missing_sentence() -> None:
     source_loss = replace(sentences[0], source_ids=("source-a",))
     assert classify_conflict_set_surface(
         plan, (source_loss, sentences[1])).status == CONFLICT_SET_FAIL
+    source_swap = (
+        replace(sentences[0], source_ids=sentences[1].source_ids),
+        replace(sentences[1], source_ids=sentences[0].source_ids),
+    )
+    swapped = classify_conflict_set_surface(plan, source_swap)
+    assert swapped.status == CONFLICT_SET_FAIL
+    assert swapped.projection is not None
+    assert swapped.projection.cited_source_ids == plan.projection.cited_source_ids
+    assert swapped.projection.claim_source_ids != plan.projection.claim_source_ids
     assert classify_conflict_set_surface(plan, None).status == CONFLICT_SET_NE
