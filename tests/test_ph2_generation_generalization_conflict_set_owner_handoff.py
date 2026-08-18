@@ -209,6 +209,9 @@ def test_public_preflight_manifest_is_canonical_and_anchored():
     assert freeze.sample_sha256 == (
         "d6250c956b20a30912bf335b4a88904e2ad80445091f4bdc97f518bfec1c2082")
     assert freeze.formal_run_count == 0
+    live = build_conflict_set_public_preflight_freeze(
+        Path(__file__).parents[1], public_head_sha1=freeze.public_head_sha1)
+    assert live == freeze
 
 
 def test_conflict_set_owner_handoff_is_label_free_and_rejects_unknown_fields():
