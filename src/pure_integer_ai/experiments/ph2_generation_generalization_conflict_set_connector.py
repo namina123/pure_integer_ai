@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from pure_integer_ai.cognition.shared.generation_content import (
     AnswerContentSelection,
 )
+from pure_integer_ai.cognition.shared.generation_plan import (
+    GenerationCandidate,
+)
 from pure_integer_ai.cognition.shared.generation_structure_plan import (
     DiscourseDependency,
 )
@@ -27,6 +30,10 @@ from pure_integer_ai.cognition.shared.identity import (
     minimal_instruction_identity,
     representation_identity,
     structure_concept_identity,
+)
+from pure_integer_ai.cognition.shared.hypothesis import (
+    EVIDENCE_REFUTE,
+    EVIDENCE_SUPPORT,
 )
 from pure_integer_ai.cognition.shared.semantic_object import role_identity
 from pure_integer_ai.cognition.shared.structure_order import (
@@ -66,20 +73,86 @@ class ConflictSetConnectorCompileError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class ConflictSetSourceBinding:
+    """把公开 source id 一一绑定到候选实际引用的 ``SourceRef``。"""
+
+    source_id: str
+    source: SourceRef
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_id, str) or not self.source_id:
+            raise ConflictSetConnectorCompileError("source_id 必须是非空文本")
+        if not isinstance(self.source, SourceRef):
+            raise TypeError("conflict source binding 类型错误")
+
+
+def _candidate_source_stances(
+        candidate: GenerationCandidate,
+        ) -> dict[SourceRef, tuple[bool, bool]]:
+    """从候选实际 Core/Memory Evidence 恢复逐来源 support/refute 位。"""
+    states: dict[SourceRef, tuple[bool, bool]] = {}
+
+    def accumulate(source: SourceRef, stance: int) -> None:
+        support, refute = states.get(source, (False, False))
+        states[source] = (
+            support or stance == EVIDENCE_SUPPORT,
+            refute or stance == EVIDENCE_REFUTE,
+        )
+
+    for evidence in candidate.evidence:
+        accumulate(evidence.source, evidence.stance)
+    for memory in candidate.memory_evidence:
+        for source in memory.sources:
+            accumulate(source.trace.source, source.trace.stance)
+    return states
+
+
+@dataclass(frozen=True, slots=True)
 class ConflictSetSentenceBinding:
-    """把一个 declared claim 绑定到真实 Proposition 和公开 surface。"""
+    """把一个 declared claim 绑定到真实候选、来源和公开 surface。"""
 
     claim_id: str
-    proposition: BoundProposition
+    candidate: GenerationCandidate
     claim_surface: str
+    source_bindings: tuple[ConflictSetSourceBinding, ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.claim_id, str) or not self.claim_id:
             raise ConflictSetConnectorCompileError("claim_id 必须是非空文本")
-        if not isinstance(self.proposition, BoundProposition):
-            raise TypeError("conflict sentence proposition 类型错误")
+        if not isinstance(self.candidate, GenerationCandidate):
+            raise TypeError("conflict sentence candidate 类型错误")
+        if not self.candidate.state.support or not self.candidate.state.refute:
+            raise ConflictSetConnectorCompileError(
+                "CONFLICT_SET candidate 必须同时携带 support/refute")
         if not isinstance(self.claim_surface, str) or not self.claim_surface:
             raise ConflictSetConnectorCompileError("claim_surface 必须是非空文本")
+        if (not isinstance(self.source_bindings, tuple)
+                or not self.source_bindings
+                or any(not isinstance(item, ConflictSetSourceBinding)
+                       for item in self.source_bindings)):
+            raise ConflictSetConnectorCompileError(
+                "source_bindings 必须是非空 typed tuple")
+        source_ids = tuple(item.source_id for item in self.source_bindings)
+        if source_ids != tuple(sorted(set(source_ids))):
+            raise ConflictSetConnectorCompileError(
+                "source_bindings 必须按唯一 source_id 规范排序")
+        sources = tuple(item.source for item in self.source_bindings)
+        if len(set(sources)) != len(sources):
+            raise ConflictSetConnectorCompileError(
+                "source_id 到 SourceRef 必须一一映射")
+        if set(sources) != set(self.candidate.citation_sources):
+            raise ConflictSetConnectorCompileError(
+                "source_bindings 未精确覆盖 candidate citation_sources")
+
+    @property
+    def proposition(self) -> BoundProposition:
+        """返回真实候选的 bound Proposition。"""
+        return self.candidate.proposition
+
+    @property
+    def source_ids(self) -> tuple[str, ...]:
+        """返回与 source bindings 相同顺序的公开 source ids。"""
+        return tuple(item.source_id for item in self.source_bindings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,8 +160,8 @@ class ConflictSetSentenceCompilation:
     """一个 claim 的 connector template、槽和来源归属。"""
 
     claim_id: str
-    proposition: BoundProposition
-    source_ids: tuple[str, ...]
+    candidate: GenerationCandidate
+    source_bindings: tuple[ConflictSetSourceBinding, ...]
     claim_surface: str
     template: LanguageGenerationConnectorTemplate
     proposition_slot: ObjectIdentity
@@ -100,13 +173,22 @@ class ConflictSetSentenceCompilation:
     def __post_init__(self) -> None:
         if not isinstance(self.claim_id, str) or not self.claim_id:
             raise ConflictSetConnectorCompileError("sentence claim_id 非法")
-        if not isinstance(self.proposition, BoundProposition):
-            raise TypeError("sentence proposition 类型错误")
-        if (not isinstance(self.source_ids, tuple) or not self.source_ids
-                or self.source_ids != tuple(sorted(set(self.source_ids)))):
-            raise ConflictSetConnectorCompileError("sentence source_ids 非规范")
-        if not all(isinstance(item, str) and item for item in self.source_ids):
-            raise ConflictSetConnectorCompileError("sentence source_ids 含非法项")
+        if not isinstance(self.candidate, GenerationCandidate):
+            raise TypeError("sentence candidate 类型错误")
+        if (not isinstance(self.source_bindings, tuple)
+                or not self.source_bindings
+                or any(not isinstance(item, ConflictSetSourceBinding)
+                       for item in self.source_bindings)):
+            raise ConflictSetConnectorCompileError(
+                "sentence source_bindings 非规范")
+        if tuple(item.source_id for item in self.source_bindings) != tuple(
+                sorted({item.source_id for item in self.source_bindings})):
+            raise ConflictSetConnectorCompileError(
+                "sentence source_bindings 未规范排序")
+        if set(item.source for item in self.source_bindings) != set(
+                self.candidate.citation_sources):
+            raise ConflictSetConnectorCompileError(
+                "sentence source_bindings 与 candidate 来源漂移")
         if not isinstance(self.claim_surface, str) or not self.claim_surface:
             raise ConflictSetConnectorCompileError("sentence claim_surface 非法")
         if not isinstance(self.template, LanguageGenerationConnectorTemplate):
@@ -124,6 +206,16 @@ class ConflictSetSentenceCompilation:
             raise TypeError("sentence claim_representation 类型错误")
         if self.template.constraints != (self.order_constraint,):
             raise ConflictSetConnectorCompileError("sentence 顺序义务未唯一注册")
+
+    @property
+    def proposition(self) -> BoundProposition:
+        """返回本句实际候选的 bound Proposition。"""
+        return self.candidate.proposition
+
+    @property
+    def source_ids(self) -> tuple[str, ...]:
+        """返回本句实际 SourceRef 对应的公开 source ids。"""
+        return tuple(item.source_id for item in self.source_bindings)
 
 
 class ConflictSetDiscourseDeclarations:
@@ -143,12 +235,12 @@ class ConflictSetDiscourseDeclarations:
         claim_ids = tuple(item.claim_id for item in bindings)
         if len(set(claim_ids)) != len(claim_ids):
             raise ConflictSetConnectorCompileError("claim_id 不得重复")
-        proposition_keys = tuple(item.proposition.stable_key() for item in bindings)
-        if len(set(proposition_keys)) != len(proposition_keys):
-            raise ConflictSetConnectorCompileError("Proposition 不得重复")
+        candidate_keys = tuple(item.candidate.stable_key() for item in bindings)
+        if len(set(candidate_keys)) != len(candidate_keys):
+            raise ConflictSetConnectorCompileError("candidate 不得重复")
         self._bindings = bindings
         self._claim_ids = claim_ids
-        self._proposition_keys = proposition_keys
+        self._candidate_keys = candidate_keys
         if not isinstance(source, SourceRef):
             raise TypeError("conflict discourse source 类型错误")
         if (not isinstance(namespace, tuple) or not namespace
@@ -162,7 +254,7 @@ class ConflictSetDiscourseDeclarations:
             self,
             selection: AnswerContentSelection,
             ) -> LanguageConnectorDiscourseDeclaration | None:
-        """按 selected candidate 的真实 Proposition 恢复唯一 claim 顺序。"""
+        """按 selected candidate 的完整身份恢复唯一 claim 顺序。"""
         if not isinstance(selection, AnswerContentSelection):
             raise TypeError("conflict discourse selection 类型错误")
         selected_keys = set(selection.selected_candidate_keys)
@@ -172,17 +264,25 @@ class ConflictSetDiscourseDeclarations:
         )
         if len(selected) != len(selected_keys):
             raise ConflictSetConnectorCompileError("selection candidate 不可恢复")
-        by_proposition = {candidate.proposition.stable_key(): candidate
-                          for candidate in selected}
-        if len(by_proposition) != len(selected):
-            raise ConflictSetConnectorCompileError("selection Proposition 不得重复")
-        if set(by_proposition) != set(self._proposition_keys):
+        by_candidate = {
+            candidate.stable_key(): candidate for candidate in selected}
+        if len(by_candidate) != len(selected):
+            raise ConflictSetConnectorCompileError("selection candidate 不得重复")
+        if set(by_candidate) != set(self._candidate_keys):
             raise ConflictSetConnectorCompileError(
                 "CONFLICT_SET selection 未精确覆盖 declared claim")
-        ordered = tuple(by_proposition[key] for key in self._proposition_keys)
+        ordered = tuple(by_candidate[key] for key in self._candidate_keys)
         candidate_keys = tuple(item.stable_key() for item in ordered)
-        relation = structure_concept_identity((*self._namespace, 5, 1))
-        reason = minimal_instruction_identity((*self._namespace, 5, 2))
+        relation = structure_concept_identity(
+            (*self._namespace, 5, 1),
+            owner=self._source.owner,
+            versions=self._source.versions,
+        )
+        reason = minimal_instruction_identity(
+            (*self._namespace, 5, 2),
+            owner=self._source.owner,
+            versions=self._source.versions,
+        )
         dependencies = tuple(
             DiscourseDependency(
                 before.stable_key(),
@@ -202,15 +302,15 @@ class ConflictSetDiscourseDeclarations:
         )
 
     def state_key(self) -> tuple[int, ...]:
-        """返回 claim/Proposition 顺序配置键。"""
+        """返回 claim/candidate 顺序配置键。"""
         source_key = self._source.stable_key()
         result = [len(self._namespace), *self._namespace,
                   len(source_key), *source_key, len(self._claim_ids)]
-        for claim_id, proposition_key in zip(
-                self._claim_ids, self._proposition_keys, strict=True):
+        for claim_id, candidate_key in zip(
+                self._claim_ids, self._candidate_keys, strict=True):
             claim_key = tuple(ord(char) for char in claim_id)
             result.extend((len(claim_key), *claim_key))
-            result.extend((len(proposition_key), *proposition_key))
+            result.extend((len(candidate_key), *candidate_key))
         return tuple(result)
 
     def clone_for_evaluation(self) -> "ConflictSetDiscourseDeclarations":
@@ -275,12 +375,47 @@ class ConflictSetConnectorCompileRequest:
             raise TypeError("compile request plan 类型错误")
         if (not isinstance(self.bindings, tuple)
                 or len(self.bindings) != len(self.plan.claim_ids)
+                or any(not isinstance(item, ConflictSetSentenceBinding)
+                       for item in self.bindings)
                 or tuple(item.claim_id for item in self.bindings)
                 != self.plan.claim_ids):
             raise ConflictSetConnectorCompileError(
                 "bindings 必须按 plan claim 顺序精确覆盖")
-        if len({item.proposition for item in self.bindings}) != len(self.bindings):
-            raise ConflictSetConnectorCompileError("bindings Proposition 不得重复")
+        candidate_keys = tuple(
+            item.candidate.stable_key() for item in self.bindings)
+        if len(set(candidate_keys)) != len(candidate_keys):
+            raise ConflictSetConnectorCompileError("bindings candidate 不得重复")
+        source_id_map: dict[str, SourceRef] = {}
+        source_ref_map: dict[SourceRef, str] = {}
+        for claim, binding in zip(
+                self.plan.claims, self.bindings, strict=True):
+            if binding.source_ids != claim.source_ids:
+                raise ConflictSetConnectorCompileError(
+                    "binding source ids 未精确覆盖 plan claim")
+            states = _candidate_source_stances(binding.candidate)
+            by_id = {item.source_id: item.source
+                     for item in binding.source_bindings}
+            support = tuple(sorted(
+                source_id for source_id, source in by_id.items()
+                if states.get(source, (False, False))[0]
+            ))
+            refute = tuple(sorted(
+                source_id for source_id, source in by_id.items()
+                if states.get(source, (False, False))[1]
+            ))
+            if (support != claim.support_source_ids
+                    or refute != claim.refute_source_ids):
+                raise ConflictSetConnectorCompileError(
+                    "candidate 逐来源 stance 与 plan claim 不一致")
+            for item in binding.source_bindings:
+                if (source_id_map.setdefault(item.source_id, item.source)
+                        != item.source):
+                    raise ConflictSetConnectorCompileError(
+                        "同一 source_id 不得映射不同 SourceRef")
+                if (source_ref_map.setdefault(item.source, item.source_id)
+                        != item.source_id):
+                    raise ConflictSetConnectorCompileError(
+                        "同一 SourceRef 不得映射不同 source_id")
         if (not isinstance(self.language_branch, ObjectIdentity)
                 or self.language_branch.object_kind != OBJECT_LANGUAGE_BRANCH):
             raise ConflictSetConnectorCompileError("language_branch 类型错误")
@@ -294,6 +429,18 @@ class ConflictSetConnectorCompileRequest:
                 "representation_family 必须是非空整数 tuple")
         if not isinstance(self.discourse_source, SourceRef):
             raise TypeError("discourse_source 类型错误")
+        if (self.discourse_source.owner != self.language_branch.owner
+                or self.discourse_source.versions
+                != self.language_branch.versions):
+            raise ConflictSetConnectorCompileError(
+                "discourse_source 与 language_branch owner/version 不一致")
+        if any(
+                item.proposition.template.owner != self.language_branch.owner
+                or item.proposition.template.versions
+                != self.language_branch.versions
+                for item in self.bindings):
+            raise ConflictSetConnectorCompileError(
+                "binding Proposition 与 language_branch owner/version 不一致")
         if (not isinstance(self.namespace, tuple) or not self.namespace
                 or any(type(item) is not int for item in self.namespace)):
             raise ConflictSetConnectorCompileError("namespace 必须是非空整数 tuple")
@@ -305,12 +452,31 @@ def compile_conflict_set_connector(
     """把 typed 多命题计划接入真实 LanguageGenerationConnector。"""
     if not isinstance(request, ConflictSetConnectorCompileRequest):
         raise TypeError("compile request 类型错误")
+    owner = request.language_branch.owner
+    versions = request.language_branch.versions
+
+    def instruction(key: tuple[int, ...]) -> ObjectIdentity:
+        """建立继承 LanguageBranch owner/version 的 MinimalInstruction。"""
+        return minimal_instruction_identity(key, owner=owner, versions=versions)
+
+    def structure_identity(key: tuple[int, ...]) -> ObjectIdentity:
+        """建立继承 LanguageBranch owner/version 的 StructureConcept。"""
+        return structure_concept_identity(key, owner=owner, versions=versions)
+
+    def concept(key: tuple[int, ...]) -> ObjectIdentity:
+        """建立继承 LanguageBranch owner/version 的通用 Concept。"""
+        return concept_identity(key, owner=owner, versions=versions)
+
+    def role(key: tuple[int, ...]) -> ObjectIdentity:
+        """建立继承 LanguageBranch owner/version 的 Role。"""
+        return role_identity(key, owner=owner, versions=versions)
+
     value_protocol = LanguageConnectorValueProtocol(*tuple(
-        minimal_instruction_identity((*request.namespace, 1, index))
+        instruction((*request.namespace, 1, index))
         for index in range(1, 5)
     ), ordinals=tuple(
         LanguageConnectorOrdinalDefinition(
-            minimal_instruction_identity((*request.namespace, 2, index)), index)
+            instruction((*request.namespace, 2, index)), index)
         for index in range(len(request.bindings))
     ))
     templates = []
@@ -318,43 +484,43 @@ def compile_conflict_set_connector(
     sentence_compilations = []
     for sentence_ordinal, binding in enumerate(request.bindings, start=1):
         identity = (*request.namespace, 3, sentence_ordinal)
-        sentence = structure_concept_identity((*identity, 1))
-        structure = structure_concept_identity((*identity, 2))
-        proposition_slot = structure_concept_identity((*identity, 3))
-        claim_slot = structure_concept_identity((*identity, 4))
-        value_type = concept_identity((*identity, 5))
+        sentence = structure_identity((*identity, 1))
+        structure = structure_identity((*identity, 2))
+        proposition_slot = structure_identity((*identity, 3))
+        claim_slot = structure_identity((*identity, 4))
+        value_type = concept((*identity, 5))
         slots = (
             StructureSlotDefinition(
-                structure, proposition_slot, role_identity((*identity, 6)),
+                structure, proposition_slot, role((*identity, 6)),
                 value_type),
             StructureSlotDefinition(
-                structure, claim_slot, role_identity((*identity, 7)),
+                structure, claim_slot, role((*identity, 7)),
                 value_type),
         )
-        claim_constant = concept_identity((*identity, 8))
+        claim_constant = concept((*identity, 8))
         bindings = (
             LanguageConnectorSlotBinding(
-                structure_concept_identity((*identity, 9)),
+                structure_identity((*identity, 9)),
                 proposition_slot, value_protocol.proposition_source),
             LanguageConnectorSlotBinding(
-                structure_concept_identity((*identity, 10)),
+                structure_identity((*identity, 10)),
                 claim_slot, value_protocol.constant_source,
                 constant=claim_constant),
         )
         directives = (
             LanguageConnectorSurfaceDirective(
-                structure_concept_identity((*identity, 11)),
+                structure_identity((*identity, 11)),
                 proposition_slot, request.surface_protocol.silent_action,
-                minimal_instruction_identity((*identity, 12)),
-                structure_concept_identity((*identity, 13)), ()),
+                instruction((*identity, 12)),
+                structure_identity((*identity, 13)), ()),
             LanguageConnectorSurfaceDirective(
-                structure_concept_identity((*identity, 14)),
+                structure_identity((*identity, 14)),
                 claim_slot, request.surface_protocol.emit_action,
-                minimal_instruction_identity((*identity, 15)),
-                structure_concept_identity((*identity, 16)), ()),
+                instruction((*identity, 15)),
+                structure_identity((*identity, 16)), ()),
         )
-        connector_id = structure_concept_identity((*identity, 17))
-        order_constraint = structure_concept_identity((*identity, 18))
+        connector_id = structure_identity((*identity, 17))
+        order_constraint = structure_identity((*identity, 18))
         template = LanguageGenerationConnectorTemplate(
             connector_id,
             request.language_branch,
@@ -364,12 +530,12 @@ def compile_conflict_set_connector(
             structure,
             slots,
             bindings,
-            structure_concept_identity((*identity, 19)),
+            structure_identity((*identity, 19)),
             (order_constraint,),
-            structure_concept_identity((*identity, 20)),
+            structure_identity((*identity, 20)),
             (),
-            minimal_instruction_identity((*identity, 21)),
-            minimal_instruction_identity((*identity, 22)),
+            instruction((*identity, 21)),
+            instruction((*identity, 22)),
             directives,
         )
         templates.append(template)
@@ -386,11 +552,8 @@ def compile_conflict_set_connector(
         ))
         sentence_compilations.append(ConflictSetSentenceCompilation(
             binding.claim_id,
-            binding.proposition,
-            tuple(sorted({
-                item.source_id for item in request.plan.evidence
-                if item.claim_id == binding.claim_id
-            })),
+            binding.candidate,
+            binding.source_bindings,
             binding.claim_surface,
             template,
             proposition_slot,
@@ -399,6 +562,8 @@ def compile_conflict_set_connector(
             representation_identity(
                 request.representation_family,
                 tuple(ord(char) for char in binding.claim_surface),
+                owner=owner,
+                versions=versions,
             ),
             order_constraint,
         ))
@@ -423,6 +588,7 @@ __all__ = [
     "ConflictSetConnectorCompileError",
     "ConflictSetConnectorCompileRequest",
     "ConflictSetDiscourseDeclarations",
+    "ConflictSetSourceBinding",
     "ConflictSetSentenceBinding",
     "ConflictSetSentenceCompilation",
     "compile_conflict_set_connector",

@@ -31,12 +31,14 @@ def _text(value: object, *, where: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ConflictSetGeneratedSentence:
-    """One generated sentence with explicit claim/source attribution."""
+    """One generated sentence with explicit claim/source/state attribution."""
 
     ordinal: int
     claim_id: str
     scope_id: int
     source_ids: tuple[str, ...]
+    support: int
+    refute: int
     surface: str
     units: tuple[int, ...]
 
@@ -53,6 +55,10 @@ class ConflictSetGeneratedSentence:
                 "sentence source ids must be canonical and non-empty")
         for source_id in self.source_ids:
             _text(source_id, where="sentence.source_id")
+        if (type(self.support) is not int or self.support not in {0, 1}
+                or type(self.refute) is not int or self.refute not in {0, 1}):
+            raise ConflictSetSurfaceError(
+                "sentence support/refute must be bits")
         _text(self.surface, where="sentence.surface")
         if (not isinstance(self.units, tuple) or not self.units
                 or any(type(item) is not int or item < 0 for item in self.units)):
@@ -99,6 +105,8 @@ def generate_conflict_set_sentences(
             claim.claim_id,
             plan.scope_id,
             claim.source_ids,
+            1,
+            1,
             _text(surface, where="surface"),
             tuple(ord(item) for item in surface),
         )
@@ -131,8 +139,11 @@ def parse_conflict_set_sentences(
     source_ids = tuple(sorted({
         source_id for item in sentences for source_id in item.source_ids
     }))
+    claim_states = tuple(
+        (item.claim_id, item.support, item.refute) for item in sentences)
     actual = ConflictSetSemanticProjection(
-        "CONFLICT_SET", "CONFLICT_SET", plan.scope_id, claim_ids, source_ids)
+        "CONFLICT_SET", "CONFLICT_SET", plan.scope_id, claim_ids,
+        claim_states, source_ids)
     expected = plan.projection
     status = evaluate_conflict_set_projection(expected, actual)
     return ConflictSetSurfaceParseResult(status, actual, count)

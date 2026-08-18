@@ -34,6 +34,10 @@ def test_conflict_set_plan_closes_all_claims_sources_and_projection() -> None:
         "carrier_kind": "CONFLICT_SET",
         "cited_source_ids": ["source-a", "source-b", "source-c", "source-d"],
         "claim_ids": ["claim-b", "claim-a"],
+        "claim_states": [
+            {"claim_id": "claim-b", "refute": 1, "support": 1},
+            {"claim_id": "claim-a", "refute": 1, "support": 1},
+        ],
         "response_act": "CONFLICT_SET",
         "scope_id": 901,
     }
@@ -93,6 +97,7 @@ def test_conflict_set_projection_has_explicit_pass_fail_ne() -> None:
             expected.response_act,
             expected.scope_id,
             tuple(reversed(expected.claim_ids)),
+            tuple(reversed(expected.claim_states)),
             expected.cited_source_ids,
         ),
     ) == CONFLICT_SET_FAIL

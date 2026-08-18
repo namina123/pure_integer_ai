@@ -114,12 +114,13 @@ class ConflictSetClaim:
 
 @dataclass(frozen=True, slots=True)
 class ConflictSetSemanticProjection:
-    """The claim/source meaning expected from a future actual generation."""
+    """The claim/source/state meaning recovered from an actual generation."""
 
     carrier_kind: str
     response_act: str
     scope_id: int
     claim_ids: tuple[str, ...]
+    claim_states: tuple[tuple[str, int, int], ...]
     cited_source_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -132,6 +133,23 @@ class ConflictSetSemanticProjection:
             raise ConflictSetContractError("projection claim_ids must be unique")
         for item in self.claim_ids:
             _text(item, where="projection.claim_id")
+        if (not isinstance(self.claim_states, tuple)
+                or len(self.claim_states) != len(self.claim_ids)):
+            raise ConflictSetContractError(
+                "projection claim_states must follow claim_ids exactly")
+        for state in self.claim_states:
+            if not isinstance(state, tuple) or len(state) != 3:
+                raise ConflictSetContractError(
+                    "projection claim state must be a three-item tuple")
+            claim_id, support, refute = state
+            _text(claim_id, where="projection.claim_state.claim_id")
+            if (type(support) is not int or support not in {0, 1}
+                    or type(refute) is not int or refute not in {0, 1}):
+                raise ConflictSetContractError(
+                    "projection claim state support/refute must be bits")
+        if tuple(item[0] for item in self.claim_states) != self.claim_ids:
+            raise ConflictSetContractError(
+                "projection claim_states must follow claim_ids exactly")
         canonical = _canonical_ids(
             self.cited_source_ids, where="projection.cited_source_ids")
         if self.cited_source_ids != canonical:
@@ -143,6 +161,14 @@ class ConflictSetSemanticProjection:
             "carrier_kind": self.carrier_kind,
             "cited_source_ids": list(self.cited_source_ids),
             "claim_ids": list(self.claim_ids),
+            "claim_states": [
+                {
+                    "claim_id": claim_id,
+                    "refute": refute,
+                    "support": support,
+                }
+                for claim_id, support, refute in self.claim_states
+            ],
             "response_act": self.response_act,
             "scope_id": self.scope_id,
         }
@@ -204,6 +230,7 @@ class ConflictSetPlan:
             _RESPONSE_ACT,
             self.scope_id,
             self.claim_ids,
+            tuple((claim_id, 1, 1) for claim_id in self.claim_ids),
             tuple(sorted({
                 item.source_id for item in self.evidence})),
         )
