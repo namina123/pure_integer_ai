@@ -14,7 +14,6 @@ from typing import Any, Iterable
 
 from pure_integer_ai.cognition.shared.identity import SourceRef
 from pure_integer_ai.experiments.ph2_dataset_contract import (
-    canonical_json_bytes,
     canonical_json_line,
     parse_canonical_json_bytes,
 )

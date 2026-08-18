@@ -1,4 +1,5 @@
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -29,6 +30,15 @@ from pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_owne
     ConflictSetSplitAxes,
     expected_conflict_set_artifact_roles,
     parse_conflict_set_owner_handoff_bytes,
+    read_conflict_set_owner_handoff,
+)
+from pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_public_preflight import (
+    ARTIFACT_KIND as PREFLIGHT_ARTIFACT_KIND,
+    PUBLIC_PREFLIGHT_STATUS,
+    build_conflict_set_code_identity,
+    build_conflict_set_public_preflight_freeze,
+    parse_conflict_set_public_preflight_bytes,
+    ConflictSetPublicPreflightError,
 )
 
 
@@ -130,6 +140,60 @@ def test_conflict_set_owner_handoff_round_trips_canonical_bytes():
     assert parsed == handoff
     assert len(handoff.artifact_roles) == 10
     assert handoff.sha256() == parsed.sha256()
+
+
+def test_public_sample_is_canonical_and_source_clusters_are_split_isolated():
+    sample = (
+        Path(__file__).parents[1]
+        / "data/ph2/conflict_set_owner_handoff_v1.jsonl.sample"
+    )
+    handoff = read_conflict_set_owner_handoff(sample)
+    assert handoff.canonical_bytes() == sample.read_bytes()
+    assert len(handoff.source_manifest) == 12
+    assert tuple(item.split for item in handoff.observations) == (
+        "train", "dev", "held_out")
+    clusters = {
+        split: {
+            item.source_cluster_id
+            for item in handoff.source_manifest
+            if item.split == split
+        }
+        for split in ("train", "dev", "held_out")
+    }
+    assert clusters["train"].isdisjoint(clusters["dev"])
+    assert clusters["train"].isdisjoint(clusters["held_out"])
+    assert clusters["dev"].isdisjoint(clusters["held_out"])
+
+
+def test_public_preflight_freeze_binds_sample_and_code_closure():
+    repository = Path(__file__).parents[1]
+    sample = repository / "data/ph2/conflict_set_owner_handoff_v1.jsonl.sample"
+    identity = build_conflict_set_code_identity(repository)
+    assert any(
+        item.relative_path.endswith(
+            "ph2_generation_generalization_conflict_set_owner_handoff.py")
+        for item in identity.files
+    )
+    freeze = build_conflict_set_public_preflight_freeze(
+        repository, public_head_sha1="b" * 40)
+    assert freeze.code_identity == identity
+    assert freeze.sample_size_bytes == sample.stat().st_size
+    assert freeze.status == PUBLIC_PREFLIGHT_STATUS
+    assert freeze.teacher_api_llm_call_count == 0
+    assert freeze.private_label_read_count == 0
+    assert freeze.formal_run_count == 0
+    assert parse_conflict_set_public_preflight_bytes(
+        freeze.canonical_bytes()) == freeze
+
+
+def test_public_preflight_freeze_rejects_identity_drift():
+    repository = Path(__file__).parents[1]
+    freeze = build_conflict_set_public_preflight_freeze(
+        repository, public_head_sha1="c" * 40)
+    value = freeze.to_dict()
+    value["artifact_kind"] = PREFLIGHT_ARTIFACT_KIND + "_OLD"
+    with pytest.raises(ConflictSetPublicPreflightError):
+        type(freeze).from_dict(value)
 
 
 def test_conflict_set_owner_handoff_is_label_free_and_rejects_unknown_fields():
