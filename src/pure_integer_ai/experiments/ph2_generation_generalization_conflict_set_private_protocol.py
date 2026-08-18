@@ -111,6 +111,13 @@ def _relative(value: object, *, where: str) -> str:
     return result
 
 
+def strict_conflict_set_relative_path(
+        value: object, *, where: str = "relative_path",
+        ) -> str:
+    """返回位于 CONFLICT_SET transport namespace 内的安全 POSIX 路径。"""
+    return _relative(value, where=where)
+
+
 @dataclass(frozen=True, slots=True, order=True)
 class ConflictSetPrivateArtifact:
     """Metadata and commitment for one role; content is never read here."""
@@ -516,4 +523,5 @@ __all__ = [
     "build_conflict_set_run_guard",
     "consume_conflict_set_run_guard",
     "parse_conflict_set_private_transport_bytes",
+    "strict_conflict_set_relative_path",
 ]

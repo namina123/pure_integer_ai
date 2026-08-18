@@ -36,13 +36,15 @@ def _prediction(projection):
     return build_conflict_set_semantic_prediction_seal(
         (
             build_conflict_set_semantic_prediction_record(
-                "a" * 64, projection),
+                "a" * 64, "c" * 64,
+                "NE" if projection is None else "PASS", projection),
             build_conflict_set_semantic_prediction_record(
-                "b" * 64, projection),
+                "b" * 64, "d" * 64,
+                "NE" if projection is None else "PASS", projection),
         ),
         family_manifest_sha256="1" * 64,
         family_commitment_sha256="2" * 64,
-        candidate_payload_sha256="3" * 64,
+        candidate_manifest_sha256="3" * 64,
     )
 
 
@@ -135,15 +137,15 @@ def test_unavailable_projection_is_ne_for_all_dimensions():
 def test_complete_projection_commitment_mismatch_cannot_hide_behind_dimensions():
     plan = _plan()
     record = build_conflict_set_semantic_prediction_record(
-        "a" * 64, plan.projection)
+        "a" * 64, "c" * 64, "PASS", plan.projection)
     tampered = replace(record, projection_sha256="f" * 64)
     prediction = build_conflict_set_semantic_prediction_seal(
         (tampered,
          build_conflict_set_semantic_prediction_record(
-             "b" * 64, plan.projection)),
+             "b" * 64, "d" * 64, "PASS", plan.projection)),
         family_manifest_sha256="1" * 64,
         family_commitment_sha256="2" * 64,
-        candidate_payload_sha256="3" * 64,
+        candidate_manifest_sha256="3" * 64,
     )
     aggregate = build_conflict_set_semantic_formal_aggregate(
         prediction,
@@ -157,13 +159,15 @@ def test_complete_projection_commitment_mismatch_cannot_hide_behind_dimensions()
 
 def test_prediction_seal_rejects_unsorted_or_nonzero_prelabel_counters():
     plan = _plan()
-    first = build_conflict_set_semantic_prediction_record("a" * 64, plan.projection)
-    second = build_conflict_set_semantic_prediction_record("b" * 64, plan.projection)
+    first = build_conflict_set_semantic_prediction_record(
+        "a" * 64, "c" * 64, "PASS", plan.projection)
+    second = build_conflict_set_semantic_prediction_record(
+        "b" * 64, "d" * 64, "PASS", plan.projection)
     with pytest.raises(ConflictSetFormalProtocolError):
         build_conflict_set_semantic_prediction_seal(
             (second, first), family_manifest_sha256="1" * 64,
             family_commitment_sha256="2" * 64,
-            candidate_payload_sha256="3" * 64)
+            candidate_manifest_sha256="3" * 64)
     with pytest.raises(ConflictSetFormalProtocolError):
         type(_prediction(plan.projection))(
             "1" * 64, "2" * 64, "3" * 64, (first, second),

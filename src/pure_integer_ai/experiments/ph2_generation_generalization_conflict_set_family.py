@@ -47,6 +47,9 @@ FAMILY_CODE_ROOT_MODULES = (
     "pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_private_protocol",
     "pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_owner_metadata",
     "pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_family",
+    "pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_formal_protocol",
+    "pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_formal_private",
+    "pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_formal_runner",
 )
 
 

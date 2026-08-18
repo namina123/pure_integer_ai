@@ -35,6 +35,7 @@ CONFLICT_SET_FORMAL_REQUIREMENTS = (
 )
 
 
+# object-model: exception
 class ConflictSetFormalProtocolError(ValueError):
     """prediction、label 或 aggregate 违反 typed formal 协议。"""
 
@@ -227,6 +228,8 @@ class ConflictSetSemanticPredictionRecord:
     """private label 读取前封存的一条 label-free prediction。"""
 
     observation_stable_key_sha256: str
+    candidate_identity_sha256: str
+    actual_status: str
     projection_sha256: str | None
     dimension_sha256: tuple[tuple[str, str | None], ...]
     run_sha256: str
@@ -234,8 +237,17 @@ class ConflictSetSemanticPredictionRecord:
     def __post_init__(self) -> None:
         _sha(self.observation_stable_key_sha256,
              where="prediction observation stable key")
+        _sha(self.candidate_identity_sha256,
+             where="prediction candidate identity")
+        if self.actual_status not in CONFLICT_SET_FORMAL_LABEL_STATUSES:
+            raise ConflictSetFormalProtocolError(
+                "prediction actual status is invalid")
         if self.projection_sha256 is not None:
             _sha(self.projection_sha256, where="prediction projection SHA")
+        if ((self.actual_status == "NE")
+                != (self.projection_sha256 is None)):
+            raise ConflictSetFormalProtocolError(
+                "prediction actual status/projection availability drift")
         if tuple(item[0] for item in self.dimension_sha256) != (
                 CONFLICT_SET_FORMAL_REQUIREMENTS):
             raise ConflictSetFormalProtocolError(
@@ -247,6 +259,8 @@ class ConflictSetSemanticPredictionRecord:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "actual_status": self.actual_status,
+            "candidate_identity_sha256": self.candidate_identity_sha256,
             "dimension_sha256": [
                 {"requirement": requirement, "sha256": value}
                 for requirement, value in self.dimension_sha256
@@ -260,11 +274,18 @@ class ConflictSetSemanticPredictionRecord:
 
 def build_conflict_set_semantic_prediction_record(
         observation_stable_key_sha256: str,
+        candidate_identity_sha256: str,
+        actual_status: str,
         projection: ConflictSetSemanticProjection | None,
         ) -> ConflictSetSemanticPredictionRecord:
     """不访问 label，把实际 runtime 输出投影为安全记录。"""
     _sha(observation_stable_key_sha256,
          where="prediction observation stable key")
+    _sha(candidate_identity_sha256,
+         where="prediction candidate identity")
+    if actual_status not in CONFLICT_SET_FORMAL_LABEL_STATUSES:
+        raise ConflictSetFormalProtocolError(
+            "prediction actual status is invalid")
     projection_sha = None if projection is None else conflict_set_projection_sha256(
         projection)
     dimensions = tuple((
@@ -274,10 +295,14 @@ def build_conflict_set_semantic_prediction_record(
     ) for requirement in CONFLICT_SET_FORMAL_REQUIREMENTS)
     return ConflictSetSemanticPredictionRecord(
         observation_stable_key_sha256,
+        candidate_identity_sha256,
+        actual_status,
         projection_sha,
         dimensions,
         _digest({
             "observation_stable_key_sha256": observation_stable_key_sha256,
+            "candidate_identity_sha256": candidate_identity_sha256,
+            "actual_status": actual_status,
             "dimension_sha256": [
                 {"requirement": requirement, "sha256": value}
                 for requirement, value in dimensions
@@ -288,13 +313,14 @@ def build_conflict_set_semantic_prediction_record(
     )
 
 
+# object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
 class ConflictSetSemanticPredictionSeal:
     """不可变的 pre-label prediction inventory。"""
 
     family_manifest_sha256: str
     family_commitment_sha256: str
-    candidate_payload_sha256: str
+    candidate_manifest_sha256: str
     records: tuple[ConflictSetSemanticPredictionRecord, ...]
     teacher_call_count: int = 0
     label_read_count: int = 0
@@ -304,7 +330,7 @@ class ConflictSetSemanticPredictionSeal:
     def __post_init__(self) -> None:
         for name in (
                 "family_manifest_sha256", "family_commitment_sha256",
-                "candidate_payload_sha256"):
+                "candidate_manifest_sha256"):
             _sha(getattr(self, name), where=f"prediction seal {name}")
         if (not self.records
                 or tuple(item.observation_stable_key_sha256
@@ -327,7 +353,7 @@ class ConflictSetSemanticPredictionSeal:
     def to_dict(self) -> dict[str, object]:
         return {
             "artifact_kind": CONFLICT_SET_PREDICTION_SEAL_ARTIFACT_KIND,
-            "candidate_payload_sha256": self.candidate_payload_sha256,
+            "candidate_manifest_sha256": self.candidate_manifest_sha256,
             "family_commitment_sha256": self.family_commitment_sha256,
             "family_manifest_sha256": self.family_manifest_sha256,
             "format_version": 1,
@@ -342,6 +368,7 @@ class ConflictSetSemanticPredictionSeal:
         return _digest(self.to_dict())
 
 
+# object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
 class ConflictSetDimensionResult:
     """一个 conflict-set requirement 的安全计数结果。"""
@@ -383,6 +410,7 @@ class ConflictSetDimensionResult:
         }
 
 
+# object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
 class ConflictSetSemanticFormalAggregate:
     """四个独立语义维度的只含计数 aggregate。"""
@@ -454,7 +482,7 @@ def build_conflict_set_semantic_prediction_seal(
         *,
         family_manifest_sha256: str,
         family_commitment_sha256: str,
-        candidate_payload_sha256: str,
+        candidate_manifest_sha256: str,
         ) -> ConflictSetSemanticPredictionSeal:
     if not isinstance(records, tuple) or not records:
         raise TypeError("prediction records must be a non-empty tuple")
@@ -463,7 +491,7 @@ def build_conflict_set_semantic_prediction_seal(
         raise TypeError("prediction records contain an invalid item")
     return ConflictSetSemanticPredictionSeal(
         family_manifest_sha256, family_commitment_sha256,
-        candidate_payload_sha256, records,
+        candidate_manifest_sha256, records,
     )
 
 
@@ -500,9 +528,9 @@ def build_conflict_set_semantic_formal_aggregate(
         )
         for requirement, actual in predicted.dimension_sha256:
             dimension_status = label.status_for(requirement, actual)
-            if identity_status == "FAIL":
+            if "FAIL" in {predicted.actual_status, identity_status}:
                 dimension_status = "FAIL"
-            elif identity_status == "NE":
+            elif "NE" in {predicted.actual_status, identity_status}:
                 dimension_status = "NE"
             statuses[requirement].append(dimension_status)
     dimensions = tuple(
@@ -542,6 +570,55 @@ def build_conflict_set_semantic_formal_aggregate(
     )
 
 
+def build_conflict_set_semantic_unavailable_aggregate(
+        prediction: ConflictSetSemanticPredictionSeal,
+        *,
+        label_commitment_sha256: str,
+        prediction_seal_sha256: str | None = None,
+        failure_phase: str,
+        label_read_count: int,
+        label_record_count: int,
+        label_transport_bytes: int,
+        ) -> ConflictSetSemanticFormalAggregate:
+    """在 guard 后运行不可判定时只发布四维 NE 计数。"""
+    if not isinstance(prediction, ConflictSetSemanticPredictionSeal):
+        raise TypeError("prediction seal 类型错误")
+    if not isinstance(failure_phase, str) or not failure_phase:
+        raise ConflictSetFormalProtocolError("failure phase 非法")
+    _sha(label_commitment_sha256, where="unavailable label commitment SHA")
+    if prediction_seal_sha256 is None:
+        prediction_seal_sha256 = prediction.sha256()
+    _sha(prediction_seal_sha256, where="unavailable prediction seal SHA")
+    dimensions = tuple(
+        ConflictSetDimensionResult(
+            requirement,
+            "NE",
+            len(prediction.records),
+            0,
+            0,
+            len(prediction.records),
+            _digest({
+                "failure_phase": failure_phase,
+                "requirement": requirement,
+                "version": 1,
+            }),
+        )
+        for requirement in CONFLICT_SET_FORMAL_REQUIREMENTS
+    )
+    return ConflictSetSemanticFormalAggregate(
+        prediction.family_manifest_sha256,
+        prediction.family_commitment_sha256,
+        prediction_seal_sha256,
+        label_commitment_sha256,
+        dimensions,
+        label_read_count,
+        label_record_count,
+        label_transport_bytes,
+        "NE",
+        failure_phase,
+    )
+
+
 def conflict_set_semantic_verdict_contract_sha256() -> str:
     """冻结独立四维 PASS/FAIL/NE 合同。"""
     return _digest({
@@ -573,6 +650,7 @@ __all__ = [
     "build_conflict_set_semantic_label_record",
     "build_conflict_set_semantic_prediction_record",
     "build_conflict_set_semantic_prediction_seal",
+    "build_conflict_set_semantic_unavailable_aggregate",
     "conflict_set_projection_dimension_sha256",
     "conflict_set_projection_sha256",
     "conflict_set_semantic_verdict_contract_sha256",
