@@ -40,9 +40,9 @@ FAMILY_FREEZE_FORMAT_VERSION = 1
 FAMILY_FREEZE_STATUS = "FROZEN_NOT_RUN_PRIVATE_LABELS_UNREAD"
 FAMILY_FREEZE_MANIFEST_NAME = "family-freeze.json"
 PUBLIC_PREFLIGHT_MANIFEST_RELATIVE_PATH = (
-    "data/ph2/manifests/gg03_conflict_set_public_preflight_v1.json")
+    "data/ph2/manifests/gg03_conflict_set_public_preflight_v2.json")
 PUBLIC_PREFLIGHT_MANIFEST_SHA256 = (
-    "5e1ba013d2889108169678370319cc43e7f492dd2b2f1a53d88a678767afa7f4")
+    "ae66fd88b96e6ee225b9be63e9b14ee8e0dfd42d3fe8b129bf1388fbe78d9097")
 FAMILY_CODE_ROOT_MODULES = (
     "pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_private_protocol",
     "pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_owner_metadata",

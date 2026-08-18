@@ -200,18 +200,25 @@ def test_public_preflight_freeze_rejects_identity_drift():
 def test_public_preflight_manifest_is_canonical_and_anchored():
     manifest = (
         Path(__file__).parents[1]
-        / "data/ph2/manifests/gg03_conflict_set_public_preflight_v1.json"
+        / "data/ph2/manifests/gg03_conflict_set_public_preflight_v2.json"
     )
     freeze = read_conflict_set_public_preflight(manifest)
     assert freeze.canonical_bytes() == manifest.read_bytes()
     assert freeze.public_head_sha1 == (
-        "1fd6476eace8e217e734c232aa41856d4da5b576")
+        "b057fc098667f438b690481653c1c501a8ba7cd2")
     assert freeze.sample_sha256 == (
         "d6250c956b20a30912bf335b4a88904e2ad80445091f4bdc97f518bfec1c2082")
     assert freeze.formal_run_count == 0
     live = build_conflict_set_public_preflight_freeze(
         Path(__file__).parents[1], public_head_sha1=freeze.public_head_sha1)
     assert live == freeze
+    legacy = read_conflict_set_public_preflight(
+        Path(__file__).parents[1]
+        / "data/ph2/manifests/gg03_conflict_set_public_preflight_v1.json")
+    assert legacy.sha256() == (
+        "5e1ba013d2889108169678370319cc43e7f492dd2b2f1a53d88a678767afa7f4")
+    assert legacy.code_identity.aggregate_sha256 == (
+        "954443b882014c784ebb277295fd1a322e522ab02e65d38c3b93c896cf8d7ff6")
 
 
 def test_conflict_set_owner_handoff_is_label_free_and_rejects_unknown_fields():

@@ -45,7 +45,7 @@ from pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_publ
 _REPOSITORY = Path(__file__).parents[1]
 _PREFLIGHT_PATH = (
     _REPOSITORY
-    / "data/ph2/manifests/gg03_conflict_set_public_preflight_v1.json"
+    / "data/ph2/manifests/gg03_conflict_set_public_preflight_v2.json"
 )
 _SPECS = {
     "code_freeze": (CODE_IDENTITY, "PUBLIC", "CODE_FREEZE"),
