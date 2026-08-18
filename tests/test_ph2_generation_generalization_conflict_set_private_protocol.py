@@ -80,6 +80,7 @@ def test_private_transport_round_trip_is_metadata_only():
         public_preflight_manifest_sha256="1" * 64,
         observation_pack_sha256="2" * 64,
         source_manifest_sha256="3" * 64,
+        candidate_manifest_sha256="4" * 64,
     )
 
 
@@ -131,6 +132,15 @@ def test_private_transport_rejects_legacy_path_and_commitment_drift():
             public_preflight_manifest_sha256="9" * 64,
             observation_pack_sha256="2" * 64,
             source_manifest_sha256="3" * 64,
+            candidate_manifest_sha256="4" * 64,
+        )
+    with pytest.raises(ConflictSetPrivateProtocolError):
+        assert_conflict_set_transport_matches_public_freeze(
+            transport,
+            public_preflight_manifest_sha256="1" * 64,
+            observation_pack_sha256="2" * 64,
+            source_manifest_sha256="3" * 64,
+            candidate_manifest_sha256="9" * 64,
         )
     with pytest.raises(ConflictSetPrivateProtocolError):
         replace(transport, family_namespace="PH2_GG03_EXECUTABLE_EVALUATION_FAMILY_FREEZE_V1")

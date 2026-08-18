@@ -462,6 +462,7 @@ def assert_conflict_set_transport_matches_public_freeze(
         public_preflight_manifest_sha256: str,
         observation_pack_sha256: str,
         source_manifest_sha256: str,
+        candidate_manifest_sha256: str,
         ) -> None:
     """Reject public/private commitment drift without opening private content."""
     if not isinstance(transport, ConflictSetPrivateTransport):
@@ -470,6 +471,7 @@ def assert_conflict_set_transport_matches_public_freeze(
         "public_preflight_manifest_sha256": public_preflight_manifest_sha256,
         "observation_pack_sha256": observation_pack_sha256,
         "source_manifest_sha256": source_manifest_sha256,
+        "candidate_manifest_sha256": candidate_manifest_sha256,
     }
     for name, value in expected.items():
         _sha(value, where=f"expected.{name}")

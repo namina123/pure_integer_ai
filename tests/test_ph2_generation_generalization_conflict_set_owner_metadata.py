@@ -15,6 +15,7 @@ from pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_owne
     OWNER_METADATA_FORMAT_VERSION,
     OWNER_METADATA_STATUS,
     ConflictSetOwnerMetadataError,
+    build_conflict_set_private_transport_from_owner_metadata,
     build_conflict_set_run_guard_from_owner_metadata,
     parse_conflict_set_owner_metadata_bytes,
     read_conflict_set_owner_metadata,
@@ -117,6 +118,27 @@ def test_owner_metadata_round_trip_closes_transport_and_guard(tmp_path):
     target = tmp_path / "owner-receipt.jsonl"
     target.write_bytes(metadata.canonical_bytes())
     assert read_conflict_set_owner_metadata(target) == metadata
+
+
+def test_candidate_transport_assembly_closes_owner_commitment():
+    original = _transport()
+    metadata = _metadata(original)
+    assembled = build_conflict_set_private_transport_from_owner_metadata(
+        metadata,
+        public_preflight_manifest_sha256="1" * 64,
+        observation_pack_sha256="2" * 64,
+        source_manifest_sha256="3" * 64,
+        candidate_manifest_sha256="4" * 64,
+    )
+    assert assembled == original
+    with pytest.raises(ConflictSetOwnerMetadataError):
+        build_conflict_set_private_transport_from_owner_metadata(
+            metadata,
+            public_preflight_manifest_sha256="9" * 64,
+            observation_pack_sha256="2" * 64,
+            source_manifest_sha256="3" * 64,
+            candidate_manifest_sha256="4" * 64,
+        )
 
 
 def test_owner_metadata_receipt_and_transport_commitments_are_self_consistent():

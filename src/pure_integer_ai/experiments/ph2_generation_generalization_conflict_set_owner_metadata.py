@@ -278,6 +278,32 @@ def validate_conflict_set_owner_metadata(
             "owner metadata artifact inventory drifted")
 
 
+def build_conflict_set_private_transport_from_owner_metadata(
+        metadata: ConflictSetOwnerMetadata,
+        *,
+        public_preflight_manifest_sha256: str,
+        observation_pack_sha256: str,
+        source_manifest_sha256: str,
+        candidate_manifest_sha256: str,
+        ) -> ConflictSetPrivateTransport:
+    """Assemble candidate transport from owner metadata, then close its hash."""
+    if not isinstance(metadata, ConflictSetOwnerMetadata):
+        raise TypeError("owner metadata type is invalid")
+    try:
+        transport = ConflictSetPrivateTransport(
+            FAMILY_NAMESPACE, CAPABILITY_KEY, CODE_IDENTITY,
+            EVALUATOR_OWNER, SOURCE_OWNER,
+            public_preflight_manifest_sha256, observation_pack_sha256,
+            source_manifest_sha256, candidate_manifest_sha256,
+            metadata.artifacts,
+        )
+    except ConflictSetPrivateProtocolError as error:
+        raise ConflictSetOwnerMetadataError(
+            "owner metadata cannot assemble a valid transport") from error
+    validate_conflict_set_owner_metadata(transport, metadata)
+    return transport
+
+
 def build_conflict_set_run_guard_from_owner_metadata(
         transport: ConflictSetPrivateTransport,
         metadata: ConflictSetOwnerMetadata,
@@ -330,6 +356,7 @@ __all__ = [
     "OWNER_METADATA_STATUS",
     "ConflictSetOwnerMetadata",
     "ConflictSetOwnerMetadataError",
+    "build_conflict_set_private_transport_from_owner_metadata",
     "build_conflict_set_run_guard_from_owner_metadata",
     "parse_conflict_set_owner_metadata_bytes",
     "read_conflict_set_owner_metadata",
