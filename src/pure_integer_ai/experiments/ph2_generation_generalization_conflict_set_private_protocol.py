@@ -32,6 +32,7 @@ PROTOCOL_STATUS = "PRIVATE_TRANSPORT_PROTOCOL_FROZEN"
 TRANSPORT_ROOT_NAMESPACE = "gg03-conflict-set-v1"
 RUN_STATES = ("AVAILABLE", "CONSUMED")
 RUN_INTENT_STATE = "FORMAL_RUN_INTENT_FROZEN"
+ARTIFACT_MATERIALIZATION_STATES = ("MATERIALIZED", "RESERVED")
 _FORBIDDEN_PATH_PARTS = frozenset({
     "PH2_GG03_EXECUTABLE_EVALUATION_FAMILY_FREEZE_V1",
     "PH2_GG03_EXECUTABLE_SEMANTIC_EVALUATION_FAMILY_FREEZE_V2",
@@ -40,16 +41,16 @@ _FORBIDDEN_PATH_PARTS = frozenset({
     "v10",
 })
 _ROLE_SPECS = {
-    "code_freeze": (CODE_IDENTITY, "PUBLIC", "CODE_FREEZE"),
-    "observation_pack": (SOURCE_OWNER, "PUBLIC", "OBSERVATION"),
-    "source_manifest": (SOURCE_OWNER, "PUBLIC", "SOURCE"),
-    "candidate_manifest": (CODE_IDENTITY, "PUBLIC", "CANDIDATE"),
-    "public_preflight": (CODE_IDENTITY, "PUBLIC", "PUBLIC_PREFLIGHT"),
-    "private_labels": (EVALUATOR_OWNER, "PRIVATE", "PRIVATE_LABEL"),
-    "prediction_seal": (EVALUATOR_OWNER, "PRIVATE", "PREDICTION"),
-    "aggregate_report": (EVALUATOR_OWNER, "PUBLIC", "PUBLICATION"),
-    "runtime_receipt": (EVALUATOR_OWNER, "PUBLIC", "PUBLICATION"),
-    "formal_failure_report": (EVALUATOR_OWNER, "PUBLIC", "PUBLICATION"),
+    "code_freeze": (CODE_IDENTITY, "PUBLIC", "CODE_FREEZE", "MATERIALIZED"),
+    "observation_pack": (SOURCE_OWNER, "PUBLIC", "OBSERVATION", "MATERIALIZED"),
+    "source_manifest": (SOURCE_OWNER, "PUBLIC", "SOURCE", "MATERIALIZED"),
+    "candidate_manifest": (CODE_IDENTITY, "PUBLIC", "CANDIDATE", "MATERIALIZED"),
+    "public_preflight": (CODE_IDENTITY, "PUBLIC", "PUBLIC_PREFLIGHT", "MATERIALIZED"),
+    "private_labels": (EVALUATOR_OWNER, "PRIVATE", "PRIVATE_LABEL", "MATERIALIZED"),
+    "prediction_seal": (EVALUATOR_OWNER, "PRIVATE", "PREDICTION", "RESERVED"),
+    "aggregate_report": (EVALUATOR_OWNER, "PUBLIC", "PUBLICATION", "RESERVED"),
+    "runtime_receipt": (EVALUATOR_OWNER, "PUBLIC", "PUBLICATION", "RESERVED"),
+    "formal_failure_report": (EVALUATOR_OWNER, "PUBLIC", "PUBLICATION", "RESERVED"),
 }
 
 
@@ -119,33 +120,47 @@ class ConflictSetPrivateArtifact:
     visibility: str
     phase: str
     relative_path: str
-    transport_sha256: str
+    transport_sha256: str | None
     transport_size_bytes: int
-    content_sha256: str
+    content_sha256: str | None
     content_size_bytes: int
     record_count: int
+    materialization: str = "MATERIALIZED"
 
     def __post_init__(self) -> None:
         spec = _ROLE_SPECS.get(self.role)
         if spec is None or self.role not in ARTIFACT_ROLES:
             raise ConflictSetPrivateProtocolError("artifact role is not frozen")
-        expected_owner, expected_visibility, expected_phase = spec
+        expected_owner, expected_visibility, expected_phase, expected_materialization = spec
         if (self.owner != expected_owner
                 or self.visibility != expected_visibility
-                or self.phase != expected_phase):
+                or self.phase != expected_phase
+                or self.materialization != expected_materialization):
             raise ConflictSetPrivateProtocolError(
-                "artifact role owner/visibility/phase drifted")
+                "artifact role owner/visibility/phase/materialization drifted")
         _relative(self.relative_path, where="artifact.relative_path")
-        _sha(self.transport_sha256, where="artifact.transport_sha256")
-        _sha(self.content_sha256, where="artifact.content_sha256")
-        for name in (
-                "transport_size_bytes", "content_size_bytes", "record_count"):
-            _positive(getattr(self, name), where=f"artifact.{name}")
+        if self.materialization == "MATERIALIZED":
+            _sha(self.transport_sha256, where="artifact.transport_sha256")
+            _sha(self.content_sha256, where="artifact.content_sha256")
+            for name in (
+                    "transport_size_bytes", "content_size_bytes", "record_count"):
+                _positive(getattr(self, name), where=f"artifact.{name}")
+        elif self.materialization == "RESERVED":
+            if self.transport_sha256 is not None or self.content_sha256 is not None:
+                raise ConflictSetPrivateProtocolError(
+                    "reserved artifact cannot claim content commitment")
+            for name in (
+                    "transport_size_bytes", "content_size_bytes", "record_count"):
+                _zero(getattr(self, name), where=f"reserved artifact.{name}")
+        else:
+            raise ConflictSetPrivateProtocolError(
+                "artifact materialization state is invalid")
 
     def to_dict(self) -> dict[str, object]:
         return {
             "content_sha256": self.content_sha256,
             "content_size_bytes": self.content_size_bytes,
+            "materialization": self.materialization,
             "owner": self.owner,
             "phase": self.phase,
             "record_count": self.record_count,
@@ -159,15 +174,16 @@ class ConflictSetPrivateArtifact:
     @classmethod
     def from_dict(cls, value: object) -> "ConflictSetPrivateArtifact":
         raw = _exact(value, {
-            "content_sha256", "content_size_bytes", "owner", "phase",
-            "record_count", "relative_path", "role", "transport_sha256",
-            "transport_size_bytes", "visibility",
+            "content_sha256", "content_size_bytes", "materialization", "owner",
+            "phase", "record_count", "relative_path", "role",
+            "transport_sha256", "transport_size_bytes", "visibility",
         }, where="private_artifact")
         return cls(
             raw["role"], raw["owner"], raw["visibility"], raw["phase"],
             raw["relative_path"], raw["transport_sha256"],
             raw["transport_size_bytes"], raw["content_sha256"],
             raw["content_size_bytes"], raw["record_count"],
+            raw["materialization"],
         )
 
 
@@ -482,6 +498,7 @@ def parse_conflict_set_private_transport_bytes(
 
 __all__ = [
     "ARTIFACT_KIND",
+    "ARTIFACT_MATERIALIZATION_STATES",
     "FORMAT_VERSION",
     "PROTOCOL_STATUS",
     "RUN_INTENT_STATE",

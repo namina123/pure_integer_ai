@@ -39,6 +39,10 @@ _SPECS = {
     "runtime_receipt": (EVALUATOR_OWNER, "PUBLIC", "PUBLICATION"),
     "formal_failure_report": (EVALUATOR_OWNER, "PUBLIC", "PUBLICATION"),
 }
+_RESERVED_ROLES = frozenset({
+    "prediction_seal", "aggregate_report", "runtime_receipt",
+    "formal_failure_report",
+})
 
 
 def _transport():
@@ -53,11 +57,15 @@ def _transport():
             role,
             *_SPECS[role],
             f"{TRANSPORT_ROOT_NAMESPACE}/{role}.json",
-            f"{index:064x}",
-            index,
-            content_sha.get(role, f"{index + 20:064x}"),
-            index + 20,
-            2 if role in {"observation_pack", "private_labels"} else 1,
+            *(
+                (None, 0, None, 0, 0, "RESERVED")
+                if role in _RESERVED_ROLES else
+                (f"{index:064x}", index,
+                 content_sha.get(role, f"{index + 20:064x}"),
+                 index + 20,
+                 2 if role in {"observation_pack", "private_labels"} else 1,
+                 "MATERIALIZED")
+            ),
         )
         for index, role in enumerate(ARTIFACT_ROLES, start=1)
     )

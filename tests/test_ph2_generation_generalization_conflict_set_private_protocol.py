@@ -33,6 +33,10 @@ _SPECS = {
     "runtime_receipt": (EVALUATOR_OWNER, "PUBLIC", "PUBLICATION"),
     "formal_failure_report": (EVALUATOR_OWNER, "PUBLIC", "PUBLICATION"),
 }
+_RESERVED_ROLES = frozenset({
+    "prediction_seal", "aggregate_report", "runtime_receipt",
+    "formal_failure_report",
+})
 
 
 def _transport():
@@ -47,11 +51,13 @@ def _transport():
             role,
             *_SPECS[role],
             f"{TRANSPORT_ROOT_NAMESPACE}/{role}.json",
-            f"{index:064x}",
-            index,
-            content_sha.get(role, f"{index + 20:064x}"),
-            index + 20,
-            1,
+            *(
+                (None, 0, None, 0, 0, "RESERVED")
+                if role in _RESERVED_ROLES else
+                (f"{index:064x}", index,
+                 content_sha.get(role, f"{index + 20:064x}"),
+                 index + 20, 1, "MATERIALIZED")
+            ),
         )
         for index, role in enumerate(ARTIFACT_ROLES, start=1)
     )
@@ -94,6 +100,20 @@ def test_private_transport_rejects_role_visibility_or_owner_drift():
             broken = replace(transport.artifacts[5], **{field: "DRIFT"})
             replace(transport, artifacts=transport.artifacts[:5] + (broken,)
                     + transport.artifacts[6:])
+
+
+def test_private_transport_keeps_future_outputs_reserved_until_formal_run():
+    transport = _transport()
+    for role in _RESERVED_ROLES:
+        item = next(row for row in transport.artifacts if row.role == role)
+        assert item.materialization == "RESERVED"
+        assert item.content_sha256 is None
+        assert item.record_count == 0
+    with pytest.raises(ConflictSetPrivateProtocolError):
+        ConflictSetPrivateArtifact(
+            "runtime_receipt", *_SPECS["runtime_receipt"],
+            f"{TRANSPORT_ROOT_NAMESPACE}/runtime_receipt.json",
+            "a" * 64, 1, "b" * 64, 1, 1, "RESERVED")
 
 
 def test_private_transport_rejects_legacy_path_and_commitment_drift():
