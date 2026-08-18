@@ -7,6 +7,7 @@ import pytest
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_line
 from pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_family import (
     FAMILY_CODE_ROOT_MODULES,
+    FAMILY_FREEZE_MANIFEST_NAME,
     FAMILY_FREEZE_STATUS,
     PUBLIC_PREFLIGHT_MANIFEST_SHA256,
     ConflictSetFamilyFreeze,
@@ -15,6 +16,7 @@ from pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_fami
     build_conflict_set_family_code_identity,
     build_conflict_set_family_freeze,
     parse_conflict_set_family_freeze_bytes,
+    read_conflict_set_family_freeze,
 )
 from pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_owner_handoff import (
     ARTIFACT_ROLES,
@@ -234,3 +236,14 @@ def test_family_freeze_parser_rejects_unknown_and_noncanonical_fields():
     with pytest.raises(ConflictSetFamilyFreezeError):
         parse_conflict_set_family_freeze_bytes(
             freeze.canonical_bytes() + b"\n")
+
+
+def test_family_freeze_file_reader_is_name_bound_and_canonical(tmp_path):
+    freeze = _freeze()
+    target = tmp_path / FAMILY_FREEZE_MANIFEST_NAME
+    target.write_bytes(freeze.canonical_bytes())
+    assert read_conflict_set_family_freeze(target) == freeze
+    wrong = tmp_path / "other.json"
+    wrong.write_bytes(freeze.canonical_bytes())
+    with pytest.raises(ConflictSetFamilyFreezeError):
+        read_conflict_set_family_freeze(wrong)

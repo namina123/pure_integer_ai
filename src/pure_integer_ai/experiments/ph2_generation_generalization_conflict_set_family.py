@@ -38,6 +38,7 @@ from pure_integer_ai.experiments.ph2_generation_generalization_conflict_set_publ
 FAMILY_FREEZE_ARTIFACT_KIND = "PH2_GG03_CONFLICT_SET_FAMILY_FREEZE_V1"
 FAMILY_FREEZE_FORMAT_VERSION = 1
 FAMILY_FREEZE_STATUS = "FROZEN_NOT_RUN_PRIVATE_LABELS_UNREAD"
+FAMILY_FREEZE_MANIFEST_NAME = "family-freeze.json"
 PUBLIC_PREFLIGHT_MANIFEST_RELATIVE_PATH = (
     "data/ph2/manifests/gg03_conflict_set_public_preflight_v1.json")
 PUBLIC_PREFLIGHT_MANIFEST_SHA256 = (
@@ -593,6 +594,23 @@ def parse_conflict_set_family_freeze_bytes(
     return ConflictSetFamilyFreeze.from_dict(value)
 
 
+def read_conflict_set_family_freeze(
+        path: str | Path,
+        ) -> ConflictSetFamilyFreeze:
+    """只读取指定 family-freeze 文件，不读取同目录其他 artifact。"""
+    target = Path(path)
+    if (target.name != FAMILY_FREEZE_MANIFEST_NAME
+            or target.is_symlink() or not target.is_file()):
+        raise ConflictSetFamilyFreezeError(
+            "family freeze manifest is missing or has an unsafe filename")
+    try:
+        payload = target.read_bytes()
+    except OSError as error:
+        raise ConflictSetFamilyFreezeError(
+            "family freeze manifest is unreadable") from error
+    return parse_conflict_set_family_freeze_bytes(payload)
+
+
 def assert_conflict_set_family_freeze_matches_live_public_code(
         freeze: ConflictSetFamilyFreeze,
         repository_root: str | Path,
@@ -630,6 +648,7 @@ __all__ = [
     "FAMILY_CODE_ROOT_MODULES",
     "FAMILY_FREEZE_ARTIFACT_KIND",
     "FAMILY_FREEZE_FORMAT_VERSION",
+    "FAMILY_FREEZE_MANIFEST_NAME",
     "FAMILY_FREEZE_STATUS",
     "PUBLIC_PREFLIGHT_MANIFEST_RELATIVE_PATH",
     "PUBLIC_PREFLIGHT_MANIFEST_SHA256",
@@ -641,4 +660,5 @@ __all__ = [
     "build_conflict_set_family_code_identity",
     "build_conflict_set_family_freeze",
     "parse_conflict_set_family_freeze_bytes",
+    "read_conflict_set_family_freeze",
 ]
