@@ -392,15 +392,21 @@ def _compile_grounded_generation_planning(
         planning_order: tuple[str, ...] | None = None,
         independent_propositions: bool = False,
         ) -> GroundedResponseActPlanningBuild:
-    """从 typed grounded Evidence 建立 ANSWER/CLARIFY/CONFLICT planning。"""
+    """从 typed grounded Evidence 建立 response-act planning。
+
+    ``UNKNOWN`` 可以合法地没有 Evidence：这表示当前问题目标已被识别，
+    但候选域为空。此时仍建立一个只代表查询目标的 opaque bound view，
+    不把它包装成 GenerationCandidate，确保内容层只能选择 UNKNOWN。
+    """
     if not _is_executable_episode(episode):
         raise TypeError("response-act planning episode 类型错误")
     if (isinstance(episode, GroundedAnswerEpisode)
             and episode.split != "train"):
         raise GroundedResponseActPlanningError(
             "response-act planning 拒绝携 surface label 的非 TRAIN episode")
-    if episode.question.answer_plan.response_act not in {
-            "ANSWER", "CLARIFY", "CONFLICT"}:
+    response_act = episode.question.answer_plan.response_act
+    if response_act not in {
+            "ANSWER", "CLARIFY", "CONFLICT", "UNKNOWN"}:
         raise GroundedResponseActPlanningError(
             "grounded planning response act 未注册")
     if (not isinstance(language_branch, ObjectIdentity)
@@ -422,7 +428,20 @@ def _compile_grounded_generation_planning(
     )
     proposition_ids = tuple(sorted({
         item.proposition_id for item in episode.question.evidence}))
-    bound = _bound_propositions(episode, aggregate, proposition_ids)
+    # 完全没有 Evidence 的 UNKNOWN 仍需要一个 typed goal proposition，供
+    # generation goal 保持 source/scope 归属；它绝不能进入 candidates。
+    goal_proposition_id = (
+        proposition_ids[0] if proposition_ids else
+        "__unknown_goal__:" + ":".join((
+            episode.episode_id,
+            episode.question.typed_intent,
+            str(episode.question.response_scope_id),
+        )))
+    bound = _bound_propositions(
+        episode,
+        aggregate,
+        (goal_proposition_id,) if not proposition_ids else proposition_ids,
+    )
     shared_competition = _fingerprint(
         episode.episode_id,
         episode.question.typed_intent,
@@ -476,6 +495,9 @@ def _compile_grounded_generation_planning(
         ))
     by_proposition = {
         item.proposition_id: item.candidate for item in candidate_bindings}
+    if response_act in {"CLARIFY", "CONFLICT"} and not proposition_ids:
+        raise GroundedResponseActPlanningError(
+            f"{response_act} planning 必须携带真实 Evidence candidate")
     if planning_order is None:
         planning_order = proposition_ids
     if (not isinstance(planning_order, tuple)
@@ -488,7 +510,7 @@ def _compile_grounded_generation_planning(
         minimal_instruction_identity((_NAMESPACE, 19, *_fingerprint(
             episode.question.typed_intent,
             domain="grounded.response.act.goal.kind.v1"))),
-        candidates[0].proposition,
+        bound[goal_proposition_id],
         LogicEvidenceState(True, False),
         aggregate,
         response_scope,
@@ -510,12 +532,12 @@ def compile_grounded_response_act_planning(
         episode: _ExecutableEpisode,
         language_branch: ObjectIdentity,
         ) -> GroundedResponseActPlanningBuild:
-    """只接受 CLARIFY/CONFLICT，并建立真实 non-answer planning。"""
+    """接受 UNKNOWN/CLARIFY/CONFLICT，并建立真实 non-answer planning。"""
     if (not _is_executable_episode(episode)
             or episode.question.answer_plan.response_act
-            not in {"CLARIFY", "CONFLICT"}):
+            not in {"UNKNOWN", "CLARIFY", "CONFLICT"}):
         raise GroundedResponseActPlanningError(
-            "response-act planning 只接受 CLARIFY/CONFLICT")
+            "response-act planning 只接受 UNKNOWN/CLARIFY/CONFLICT")
     return _compile_grounded_generation_planning(episode, language_branch)
 
 

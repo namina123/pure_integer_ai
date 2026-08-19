@@ -24,6 +24,7 @@ from pure_integer_ai.experiments.question_answer_runtime import (
     QuestionAnswerProtocol,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_connector import (
+    GroundedAnswerClaimInput,
     GroundedAnswerConnectorTarget,
     compile_grounded_answer_connectors,
 )
@@ -106,6 +107,27 @@ _BASE = 20930
 _GROUNDED_SAMPLE = Path("data/ph2/grounded_answer_train_v1.jsonl.sample")
 _CASE_SAMPLE = Path(
     "data/ph2/generation_generalization_executable_train_case_v1.jsonl.sample")
+
+
+def test_grounded_connector_accepts_typed_claim_input_without_course_episode():
+    """generic ANSWER connector 只需本次 claim surface，不读取课程 episode。"""
+    model, question, _planning, candidate, branch = (
+        _connector_question_and_candidate())
+    claim_text = next(
+        item.claim_text
+        for item in question.evidence
+        if item.proposition_id == question.answer_plan.ordered_claim_ids[0]
+    )
+    target = GroundedAnswerConnectorTarget(
+        candidate.proposition, branch, (_BASE, 1))
+    from tests.test_g03_generation_surface import _surface_protocol
+    generic = GroundedAnswerClaimInput(claim_text)
+    course = compile_grounded_answer_connectors(
+        model, question, target, _surface_protocol(_BASE + 2))
+    detached = compile_grounded_answer_connectors(
+        model, generic, target, _surface_protocol(_BASE + 2))
+    assert detached.variants == course.variants
+    assert detached.structures == course.structures
 
 
 class _AliasFactory:

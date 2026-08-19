@@ -150,6 +150,25 @@ class _UnavailableMapper:
             "当前 response-act installation 不支持普通命题 fallback")
 
 
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class GroundedResponseActQuestionInput:
+    """由实际 G-01 stance 产生的无 surface response-act 编译输入。"""
+
+    response_act: str
+    ordered_claim_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """拒绝把命题 claim 或未注册 stance 偷带入 non-answer factory。"""
+        if self.response_act not in {"UNKNOWN", "CLARIFY", "CONFLICT"}:
+            raise GroundedResponseActRunLocalFactoryError(
+                "response-act question input 未注册")
+        if (not isinstance(self.ordered_claim_ids, tuple)
+                or self.ordered_claim_ids):
+            raise GroundedResponseActRunLocalFactoryError(
+                "response-act question input 不得携带 ordered claim")
+
+
 class _NoConstraintResolver:
     """无约束单槽结构的 resolver；若被调用即说明图状态漂移。"""
 
@@ -354,7 +373,7 @@ class GroundedResponseActRunLocalBuild:
     """显式 response-act pattern 与同次 planning/query 的装配请求。"""
 
     model: GroundedAnswerSurfaceModel
-    question: GroundedQuestionEpisode
+    question: GroundedQuestionEpisode | GroundedResponseActQuestionInput
     target: GroundedResponseActCompileTarget
     planning: GenerationPlanningRequest
     pattern_id: int
@@ -367,14 +386,20 @@ class GroundedResponseActRunLocalBuild:
     def __post_init__(self) -> None:
         if not isinstance(self.model, GroundedAnswerSurfaceModel):
             raise TypeError("response-act build model 类型错误")
-        if not isinstance(self.question, GroundedQuestionEpisode):
+        if isinstance(self.question, GroundedQuestionEpisode):
+            question_response_act = self.question.answer_plan.response_act
+            question_claims = self.question.answer_plan.ordered_claim_ids
+        elif isinstance(self.question, GroundedResponseActQuestionInput):
+            question_response_act = self.question.response_act
+            question_claims = self.question.ordered_claim_ids
+        else:
             raise TypeError("response-act build question 类型错误")
         if not isinstance(self.target, GroundedResponseActCompileTarget):
             raise TypeError("response-act build target 类型错误")
-        if self.question.answer_plan.response_act != self.target.response_act:
+        if question_response_act != self.target.response_act:
             raise GroundedResponseActRunLocalFactoryError(
                 "response-act question/target 漂移")
-        if self.question.answer_plan.ordered_claim_ids:
+        if question_claims:
             raise GroundedResponseActRunLocalFactoryError(
                 "response-act question 不得携带 ordered claim")
         if not isinstance(self.planning, GenerationPlanningRequest):
@@ -648,6 +673,7 @@ class GroundedResponseActRunLocalFactory:
 __all__ = [
     "GroundedResponseActAliasRuntimeFactory",
     "GroundedResponseActQuestionExecutor",
+    "GroundedResponseActQuestionInput",
     "GroundedResponseActRunLocalBuild",
     "GroundedResponseActRunLocalComponents",
     "GroundedResponseActRunLocalFactory",

@@ -1383,6 +1383,24 @@ class MemoryHotSetRuntime:
         """返回当前只读精确查询索引清单；未安装时为空。"""
         return self._query_index_projection
 
+    def exact_index_available_for(
+            self,
+            requests: tuple[MemoryActivationRequest, ...],
+            ) -> bool:
+        """仅在本批 requests 全部命中 exact-index 前提时返回证明资格。"""
+        if (not isinstance(requests, tuple)
+                or not requests
+                or any(not isinstance(item, MemoryActivationRequest)
+                       for item in requests)):
+            raise TypeError("exact index requests 必须是非空 request tuple")
+        if self._query_index_projection is None:
+            return False
+        planner = self.resolver.score_provider
+        if not isinstance(planner, ExactMemoryProjectionPlanner):
+            return False
+        return all(self._filters(request) == (MemoryAggregateFilter(),)
+                   for request in requests)
+
     def query_resources_closed(self) -> bool:
         """返回当前 query 的 reader、热集和缓存结果是否已经全部释放。"""
         return (

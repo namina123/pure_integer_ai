@@ -125,8 +125,29 @@ def _choice_id(
     })
 
 
-def _claim_text(question: GroundedQuestionEpisode) -> str:
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
+class GroundedAnswerClaimInput:
+    """不依赖课程 episode 的单 claim typed 输入。
+
+    claim surface 必须由调用方从本次实际候选/来源恢复；该对象不保存
+    expected answer、response-act label、课程 episode 或 evaluator 字段。
+    """
+
+    claim_text: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.claim_text, str) or not self.claim_text:
+            raise GroundedAnswerConnectorError(
+                "generic answer claim surface 必须是非空字符串")
+
+
+def _claim_text(
+        question: GroundedQuestionEpisode | GroundedAnswerClaimInput,
+        ) -> str:
     """恢复单 claim ANSWER 的唯一 Evidence 表面。"""
+    if isinstance(question, GroundedAnswerClaimInput):
+        return question.claim_text
     plan = question.answer_plan
     if plan.response_act != "ANSWER" or len(plan.ordered_claim_ids) != 1:
         raise GroundedAnswerConnectorError(
@@ -496,7 +517,7 @@ def _value_protocol() -> LanguageConnectorValueProtocol:
 
 def _variant(
         pattern: LearnedSurfacePattern,
-        question: GroundedQuestionEpisode,
+        question: GroundedQuestionEpisode | GroundedAnswerClaimInput,
         target: GroundedAnswerConnectorTarget,
         surface_protocol: GenerationSurfaceProtocol,
         value_protocol: LanguageConnectorValueProtocol,
@@ -639,7 +660,7 @@ def _structure_options(
 
 def compile_grounded_answer_connectors(
         model: GroundedAnswerSurfaceModel,
-        question: GroundedQuestionEpisode,
+        question: GroundedQuestionEpisode | GroundedAnswerClaimInput,
         target: GroundedAnswerConnectorTarget,
         surface_protocol: GenerationSurfaceProtocol,
         *,
@@ -648,7 +669,8 @@ def compile_grounded_answer_connectors(
     """编译全部合法单 claim ANSWER pattern，不按稳定序暗中采用任何一个。"""
     if not isinstance(model, GroundedAnswerSurfaceModel):
         raise TypeError("grounded connector model 类型错误")
-    if not isinstance(question, GroundedQuestionEpisode):
+    if not isinstance(question, (GroundedQuestionEpisode,
+                                 GroundedAnswerClaimInput)):
         raise TypeError("grounded connector question 类型错误")
     if not isinstance(target, GroundedAnswerConnectorTarget):
         raise TypeError("grounded connector target 类型错误")
@@ -723,6 +745,7 @@ def build_grounded_answer_connector(
 
 __all__ = [
     "GroundedAnswerAliasRequirement",
+    "GroundedAnswerClaimInput",
     "GroundedAnswerConnectorCompilation",
     "GroundedAnswerConnectorError",
     "GroundedAnswerConnectorTarget",

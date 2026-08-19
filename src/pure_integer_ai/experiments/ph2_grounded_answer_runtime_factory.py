@@ -61,6 +61,7 @@ from pure_integer_ai.experiments.ph2_grounded_answer_choice import (
     build_grounded_answer_lexical_choice,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_connector import (
+    GroundedAnswerClaimInput,
     GroundedAnswerConnectorCompilation,
     GroundedAnswerConnectorTarget,
     GroundedAnswerConnectorVariant,
@@ -189,7 +190,7 @@ class GroundedAnswerRunLocalBuild:
     """显式 pattern 与同次 planning/query route 的不可变装配请求。"""
 
     model: GroundedAnswerSurfaceModel
-    question: GroundedQuestionEpisode
+    question: GroundedQuestionEpisode | GroundedAnswerClaimInput
     target: GroundedAnswerConnectorTarget
     planning: GenerationPlanningRequest
     candidate: GenerationCandidate
@@ -204,7 +205,8 @@ class GroundedAnswerRunLocalBuild:
     def __post_init__(self) -> None:
         if not isinstance(self.model, GroundedAnswerSurfaceModel):
             raise TypeError("grounded build model 类型错误")
-        if not isinstance(self.question, GroundedQuestionEpisode):
+        if not isinstance(self.question, (GroundedQuestionEpisode,
+                                          GroundedAnswerClaimInput)):
             raise TypeError("grounded build question 类型错误")
         if not isinstance(self.target, GroundedAnswerConnectorTarget):
             raise TypeError("grounded build target 类型错误")

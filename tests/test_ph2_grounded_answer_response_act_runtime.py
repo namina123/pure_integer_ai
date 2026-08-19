@@ -56,6 +56,9 @@ from pure_integer_ai.experiments.ph2_grounded_answer_response_act_runtime_factor
     GroundedResponseActRunLocalComponents,
     GroundedResponseActRunLocalFactory,
 )
+from pure_integer_ai.experiments.conversation_context_runtime import (
+    start_conversation_context,
+)
 from pure_integer_ai.experiments.ph2_generation_generalization_executable_train_course import (
     read_generation_generalization_executable_train_course,
 )
@@ -494,3 +497,152 @@ def test_response_act_catalog_rehearses_task_and_cross_source_conflict():
         ),
     )
     assert biased_report.results[0].verdict == VERDICT_REFUTE
+
+
+def test_unknown_without_evidence_runs_as_empty_candidate_response_act():
+    """无 Evidence 的 UNKNOWN 仍完成 actual surface/readback，但不产生候选。"""
+    episode = next(
+        item for item in read_grounded_answer_episodes(_SAMPLE)
+        if item.episode_id == "train-grounded-unknown-budget-v1")
+    model, _report = learn_grounded_answer_surface_model(
+        compile_grounded_answer_training_records(_SAMPLE))
+    offset = 30
+    branch = language_branch_identity((_BASE, 100, offset))
+    planning_build = compile_grounded_response_act_planning(episode, branch)
+    assert planning_build.planning.candidates == ()
+    content_protocol = AnswerContentProtocol(*tuple(
+        minimal_instruction_identity((_BASE, 101 + offset, index))
+        for index in range(1, 6)
+    ))
+    selector = AnswerContentSelector(
+        content_protocol,
+        EvidenceAnswerPolicy(
+            content_protocol,
+            EvidenceAnswerPolicyProtocol(*tuple(
+                minimal_instruction_identity((_BASE, 111 + offset, index))
+                for index in range(1, 5)
+            )),
+        ),
+    )
+    target = GroundedResponseActCompileTarget(
+        "UNKNOWN", content_protocol.unknown, branch, (_BASE, 120, offset))
+    compilation = compile_grounded_response_act_patterns(model, target)
+    backend = DictBackend()
+    alias_factory = _AliasFactory(branch)
+    try:
+        graphs = _graphs(backend)
+        renderer_identity = minimal_instruction_identity(
+            (_BASE, 121, offset))
+        renderer = UnicodeRepresentationRenderer(
+            target.representation_family, renderer_identity)
+        components = GroundedResponseActRunLocalComponents(
+            selector,
+            _plan_protocol(_BASE + 130 + offset),
+            GenerationStructureLayerProtocol(*tuple(
+                minimal_instruction_identity(
+                    (_BASE, 140 + offset, index))
+                for index in range(1, 4)
+            )),
+            _surface_protocol(_BASE + 150 + offset),
+            alias_factory,
+            renderer,
+            renderer_identity,
+            _postcheck_protocol(),
+            GroundedResponseActStructureVerifier(
+                minimal_instruction_identity((_BASE, 160 + offset, 1)),
+                minimal_instruction_identity((_BASE, 160 + offset, 2)),
+            ),
+            _StaticVerifier(VERDICT_SUPPORT, 20 + offset),
+            GroundedResponseActTaskVerifier(
+                minimal_instruction_identity((_BASE, 170 + offset, 1)),
+                minimal_instruction_identity((_BASE, 170 + offset, 2)),
+            ),
+            QuestionAnswerProtocol(*tuple(
+                minimal_instruction_identity(
+                    (_BASE, 180 + offset, index))
+                for index in range(1, 4)
+            )),
+        )
+        selected = compilation.variants[0]
+        query_kind = minimal_instruction_identity((_BASE, 190 + offset, 1))
+        installation = GroundedResponseActRunLocalFactory(
+            graphs.lifecycle, components).build(
+                GroundedResponseActRunLocalBuild(
+                    model,
+                    episode.question,
+                    target,
+                    planning_build.planning,
+                    selected.pattern_id,
+                    GroundedResponseActParserProtocol(*tuple(
+                        minimal_instruction_identity(
+                            (_BASE, 200 + offset, index))
+                        for index in range(1, 4)
+                    )),
+                    query_kind,
+                    minimal_instruction_identity((_BASE, 190 + offset, 2)),
+                    minimal_instruction_identity((_BASE, 210 + offset, 1)),
+                    (_BASE, 210 + offset, 2),
+                ))
+        request = QuestionRequest(
+            query_kind,
+            minimal_instruction_identity((_BASE, 220 + offset, 1)),
+            planning_build.planning.goal.goal_kind,
+            planning_build.planning.goal.proposition,
+            planning_build.planning.goal.required,
+            planning_build.planning.goal.scope,
+            planning_build.planning.goal.scope,
+            (_BASE, 220 + offset, 2),
+            branch,
+            (),
+        )
+        run = installation.runtime.run(request)
+        assert run.status == content_protocol.unknown
+        assert run.selection is not None
+        assert run.selection.selected_candidate_keys == ()
+        assert run.generation is not None and run.generation.complete
+        assert run.generation.plan.request.candidates == ()
+        assert run.generation.rendered is not None
+        assert run.generation.rendered.units
+        assert run.postcheck is not None and run.postcheck.complete
+        assert run.postcheck.parsed.observation.stance == content_protocol.unknown
+        context = start_conversation_context((_BASE, 230, offset))
+        first_context = context.append(run)
+        assert first_context.revision == 1
+        first_turn = first_context.turns[0]
+        assert first_turn.response_stance == content_protocol.unknown
+        assert first_turn.selected_candidate_keys == ()
+        assert first_turn.cited_sources == ()
+        assert first_turn.context_read is not None
+        assert first_turn.context_read.turns == ()
+        assert not hasattr(first_turn, "surface")
+        with pytest.raises(ValueError, match="必须显式绑定"):
+            first_context.append(run)
+
+        # 第二回合只把显式 typed read 键带入 request trace；不存在可读取的
+        # 上一轮问题/回答 surface 字段。
+        context_read = first_context.read(1)
+        assert context_read.turns == (first_turn,)
+        assert not hasattr(context_read, "surface")
+        second_request = context_read.bind_request(request)
+        second_run = installation.runtime.run(second_request)
+        assert second_run.complete
+        with pytest.raises(ValueError, match="过期或其他会话"):
+            first_context.append_consumed(second_run, context.read(0))
+        second_context = first_context.append_consumed(
+            second_run, context_read)
+        assert second_context.revision == 2
+        assert second_context.previous_digest == first_context.digest()
+        second_turn = second_context.turns[1]
+        assert second_turn.context_read == context_read
+        assert second_turn.response_stance == first_turn.response_stance
+        assert second_turn.selected_candidate_keys == (
+            first_turn.selected_candidate_keys)
+        assert second_turn.cited_sources == first_turn.cited_sources
+        assert second_turn.discourse_sentence_keys == (
+            first_turn.discourse_sentence_keys)
+        assert second_turn.parser_revision == first_turn.parser_revision
+        assert second_context.visible_turns(1) == (second_turn,)
+    finally:
+        if alias_factory.fixture is not None:
+            alias_factory.fixture.close()
+        backend.close()
