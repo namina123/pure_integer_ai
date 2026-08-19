@@ -20,7 +20,7 @@ DEFAULT_TARGET = (
     / "data"
     / "ph2"
     / "manifests"
-    / "dlg05_public_preflight_freeze_v1.json"
+    / "dlg05_public_preflight_freeze_v2.json"
 )
 QUALIFICATION_NODE = (
     "tests/test_ph2_conversation_heldout_runtime.py::"
@@ -59,13 +59,10 @@ def freeze(target: str | Path = DEFAULT_TARGET) -> dict[str, object]:
     value = json.loads(payload)
     if value.get("formal_run") != 0 or value.get("labels_included") != 0:
         raise RuntimeError("DLG-05 freeze 越过 public/label-free 边界")
-    return {
-        "path": output.relative_to(REPOSITORY_ROOT).as_posix(),
-        "bytes": len(payload),
-        "sha256": hashlib.sha256(payload).hexdigest(),
-        "inventory_sha256": value["file_inventory"]["inventory_sha256"],
-        "document_sha256": value["document_sha256"],
-    }
+    result = verify_dlg05_public_freeze_document(output, REPOSITORY_ROOT)
+    if result["sha256"] != hashlib.sha256(payload).hexdigest():
+        raise RuntimeError("DLG-05 freeze verifier/output SHA 漂移")
+    return result
 
 
 def main() -> int:

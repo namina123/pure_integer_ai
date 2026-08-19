@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +28,11 @@ from pure_integer_ai.experiments.conversation_heldout_qualification import (
 )
 from pure_integer_ai.experiments.conversation_heldout_runtime import (
     ConversationHeldOutSelectionReceipt,
+)
+from pure_integer_ai.experiments.conversation_heldout_freeze import (
+    assert_dlg05_public_freeze_inventory_complete,
+    ConversationHeldOutFreezeError,
+    dlg05_public_freeze_inventory_paths,
 )
 
 
@@ -125,3 +131,31 @@ def test_dlg05_preflight_qualification_rejects_missing_axis_and_drift():
             ConversationHeldOutQualificationError,
             match="逐 case 覆盖"):
         qualify_dlg05_preflight(catalog, manifest, drift)
+
+
+def test_dlg05_freeze_inventory_contract_rejects_missing_extra_and_group_drift():
+    """v2 必须证明应冻结文件集合完整，不能只复核已登记文件。"""
+    root = Path(__file__).resolve().parents[1]
+    expected = dlg05_public_freeze_inventory_paths(root)
+    assert assert_dlg05_public_freeze_inventory_complete(
+        root, expected) == sum(len(values) for values in expected.values())
+
+    missing = dict(expected)
+    missing["source"] = expected["source"][:-1]
+    with pytest.raises(ConversationHeldOutFreezeError, match="set 漂移"):
+        assert_dlg05_public_freeze_inventory_complete(root, missing)
+
+    extra = dict(expected)
+    extra["source"] = (
+        *expected["source"],
+        "src/pure_integer_ai/unregistered_after_freeze.py",
+    )
+    with pytest.raises(ConversationHeldOutFreezeError, match="set 漂移"):
+        assert_dlg05_public_freeze_inventory_complete(root, extra)
+
+    wrong_groups = {
+        key: value for key, value in expected.items()
+        if key != "training_sample"
+    }
+    with pytest.raises(ConversationHeldOutFreezeError, match="groups"):
+        assert_dlg05_public_freeze_inventory_complete(root, wrong_groups)

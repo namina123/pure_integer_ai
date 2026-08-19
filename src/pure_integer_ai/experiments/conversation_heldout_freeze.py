@@ -43,6 +43,13 @@ _DLG05_TEST_NAMES = (
     "test_ph2_conversation_heldout_qualification.py",
     "test_ph2_conversation_heldout_runtime.py",
 )
+DLG05_PUBLIC_FREEZE_SCHEMA = "dlg05-public-preflight-freeze-v2"
+_INVENTORY_GROUPS = (
+    "source",
+    "dlg05_tests_and_fixtures",
+    "freeze_harness",
+    "training_sample",
+)
 
 
 def _key(value: ProtocolKey | tuple[int, ...]) -> list[int]:
@@ -243,6 +250,91 @@ def _test_dependency_paths(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(result))
 
 
+def _inventory_path_objects(root: Path) -> dict[str, tuple[Path, ...]]:
+    """按冻结合同重算全部应登记文件，顺序也是协议的一部分。"""
+    resolved = root.resolve()
+    if not resolved.is_dir():
+        raise ConversationHeldOutFreezeError("repository root 不存在")
+    return {
+        "source": tuple(sorted(
+            (resolved / "src" / "pure_integer_ai").rglob("*.py"))),
+        "dlg05_tests_and_fixtures": _test_dependency_paths(resolved),
+        "freeze_harness": (
+            resolved / "conftest.py",
+            resolved / "scripts" / "freeze_dlg05_public_preflight.py",
+        ),
+        "training_sample": (
+            resolved / "data" / "ph2"
+            / "grounded_answer_train_v1.jsonl.sample",
+        ),
+    }
+
+
+def dlg05_public_freeze_inventory_paths(
+        repository_root: str | Path,
+        ) -> dict[str, tuple[str, ...]]:
+    """返回 v2 合同要求的完整、分组、规范相对路径集合。"""
+    root = Path(repository_root).resolve()
+    return {
+        group: tuple(_relative_file(root, path) for path in paths)
+        for group, paths in _inventory_path_objects(root).items()
+    }
+
+
+def assert_dlg05_public_freeze_inventory_complete(
+        repository_root: str | Path,
+        declared_paths: dict[str, tuple[str, ...]],
+        ) -> int:
+    """拒绝缺失、额外、重排、重复或跨分组漂移的冻结路径。"""
+    if not isinstance(declared_paths, dict):
+        raise TypeError("freeze declared paths 必须是 dict")
+    expected = dlg05_public_freeze_inventory_paths(repository_root)
+    if set(declared_paths) != set(_INVENTORY_GROUPS):
+        raise ConversationHeldOutFreezeError(
+            "freeze inventory groups 不完整或含额外分组")
+    declared_all: list[str] = []
+    for group in _INVENTORY_GROUPS:
+        values = declared_paths.get(group)
+        if (not isinstance(values, tuple) or not values
+                or any(not isinstance(item, str) or not item
+                       for item in values)):
+            raise ConversationHeldOutFreezeError(
+                f"freeze inventory paths 非法: {group}")
+        if len(set(values)) != len(values):
+            raise ConversationHeldOutFreezeError(
+                f"freeze inventory paths 重复: {group}")
+        if values != expected[group]:
+            missing = tuple(sorted(set(expected[group]) - set(values)))
+            extra = tuple(sorted(set(values) - set(expected[group])))
+            raise ConversationHeldOutFreezeError(
+                f"freeze inventory set 漂移: {group}; "
+                f"missing={missing}; extra={extra}")
+        declared_all.extend(values)
+    if len(set(declared_all)) != len(declared_all):
+        raise ConversationHeldOutFreezeError(
+            "freeze inventory path 不得跨分组重复")
+    return len(declared_all)
+
+
+def _inventory_contract() -> dict[str, Any]:
+    """返回 verifier 必须逐字匹配的 v2 文件集合规则。"""
+    return {
+        "version": 2,
+        "complete_set_required": 1,
+        "groups": list(_INVENTORY_GROUPS),
+        "source_rule": "src/pure_integer_ai/**/*.py",
+        "dlg05_test_roots": list(_DLG05_TEST_NAMES),
+        "test_dependency_rule": "recursive-top-level-test-module-imports",
+        "freeze_harness_paths": [
+            "conftest.py",
+            "scripts/freeze_dlg05_public_preflight.py",
+        ],
+        "training_sample_paths": [
+            "data/ph2/grounded_answer_train_v1.jsonl.sample",
+        ],
+    }
+
+
 def build_dlg05_public_freeze_document(
         repository_root: str | Path,
         catalog: ConversationHeldOutInputCatalog,
@@ -257,26 +349,25 @@ def build_dlg05_public_freeze_document(
         raise ConversationHeldOutFreezeError("freeze catalog key 漂移")
     if manifest.stable_key() != qualification.manifest_key:
         raise ConversationHeldOutFreezeError("freeze manifest key 漂移")
-    source_paths = tuple(sorted((root / "src" / "pure_integer_ai").rglob("*.py")))
-    test_paths = _test_dependency_paths(root)
-    sample_path = root / "data" / "ph2" / "grounded_answer_train_v1.jsonl.sample"
-    harness_paths = (
-        root / "conftest.py",
-        root / "scripts" / "freeze_dlg05_public_preflight.py",
-    )
+    path_groups = _inventory_path_objects(root)
     files = {
-        "source": [_file_record(root, path) for path in source_paths],
-        "dlg05_tests_and_fixtures": [
-            _file_record(root, path) for path in test_paths],
-        "freeze_harness": [_file_record(root, path) for path in harness_paths],
-        "training_sample": [_file_record(root, sample_path)],
+        group: [_file_record(root, path) for path in path_groups[group]]
+        for group in _INVENTORY_GROUPS
     }
+    assert_dlg05_public_freeze_inventory_complete(
+        root,
+        {
+            group: tuple(record["path"] for record in files[group])
+            for group in _INVENTORY_GROUPS
+        },
+    )
     inventory_payload = canonical_json_bytes(files)
     document: dict[str, Any] = {
-        "schema": "dlg05-public-preflight-freeze-v1",
+        "schema": DLG05_PUBLIC_FREEZE_SCHEMA,
         "authority": "public-preflight-only",
         "labels_included": 0,
         "formal_run": 0,
+        "inventory_contract": _inventory_contract(),
         "manifest": _manifest_dict(manifest),
         "catalog": _catalog_dict(catalog),
         "qualification": _qualification_dict(qualification),
@@ -332,11 +423,14 @@ def verify_dlg05_public_freeze_document(
     value = parse_canonical_json_bytes(payload[:-1], require_object=True)
     if canonical_json_bytes(value) + b"\n" != payload:
         raise ConversationHeldOutFreezeError("freeze document 不是规范 JSON")
-    if (value.get("schema") != "dlg05-public-preflight-freeze-v1"
+    if (value.get("schema") != DLG05_PUBLIC_FREEZE_SCHEMA
             or value.get("labels_included") != 0
             or value.get("formal_run") != 0):
         raise ConversationHeldOutFreezeError(
             "freeze document 越过 public/label-free 边界")
+    if value.get("inventory_contract") != _inventory_contract():
+        raise ConversationHeldOutFreezeError(
+            "freeze inventory contract 缺失或漂移")
     declared_document_sha = value.get("document_sha256")
     without_document_sha = dict(value)
     without_document_sha.pop("document_sha256", None)
@@ -356,11 +450,12 @@ def verify_dlg05_public_freeze_document(
         canonical_json_bytes(inventory_groups))
     if inventory.get("inventory_sha256") != actual_inventory_sha:
         raise ConversationHeldOutFreezeError("freeze inventory SHA-256 漂移")
-    file_count = 0
+    declared_paths: dict[str, tuple[str, ...]] = {}
     for group, records in inventory_groups.items():
         if not isinstance(records, list) or not records:
             raise ConversationHeldOutFreezeError(
                 f"freeze inventory group 非法: {group}")
+        paths = []
         for record in records:
             if not isinstance(record, dict):
                 raise ConversationHeldOutFreezeError(
@@ -369,12 +464,18 @@ def verify_dlg05_public_freeze_document(
             if not isinstance(relative, str) or not relative:
                 raise ConversationHeldOutFreezeError(
                     f"freeze inventory path 非法: {group}")
+            paths.append(relative)
+        declared_paths[group] = tuple(paths)
+    file_count = assert_dlg05_public_freeze_inventory_complete(
+        root, declared_paths)
+    for group in _INVENTORY_GROUPS:
+        for record in inventory_groups[group]:
+            relative = record["path"]
             resolved = (root / Path(*relative.split("/"))).resolve()
             current = _file_record(root, resolved)
             if current != record:
                 raise ConversationHeldOutFreezeError(
                     f"freeze file identity 漂移: {relative}")
-            file_count += 1
     return {
         "path": _relative_file(root, target),
         "bytes": len(payload),
@@ -387,8 +488,11 @@ def verify_dlg05_public_freeze_document(
 
 
 __all__ = [
+    "assert_dlg05_public_freeze_inventory_complete",
     "ConversationHeldOutFreezeError",
+    "DLG05_PUBLIC_FREEZE_SCHEMA",
     "build_dlg05_public_freeze_document",
+    "dlg05_public_freeze_inventory_paths",
     "verify_dlg05_public_freeze_document",
     "write_dlg05_public_freeze_document",
 ]
