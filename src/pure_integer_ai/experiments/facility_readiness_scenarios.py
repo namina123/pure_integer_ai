@@ -133,6 +133,9 @@ from pure_integer_ai.experiments.facility_generation_scenario import (
     build_postcheck_owners,
     build_question_fixture,
 )
+from pure_integer_ai.experiments.conversation_memory_demand_runtime import (
+    ConversationMemoryDemandConsumer,
+)
 from pure_integer_ai.experiments.memory_generation_outcome_runtime import (
     MemoryGenerationOutcomeProtocol,
     MemoryGenerationOutcomeRoute,
@@ -246,6 +249,48 @@ class MemoryPathEvidence:
     result_identity: CanonicalIdentity
     observation_ref: Any
     source: SourceRef
+
+
+# object-model: resource-owner; state=mutable
+@dataclass(slots=True)
+class FacilityConversationMemoryOwner:
+    """持有 DLG 候选可切换、可恢复的真实 M-06/M-07 owner。"""
+
+    backend: Any
+    ctx: Any
+    consumer: ConversationMemoryDemandConsumer
+
+    def begin_current(
+            self,
+            source: SourceRef,
+            scope: Any,
+            ) -> MemoryCurrentQuery:
+        """按调用方冻结的 source/scope 打开 query 并物化 typed current。"""
+        document = document_scope(source)
+        episode = scope.parent
+        if episode is None or episode.parent != document:
+            raise ValueError("conversation Memory scope 未绑定 source document")
+        session = session_scope(
+            1,
+            owner=source.owner,
+            versions=source.versions,
+            source=source,
+        )
+        work = self.ctx.work_memory
+        work.begin_session(session)
+        work.begin_document(document)
+        work.begin_episode(episode)
+        work.begin_query(scope)
+        return _current(self.ctx, source, scope)
+
+    def close_active(self) -> None:
+        """逆序关闭本 owner 当前仍打开的 WorkMemory 生命周期。"""
+        _close_outer_lifecycle(self.ctx)
+
+    def close(self) -> None:
+        """关闭 active 生命周期与后端。"""
+        self.close_active()
+        self.backend.close()
 
 
 def _versions() -> VersionBundle:
@@ -713,6 +758,44 @@ def _current(ctx: Any, source: SourceRef, scope: Any) -> MemoryCurrentQuery:
         concept_identity((7305,), owner=source.owner, versions=source.versions),
         concept_identity((7306,), owner=source.owner, versions=source.versions),
     )
+
+
+def facility_conversation_memory_owner_from_context(
+        ctx: Any,
+        backend: Any,
+        ) -> FacilityConversationMemoryOwner:
+    """把已克隆或已恢复 context 绑定为可替换的 DLG Memory owner。"""
+    if ctx.backend is not backend:
+        raise ValueError("conversation Memory context/backend 不一致")
+    if ctx.memory_query_runtime is None or ctx.memory_resolver_runtime is None:
+        raise ValueError("conversation Memory context 缺少 M-06/M-07 runtime")
+    return FacilityConversationMemoryOwner(
+        backend,
+        ctx,
+        ConversationMemoryDemandConsumer(
+            ctx, ctx.memory_query_runtime, ctx.memory_resolver_runtime),
+    )
+
+
+def build_facility_conversation_memory_owner(
+        backend: Any | None = None,
+        *,
+        seed: bool = True,
+        ) -> FacilityConversationMemoryOwner:
+    """建立或恢复 DLG 候选使用的真实 Memory 候选和 M-06/M-07 owner。"""
+    if type(seed) is not bool:
+        raise TypeError("conversation Memory seed 必须是 bool")
+    actual_backend = DictBackend() if backend is None else backend
+    ctx = make_train_context(actual_backend)
+    if seed:
+        _seed_memory(ctx)
+    source = _query_source(document_id=1)
+    _install_resolver(ctx, source, _core_refs(ctx)[1])
+    scope = _open_query(ctx, source)
+    _current(ctx, source, scope)
+    _close_outer_lifecycle(ctx)
+    return facility_conversation_memory_owner_from_context(
+        ctx, actual_backend)
 
 
 def _attractor_protocol(source: SourceRef) -> AttractorProtocol:
@@ -1656,7 +1739,10 @@ def published_worker_bytes(worker_count: int) -> tuple[Any, ...]:
 
 
 __all__ = [
+    "FacilityConversationMemoryOwner",
     "MemoryPathEvidence",
+    "build_facility_conversation_memory_owner",
+    "facility_conversation_memory_owner_from_context",
     "prepare_facility_context",
     "published_worker_bytes",
     "run_capability_evidence",

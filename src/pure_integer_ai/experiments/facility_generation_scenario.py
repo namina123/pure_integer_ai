@@ -120,6 +120,8 @@ from pure_integer_ai.cognition.shared.semantic_object import (
     role_identity,
 )
 from pure_integer_ai.cognition.shared.structure_order import (
+    StructureOrderGraph,
+    StructureOrderGraphPredicates,
     StructureSlotDefinition,
 )
 from pure_integer_ai.cognition.shared.structure_order_consumer import (
@@ -127,6 +129,10 @@ from pure_integer_ai.cognition.shared.structure_order_consumer import (
     StructureOrderLinearizationResult,
     StructureOrderSearchBudget,
     StructureSlotValue,
+)
+from pure_integer_ai.cognition.shared.structure_order_lifecycle import (
+    StructureOrderLifecycleGraph,
+    StructureOrderLifecycleProtocol,
 )
 from pure_integer_ai.cognition.shared.typed_binding import (
     BindingEnvironment,
@@ -303,8 +309,9 @@ def _recognition(
     )
 
 
-@dataclass
-class _AliasFixture:
+# object-model: resource-owner; state=mutable
+@dataclass(slots=True)
+class FacilityAliasFixture:
     """持有设施生成场景的 active relation owner 和图。"""
 
     backend: DictBackend
@@ -318,7 +325,7 @@ class _AliasFixture:
 def _alias_fixture(
         branch: ObjectIdentity,
         realizations: tuple[tuple[ObjectIdentity, ObjectIdentity], ...],
-        ) -> _AliasFixture:
+        ) -> FacilityAliasFixture:
     """为权威对象建立 active realizes fact 和唯一 surface route。"""
     if branch.object_kind != OBJECT_LANGUAGE_BRANCH:
         raise ValueError("设施 branch 必须是 LanguageBranch")
@@ -450,10 +457,18 @@ def _alias_fixture(
         minimal_instruction_identity((_ALIAS_BASE + 4, 5)),
         minimal_instruction_identity((_ALIAS_BASE + 4, 6)),
     )
-    return _AliasFixture(
+    return FacilityAliasFixture(
         backend,
         AliasRelationRuntime(closure, AliasResolutionSelector(protocol)),
     )
+
+
+def build_facility_alias_fixture(
+        branch: ObjectIdentity,
+        realizations: tuple[tuple[ObjectIdentity, ObjectIdentity], ...],
+        ) -> FacilityAliasFixture:
+    """建立可由生产候选 owner 关闭的独立 alias runtime。"""
+    return _alias_fixture(branch, realizations)
 
 
 def _world() -> tuple[SourceRef, Any, Any]:
@@ -495,12 +510,24 @@ def _plan_protocol(seed: int) -> GenerationPlanProtocol:
     ))
 
 
+def build_facility_generation_plan_protocol(seed: int) -> GenerationPlanProtocol:
+    """构造调用方命名空间内互异的 G-00 六层协议。"""
+    return _plan_protocol(seed)
+
+
 def _surface_protocol(seed: int) -> GenerationSurfaceProtocol:
     """构造互异 emit/silent 动作和七类 surface 原因。"""
     return GenerationSurfaceProtocol(*tuple(
         minimal_instruction_identity((seed, index))
         for index in range(1, 10)
     ))
+
+
+def build_facility_generation_surface_protocol(
+        seed: int,
+        ) -> GenerationSurfaceProtocol:
+    """构造调用方命名空间内互异的 G-03 surface 协议。"""
+    return _surface_protocol(seed)
 
 
 def _manual_execution(structure: Any) -> GenerationStructureExecutionPlan:
@@ -649,7 +676,7 @@ class FacilityQuestionFixture:
 
     runtime: QuestionAnswerRuntime
     request: QuestionRequest
-    alias: _AliasFixture
+    alias: FacilityAliasFixture
 
     def close(self) -> None:
         """关闭本次问答使用的独立 alias 后端。"""
@@ -837,6 +864,12 @@ def _postcheck_protocol() -> GenerationPostcheckProtocol:
     return GenerationPostcheckProtocol(*keys, *reasons)
 
 
+def build_facility_generation_postcheck_protocol(
+        ) -> GenerationPostcheckProtocol:
+    """构造设施场景使用的完整六维 G-04 协议。"""
+    return _postcheck_protocol()
+
+
 class _ExecutionParser:
     """只按 mapper 预登记的同次 execution 请求返回 typed 观察。"""
 
@@ -899,7 +932,8 @@ class _ExecutionParser:
         )
 
 
-class _StaticVerifier:
+# object-model: verifier; state=immutable
+class SupportingGenerationVerifier:
     """为结构或来源维度返回固定 support 的独立 verifier。"""
 
     def __init__(self, marker: int) -> None:
@@ -915,6 +949,15 @@ class _StaticVerifier:
             source=goal.source,
             scope=goal.scope,
         )
+
+
+def build_supporting_generation_verifier(
+        marker: int,
+        ) -> SupportingGenerationVerifier:
+    """构造只绑定同次 execution 与 goal 归属的支持型 verifier。"""
+    if type(marker) is not int or marker <= 0:
+        raise ValueError("supporting verifier marker 必须是正严格整数")
+    return SupportingGenerationVerifier(marker)
 
 
 class _RecordingPostcheckMapper:
@@ -956,14 +999,60 @@ def build_postcheck_owners() -> tuple[Any, GenerationPostcheckRuntime]:
     runtime = GenerationPostcheckRuntime(
         _postcheck_protocol(),
         parser,
-        _StaticVerifier(1),
-        _StaticVerifier(2),
+        SupportingGenerationVerifier(1),
+        SupportingGenerationVerifier(2),
     )
     return _RecordingPostcheckMapper(parser), runtime
 
 
+# object-model: resource-owner; state=mutable
+@dataclass(slots=True)
+class FacilityStructureOrderOwner:
+    """持有一次候选运行独占的 S-07 图和可关闭后端。"""
+
+    backend: DictBackend
+    lifecycle: StructureOrderLifecycleGraph
+
+    def close(self) -> None:
+        """关闭本次 S-07 owner 的独立内存后端。"""
+        self.backend.close()
+
+
+def build_facility_structure_order_owner(
+        seed: int,
+        ) -> FacilityStructureOrderOwner:
+    """在独立 GraphOntology 上建立可供生产 factory 使用的 S-07 owner。"""
+    if type(seed) is not int or seed <= 0:
+        raise ValueError("structure-order seed 必须是正严格整数")
+    backend = DictBackend()
+    context = make_train_context(backend)
+    ontology = context.graph_ontology
+    identities = tuple(
+        concept_identity((seed, 40, index)) for index in range(1, 26))
+    refs = tuple(ontology.materialize(item) for item in identities)
+    graph = StructureOrderGraph(
+        ontology, StructureOrderGraphPredicates(*refs[:19]))
+    states_and_kinds = tuple(
+        concept_identity((seed, 41, index)) for index in range(1, 7))
+    for identity in states_and_kinds:
+        ontology.materialize(identity)
+    protocol = StructureOrderLifecycleProtocol(
+        *refs[19:], *states_and_kinds, (seed, 42, 1))
+    return FacilityStructureOrderOwner(
+        backend, StructureOrderLifecycleGraph(graph, protocol))
+
+
 __all__ = [
+    "FacilityAliasFixture",
+    "FacilityStructureOrderOwner",
     "FacilityQuestionFixture",
+    "build_facility_alias_fixture",
+    "build_facility_generation_plan_protocol",
+    "build_facility_generation_postcheck_protocol",
+    "build_facility_generation_surface_protocol",
+    "build_facility_structure_order_owner",
     "build_postcheck_owners",
     "build_question_fixture",
+    "build_supporting_generation_verifier",
+    "SupportingGenerationVerifier",
 ]

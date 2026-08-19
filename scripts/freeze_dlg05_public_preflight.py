@@ -4,13 +4,18 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
-import subprocess
-import sys
+from tempfile import TemporaryDirectory
 
+from pure_integer_ai.experiments.conversation_heldout_candidate_runtime import (
+    qualify_dlg05_public_candidate,
+    run_dlg05_public_candidate,
+    verify_dlg05_candidate_observation,
+    write_dlg05_candidate_observation,
+)
 from pure_integer_ai.experiments.conversation_heldout_freeze import (
     verify_dlg05_public_freeze_document,
+    write_dlg05_public_freeze_document,
 )
 
 
@@ -20,11 +25,14 @@ DEFAULT_TARGET = (
     / "data"
     / "ph2"
     / "manifests"
-    / "dlg05_public_preflight_freeze_v2.json"
+    / "dlg05_public_preflight_freeze_v3.json"
 )
-QUALIFICATION_NODE = (
-    "tests/test_ph2_conversation_heldout_runtime.py::"
-    "test_dlg05_catalog_selection_first_runs_all_six_cases_without_labels"
+CANDIDATE_OBSERVATION = (
+    REPOSITORY_ROOT
+    / "data"
+    / "ph2"
+    / "manifests"
+    / "dlg05_public_candidate_observation_v3.json"
 )
 
 
@@ -44,17 +52,21 @@ def _target(value: str | Path) -> Path:
 def freeze(target: str | Path = DEFAULT_TARGET) -> dict[str, object]:
     """运行真实六 case preflight 并返回写出的公开冻结摘要。"""
     output = _target(target)
-    environment = os.environ.copy()
-    environment["DLG05_PUBLIC_FREEZE_TARGET"] = str(output)
-    completed = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", QUALIFICATION_NODE],
-        cwd=REPOSITORY_ROOT,
-        env=environment,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"DLG-05 public qualification harness failed: {completed.returncode}")
+    with TemporaryDirectory(prefix="dlg05-public-freeze-") as root:
+        selection = run_dlg05_public_candidate(
+            Path(root) / "selection.sqlite3")
+        write_dlg05_candidate_observation(
+            CANDIDATE_OBSERVATION, REPOSITORY_ROOT, selection)
+        verify_dlg05_candidate_observation(CANDIDATE_OBSERVATION)
+        result = qualify_dlg05_public_candidate(
+            Path(root) / "qualification.sqlite3")
+        write_dlg05_public_freeze_document(
+            output,
+            REPOSITORY_ROOT,
+            result.catalog,
+            result.manifest,
+            result.qualification,
+        )
     payload = output.read_bytes()
     value = json.loads(payload)
     if value.get("formal_run") != 0 or value.get("labels_included") != 0:

@@ -38,17 +38,19 @@ _TEST_IMPORT_RE = re.compile(
     r"\b(?:from|import)\s+(test_[A-Za-z0-9_]+)",
 )
 _DLG05_TEST_NAMES = (
+    "test_ph2_conversation_heldout_candidate.py",
     "test_ph2_conversation_heldout_family.py",
     "test_ph2_conversation_heldout_protocol.py",
     "test_ph2_conversation_heldout_qualification.py",
     "test_ph2_conversation_heldout_runtime.py",
 )
-DLG05_PUBLIC_FREEZE_SCHEMA = "dlg05-public-preflight-freeze-v2"
+DLG05_PUBLIC_FREEZE_SCHEMA = "dlg05-public-preflight-freeze-v3"
 _INVENTORY_GROUPS = (
     "source",
     "dlg05_tests_and_fixtures",
     "freeze_harness",
     "training_sample",
+    "candidate_observation",
 )
 
 
@@ -262,10 +264,15 @@ def _inventory_path_objects(root: Path) -> dict[str, tuple[Path, ...]]:
         "freeze_harness": (
             resolved / "conftest.py",
             resolved / "scripts" / "freeze_dlg05_public_preflight.py",
+            resolved / "scripts" / "run_dlg05_public_candidate.py",
         ),
         "training_sample": (
             resolved / "data" / "ph2"
             / "grounded_answer_train_v1.jsonl.sample",
+        ),
+        "candidate_observation": (
+            resolved / "data" / "ph2" / "manifests"
+            / "dlg05_public_candidate_observation_v3.json",
         ),
     }
 
@@ -273,7 +280,7 @@ def _inventory_path_objects(root: Path) -> dict[str, tuple[Path, ...]]:
 def dlg05_public_freeze_inventory_paths(
         repository_root: str | Path,
         ) -> dict[str, tuple[str, ...]]:
-    """返回 v2 合同要求的完整、分组、规范相对路径集合。"""
+    """返回 v3 合同要求的完整、分组、规范相对路径集合。"""
     root = Path(repository_root).resolve()
     return {
         group: tuple(_relative_file(root, path) for path in paths)
@@ -317,9 +324,9 @@ def assert_dlg05_public_freeze_inventory_complete(
 
 
 def _inventory_contract() -> dict[str, Any]:
-    """返回 verifier 必须逐字匹配的 v2 文件集合规则。"""
+    """返回 verifier 必须逐字匹配的 v3 文件集合规则。"""
     return {
-        "version": 2,
+        "version": 3,
         "complete_set_required": 1,
         "groups": list(_INVENTORY_GROUPS),
         "source_rule": "src/pure_integer_ai/**/*.py",
@@ -328,9 +335,13 @@ def _inventory_contract() -> dict[str, Any]:
         "freeze_harness_paths": [
             "conftest.py",
             "scripts/freeze_dlg05_public_preflight.py",
+            "scripts/run_dlg05_public_candidate.py",
         ],
         "training_sample_paths": [
             "data/ph2/grounded_answer_train_v1.jsonl.sample",
+        ],
+        "candidate_observation_paths": [
+            "data/ph2/manifests/dlg05_public_candidate_observation_v3.json",
         ],
     }
 
