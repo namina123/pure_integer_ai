@@ -31,6 +31,7 @@ from pure_integer_ai.experiments.conversation_heldout_v4_projection import (
 )
 
 
+# object-model: exception
 class ConversationHeldOutV4MetadataAuditError(RuntimeError):
     """v4 source bundle 无法满足 owner handoff 的只读元数据合同。"""
 
