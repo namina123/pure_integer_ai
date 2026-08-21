@@ -115,13 +115,24 @@ def test_owner_metadata_reader_requires_k_drive_in_production(tmp_path):
         read_v4_owner_metadata(owner, source, family=family)
 
 
-def test_owner_metadata_reader_rejects_symlink_root(tmp_path):
+def test_owner_metadata_reader_rejects_symlink_root_before_resolve(
+        tmp_path, monkeypatch):
     """根目录链接必须在 resolve 前拒绝，不能借目标目录通过隔离门。"""
     family, source, owner, _label = _setup(tmp_path)
-    linked = tmp_path / "owner-link"
-    try:
-        linked.symlink_to(owner, target_is_directory=True)
-    except (OSError, NotImplementedError):
-        pytest.skip("当前 Windows 环境不允许创建目录 symlink")
+    original_is_symlink = Path.is_symlink
+    original_resolve = Path.resolve
+
+    def is_owner_link(path):
+        if path == owner:
+            return True
+        return original_is_symlink(path)
+
+    def resolve_after_link_check(path, *args, **kwargs):
+        if path == owner:
+            raise AssertionError("链接根不得在检查前 resolve")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_symlink", is_owner_link)
+    monkeypatch.setattr(Path, "resolve", resolve_after_link_check)
     with pytest.raises(ConversationHeldOutV4OwnerHandoffError, match="链接|reparse"):
-        read_v4_owner_metadata(linked, source, require_k_drive=False, family=family)
+        read_v4_owner_metadata(owner, source, require_k_drive=False, family=family)

@@ -61,7 +61,17 @@ def _fail(message: str) -> None:
 
 def _root_path(root: str | Path, *, require_k_drive: bool) -> Path:
     """解析并限制审计根；生产默认拒绝非 K 盘回退。"""
-    path = Path(root).resolve()
+    raw_path = Path(root)
+    if raw_path.is_symlink():
+        _fail("v4 metadata audit 根不存在或是链接")
+    try:
+        raw_stat = os.stat(raw_path, follow_symlinks=False)
+    except OSError as exc:
+        _fail("v4 metadata audit 根不存在或不可读取")
+        raise AssertionError from exc
+    if getattr(raw_stat, "st_file_attributes", 0) & _REPARSE_POINT:
+        _fail("v4 metadata audit 根不得是 reparse point")
+    path = raw_path.resolve()
     if require_k_drive and path.drive.upper() != "K:":
         _fail("v4 metadata audit 生产根必须位于 K 盘")
     if not path.is_dir() or path.is_symlink():

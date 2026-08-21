@@ -50,3 +50,28 @@ def test_v4_metadata_audit_rejects_non_k_production_root(tmp_path):
     """生产默认不能静默把 D 盘或临时目录当 K 盘工作根。"""
     with pytest.raises(ConversationHeldOutV4MetadataAuditError, match="K 盘"):
         audit_v4_family_artifacts(Path(tmp_path))
+
+
+def test_v4_metadata_audit_rejects_symlink_root_before_resolve(
+        tmp_path, monkeypatch):
+    """root 链接必须在 resolve 前拒绝，避免 junction 隐去自身属性。"""
+    family = build_v4_family()
+    root = tmp_path / "family"
+    write_v4_family_artifacts(family, root)
+    original_is_symlink = Path.is_symlink
+    original_resolve = Path.resolve
+
+    def is_family_link(path):
+        if path == root:
+            return True
+        return original_is_symlink(path)
+
+    def resolve_after_link_check(path, *args, **kwargs):
+        if path == root:
+            raise AssertionError("链接根不得在检查前 resolve")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_symlink", is_family_link)
+    monkeypatch.setattr(Path, "resolve", resolve_after_link_check)
+    with pytest.raises(ConversationHeldOutV4MetadataAuditError, match="链接|reparse"):
+        audit_v4_family_artifacts(root, require_k_drive=False, family=family)
