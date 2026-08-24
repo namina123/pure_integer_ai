@@ -109,4 +109,3 @@ def test_digest_and_scope_mismatch_fail_closed(runtime) -> None:
         run_capsule_dialogue_turn(
             capsule, raw, state,
             RuntimeMemoryState((999,)), runtime)
-
