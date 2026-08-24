@@ -25,6 +25,9 @@ from pure_integer_ai.experiments.conversation_training_pack import (
 from pure_integer_ai.experiments.run_conversation_training import (
     default_course_paths,
 )
+from pure_integer_ai.experiments.conversation_training_cursor import (
+    recover_training_cursor,
+)
 from pure_integer_ai.experiments.conversation_public_sentence_demo import (
     build_public_sentence_demo_catalog,
     run_public_sentence_demo_bytes,
@@ -196,6 +199,28 @@ def load_training_observation(
     if graph_size != concept_node_count:
         raise ValueError("training observation graph_size 与 SQLite 漂移")
     stages = tuple(int(item) for item in summary["stages_completed"])
+    cursor_path = root / "training_cursor.int"
+    if cursor_path.is_file():
+        cursor = recover_training_cursor(root, require_k_drive=True)
+        try:
+            run_id_u8 = tuple(str(summary["run_id"]).encode("utf-8"))
+        except (KeyError, UnicodeEncodeError) as error:
+            raise ValueError("training observation run_id 不可编码") from error
+        if (
+                cursor.pack_sha256_u8 != tuple(
+                    bytes.fromhex(str(summary["pack_sha256"])))
+                or cursor.run_id_u8 != run_id_u8
+                or cursor.requested_stages != tuple(
+                    sorted(int(item) for item in summary.get("active_stages", ())))
+                or cursor.completed_stages != stages
+                or cursor.training_item_count != int(
+                    summary["training_item_count"])
+                or cursor.heldout_probe_count != int(
+                    summary["heldout_probe_count"])
+                or cursor.graph_size != graph_size
+                or cursor.weaning_ready != bool(summary["weaning_ready"])
+        ):
+            raise ValueError("training observation cursor 与摘要漂移")
     return TrainingObservation(
         str(summary["run_id"]), str(summary["pack_sha256"]),
         int(summary["training_item_count"]), int(summary["heldout_probe_count"]),

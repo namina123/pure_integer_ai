@@ -17,7 +17,12 @@ from pure_integer_ai.experiments.conversation_training_contrast import (
     build_dialogue_training_contrast,
 )
 from pure_integer_ai.experiments.formal_train import FormalTrainConfig, formal_train
+from pure_integer_ai.experiments.conversation_training_cursor import (
+    DialogueTrainingCursor,
+    write_training_cursor,
+)
 from pure_integer_ai.storage.backend import SQLiteBackend
+from pure_integer_ai.storage.k_run_boundary import open_existing_run_root
 
 
 def default_course_paths(project_root: str | Path) -> tuple[Path, ...]:
@@ -102,6 +107,20 @@ def run_conversation_training(*, project_root: str | Path,
         gates.TRAINING_MODE = previous
         backend.commit()
         backend.close()
+    cursor = DialogueTrainingCursor(
+        tuple(bytes.fromhex(pack.pack_sha256)),
+        tuple(run_id.encode("utf-8")),
+        tuple(sorted(active_stages)),
+        tuple(sorted(result.stages_completed)),
+        len(train_items),
+        len(heldout_items) if with_heldout_probe else 0,
+        int(result.final_metrics.graph_size),
+        bool(result.weaning_ready),
+    )
+    cursor_path = write_training_cursor(
+        open_existing_run_root(run_dir, require_k_drive=True),
+        cursor,
+    )
     summary = {
         "run_id": run_id,
         "pack_sha256": pack.pack_sha256,
@@ -122,6 +141,8 @@ def run_conversation_training(*, project_root: str | Path,
         "weaning_ready": bool(result.weaning_ready),
         "weaning_blockers": tuple(result.weaning_blockers),
         "database": str(database_path),
+        "training_cursor": str(cursor_path),
+        "training_cursor_identity": list(cursor.identity()),
     }
     _write_json(run_dir / "training_summary.json", summary)
     return summary
