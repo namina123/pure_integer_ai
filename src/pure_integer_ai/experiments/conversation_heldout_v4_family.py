@@ -1,10 +1,10 @@
-"""DLG-05 v4 新 successor 的 typed family 构造点。
+"""DLG-05 v4 的 synthetic source-bundle fixture。
 
-本模块只从公开 S-00/S-03/F-00/G-00 类型正向构造新的六 case family。
-每个 turn 在同一构造点生成 ``QuestionRequest``、``QuestionExecutionResult``、
-完整候选集合、输入/输出 Representation 和 SourceRecord；不读取旧 catalog、
-旧 observation、private label 或论文。它是 source-bundle 的生产前置，不是
-owner/formal runner，也不写入仓库内的大体量材料。
+本模块只为 bundle/freeze/projection 合同提供可重建的 synthetic 数据。它手工构造
+``QuestionExecutionResult``、candidate 和 surface，因此不得作为 owner、formal 或
+能力运行时输入。``conversation_heldout_v4_candidate_runtime`` 的默认输入同样只是
+synthetic runtime fixture；只有未来独立冻结的 external source capsule 才可进入实际
+runtime、artifact 或 owner 路径。
 """
 from __future__ import annotations
 
@@ -324,7 +324,7 @@ class ConversationHeldOutV4Family:
 
 
 def build_v4_family() -> ConversationHeldOutV4Family:
-    """构造六 case/十二 turn successor，并从同次 execution 导出 bundle。"""
+    """构造 synthetic 六 case fixture；绝不能据此声明真实运行时证据。"""
     dependencies = _dependency_binding()
     executions = []
     inputs = []
@@ -407,10 +407,13 @@ def write_v4_family_artifacts(
         family: ConversationHeldOutV4Family,
         root: str | Path,
         ) -> dict[str, Path]:
-    """把可重建的 bundle/freeze/projection 审计材料写入指定 K 盘目录。"""
+    """把 synthetic fixture 的 bundle/freeze/projection 写入测试目录，禁止写 K 盘来源根。"""
     if not isinstance(family, ConversationHeldOutV4Family):
         raise TypeError("family 类型错误")
-    target = Path(root).resolve()
+    raw_target = Path(root)
+    if raw_target.drive.upper() == "K:":
+        raise ValueError("synthetic family 不得写入 K 盘 source artifact 根")
+    target = raw_target.resolve()
     target.mkdir(parents=True, exist_ok=True)
     payload_path = target / "bundle.canonical.ints"
     payload = (" ".join(str(value) for value in family.bundle.canonical_payload) + "\n").encode()

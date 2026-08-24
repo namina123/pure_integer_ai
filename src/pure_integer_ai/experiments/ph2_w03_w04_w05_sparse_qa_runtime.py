@@ -74,6 +74,8 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_runtime_contract impo
     SparseQAQueryBatch,
     SparseQAQueryProbe,
     SparseQAResult,
+    SparseQASameDispatchProofProjection,
+    SparseQASentenceProjection,
     SparseQARuntime,
     SparseQARuntimeBuildProbe,
     W03W04W05SparseQARuntimeError,
@@ -312,13 +314,13 @@ def _selected_raw_result(record) -> RawQuestionAnswerResult | None:
         "FT22 selected sparse decision lacks its typed result")
 
 
-def run_sparse_qa_query(
+def _run_sparse_qa_query_with_raw(
         runtime: SparseQARuntime,
         request: RawQuestionRequest,
         *,
         audit: bool = False,
-        ) -> SparseQAResult:
-    """Run one FT20 hot query and project complete FT16 traces only on request."""
+        ) -> tuple[SparseQAResult, RawQuestionAnswerResult | None]:
+    """执行一次 sparse dispatch，并同时保留受验证的选择结果供窄投影读取。"""
     if (not isinstance(runtime, SparseQARuntime)
             or not isinstance(request, RawQuestionRequest)
             or type(audit) is not bool):
@@ -343,7 +345,7 @@ def run_sparse_qa_query(
         if audit else None
     )
     decision = record.decision
-    return SparseQAResult(
+    result = SparseQAResult(
         runtime.identity_sha256,
         runtime.frozen_identities,
         request,
@@ -356,6 +358,63 @@ def run_sparse_qa_query(
         sparse_question_dispatch_probe(runtime.dispatch_index, record),
         audit_result,
     )
+    return result, raw_result
+
+
+def run_sparse_qa_query(
+        runtime: SparseQARuntime,
+        request: RawQuestionRequest,
+        *,
+        audit: bool = False,
+        ) -> SparseQAResult:
+    """运行一条 FT20 热路径查询；默认不投影完整 FT16 审计。"""
+    return _run_sparse_qa_query_with_raw(runtime, request, audit=audit)[0]
+
+
+def run_sparse_qa_query_with_typed_proof(
+        runtime: SparseQARuntime,
+        request: RawQuestionRequest,
+        ) -> SparseQASameDispatchProofProjection:
+    """仅供 Python host adapter 读取同次 dispatch 留存的 typed proof。
+
+    本函数不重跑 sparse dispatch，不从短答案或生成文本反推 proof。返回值是
+    明确的 host-only legacy carrier，不能作为 canonical 或可迁移 record 使用。
+    """
+    result, raw_result = _run_sparse_qa_query_with_raw(runtime, request)
+    proof = None
+    surface = None
+    if result.status == "ANSWER":
+        if (raw_result is None or raw_result.typed_result is None
+                or raw_result.typed_result.proof is None):
+            raise W03W04W05SparseQARuntimeError(
+                "FT22 ANSWER lacks a same-dispatch typed proof")
+        proof = raw_result.typed_result.proof
+        surface = proof.generated_proposition_surface
+    return SparseQASameDispatchProofProjection(
+        result,
+        raw_result,
+        proof,
+        surface,
+    )
+
+
+def run_sparse_qa_sentence(
+        runtime: SparseQARuntime,
+        request: RawQuestionRequest,
+        ) -> SparseQASentenceProjection:
+    """返回已选择 proof 的完整生成命题句，不为短答案添加任何模板。"""
+    result, raw_result = _run_sparse_qa_query_with_raw(runtime, request)
+    surface = None
+    if result.status == "ANSWER":
+        if (raw_result is None or raw_result.typed_result is None
+                or raw_result.typed_result.status != "ANSWER"
+                or raw_result.typed_result.proof is None
+                or raw_result.typed_result.answer_surface
+                != result.answer_surface):
+            raise W03W04W05SparseQARuntimeError(
+                "FT22 sentence projection lost its selected typed proof")
+        surface = raw_result.typed_result.proof.generated_proposition_surface
+    return SparseQASentenceProjection(result, surface)
 
 
 def run_sparse_qa_queries(
@@ -403,6 +462,8 @@ __all__ = [
     "SparseQAQueryBatch",
     "SparseQAQueryProbe",
     "SparseQAResult",
+    "SparseQASameDispatchProofProjection",
+    "SparseQASentenceProjection",
     "SparseQARuntime",
     "SparseQARuntimeBuildProbe",
     "W03W04W05SparseQARuntimeError",
@@ -410,4 +471,6 @@ __all__ = [
     "build_public_sparse_qa_runtime",
     "run_sparse_qa_queries",
     "run_sparse_qa_query",
+    "run_sparse_qa_query_with_typed_proof",
+    "run_sparse_qa_sentence",
 ]

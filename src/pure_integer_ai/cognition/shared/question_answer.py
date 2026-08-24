@@ -282,7 +282,7 @@ class QuestionExecutor(Protocol):
 
 
 class FactQuestionExecutor:
-    """从既有 H-00 ledger 只读恢复一个显式 Proposition 的 active Evidence。"""
+    """从既有 H-00 ledger 只读恢复全部获授权 Proposition 的 active Evidence。"""
 
     def __init__(
             self,
@@ -303,43 +303,47 @@ class FactQuestionExecutor:
             executed_reason, label="fact question executed_reason")
 
     def execute(self, query: QuestionQuery) -> QuestionExecutionResult:
-        """读取目标命题 active 快照及未被替代 Evidence，形成回答 scope 候选。"""
+        """读取全部授权目标的 active Evidence，形成同次完整候选集合。"""
         if not isinstance(query, QuestionQuery):
             raise TypeError("fact question query 类型错误")
         if query.route != self.route:
             raise ValueError("fact question executor 收到未注册 route")
         request = query.request
-        snapshots = self.ledger.candidate_snapshots(
-            request.target.template.stable_key(),
-            observation=request.source,
-            scope=request.evidence_scope,
-            hypothesis_kind=self.hypothesis_kind,
-        )
         candidates = []
-        trace: list[int] = [1, *_packed(query.stable_key()), len(snapshots)]
-        for snapshot in snapshots:
-            trace.extend(_packed(_snapshot_key(snapshot)))
-            if snapshot.lifecycle != LIFECYCLE_ACTIVE:
-                continue
-            active_ids = set(
-                snapshot.support_evidence_ids
-                + snapshot.refute_evidence_ids
-                + snapshot.unknown_evidence_ids
+        targets = request.authorized_candidate_targets or (request.target,)
+        trace: list[int] = [1, *_packed(query.stable_key())]
+        for target in targets:
+            snapshots = self.ledger.candidate_snapshots(
+                target.template.stable_key(),
+                observation=request.source,
+                scope=request.evidence_scope,
+                hypothesis_kind=self.hypothesis_kind,
             )
-            evidence = tuple(
-                item for item in self.ledger.evidence_history(
-                    snapshot.hypothesis)
-                if item.evidence_id in active_ids
-            )
-            if not evidence:
-                continue
-            candidates.append(GenerationCandidate(
-                request.target,
-                LogicEvidenceState.from_status(snapshot.epistemic_status),
-                request.source,
-                request.response_scope,
-                evidence,
-            ))
+            trace.extend((len(target.stable_key()), *target.stable_key(),
+                          len(snapshots)))
+            for snapshot in snapshots:
+                trace.extend(_packed(_snapshot_key(snapshot)))
+                if snapshot.lifecycle != LIFECYCLE_ACTIVE:
+                    continue
+                active_ids = set(
+                    snapshot.support_evidence_ids
+                    + snapshot.refute_evidence_ids
+                    + snapshot.unknown_evidence_ids
+                )
+                evidence = tuple(
+                    item for item in self.ledger.evidence_history(
+                        snapshot.hypothesis)
+                    if item.evidence_id in active_ids
+                )
+                if not evidence:
+                    continue
+                candidates.append(GenerationCandidate(
+                    target,
+                    LogicEvidenceState.from_status(snapshot.epistemic_status),
+                    request.source,
+                    request.response_scope,
+                    evidence,
+                ))
         trace.append(len(candidates))
         return QuestionExecutionResult(
             query,

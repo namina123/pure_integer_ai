@@ -16,15 +16,16 @@ from pure_integer_ai.experiments.conversation_heldout_v4_metadata_audit import (
 )
 
 
-def test_v4_metadata_audit_is_read_only_and_deterministic(tmp_path):
-    """完整 family artifact 可由同一 typed bundle 逐字节核对。"""
+def test_v4_metadata_audit_is_read_only_and_explicitly_fixture_only(tmp_path):
+    """完整 family artifact 可逐字节核对，但不得获得 owner handoff 资格。"""
     family = build_v4_family()
     root = tmp_path / "family"
     write_v4_family_artifacts(family, root)
     first = audit_v4_family_artifacts(root, require_k_drive=False, family=family)
     second = audit_v4_family_artifacts(root, require_k_drive=False, family=family)
     assert first == second
-    assert first.status == "READY_FOR_OWNER_HANDOFF"
+    assert first.status == "SYNTHETIC_FIXTURE_ONLY"
+    assert first.source_qualified == 0
     assert first.file_count == 5
     assert first.document()["status"] == first.status
 
@@ -49,7 +50,7 @@ def test_v4_metadata_audit_report_is_idempotent_and_detects_drift(tmp_path):
 def test_v4_metadata_audit_rejects_non_k_production_root(tmp_path):
     """生产默认不能静默把 D 盘或临时目录当 K 盘工作根。"""
     with pytest.raises(ConversationHeldOutV4MetadataAuditError, match="K 盘"):
-        audit_v4_family_artifacts(Path(tmp_path))
+        audit_v4_family_artifacts(Path(tmp_path), family=build_v4_family())
 
 
 def test_v4_metadata_audit_rejects_symlink_root_before_resolve(

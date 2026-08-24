@@ -177,6 +177,15 @@ class GroundedAnswerConnectorTarget:
         if (not isinstance(self.language_branch, ObjectIdentity)
                 or self.language_branch.object_kind != OBJECT_LANGUAGE_BRANCH):
             raise ValueError("grounded connector language branch 类型错误")
+        if any(
+                value.owner != self.language_branch.owner
+                or value.versions != self.language_branch.versions
+                for value in (
+                    self.proposition.template,
+                    self.proposition.predicate,
+                    self.proposition.structure)):
+            raise GroundedAnswerConnectorError(
+                "grounded connector target crosses language branch owner/version")
         if (not isinstance(self.representation_family, tuple)
                 or not self.representation_family
                 or any(type(value) is not int
@@ -507,10 +516,16 @@ class GroundedAnswerConnectorCompilation:
         return variant
 
 
-def _value_protocol() -> LanguageConnectorValueProtocol:
-    """建立本课程共享的四类最小 slot 读取指令。"""
+def _value_protocol(
+        target: GroundedAnswerConnectorTarget,
+        ) -> LanguageConnectorValueProtocol:
+    """按目标语言分支边界建立四类最小 slot 读取指令。"""
     return LanguageConnectorValueProtocol(*tuple(
-        minimal_instruction_identity((_NAMESPACE, 1, index))
+        minimal_instruction_identity(
+            (_NAMESPACE, 1, index),
+            owner=target.language_branch.owner,
+            versions=target.language_branch.versions,
+        )
         for index in range(1, 5)
     ))
 
@@ -529,14 +544,21 @@ def _variant(
     structure_id = surface_pattern_structure_id(pattern)
     structure_key = (
         _NAMESPACE, 3, structure_id, _structure_template_id(pattern, target))
-    connector = structure_concept_identity((*pattern_key, 1))
-    structure = structure_concept_identity((*structure_key, 1))
-    value_type = concept_identity((*structure_key, 2))
+    owner = target.language_branch.owner
+    versions = target.language_branch.versions
+    connector = structure_concept_identity(
+        (*pattern_key, 1), owner=owner, versions=versions)
+    structure = structure_concept_identity(
+        (*structure_key, 1), owner=owner, versions=versions)
+    value_type = concept_identity(
+        (*structure_key, 2), owner=owner, versions=versions)
     slots = tuple(
         StructureSlotDefinition(
             structure,
-            structure_concept_identity((*structure_key, 10, index)),
-            role_identity((*structure_key, 11, index)),
+            structure_concept_identity(
+                (*structure_key, 10, index), owner=owner, versions=versions),
+            role_identity(
+                (*structure_key, 11, index), owner=owner, versions=versions),
             value_type,
         )
         for index, _part in enumerate(pattern.parts, start=1)
@@ -554,24 +576,31 @@ def _variant(
             constant = None
         elif part.kind == PATTERN_LITERAL:
             source = value_protocol.constant_source
-            filler = concept_identity((
-                *pattern_key, 20, ordinal, _text_id(part.literal)))
+            filler = concept_identity(
+                (*pattern_key, 20, ordinal, _text_id(part.literal)),
+                owner=owner,
+                versions=versions,
+            )
             text = part.literal
             constant = filler
         else:
             raise GroundedAnswerConnectorError("pattern part kind 未注册")
         bindings.append(LanguageConnectorSlotBinding(
-            structure_concept_identity((*pattern_key, 30, ordinal)),
+            structure_concept_identity(
+                (*pattern_key, 30, ordinal), owner=owner, versions=versions),
             slot.slot,
             source,
             constant=constant,
         ))
         directives.append(LanguageConnectorSurfaceDirective(
-            structure_concept_identity((*pattern_key, 40, ordinal)),
+            structure_concept_identity(
+                (*pattern_key, 40, ordinal), owner=owner, versions=versions),
             slot.slot,
             surface_protocol.emit_action,
-            minimal_instruction_identity((*pattern_key, 41, ordinal)),
-            structure_concept_identity((*pattern_key, 42, ordinal)),
+            minimal_instruction_identity(
+                (*pattern_key, 41, ordinal), owner=owner, versions=versions),
+            structure_concept_identity(
+                (*pattern_key, 42, ordinal), owner=owner, versions=versions),
             (),
         ))
         runtime.append(LanguageConnectorSurfaceRuntimePolicy(
@@ -586,13 +615,16 @@ def _variant(
             representation_identity(
                 target.representation_family,
                 tuple(ord(char) for char in text),
+                owner=owner,
+                versions=versions,
             ),
             part.kind,
             ordinal - 1,
         ))
     orders = tuple(
         GroundedAnswerOrderRequirement(
-            structure_concept_identity((*structure_key, 60, index)),
+            structure_concept_identity(
+                (*structure_key, 60, index), owner=owner, versions=versions),
             before.slot,
             after.slot,
         )
@@ -604,16 +636,21 @@ def _variant(
         target.language_branch,
         target.proposition.structure,
         target.proposition.predicate,
-        structure_concept_identity((*structure_key, 3)),
+        structure_concept_identity(
+            (*structure_key, 3), owner=owner, versions=versions),
         structure,
         slots,
         tuple(bindings),
-        structure_concept_identity((*structure_key, 4)),
+        structure_concept_identity(
+            (*structure_key, 4), owner=owner, versions=versions),
         tuple(item.constraint for item in orders),
-        structure_concept_identity((*structure_key, 5)),
+        structure_concept_identity(
+            (*structure_key, 5), owner=owner, versions=versions),
         (),
-        minimal_instruction_identity((*structure_key, 6)),
-        minimal_instruction_identity((*structure_key, 7)),
+        minimal_instruction_identity(
+            (*structure_key, 6), owner=owner, versions=versions),
+        minimal_instruction_identity(
+            (*structure_key, 7), owner=owner, versions=versions),
         tuple(directives),
     )
     policy = LanguageGenerationConnectorRuntimePolicy(
@@ -689,7 +726,7 @@ def compile_grounded_answer_connectors(
     if not patterns:
         raise GroundedAnswerConnectorError(
             "当前模型没有可编译的单 claim ANSWER pattern")
-    value_protocol = _value_protocol()
+    value_protocol = _value_protocol(target)
     variants = tuple(sorted(
         (
             _variant(item, question, target, surface_protocol, value_protocol)

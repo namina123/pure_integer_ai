@@ -1,0 +1,274 @@
+{
+  "chain_shape_reference_status": "PORTABILITY_CONTRACT_REFERENCE_ONLY",
+  "chain_shape_rejections": [
+    {
+      "collection": "registry",
+      "error_code": 105,
+      "index": 1,
+      "name": "registry-successor-predecessor-break",
+      "operation": "set",
+      "path": [
+        "predecessor_registry_identity_sha256"
+      ],
+      "value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "collection": "revocation",
+      "error_code": 108,
+      "index": 0,
+      "name": "revocation-foreign-registry-binding",
+      "operation": "set",
+      "path": [
+        "registry_document_identity_sha256"
+      ],
+      "value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "collection": "revocation",
+      "error_code": 109,
+      "index": 1,
+      "name": "revocation-successor-predecessor-break",
+      "operation": "set",
+      "path": [
+        "predecessor_revocation_identity_sha256"
+      ],
+      "value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "collection": "revocation",
+      "error_code": 110,
+      "index": 1,
+      "name": "revocation-successor-must-add-record",
+      "operation": "copy",
+      "path": [
+        "revocations"
+      ],
+      "source_collection": "revocation",
+      "source_index": 0,
+      "source_path": [
+        "revocations"
+      ]
+    },
+    {
+      "collection": "declaration",
+      "error_code": 111,
+      "index": 0,
+      "name": "declaration-foreign-registry-binding",
+      "operation": "set",
+      "path": [
+        "registry_document_identity_sha256"
+      ],
+      "value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "collection": "declaration",
+      "error_code": 112,
+      "index": 1,
+      "name": "declaration-head-must-bind-selected-revocation",
+      "operation": "set",
+      "path": [
+        "revocation_document_identity_sha256"
+      ],
+      "value": "af05a1a075126445d6c032258320a82c3824e15ba71df3d05703e0d18f8c3699"
+    },
+    {
+      "collection": "declaration",
+      "error_code": 114,
+      "index": 1,
+      "name": "declaration-successor-predecessor-break",
+      "operation": "set",
+      "path": [
+        "predecessor_declaration_identity_sha256"
+      ],
+      "value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "expected_head_identities_sha256_hex": [
+    "56efd6d0000cb71663fbc11ce22d9ba37668a0fabe15e576264fa4c264715a5d",
+    "02b9e21de3dc374648ddcb16e9e581636d54f17abddf0e4dd9f8dd2ebcb2a07d",
+    "c5317056ea705a399a4e44b47df5d58ea686e3cc8948075d7b7fc5c432d16d53"
+  ],
+  "profile": "GOV-CJSON-1",
+  "reference_collections": {
+    "declaration": [
+      {
+        "algorithm": "Ed25519",
+        "control_domain": "source-control",
+        "ingest_code_identity_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "key_id": "source-issuer-1",
+        "kind": "source-snapshot-declaration",
+        "license_id": "CC-BY-SA-4.0",
+        "license_review_artifact_identity_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+        "metadata_byte_count": 17,
+        "metadata_id": "metadata-v1",
+        "metadata_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+        "official_uri": "https://example.org/snapshot%2Fv1?view=full#f",
+        "predecessor_declaration_identity_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "registry_document_identity_sha256": "56efd6d0000cb71663fbc11ce22d9ba37668a0fabe15e576264fa4c264715a5d",
+        "revocation_document_identity_sha256": "af05a1a075126445d6c032258320a82c3824e15ba71df3d05703e0d18f8c3699",
+        "schema": 1,
+        "sequence": 1,
+        "snapshot_id": "snapshot-v1",
+        "source_file_byte_count": 101,
+        "source_file_id": "raw-source-v1",
+        "source_file_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_key": "EXTERNAL_SOURCE_V1",
+        "source_ref_key": [
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
+        "transform_code_identity_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "upstream_digest_algorithm": "SHA256",
+        "upstream_digest_hex": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "version": 1
+      },
+      {
+        "algorithm": "Ed25519",
+        "control_domain": "source-control",
+        "ingest_code_identity_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "key_id": "source-issuer-1",
+        "kind": "source-snapshot-declaration",
+        "license_id": "CC-BY-SA-4.0",
+        "license_review_artifact_identity_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+        "metadata_byte_count": 17,
+        "metadata_id": "metadata-v2",
+        "metadata_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "official_uri": "https://example.org/snapshot%2Fv2?view=full#f",
+        "predecessor_declaration_identity_sha256": "9231d9878a663799300344108a2dbcaab2d5e4e04f5bbfd38a8138d5e4374b71",
+        "registry_document_identity_sha256": "56efd6d0000cb71663fbc11ce22d9ba37668a0fabe15e576264fa4c264715a5d",
+        "revocation_document_identity_sha256": "02b9e21de3dc374648ddcb16e9e581636d54f17abddf0e4dd9f8dd2ebcb2a07d",
+        "schema": 1,
+        "sequence": 2,
+        "snapshot_id": "snapshot-v2",
+        "source_file_byte_count": 101,
+        "source_file_id": "raw-source-v2",
+        "source_file_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "source_key": "EXTERNAL_SOURCE_V1",
+        "source_ref_key": [
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
+        "transform_code_identity_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "upstream_digest_algorithm": "SHA256",
+        "upstream_digest_hex": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "version": 1
+      }
+    ],
+    "registry": [
+      {
+        "algorithm": "Ed25519",
+        "issuers": [
+          {
+            "control_domain": "annotation-control",
+            "issuer_key_id": "ann-issuer-1",
+            "not_after_registry_sequence": 9,
+            "not_before_registry_sequence": 1,
+            "public_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+            "role": "ANNOTATION_SOURCE"
+          },
+          {
+            "control_domain": "source-control",
+            "issuer_key_id": "source-issuer-1",
+            "not_after_registry_sequence": 9,
+            "not_before_registry_sequence": 1,
+            "public_key_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+            "role": "SOURCE_SNAPSHOT"
+          }
+        ],
+        "key_id": "root-chain-1",
+        "kind": "root-registry",
+        "predecessor_registry_identity_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "schema": 1,
+        "sequence": 1,
+        "version": 1
+      },
+      {
+        "algorithm": "Ed25519",
+        "issuers": [
+          {
+            "control_domain": "annotation-control",
+            "issuer_key_id": "ann-issuer-1",
+            "not_after_registry_sequence": 9,
+            "not_before_registry_sequence": 1,
+            "public_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+            "role": "ANNOTATION_SOURCE"
+          },
+          {
+            "control_domain": "source-control",
+            "issuer_key_id": "source-issuer-1",
+            "not_after_registry_sequence": 9,
+            "not_before_registry_sequence": 1,
+            "public_key_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+            "role": "SOURCE_SNAPSHOT"
+          }
+        ],
+        "key_id": "root-chain-1",
+        "kind": "root-registry",
+        "predecessor_registry_identity_sha256": "2a8b4b5209d21d4f4e0c328c7caae7525679995be66df0a10e85c663b0f78f04",
+        "schema": 1,
+        "sequence": 2,
+        "version": 1
+      }
+    ],
+    "revocation": [
+      {
+        "algorithm": "Ed25519",
+        "key_id": "root-chain-1",
+        "kind": "revocation-snapshot",
+        "predecessor_revocation_identity_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "registry_document_identity_sha256": "56efd6d0000cb71663fbc11ce22d9ba37668a0fabe15e576264fa4c264715a5d",
+        "revocations": [
+          {
+            "effective_declaration_sequence": 4,
+            "reason_digest_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "revoked_key_id": "ann-issuer-1"
+          }
+        ],
+        "schema": 1,
+        "sequence": 1,
+        "version": 1
+      },
+      {
+        "algorithm": "Ed25519",
+        "key_id": "root-chain-1",
+        "kind": "revocation-snapshot",
+        "predecessor_revocation_identity_sha256": "af05a1a075126445d6c032258320a82c3824e15ba71df3d05703e0d18f8c3699",
+        "registry_document_identity_sha256": "56efd6d0000cb71663fbc11ce22d9ba37668a0fabe15e576264fa4c264715a5d",
+        "revocations": [
+          {
+            "effective_declaration_sequence": 4,
+            "reason_digest_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "revoked_key_id": "ann-issuer-1"
+          },
+          {
+            "effective_declaration_sequence": 7,
+            "reason_digest_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "revoked_key_id": "source-issuer-1"
+          }
+        ],
+        "schema": 1,
+        "sequence": 2,
+        "version": 1
+      }
+    ]
+  },
+  "signature_semantics": "ZERO_BYTES_UNVERIFIED"
+}

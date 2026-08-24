@@ -217,9 +217,6 @@ class GroundedAnswerRunLocalBuild:
         if self.candidate not in self.planning.candidates:
             raise GroundedAnswerRunLocalFactoryError(
                 "grounded build candidate 不属于 planning")
-        if self.planning.candidates != (self.candidate,):
-            raise GroundedAnswerRunLocalFactoryError(
-                "首轮 grounded run-local 只接受单 candidate planning")
         if self.target.proposition != self.candidate.proposition:
             raise GroundedAnswerRunLocalFactoryError(
                 "grounded target 替换了 planning candidate Proposition")
@@ -322,7 +319,7 @@ class GroundedAnswerRunLocalInstallation:
             raise TypeError("grounded installation planning 类型错误")
         if not isinstance(self.candidate, GenerationCandidate):
             raise TypeError("grounded installation candidate 类型错误")
-        if (self.planning.candidates != (self.candidate,)
+        if (self.candidate not in self.planning.candidates
                 or self.candidate.proposition.structure
                 != self.variant.template.proposition_structure
                 or self.candidate.proposition.predicate
@@ -431,6 +428,9 @@ class GroundedAnswerRunLocalFactory:
         if request.parser_protocol.answer_stance != selection.stance:
             raise GroundedAnswerRunLocalFactoryError(
                 "grounded parser stance 与 G-01 selection 漂移")
+        if selection.selected_candidate_keys != (request.candidate.stable_key(),):
+            raise GroundedAnswerRunLocalFactoryError(
+                "grounded run-local 只能为 G-01 精确选中的单 candidate 生成")
         compilation = compile_grounded_answer_connectors(
             request.model,
             request.question,

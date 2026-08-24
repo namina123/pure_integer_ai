@@ -64,6 +64,45 @@ After the formal vertical slice, the repository added a 100-question interactive
 
 This remains a source-bound extractive broad factual-QA slice, not free-form generation, general QA, or language weaning. It demonstrates that sparse page retrieval, source-bound evidence selection, and citation-by-citation verification can close a predeclared evaluation on the frozen Chinese Wikipedia snapshot. It does not establish arbitrary-question coverage, future-source revisions, long dialogue, or autonomous language learning. See the [20k development preview](docs/broad_qa_20k_preview_en.md), [external evaluation report](docs/broad_qa_external_evidence_eval.md), and [joint evaluation report](docs/broad_qa_joint_retrieval_eval.md) for contracts and limits.
 
+The public dialogue course is now connected to a real stage-1 observe run on the `K:` training volume: `731` cases (`365 train / 184 heldout / 182 negative`), pack SHA-256 `1c907caac90c6edb687ad45e0db490da9188028374d90757af8fc28b720ce03d`. A read-only dialogue showcase combines complete-sentence answers, long questions, source-bound follow-ups, and broad QA. Its latest reproducible run has `14` turns, `13 ANSWER / 1 UNKNOWN`, `5` long questions, `10` source-bound answers, and bit-identical replay. Immediate references such as “它/该条目” reuse only the source title confirmed by the adjacent `ANSWER` turn; no source or an intervening `UNKNOWN/CLARIFY` leaves the follow-up unresolved. This remains a source-bound QA/dialogue demonstration, not free-form generation, general language mastery, or weaning.
+
+An independent surface-structure held-out development evaluation now checks new entities, qualifiers, and combinations rather than replaying training entities. Ten cases cover `ANSWER/UNKNOWN/CLARIFY/REPAIR`; all ten outputs are long surfaces (at least 48 UTF-8 bytes). The trained surface consumer reaches `10/10 PASS`, while the explicit no-consumer baseline is `10/10 NO_LEARNED_SURFACE`. Report SHA-256 is `7e77514e4b074eb46e2fa0e524f977c1fdafa28175430ccd4345f429f29479ec`. This demonstrates compositional use of a learned surface structure on typed inputs, not raw-text understanding, fact verification, free-form generation, or broad knowledge generalization. Broad knowledge remains source-bound retrieval and evidence selection.
+
+A real six-turn dialogue development slice now exercises `ANSWER -> UNKNOWN -> CLARIFY -> ANSWER -> ANSWER -> ANSWER`. After confirming the source “矮寨大桥”, it deliberately asks about “火星上的矮寨大桥”; the immediate pronoun “它” receives `CLARIFY` and the audited retrieval question does not inherit the old source. A new narrow complete-sentence answer and a legitimate Huangshan-pine follow-up then recover as readable `ANSWER` turns. The v6 run has `6` turns, `4 ANSWER / 1 UNKNOWN / 1 CLARIFY`, `3` long answers, one trained-surface use, and bit-identical replay. Report SHA-256 is `8543abacf0e5b8be72c1fb6cadfa3ab75d804062b28df8490ebf67b160a67e05`. This demonstrates bounded hot-history focus and recovery, not unlimited memory, free dialogue, or general knowledge understanding.
+
+The expanded v2 slice covers five real source domains: railway, bridge, knowledge graph, airport, and geographic distribution. It runs `6` scenarios and `19` turns. Each `ANSWER` must contain predeclared evidence tokens, so a status code alone cannot count as success. The run reaches `17/17` evidence-token hits, `16` long answers, `10` legitimate focus injections, and bit-identical replay; the pronoun after an `UNKNOWN` still remains unanchored `CLARIFY`. Report SHA-256 is `45172ce30f021e524466af525fc3dbc9ee888c9517e097e1bc74f606b4e796c4`. This demonstrates readable, evidence-bound multi-turn QA over a bounded source set, not arbitrary-domain understanding or open-ended semantic competence.
+
+The public 24-question broad-QA development pool now has an independent primary-evidence audit: `23 ANSWER / 1 UNKNOWN`, `23/23` predeclared evidence-token hits, `23/23` readable primary surfaces with no `Category:`, lowercase `category:`, or table residue, `23` long answers, and bit-identical replay. The audit fixed a real deduplication bug: a later larger window could delete an earlier, better primary sentence. Medal, event-date, population, astronomical-distance, and discoverer questions now expose their complete factual sentence first. Report SHA-256 is `68133dd1763a7d5a90ed72cb9d38434dd8c46bd80dff69de0ffa76297ca8f52a`. This remains a development regression on the frozen Chinese Wikipedia 20k index, not a held-out or general-QA claim.
+
+The held-out surface check can be reproduced with:
+
+```bash
+python -m pure_integer_ai.experiments.run_conversation_surface_heldout \
+  --project-root . \
+  --training-run-root K:\pure_integer_ai_work\dialogue_training_week_v1\dialogue-pack-v6-clean-surface \
+  --pack-sha256 1c907caac90c6edb687ad45e0db490da9188028374d90757af8fc28b720ce03d \
+  --output K:\your_run_root\dialogue-surface-heldout-v1.json
+
+python -m pure_integer_ai.experiments.run_conversation_multiturn_scale \
+  --project-root . \
+  --database K:\pure_integer_ai_work\broad_qa_week_v1\indexes\broad-qa-20k-from-100k-target-v2.sqlite3 \
+  --training-run-root K:\pure_integer_ai_work\dialogue_training_week_v1\dialogue-pack-v6-clean-surface \
+  --pack-sha256 1c907caac90c6edb687ad45e0db490da9188028374d90757af8fc28b720ce03d \
+  --output K:\your_run_root\dialogue-multiturn-scale-v1.json
+
+python -m pure_integer_ai.experiments.run_conversation_multiturn_scale_v2 \
+  --project-root . \
+  --database K:\pure_integer_ai_work\broad_qa_week_v1\indexes\broad-qa-20k-from-100k-target-v2.sqlite3 \
+  --training-run-root K:\pure_integer_ai_work\dialogue_training_week_v1\dialogue-pack-v6-clean-surface \
+  --pack-sha256 1c907caac90c6edb687ad45e0db490da9188028374d90757af8fc28b720ce03d \
+  --output K:\your_run_root\dialogue-multiturn-scale-v2.json
+
+python -m pure_integer_ai.experiments.run_broad_qa_dev_surface_audit \
+  --project-root . \
+  --database K:\pure_integer_ai_work\broad_qa_week_v1\indexes\broad-qa-20k-from-100k-target-v2.sqlite3 \
+  --output K:\your_run_root\broad-qa-dev-surface-v1.json
+```
+
 ## Quick start
 
 ```bash
@@ -87,6 +126,88 @@ pure-integer-qa "什么使得河水上涨？"
 The probe accepts a raw question and can optionally restrict it with `--source-ref 1,2,...`. It emits only the sparse short result by default; add `--audit` explicitly for complete audit traces. `--repeat N` runs warm queries on the same built runtime to check bit-identical repetition. This entry point demonstrates only the capabilities covered by the current public learned samples; it is not broad-domain QA or mature dialogue.
 
 Startup validates and loads the repository's typed canonical snapshot by default. If the snapshot is missing, damaged, or inconsistent with the public source identities, partial loading is rejected and the runtime is rebuilt in full.
+
+For a human-facing line-oriented short-QA shell:
+
+```bash
+pure-integer-qa --interactive
+你> 什么使得河水上涨？
+系统> 暴雨
+你> :quit
+```
+
+The shell reuses one read-only sparse runtime. `ANSWER` shows the learned answer surface, while other cases remain typed
+results; it does not invent a natural-language reply. It does not retain terminal input or present terminal history as
+long-term memory. Use `:quit`, `:exit`, or EOF to leave.
+
+To display the complete proposition surface produced by the same public learned path, use the separate shell:
+
+```bash
+pure-integer-qa --interactive-sentence
+你> 暴雨使得什么？
+系统> 暴雨使得河水上涨。
+你> :quit
+```
+
+The sentence is read directly from the complete generated result in the selected learned proof; it is not a short answer wrapped in a fixed template. This remains a read-only display of finite public examples, not free-form dialogue, conversation memory, or broad language understanding.
+
+For the same finite public-course demonstration with terminal input passing through the strict raw-byte/UTF-8 integer boundary, use:
+
+```bash
+# Run directly from the repository root; after installation, use pure-integer-dialogue-demo.
+py -3.11 -m pure_integer_ai.experiments.run_public_sentence_demo
+# pure-integer-dialogue-demo
+你> 暴雨使得什么？
+系统> 暴雨使得河水上涨。
+你> :quit
+```
+
+For an immediate one-shot check without interactive input:
+
+```bash
+py -3.11 -m pure_integer_ai.experiments.run_public_sentence_demo --question "暴雨使得什么？"
+# 系统> 暴雨使得河水上涨。
+```
+
+`--question="暴雨使得什么？"` is equivalent; both forms avoid a text pipe that may rewrite Chinese encoding.
+
+This entry starts from raw bytes and exactly matches a learned route in the current public course. A successful reply is
+the complete proposition from the same source proof; unseen input, ambiguity, or invalid input produces only a typed
+rejection code. It retains no terminal history and writes no long-term memory or database. This is a finite public-course
+demonstration, not free-form dialogue or broad language understanding.
+
+A limited public dialogue entry is now available:
+
+```bash
+# Run directly from the repository root; after installation, use pure-integer-dialogue.
+# On a Windows legacy-code-page terminal, run first: chcp 65001 > $null
+py -3.11 -m pure_integer_ai.experiments.run_public_frame_dialogue
+# pure-integer-dialogue
+你> 东岸入口何时启用？
+系统> 此输入对应多个已学习路径，请重输其中一个完整问题：
+澄川码头何时启用？
+北川站东门何时启用？
+你> 澄川码头何时启用？
+系统> 澄川码头于2023年启用。
+你> :quit
+```
+
+Each line passes through a strict raw-byte/UTF-8 boundary. The current entry demonstrates one source-bound, auditable
+two-candidate clarification flow: it lists complete questions, then accepts only one of those complete questions and
+copies the answer actually produced for it. Enter Chinese directly in a UTF-8 interactive terminal; legacy pipelines may
+rewrite its bytes. This is a narrow public demonstration, not free-form dialogue, long-term memory, or broad QA.
+
+The same entry also contains one constrained source-bound follow-up chain:
+
+```text
+你> 寒潮导致什么？
+系统> 寒潮使得路面结冰。
+你> 它的原因是什么？
+系统> 寒潮
+```
+
+Here, “它” is resolved only within the frozen current focus and source course; missing evidence yields a typed rejection
+instead of a guess.
 
 Use the long-lived JSONL mode to share one runtime build across different questions:
 

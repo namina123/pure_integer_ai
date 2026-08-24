@@ -1,9 +1,9 @@
-"""DLG-05 v4 候选侧 metadata-only handoff 审计。
+"""DLG-05 v4 synthetic fixture 的 metadata-only 文件闭包审计。
 
-本模块只检查公开 K 盘 source bundle 的文件闭包、确定性身份、freeze/manifest
-一致性和物理文件边界。它不读取 owner label，不创建 guard，不执行 query 或
-formal，也不把 Markdown/HTML 投影导入运行时。默认只接受 K 盘路径；测试可显式
-关闭盘符门，但生产调用不得关闭。
+本模块只检查旧 synthetic family 的文件闭包、确定性身份、freeze/manifest 一致性和
+物理文件边界。它不读取 owner label，不创建 guard，不执行 query 或 formal，也不把
+Markdown/HTML 投影导入运行时。此审计只能得到 ``SYNTHETIC_FIXTURE_ONLY``；外部
+source capsule 的 runtime artifact 审计将在独立模块中实现，不能复用本模块取得 owner 资格。
 """
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from pure_integer_ai.experiments.conversation_heldout_v4_bundle import (
 )
 from pure_integer_ai.experiments.conversation_heldout_v4_family import (
     ConversationHeldOutV4Family,
-    build_v4_family,
 )
 from pure_integer_ai.experiments.conversation_heldout_v4_freeze import (
     ConversationHeldOutV4Freeze,
@@ -161,7 +160,7 @@ def _expected_manifest_doc(
 
 @dataclass(frozen=True, slots=True)
 class ConversationHeldOutV4MetadataAudit:
-    """可供 owner handoff 读取的只读整数资格摘要。"""
+    """synthetic fixture 的只读整数闭包摘要，不授予 owner handoff 资格。"""
 
     schema_version: int
     bundle_payload_size: int
@@ -171,6 +170,7 @@ class ConversationHeldOutV4MetadataAudit:
     source_count: int
     candidate_count: int
     file_count: int
+    source_qualified: int
     hard_link_clear: int
     manifest_clear: int
     freeze_clear: int
@@ -180,7 +180,7 @@ class ConversationHeldOutV4MetadataAudit:
         values = (
             self.schema_version, self.bundle_payload_size, self.bundle_index,
             self.turn_count, self.source_count, self.candidate_count,
-            self.file_count, self.hard_link_clear, self.manifest_clear,
+            self.file_count, self.source_qualified, self.hard_link_clear, self.manifest_clear,
             self.freeze_clear, self.projection_boundary_clear,
         )
         if any(type(value) is not int or value < 0 for value in values):
@@ -193,22 +193,28 @@ class ConversationHeldOutV4MetadataAudit:
                for value in self.bundle_payload_sha256):
             raise ConversationHeldOutV4MetadataAuditError(
                 "metadata audit bundle SHA 含非法字节")
+        if self.source_qualified not in (0, 1):
+            raise ConversationHeldOutV4MetadataAuditError(
+                "metadata audit source_qualified 必须是 0/1")
         if not all((self.hard_link_clear, self.manifest_clear,
                     self.freeze_clear, self.projection_boundary_clear)):
             raise ConversationHeldOutV4MetadataAuditError(
-                "metadata audit 未达到 handoff ready")
+                "metadata audit fixture 文件闭包不完整")
+        if self.source_qualified:
+            raise ConversationHeldOutV4MetadataAuditError(
+                "synthetic fixture 审计不得声明 external source qualified")
 
     @property
     def status(self) -> str:
-        """返回只读 owner handoff 状态；不表示能力或 formal 结果。"""
-        return "READY_FOR_OWNER_HANDOFF"
+        """返回 fixture-only 状态；不表示 owner、能力或 formal 结果。"""
+        return "SYNTHETIC_FIXTURE_ONLY"
 
     def stable_key(self) -> tuple[int, ...]:
         """返回不含路径和文本的完整整数资格键。"""
         return (
             self.schema_version, self.bundle_payload_size, self.bundle_index,
             self.turn_count, self.source_count, self.candidate_count,
-            self.file_count, self.hard_link_clear, self.manifest_clear,
+            self.file_count, self.source_qualified, self.hard_link_clear, self.manifest_clear,
             self.freeze_clear, self.projection_boundary_clear,
             *self.bundle_payload_sha256,
         )
@@ -227,6 +233,7 @@ class ConversationHeldOutV4MetadataAudit:
             "projection_boundary_clear": self.projection_boundary_clear,
             "schema": "dlg05-v4-metadata-audit-v1",
             "source_count": self.source_count,
+            "source_qualified": self.source_qualified,
             "status": self.status,
             "turn_count": self.turn_count,
         }
@@ -236,18 +243,19 @@ def audit_v4_family_artifacts(
         root: str | Path,
         *,
         require_k_drive: bool = True,
-        family: ConversationHeldOutV4Family | None = None,
+        family: ConversationHeldOutV4Family,
         ) -> ConversationHeldOutV4MetadataAudit:
-    """只读核对 v4 K 盘 artifact，并返回 handoff 元数据资格摘要。"""
+    """只读核对 synthetic family artifact；结果不得用于 owner handoff。"""
     target = _root_path(root, require_k_drive=require_k_drive)
     files = _relative_files(target)
     allowed = _EXPECTED_FILES | ({_OPTIONAL_REPORT}
                                   if _OPTIONAL_REPORT in files else set())
     if set(files) != allowed:
         _fail("v4 metadata audit 文件闭包与预期不一致")
-    current = family if family is not None else build_v4_family()
-    bundle = current.bundle
-    freeze = current.freeze
+    if not isinstance(family, ConversationHeldOutV4Family):
+        raise TypeError("synthetic family metadata audit 必须显式接收 fixture family")
+    bundle = family.bundle
+    freeze = family.freeze
     payload = (" ".join(str(value) for value in bundle.canonical_payload) + "\n").encode()
     if (target / "bundle.canonical.ints").read_bytes() != payload:
         _fail("v4 metadata audit canonical payload 漂移")
@@ -276,6 +284,7 @@ def audit_v4_family_artifacts(
         len(bundle.sources),
         sum(len(item.candidates) for item in bundle.turns),
         len(_EXPECTED_FILES),
+        0,
         1,
         1,
         1,
@@ -292,7 +301,7 @@ def write_v4_metadata_audit(
         root: str | Path,
         audit: ConversationHeldOutV4MetadataAudit,
         ) -> Path:
-    """在 bundle 根幂等写入 metadata-only handoff 摘要，不创建 owner receipt。"""
+    """在 fixture bundle 根幂等写入 metadata 摘要，不创建 owner receipt。"""
     target = _root_path(root, require_k_drive=True)
     if not isinstance(audit, ConversationHeldOutV4MetadataAudit):
         raise TypeError("audit 类型错误")

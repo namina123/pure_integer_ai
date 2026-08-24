@@ -10,7 +10,12 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_contract import (
     RawQuestionRequest,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_runtime import (
+    run_sparse_qa_query,
+    run_sparse_qa_sentence,
     run_sparse_qa_queries,
+)
+from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_runtime_contract import (
+    SparseQARuntime,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_session import (
     advance_sparse_qa_session,
@@ -75,6 +80,16 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="read multiple question objects from stdin using one runtime",
     )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="run a human-facing line-oriented short-QA shell",
+    )
+    parser.add_argument(
+        "--interactive-sentence",
+        action="store_true",
+        help="show learned complete proposition surfaces in a line shell",
+    )
     return parser
 
 
@@ -89,6 +104,73 @@ def _emit(value: object, stream: TextIO) -> None:
     stream.flush()
 
 
+def _interactive_reply(status: str, answer_surface: str | None) -> str:
+    """Render only a runtime result; this shell never invents a reply."""
+    if status == "ANSWER":
+        if answer_surface is None:
+            raise RuntimeError("ANSWER result has no answer surface")
+        return answer_surface
+    return f"[{status}]"
+
+
+def _run_interactive_short_qa(
+        runtime: SparseQARuntime,
+        input_stream: TextIO,
+        output_stream: TextIO,
+        ) -> None:
+    """Reuse one read-only sparse runtime for a human terminal session."""
+    while True:
+        output_stream.write("你> ")
+        output_stream.flush()
+        line = input_stream.readline()
+        if line == "":
+            return
+        question = line.rstrip("\r\n")
+        if question in {":quit", ":exit"}:
+            return
+        try:
+            request = RawQuestionRequest(question)
+        except ValueError:
+            reply = "[INVALID_QUESTION]"
+        else:
+            result = run_sparse_qa_query(runtime, request)
+            reply = _interactive_reply(result.status, result.answer_surface)
+        output_stream.write(f"系统> {reply}\n")
+        output_stream.flush()
+
+
+def _run_interactive_sentence_qa(
+        runtime: SparseQARuntime,
+        input_stream: TextIO,
+        output_stream: TextIO,
+        ) -> None:
+    """展示 W03-W05 proof 的完整命题句；不持久化任何终端历史。"""
+    while True:
+        output_stream.write("你> ")
+        output_stream.flush()
+        line = input_stream.readline()
+        if line == "":
+            return
+        question = line.rstrip("\r\n")
+        if question in {":quit", ":exit"}:
+            return
+        try:
+            request = RawQuestionRequest(question)
+        except ValueError:
+            reply = "[INVALID_QUESTION]"
+        else:
+            result = run_sparse_qa_sentence(runtime, request)
+            reply = (
+                result.generated_proposition_surface
+                if result.query_result.status == "ANSWER"
+                else f"[{result.query_result.status}]"
+            )
+            if reply is None:
+                raise RuntimeError("ANSWER sentence projection has no surface")
+        output_stream.write(f"系统> {reply}\n")
+        output_stream.flush()
+
+
 def main(
         argv: list[str] | None = None,
         *,
@@ -99,6 +181,20 @@ def main(
     args = parser.parse_args(argv)
     input_stream = sys.stdin if stdin is None else stdin
     output_stream = sys.stdout if stdout is None else stdout
+    if args.interactive or args.interactive_sentence:
+        if (args.question is not None or args.source_ref is not None
+                or args.audit or args.repeat != 1 or args.jsonl
+                or (args.interactive and args.interactive_sentence)):
+            parser.error(
+                "interactive shells cannot be combined with a positional question, "
+                "--source-ref, --audit, --repeat, --jsonl, or each other"
+            )
+        runtime = load_or_rebuild_public_sparse_qa_runtime()
+        if args.interactive:
+            _run_interactive_short_qa(runtime, input_stream, output_stream)
+        else:
+            _run_interactive_sentence_qa(runtime, input_stream, output_stream)
+        return 0
     if args.jsonl:
         if (args.question is not None or args.source_ref is not None
                 or args.audit or args.repeat != 1):

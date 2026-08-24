@@ -42,7 +42,10 @@ from pure_integer_ai.cognition.shared.relation_use import (
     RelationUseGraphProtocol,
     RelationUseWriteMetadata,
 )
-from pure_integer_ai.cognition.shared.scope_identity import document_scope
+from pure_integer_ai.cognition.shared.scope_identity import (
+    ScopeIdentity,
+    document_scope,
+)
 from pure_integer_ai.cognition.shared.semantic_object import (
     AtomicPropositionDefinition,
     AtomicRoleBinding,
@@ -108,13 +111,87 @@ class _Protocols:
     schemas: tuple[RelationSchema, ...]
 
 
-def _prefix(pack: GenerationCandidatePack) -> tuple[int, ...]:
-    """从 pack 内容锁和 candidate version 建立协议身份前缀。"""
-    digest = tuple(bytes.fromhex(pack.sha256()))
+# object-model: value; representation=struct; interop=R-01-manifest-profile-v1
+@dataclass(frozen=True, slots=True)
+class AliasRelationManifestProfile:
+    """R-01 manifest 的语言无关输入身份，不携带训练 surface 或课程标签。
+
+    该 profile 只定义协议 namespace、来源/作用域归属、形成来源下限和内容摘要。
+    ``GenerationCandidatePack`` 与公开 V3 source projection 都可各自构造一个 profile，
+    但两者必须在此后的 manifest 路径共享同一整数/字节语义。
+    """
+
+    candidate_version: tuple[int, ...]
+    content_sha256: tuple[int, ...]
+    owner_source: SourceRef
+    owner_scope: ScopeIdentity
+    minimum_forming_sources: int = 1
+
+    def __post_init__(self) -> None:
+        """冻结所有可观察 R-01 profile 输入，并拒绝 bool 伪整数。"""
+        if (not isinstance(self.candidate_version, tuple)
+                or not self.candidate_version
+                or any(type(item) is not int or item <= 0
+                       for item in self.candidate_version)):
+            raise GenerationCandidateAliasRuntimeError(
+                "alias manifest profile version 非法")
+        if (not isinstance(self.content_sha256, tuple)
+                or len(self.content_sha256) != 32
+                or any(type(item) is not int or item < 0 or item > 255
+                       for item in self.content_sha256)):
+            raise GenerationCandidateAliasRuntimeError(
+                "alias manifest profile content SHA-256 非法")
+        if not isinstance(self.owner_source, SourceRef):
+            raise TypeError("alias manifest profile owner source 类型错误")
+        if (not isinstance(self.owner_scope, ScopeIdentity)
+                or self.owner_scope.source != self.owner_source):
+            raise GenerationCandidateAliasRuntimeError(
+                "alias manifest profile owner scope 未绑定 owner source")
+        if (type(self.minimum_forming_sources) is not int
+                or self.minimum_forming_sources <= 0):
+            raise GenerationCandidateAliasRuntimeError(
+                "alias manifest profile forming source 下限非法")
+
+    def sha256(self) -> str:
+        """返回 profile 已冻结的 raw SHA-256 十六进制表示。"""
+        return bytes(self.content_sha256).hex()
+
+    def canonical_record(self) -> tuple[int, ...]:
+        """导出完整有序 profile record，供其他语言重放同一 manifest。"""
+        result = [1, len(self.candidate_version), *self.candidate_version]
+        for value in (
+                self.content_sha256,
+                self.owner_source.stable_key(),
+                self.owner_scope.stable_key()):
+            result.extend((len(value), *value))
+        result.append(self.minimum_forming_sources)
+        return tuple(result)
+
+
+def _profile_for_pack(
+        pack: GenerationCandidatePack,
+        ) -> AliasRelationManifestProfile:
+    """把旧 candidate pack 逐字段投影为中性 R-01 manifest profile。"""
+    if not isinstance(pack, GenerationCandidatePack):
+        raise TypeError("generation alias manifest pack 类型错误")
+    return AliasRelationManifestProfile(
+        pack.candidate_version,
+        tuple(bytes.fromhex(pack.sha256())),
+        pack.owner_source,
+        pack.owner_scope,
+        pack.minimum_forming_sources,
+    )
+
+
+def _prefix(profile: AliasRelationManifestProfile) -> tuple[int, ...]:
+    """从 profile 内容锁和候选版本建立协议身份前缀。"""
+    if not isinstance(profile, AliasRelationManifestProfile):
+        raise TypeError("alias manifest profile 类型错误")
+    digest = profile.content_sha256
     return (
         _NAMESPACE,
-        len(pack.candidate_version),
-        *pack.candidate_version,
+        len(profile.candidate_version),
+        *profile.candidate_version,
         len(digest),
         *digest,
     )
@@ -376,16 +453,16 @@ def _entry(
     )
 
 
-def build_generation_candidate_alias_manifest(
-        pack: GenerationCandidatePack,
+def build_alias_relation_manifest(
+        profile: AliasRelationManifestProfile,
         request: GenerationCandidateAliasCourseRequest,
         ) -> AliasRelationCourseManifest:
-    """把已核验 pack request 物化为可由正式 Loader 恢复的 R-01 manifest。"""
-    if not isinstance(pack, GenerationCandidatePack):
-        raise TypeError("generation alias manifest pack 类型错误")
+    """将中性 profile 与来源化请求物化为可由 R-01 Loader 恢复的 manifest。"""
+    if not isinstance(profile, AliasRelationManifestProfile):
+        raise TypeError("alias relation manifest profile 类型错误")
     if not isinstance(request, GenerationCandidateAliasCourseRequest):
         raise TypeError("generation alias manifest request 类型错误")
-    protocols = _protocols(pack, request)
+    protocols = _protocols(profile, request)
     request_key = request.stable_key()
     schema_by_relation = {
         protocols.alias.alias_relation: protocols.schemas[0],
@@ -397,7 +474,7 @@ def build_generation_candidate_alias_manifest(
     for item in request.references:
         ordinal += 1
         entries.append(_entry(
-            pack,
+            profile,
             protocols,
             request_key,
             ordinal,
@@ -412,7 +489,7 @@ def build_generation_candidate_alias_manifest(
     for item in request.realizations:
         ordinal += 1
         entries.append(_entry(
-            pack,
+            profile,
             protocols,
             request_key,
             ordinal,
@@ -430,13 +507,13 @@ def build_generation_candidate_alias_manifest(
         request_key,
         domain="gg03.generation.candidate.alias.course.v1",
     )
-    content_version = pack.candidate_version[-1]
+    content_version = profile.candidate_version[-1]
     return AliasRelationCourseManifest(
         1,
-        (*pack.candidate_version, *course_fingerprint),
+        (*profile.candidate_version, *course_fingerprint),
         protocols.semantic_predicates,
         protocols.candidate_projection,
-        (*_prefix(pack), 40),
+        (*_prefix(profile), 40),
         protocols.learning,
         protocols.verifier,
         CandidateProjectionMetadata(
@@ -462,4 +539,16 @@ def build_generation_candidate_alias_manifest(
     )
 
 
-__all__ = ["build_generation_candidate_alias_manifest"]
+def build_generation_candidate_alias_manifest(
+        pack: GenerationCandidatePack,
+        request: GenerationCandidateAliasCourseRequest,
+        ) -> AliasRelationCourseManifest:
+    """保持旧 pack 入口的内容等价 wrapper，不改变既有 R-01 manifest。"""
+    return build_alias_relation_manifest(_profile_for_pack(pack), request)
+
+
+__all__ = [
+    "AliasRelationManifestProfile",
+    "build_alias_relation_manifest",
+    "build_generation_candidate_alias_manifest",
+]

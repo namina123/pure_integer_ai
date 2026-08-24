@@ -65,8 +65,9 @@ def _setup(tmp_path):
     return family, source, owner, label
 
 
-def test_owner_metadata_reader_does_not_read_label_payload(tmp_path, monkeypatch):
-    """无效/不可解析 label 正文也不影响 metadata-only 回读。"""
+def test_owner_metadata_reader_rejects_synthetic_before_reading_label(
+        tmp_path, monkeypatch):
+    """synthetic source 必须在 owner receipt/label payload 读取前被拒绝。"""
     family, source, owner, label = _setup(tmp_path)
     # 用同长度非 JSON 内容替换，并让任何 open 立即失败，机械证明只读取 stat。
     label.write_bytes(b"X" * label.stat().st_size)
@@ -78,33 +79,19 @@ def test_owner_metadata_reader_does_not_read_label_payload(tmp_path, monkeypatch
         return original_open(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "open", guarded_open)
-    metadata = read_v4_owner_metadata(
-        owner, source, require_k_drive=False, family=family)
-    assert metadata.status == "SEALED_UNREAD"
-    assert metadata.labels_read == 0
-    assert metadata.formal_run == 0
+    with pytest.raises(ConversationHeldOutV4OwnerHandoffError, match="synthetic"):
+        read_v4_owner_metadata(
+            owner, source, require_k_drive=False, family=family)
 
 
-def test_owner_metadata_reader_rejects_drift_and_path_escape(tmp_path):
-    """receipt 漂移、路径穿越和额外文件必须 fail closed。"""
+def test_owner_metadata_reader_rejects_synthetic_even_with_owner_drift(tmp_path):
+    """旧 synthetic audit 不得因 receipt 内容变化重新获得 owner 路径。"""
     family, source, owner, _label = _setup(tmp_path)
     receipt = owner / "owner_receipt.json"
     document = json.loads(receipt.read_text(encoding="utf-8"))
     document["status"] = "READ"
     receipt.write_bytes(_canonical(document))
-    with pytest.raises(ConversationHeldOutV4OwnerHandoffError, match="document SHA"):
-        read_v4_owner_metadata(owner, source, require_k_drive=False, family=family)
-    family, source, owner, _label = _setup(tmp_path / "escape")
-    document = json.loads((owner / "owner_receipt.json").read_text(encoding="utf-8"))
-    document["label_payload_path"] = "../outside.bin"
-    document.pop("document_sha256")
-    document["document_sha256"] = hashlib.sha256(_canonical(document)).hexdigest()
-    (owner / "owner_receipt.json").write_bytes(_canonical(document))
-    with pytest.raises(ConversationHeldOutV4OwnerHandoffError, match="相对路径"):
-        read_v4_owner_metadata(owner, source, require_k_drive=False, family=family)
-    family, source, owner, _label = _setup(tmp_path / "extra")
-    (owner / "unexpected.bin").write_bytes(b"x")
-    with pytest.raises(ConversationHeldOutV4OwnerHandoffError, match="文件闭包"):
+    with pytest.raises(ConversationHeldOutV4OwnerHandoffError, match="synthetic"):
         read_v4_owner_metadata(owner, source, require_k_drive=False, family=family)
 
 

@@ -1,0 +1,12 @@
+[
+  {"name":"zh_no_terminator","raw":[228,189,160,229,165,189],"code":0,"body":[228,189,160,229,165,189],"scalars":[20320,22909]},
+  {"name":"zh_lf","raw":[228,189,160,229,165,189,10],"code":0,"body":[228,189,160,229,165,189],"scalars":[20320,22909]},
+  {"name":"zh_crlf","raw":[228,189,160,229,165,189,13,10],"code":0,"body":[228,189,160,229,165,189],"scalars":[20320,22909]},
+  {"name":"bom","raw":[239,187,191,228,189,160],"code":2,"body":[],"scalars":[]},
+  {"name":"empty_lf","raw":[10],"code":4,"body":[],"scalars":[]},
+  {"name":"inner_lf","raw":[65,10,66],"code":3,"body":[],"scalars":[]},
+  {"name":"overlong","raw":[192,128],"code":5,"body":[192,128],"scalars":[]},
+  {"name":"surrogate","raw":[237,160,128],"code":5,"body":[237,160,128],"scalars":[]},
+  {"name":"out_of_range","raw":[244,144,128,128],"code":5,"body":[244,144,128,128],"scalars":[]},
+  {"name":"control","raw":[65,9,66],"code":6,"body":[65,9,66],"scalars":[65,9,66]}
+]

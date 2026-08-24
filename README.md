@@ -64,6 +64,62 @@ formal 纵切后又公开了一个不消费 held-out 的 100 问交互开发集�
 
 这仍是来源约束的抽取式广域事实问答纵切，不是自由生成、通用问答或断奶结果。它证明了当前中文 Wikipedia 冻结快照内的稀疏页面检索、来源约束证据选择和逐引用核验可以在预声明评测上闭合；没有证明任意问题、任意来源更新、长对话或自主语言学习已经闭合。详细合同和诚实边界见[20k 开发预览](docs/broad_qa_20k_preview.md)、[外部评测报告](docs/broad_qa_external_evidence_eval_cn.md)与[联合评测报告](docs/broad_qa_joint_retrieval_eval_cn.md)。
 
+2026-08-24 起，公开对话课程开始进入真实训练主线：清洗后的统一 pack 回读为 `731` 条（`365 train / 184 heldout / 182 negative`），pack SHA-256 为 `1c907caac90c6edb687ad45e0db490da9188028374d90757af8fc28b720ce03d`。其中保留完整句和 Markdown、HTML、源代码、表格、引用/嵌入等结构载体的原文；元数据不会被送入语言通道。该 pack 已在 `K:` 盘完成新的 stage-1 observe 训练，产生 SQLite 图、checkpoint/dump、cursor 和运行 manifest。训练结果目前只证明公开课程被真实消费并改变了图状态，不宣称生成能力或语言 mastered。可选的组合入口 `run_integrated_dialogue` 会保留有限对话热历史，先尝试公开完整命题句运行时，未命中再查询来源约束的中文 Wikipedia 索引；回答带来源标题和链接，无法确认时保持 UNKNOWN/CLARIFY/CONFLICT。
+
+公开 split 对照显示，held-out 与 negative 均和训练集保持零身份重叠；这只是数据隔离和输入新颖性证据，不是问答正确率。当前 K 盘训练仍处于 stage-1 observe 阶段，广域入口仍是来源约束抽取式问答。可复跑的规模展示入口固定执行窄域完整句、长问句、来源绑定追问和广域问题，并对同一只读数据库重放：最近一次展示为 `14` 轮、`13 ANSWER / 1 UNKNOWN`、`5` 条长问句、`10` 个来源绑定回答，重放逐位一致；其中“它/该条目”等紧接追问会复用上一轮已确认的来源标题作为检索焦点。展示同时实际读取 v6 K 盘训练状态，并用 DLG-RAW-16 两个独立 family 学到的结构消费 3 条窄域回答和 4 条新值 typed probe，覆盖限定事实、UNKNOWN、CLARIFY、REPAIR（`trained_surface_consumer.bound=true`、`typed_probe_used_count=4`）。摘要同时绑定 `dialogue-pack-v6-clean-surface` 的训练 pack SHA 和只读 SQLite graph 状态。展示摘要会写入调用者指定的 K 盘路径；它不是通用问答或自由生成评测。
+
+为验证“让人听懂的完整句子”不是只回放训练实体，项目又增加了独立的表层结构 held-out 开发评估：10 条新实体、新限定和新组合，覆盖 `ANSWER/UNKNOWN/CLARIFY/REPAIR`，每条生成结果均为长句（至少 48 UTF-8 bytes）。接入训练表层消费者后为 `10/10 PASS`，未接消费者的对照为 `10/10 NO_LEARNED_SURFACE`；报告 SHA-256 为 `7e77514e4b074eb46e2fa0e524f977c1fdafa28175430ccd4345f429f29479ec`。该结果证明的是已学表层结构对新 typed 输入的组合能力，不证明从原始文本自动理解、事实真值判断、自由生成或广域知识泛化；广域知识路径仍是带来源约束的检索与证据选择。
+
+随后又加入真实六轮多轮开发切片：`ANSWER -> UNKNOWN -> CLARIFY -> ANSWER -> ANSWER -> ANSWER`。它在首轮确认矮寨大桥来源后故意进入“火星上的矮寨大桥”未知问题，紧接的“它”只得到 `CLARIFY`，实际检索问句没有注入旧来源；之后新的窄域完整句和黄山松来源追问恢复为可读 `ANSWER`。v6 运行结果为 `6` 轮、`4 ANSWER / 1 UNKNOWN / 1 CLARIFY`、`3` 条长回答、训练表层消费者实际使用 `1` 次，回放逐位一致；报告 SHA-256 为 `8543abacf0e5b8be72c1fb6cadfa3ab75d804062b28df8490ebf67b160a67e05`。这证明的是有限热历史中的来源焦点边界与回答恢复，不是无限长记忆、自由对话或通用知识理解。
+
+为扩大来源面，v2 又把铁路、桥梁、知识图谱、机场和地理分布五个真实来源域组成 `6` 个场景、`19` 轮对话。每条 `ANSWER` 都要求主证据包含预声明的事实词，而不是只统计状态码；实际结果为 `17/17` 证据词命中、`16` 条长回答、`10` 次合法焦点注入，未知轮后的指代仍保持 `CLARIFY` 且不泄漏旧来源，回放逐位一致。报告 SHA-256 为 `45172ce30f021e524466af525fc3dbc9ee888c9517e097e1bc74f606b4e796c4`。这证明的是有限来源覆盖下的可读多轮问答和证据约束，不代表任意领域、任意长文本或开放域语义理解已经完成。
+
+公开 24 问广域开发池现在也有独立的主证据审计：`23 ANSWER / 1 UNKNOWN`，`23/23` 预声明证据词命中，`23/23` 主证据不是 `Category:`、小写 `category:` 或表格残片，23 条回答均达到长回答阈值，重复运行逐位一致。审计过程中修正了证据去重顺序：不再让后出现的较大窗口删除先出现的正确短证据；奖牌、活动日期、人口、天体距离和发现者问题现在都优先显示完整事实句。报告 SHA-256 为 `68133dd1763a7d5a90ed72cb9d38434dd8c46bd80dff69de0ffa76297ca8f52a`。这仍是冻结中文 Wikipedia 20k 索引上的开发回归，不是 held-out 或通用问答结论。
+
+```bash
+# 训练大数据和运行产物必须放在 K:，以下命令不会把它们写入 Git 工作区
+python -m pure_integer_ai.experiments.run_conversation_training \
+  --project-root . \
+  --run-root K:\pure_integer_ai_work\dialogue_training_week_v1 \
+  --run-id dialogue-pack-v6-clean-surface --stages 1 --with-heldout-probe
+
+python -m pure_integer_ai.experiments.run_integrated_dialogue \
+  --database K:\pure_integer_ai_work\broad_qa_week_v1\indexes\broad-qa-20k-from-100k-target-v2.sqlite3 \
+  --training-run-root K:\pure_integer_ai_work\dialogue_training_week_v1\dialogue-pack-v6-clean-surface \
+  "保满铁路全长多少公里？"
+
+python -m pure_integer_ai.experiments.run_dialogue_scale_showcase \
+  --project-root . \
+  --database K:\pure_integer_ai_work\broad_qa_week_v1\indexes\broad-qa-20k-from-100k-target-v2.sqlite3 \
+  --training-run-root K:\pure_integer_ai_work\dialogue_training_week_v1\dialogue-pack-v6-clean-surface \
+  --output K:\your_run_root\dialogue-scale-showcase-v12.json
+
+python -m pure_integer_ai.experiments.run_conversation_surface_heldout \
+  --project-root . \
+  --training-run-root K:\pure_integer_ai_work\dialogue_training_week_v1\dialogue-pack-v6-clean-surface \
+  --pack-sha256 1c907caac90c6edb687ad45e0db490da9188028374d90757af8fc28b720ce03d \
+  --output K:\your_run_root\dialogue-surface-heldout-v1.json
+
+python -m pure_integer_ai.experiments.run_conversation_multiturn_scale \
+  --project-root . \
+  --database K:\pure_integer_ai_work\broad_qa_week_v1\indexes\broad-qa-20k-from-100k-target-v2.sqlite3 \
+  --training-run-root K:\pure_integer_ai_work\dialogue_training_week_v1\dialogue-pack-v6-clean-surface \
+  --pack-sha256 1c907caac90c6edb687ad45e0db490da9188028374d90757af8fc28b720ce03d \
+  --output K:\your_run_root\dialogue-multiturn-scale-v1.json
+
+python -m pure_integer_ai.experiments.run_conversation_multiturn_scale_v2 \
+  --project-root . \
+  --database K:\pure_integer_ai_work\broad_qa_week_v1\indexes\broad-qa-20k-from-100k-target-v2.sqlite3 \
+  --training-run-root K:\pure_integer_ai_work\dialogue_training_week_v1\dialogue-pack-v6-clean-surface \
+  --pack-sha256 1c907caac90c6edb687ad45e0db490da9188028374d90757af8fc28b720ce03d \
+  --output K:\your_run_root\dialogue-multiturn-scale-v2.json
+
+python -m pure_integer_ai.experiments.run_broad_qa_dev_surface_audit \
+  --project-root . \
+  --database K:\pure_integer_ai_work\broad_qa_week_v1\indexes\broad-qa-20k-from-100k-target-v2.sqlite3 \
+  --output K:\your_run_root\broad-qa-dev-surface-v1.json
+```
+
 ## 快速开始
 
 ```bash
@@ -87,6 +143,81 @@ pure-integer-qa "什么使得河水上涨？"
 探针接收原始问题，也可用 `--source-ref 1,2,...` 限定来源。默认只输出稀疏短结果；需要完整审计轨迹时显式添加 `--audit`。`--repeat N` 会在同一个已构建运行时上重复查询，用于核对 warm query 的逐位一致性。这个入口只展示当前公开学习样例所覆盖的能力，不代表广域问答或成熟对话能力。
 
 默认启动会校验并加载仓库中的类型化规范快照；快照缺失、损坏或与公开来源身份不一致时，会拒绝部分加载并完整重建运行时。
+
+也可直接进入面向人的逐行短问答壳：
+
+```bash
+pure-integer-qa --interactive
+你> 什么使得河水上涨？
+系统> 暴雨
+你> :quit
+```
+
+该壳只复用一次只读稀疏运行时；`ANSWER` 显示实际学习到的答案表面，其他情况保持类型化结果，不编造自然语言回复。它不保存终端输入，也不把终端历史冒充为长期记忆。输入 `:quit`、`:exit` 或 EOF 可退出。
+
+需要查看同一公开学习链产生的完整命题句时，可使用独立展示壳：
+
+```bash
+pure-integer-qa --interactive-sentence
+你> 暴雨使得什么？
+系统> 暴雨使得河水上涨。
+你> :quit
+```
+
+这里的句子直接来自同一条已选择学习证明中的完整生成结果，不是把短答案套进固定句式。它仍是有限公开样例的只读展示，不是自由对话、会话记忆或广域语言理解。
+
+需要让终端输入也经过严格 raw-byte/UTF-8 整数边界时，使用单独的公开课程 demo：
+
+```bash
+# 完成上方安装后运行；未安装时先设置 PYTHONPATH=./src
+py -3.11 -m pure_integer_ai.experiments.run_public_sentence_demo
+# pure-integer-dialogue-demo
+你> 暴雨使得什么？
+系统> 暴雨使得河水上涨。
+你> :quit
+```
+
+若只想立即验证第一句回答，也可以省略交互输入：
+
+```bash
+py -3.11 -m pure_integer_ai.experiments.run_public_sentence_demo --question "暴雨使得什么？"
+# 系统> 暴雨使得河水上涨。
+```
+
+`--question="暴雨使得什么？"` 与上面的写法等价；两者都绕过易改写中文编码的文本管道。
+
+这个入口从原始字节输入开始，严格匹配当前公开课程中的已学习路由；成功输出是同一条来源证明中的完整命题句，未学习、歧义或输入错误只显示类型化拒绝码。它不保存终端历史，也不写入长期记忆或数据库。这是有限公开课程演示，不等同于自由对话或广域理解。
+
+当前公开的受限对话入口可使用：
+
+```bash
+# 完成上方安装后运行；未安装时先设置 PYTHONPATH=./src
+# Windows PowerShell：chcp 65001 > $null，并把输入/输出编码设为 UTF-8
+py -3.11 -m pure_integer_ai.experiments.run_public_frame_dialogue
+# pure-integer-dialogue
+你> 东岸入口何时启用？
+系统> 此输入对应多个已学习路径，请重输其中一个完整问题：
+澄川码头何时启用？
+北川站东门何时启用？
+你> 澄川码头何时启用？
+系统> 澄川码头于2023年启用。
+你> :quit
+```
+
+每一行都经过严格的原始字节与 UTF-8 输入边界。当前入口展示的是一个来源绑定的、可审计的两候选澄清流程：
+系统先列出完整问题，随后只接受用户重输其中一个完整问题，并复制该问题实际得到的答案。输入必须在 UTF-8
+交互终端中直接完成；旧式管道可能先改写中文字节。这个入口是公开窄域演示，不代表自由对话、长期记忆或广域问答。
+
+同一入口也包含一个受限的来源绑定追问链：
+
+```text
+你> 寒潮导致什么？
+系统> 寒潮使得路面结冰。
+你> 它的原因是什么？
+系统> 寒潮
+```
+
+这里的“它”只在已冻结的当前焦点和来源课程内解析；没有匹配证据时会返回类型化拒绝，不会猜测。
 
 多个不同问题可通过长驻 JSONL 模式共享同一次运行时构建：
 

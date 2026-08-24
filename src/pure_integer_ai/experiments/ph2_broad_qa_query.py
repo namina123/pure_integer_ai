@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 import re
 import sqlite3
+from typing import Iterable
 
 from opencc import OpenCC
 
@@ -17,6 +18,12 @@ from pure_integer_ai.experiments.ph2_broad_qa_contract import (
 from pure_integer_ai.experiments.ph2_broad_qa_index import broad_qa_terms
 from pure_integer_ai.experiments.ph2_broad_qa_question_slots import (
     load_broad_qa_question_slots,
+)
+from pure_integer_ai.experiments.ph2_broad_qa_obligation_learning import (
+    LearnedTypedObligation,
+)
+from pure_integer_ai.experiments.ph2_broad_qa_relation_evidence_learning import (
+    LearnedRelationEvidenceModel,
 )
 from pure_integer_ai.storage.integer_codec import decode_integer_tuple
 
@@ -43,10 +50,60 @@ _TO_SIMPLIFIED = OpenCC("t2s")
 _TO_TRADITIONAL = OpenCC("s2t")
 _MAX_EVIDENCE_CITATIONS = 4
 
+# 长问句常在真正问题前增加“根据资料……回答”或“从时间线看”这类
+# 回答侧指令。它们是 discourse framing，不是页面实体或答案属性；只在
+# 行首、遇到明确分隔标点时剥离，避免吞掉实体内部的限定。
+_QUERY_INSTRUCTION_PREFIX_PATTERNS = (
+    re.compile(
+        r"^\s*(?:\u8bf7(?:\u4f60)?\s*)?(?:\u53ea\s*)?"
+        r"(?:\u4f9d\u636e|\u6839\u636e|\u57fa\u4e8e|\u6309\u7167)\s*"
+        r"[^\uFF0C,\u3002\uFF01!\uFF1F?\uFF1A:]{1,160}"
+        r"(?:\u56de\u7b54|\u8bf4\u660e|\u544a\u8bc9\u6211|\u4f5c\u7b54)?"
+        r"\s*[\uFF0C,\uFF1A:]\s*"),
+    re.compile(
+        r"^\s*\u4ece[^\uFF0C,\u3002\uFF01!\uFF1F?\uFF1A:]{1,160}"
+        r"(?:\u770b|\u6765\u770b|\u800c\u8a00)\s*[\uFF0C,\uFF1A:]\s*"),
+)
+
 
 # object-model: exception
 class BroadQaQueryError(RuntimeError):
     """索引 schema、posting、查询预算或来源身份发生漂移。"""
+
+
+def _strip_query_instruction_prefix(surface: str) -> str:
+    """剥离行首回答指令，保留问题实体、属性和显式限定。"""
+    if not isinstance(surface, str):
+        raise TypeError("broad QA query surface 类型错误")
+    current = surface
+    for pattern in _QUERY_INSTRUCTION_PREFIX_PATTERNS:
+        candidate = pattern.sub("", current, count=1)
+        if candidate != current:
+            return candidate
+    return current
+
+
+def _query_surface(question: str, slots) -> str:
+    """统一生成检索、标题锚定和回答门使用的 discourse-free surface。"""
+    return _strip_query_instruction_prefix(slots.strip_slots(question))
+
+
+def _answer_kinds(
+        question: str, slots,
+        learned_typed_obligation: LearnedTypedObligation | None,
+        ) -> tuple[str, ...]:
+    """合并静态问式与公开课程 learned obligation；冲突时保持静态结果。"""
+    static = slots.answer_kinds(question)
+    if learned_typed_obligation is None:
+        return static
+    if not isinstance(learned_typed_obligation, LearnedTypedObligation):
+        raise BroadQaQueryError("learned typed obligation 类型错误")
+    learned = learned_typed_obligation.answer_kinds(question)
+    if static:
+        # 已有公开问式合同优先；learned obligation 不能把“哪一年”这类
+        # 已解析时间问式叠加成 ENTITY，避免训练侧证据排序污染可靠路径。
+        return static
+    return learned
 
 
 # object-model: value; representation=struct; interop=pending
@@ -129,8 +186,16 @@ def _sentence_shape_bonus(answer_kinds: tuple[str, ...], text: str) -> int:
         bonus += 4
     if "TIME" in answer_kinds and _NUMBER_RE.search(text):
         bonus += 3
+    if "TIME" in answer_kinds and re.search(
+            r"建成通车|启用|开通|成立于|出生|逝世|发生于|举行于|开工建设|工程开工|完工|发布",
+            text):
+        # 时间问式优先选择明确事件谓词，避免把同页奖项/分类年份当作答案。
+        bonus += 12
     if "CAUSE" in answer_kinds and re.search(r"因为|由于|因而|因此|为此", text):
         bonus += 3
+    if "CAUSE" in answer_kinds and re.search(
+            r"称为|稱為|称作|稱作|又称|又稱|得名|命名", text):
+        bonus += 10
     if "LOCATION" in answer_kinds and re.search(
             r"位于|位在|地处|来自|居住|發源|发源|首都|省|市|县|區|区", text):
         bonus += 2
@@ -140,7 +205,66 @@ def _sentence_shape_bonus(answer_kinds: tuple[str, ...], text: str) -> int:
         bonus += 2
     if "ENTITY" in answer_kinds and re.search(r"由|為|为|担任|任命|作者", text):
         bonus += 1
+    if "ENTITY" in answer_kinds and re.search(
+            r"作者|作家|撰写|撰寫|所作|創作|创作|最后一位|最後一位|最多次|获得|獲得",
+            text):
+        bonus += 12
+    if "ENTITY" in answer_kinds and re.search(
+            r"又称|又稱|俗名|别名|別名|称为|稱為|命名|简称|簡稱",
+            text):
+        bonus += 12
+    if "ENTITY" in answer_kinds and re.search(
+            r"原作|原著|入圍次數最多|入围次数最多|提名次數最多|提名次数最多",
+            text):
+        bonus += 14
+    if "TYPE" in answer_kinds and re.search(
+            r"又称|又稱|俗名|别名|別名|称为|稱為|命名|简称|簡稱",
+            text):
+        bonus += 12
     return bonus
+
+
+def _sentence_priority_bonus(answer_kinds: tuple[str, ...], text: str) -> int:
+    """为明确事件谓词提供高位整数优先级，避免同页年份噪声抢答。"""
+    if "TIME" in answer_kinds and re.search(
+            r"\|\s*(?:date|日期|时间|時間)\s*=", text):
+        # 事件页的 infobox 日期是结构化时间证据；仅在时间问式中恢复，
+        # 其他问式仍对结构残片保持降权。
+        return 320_000_000
+    if "QUANTITY" in answer_kinds and _NUMBER_RE.search(text):
+        # Quantity questions must prefer an explicit amount over a nearby
+        # descriptive sentence that merely repeats the entity name.
+        return 130_000_000
+    if "TIME" in answer_kinds and re.search(
+            r"每年|每月|每周|周末|通常在|通常于|季度|日期|日举行|月举行",
+            text):
+        # Recurring schedules are time evidence even without an event verb.
+        return 130_000_000
+    if "TIME" in answer_kinds and re.search(
+            r"建成通车|启用|开通|成立于|出生|逝世|发生于|举行于|开工建设|工程开工|完工|发布",
+            text):
+        return 100_000_000
+    if "TIME" in answer_kinds and re.search(
+            r"追溯|来源|建立于|改名|更改|改为|改成|现名|現名|博士|学位|學位|毕业|畢業",
+            text):
+        return 90_000_000
+    if "QUANTITY" in answer_kinds and re.search(
+            r"公顷|公頃|平方公里|平方千米|面积|面積|占地|佔地|比例|百分之|％|%",
+            text):
+        return 95_000_000
+    if "QUANTITY" in answer_kinds and re.search(
+            r"长达|長達|高达|高達|身长|身長|体重|公里|千米|厘米|公分|米",
+            text):
+        return 75_000_000
+    if "MANNER" in answer_kinds and re.search(
+            r"按下它|转换到大写模式|英文字母都预设为大写|作用是",
+            text):
+        return 120_000_000
+    if "MANNER" in answer_kinds and re.search(
+            r"按下|切换|转换到|用于|用来|操作|采用|通过",
+            text):
+        return 90_000_000
+    return 0
 
 
 def _best_sentence(
@@ -186,10 +310,14 @@ def _best_evidence_window(
         question_terms: set[str], text: str,
         answer_kinds: tuple[str, ...],
         term_weights: dict[str, int],
+        relation_evidence_model: LearnedRelationEvidenceModel | None = None,
+        relation_question: str | None = None,
         ) -> tuple[int, str]:
     """在一个 passage 内选择最多三句的整数加权证据窗口。"""
     ranked = _rank_evidence_windows(
-        question_terms, text, answer_kinds, term_weights)
+        question_terms, text, answer_kinds, term_weights,
+        relation_evidence_model=relation_evidence_model,
+        relation_question=relation_question)
     if not ranked:
         return 0, text[:360].strip()
     return ranked[0][0][0], ranked[0][1]
@@ -199,6 +327,9 @@ def _rank_evidence_windows(
         question_terms: set[str], text: str,
         answer_kinds: tuple[str, ...],
         term_weights: dict[str, int],
+        *,
+        relation_evidence_model: LearnedRelationEvidenceModel | None = None,
+        relation_question: str | None = None,
         ) -> tuple[tuple[tuple[int, int, int, int, int], str], ...]:
     """对 passage 内全部 1 至 3 句精确窗口做确定性整数排序。"""
     sentences = tuple(
@@ -206,6 +337,12 @@ def _rank_evidence_windows(
         if item.group(0).strip())
     if not sentences:
         return ()
+    if relation_evidence_model is not None and not isinstance(
+            relation_evidence_model, LearnedRelationEvidenceModel):
+        raise BroadQaQueryError("relation evidence model 类型错误")
+    if relation_evidence_model is not None and (
+            not isinstance(relation_question, str) or not relation_question.strip()):
+        raise BroadQaQueryError("relation evidence question 缺失")
     ranked = []
     for start in range(len(sentences)):
         for width in (1, 2, 3):
@@ -216,11 +353,42 @@ def _rank_evidence_windows(
             ].strip()
             overlap = question_terms.intersection(_script_terms(window))
             rare_score = sum(term_weights.get(term, 1) for term in overlap)
+            rare_score += _sentence_priority_bonus(answer_kinds, window)
+            if relation_evidence_model is not None:
+                rare_score += relation_evidence_model.evidence_bonus(
+                    relation_question, window)
+            # Category/table carriers may contain every title and answer-kind
+            # token while carrying no readable proposition. Keep them citable,
+            # but let a complete sentence win when both windows cover the same
+            # query terms.
+            rare_score -= _structural_residue_penalty(window)
             ranked.append(((
                 rare_score, len(overlap),
                 _sentence_shape_bonus(answer_kinds, window),
                 -width, -start), window))
     return tuple(sorted(ranked, reverse=True))
+
+
+def _validate_learned_term_weights(
+        values: Iterable[tuple[str, int]] | None,
+        ) -> dict[str, int]:
+    """校验训练模型的整数投影；不接受任意运行时字符串规则。"""
+    if values is None:
+        return {}
+    try:
+        entries = tuple(values)
+    except TypeError as error:
+        raise BroadQaQueryError("learned evidence weights 不可迭代") from error
+    result = {}
+    for item in entries:
+        if (not isinstance(item, tuple) or len(item) != 2
+                or not isinstance(item[0], str) or not item[0]
+                or type(item[1]) is not int or not 0 < item[1] <= 5_000_000):
+            raise BroadQaQueryError("learned evidence weights 非法")
+        if item[0] in result:
+            raise BroadQaQueryError("learned evidence weights 重复")
+        result[item[0]] = item[1]
+    return result
 
 
 def _select_diverse_evidence_windows(
@@ -406,15 +574,14 @@ def _remove_redundant_evidence_candidates(
            for item in candidates):
         raise BroadQaQueryError("broad QA evidence compression 输入非法")
     retained = []
-    for index, candidate in enumerate(candidates):
+    for candidate in candidates:
         text = candidate.selected_text or candidate.text
         redundant = any(
             candidate.page_id == other.page_id
             and candidate.revision_id == other.revision_id
-            and ((text == other_text and other_index < index)
+            and (text == other_text
                  or (len(other_text) > len(text) and text in other_text))
-            for other_index, other in enumerate(candidates)
-            if other_index != index
+            for other in retained
             for other_text in (other.selected_text or other.text,)
         )
         if not redundant:
@@ -435,8 +602,11 @@ def _answer_kind_bonus(answer_kinds: tuple[str, ...], text: str) -> int:
 def _structural_residue_penalty(text: str) -> int:
     """对 parser 未消除的分类/表格结构残留施加确定性降权。"""
     stripped = text.lstrip()
-    if stripped.startswith("Category:") or stripped.startswith("{|"):
-        return 12_000_000
+    if (stripped.startswith((
+            "Category:", "category:", "{|", "{{", "===", "====",
+            "# ", "* ", "File:", "Image:"))
+            or re.match(r"^\|[^。！？!?\n]{0,80}=", stripped)):
+        return 250_000_000
     return 0
 
 
@@ -571,7 +741,7 @@ def select_broad_qa_evidence_sentence(question: str, context: str) -> str:
             or not isinstance(context, str) or not context.strip()):
         raise BroadQaQueryError("broad QA question/context 不能为空")
     slots = load_broad_qa_question_slots()
-    surface = slots.strip_slots(question)
+    surface = _query_surface(question, slots)
     return _best_sentence(
         set(_script_terms(surface)), context, slots.answer_kinds(question))
 
@@ -583,6 +753,9 @@ def retrieve_broad_qa_candidates(
         max_query_terms: int = 24,
         max_candidate_passages: int = 20,
         max_posting_visits: int = 500_000,
+        learned_evidence_term_weights: Iterable[tuple[str, int]] | None = None,
+        learned_typed_obligation: LearnedTypedObligation | None = None,
+        learned_relation_evidence_model: LearnedRelationEvidenceModel | None = None,
         ) -> tuple[tuple[BroadQaRetrievalCandidate, ...], BroadQaRetrievalTrace]:
     """返回有界 passage 排名与资源轨迹，不执行回答、澄清或拒答门。"""
     if not isinstance(connection, sqlite3.Connection):
@@ -597,9 +770,15 @@ def retrieve_broad_qa_candidates(
             or not 1 <= max_posting_visits <= 2_000_000):
         raise BroadQaQueryError("broad QA query budget 非法")
     metadata = _metadata(connection)
+    if learned_relation_evidence_model is not None and not isinstance(
+            learned_relation_evidence_model, LearnedRelationEvidenceModel):
+        raise BroadQaQueryError("relation evidence model 类型错误")
+    learned_weights = _validate_learned_term_weights(
+        learned_evidence_term_weights)
     question_slots = load_broad_qa_question_slots()
-    answer_kinds = question_slots.answer_kinds(question)
-    slot_free_question = question_slots.strip_slots(question)
+    answer_kinds = _answer_kinds(
+        question, question_slots, learned_typed_obligation)
+    slot_free_question = _query_surface(question, question_slots)
     raw_terms = tuple(sorted(_script_terms(slot_free_question)))
     if len(raw_terms) > 512:
         raise BroadQaQueryError("broad QA 原始 query term 超预算")
@@ -653,7 +832,7 @@ def retrieve_broad_qa_candidates(
             (*raw_terms, max_candidate_passages * 32),
         ))
         for surface, doc_id, _ in alias_rows:
-            if _title_span(question, surface) is None:
+            if _title_span(slot_free_question, surface) is None:
                 continue
             prior = anchor_matches.get(int(doc_id))
             if prior is None or (-len(surface), surface) < (-len(prior), prior):
@@ -681,6 +860,9 @@ def retrieve_broad_qa_candidates(
     term_weights = {
         term: max(1, 1_000_000 // frequency)
         for term, frequency, _ in all_rows}
+    for term, weight in learned_weights.items():
+        if term in term_weights:
+            term_weights[term] += weight
     for passage_id in ranked_ids:
         row = connection.execute("""
             SELECT p.passage_id,p.raw_start,p.raw_end,p.raw_sha256,p.text,
@@ -699,7 +881,7 @@ def retrieve_broad_qa_candidates(
         title_surfaces = (row[6],) + aliases
         matching_titles = tuple(
             title for title in title_surfaces
-            if _title_span(question, title) is not None)
+            if _title_span(slot_free_question, title) is not None)
         candidate_inputs.append((row, title_surfaces, matching_titles))
     dominated_titles = _dominated_title_surfaces(
         question,
@@ -773,7 +955,9 @@ def retrieve_broad_qa_candidates(
         ranked_windows = []
         for page_row in page_rows:
             for window_score, selected_text in _rank_evidence_windows(
-                    set(page_terms), page_row[4], answer_kinds, term_weights):
+                    set(page_terms), page_row[4], answer_kinds, term_weights,
+                    relation_evidence_model=learned_relation_evidence_model,
+                    relation_question=slot_free_question):
                 if (scoped_quantity_focus
                         and _title_span(
                             selected_text,
@@ -817,6 +1001,8 @@ def answer_broad_qa_candidates(
         question: str,
         candidates: tuple[BroadQaRetrievalCandidate, ...],
         trace: BroadQaRetrievalTrace,
+        *,
+        learned_typed_obligation: LearnedTypedObligation | None = None,
         ) -> BroadQaResult:
     """对一次已完成的候选检索执行回答、澄清和拒答门。"""
     if (not isinstance(question, str) or not question.strip()
@@ -826,7 +1012,7 @@ def answer_broad_qa_candidates(
             or not isinstance(trace, BroadQaRetrievalTrace)):
         raise BroadQaQueryError("broad QA candidate resolution 输入非法")
     question_slots = load_broad_qa_question_slots()
-    slot_free_question = question_slots.strip_slots(question)
+    slot_free_question = _query_surface(question, question_slots)
     if not candidates:
         return BroadQaResult(
             "UNKNOWN", question, None, None, None, None, None, None, None,
@@ -873,7 +1059,7 @@ def answer_broad_qa_candidates(
             None, None, trace.snapshot_id, trace.license_id,
             trace.matched_query_term_count, trace.candidate_document_count,
         )
-    if (_title_span(question, best.query_anchor_title) is None
+    if (_title_span(slot_free_question, best.query_anchor_title) is None
             and len(candidates) > 1
             and candidates[1].doc_id != best.doc_id
             and candidates[1].score * 100 >= best.score * 95):
@@ -895,7 +1081,8 @@ def answer_broad_qa_candidates(
         sentence_question = (
             sentence_question[:span[0]] + "\n" + sentence_question[span[1]:])
     question_terms = _script_terms(sentence_question)
-    answer_kinds = question_slots.answer_kinds(question)
+    answer_kinds = _answer_kinds(
+        question, question_slots, learned_typed_obligation)
     evidence_candidates = _remove_redundant_evidence_candidates(
         evidence_candidates)
     primary_evidence = evidence_candidates[0]
@@ -941,14 +1128,22 @@ def query_broad_qa(
         max_query_terms: int = 24,
         max_candidate_passages: int = 20,
         max_posting_visits: int = 500_000,
+        learned_evidence_term_weights: Iterable[tuple[str, int]] | None = None,
+        learned_typed_obligation: LearnedTypedObligation | None = None,
+        learned_relation_evidence_model: LearnedRelationEvidenceModel | None = None,
         ) -> BroadQaResult:
     """以稀有 term postings 缩小候选，并从 top-K 页面投影可引用回答。"""
     candidates, trace = retrieve_broad_qa_candidates(
         connection, question,
         max_query_terms=max_query_terms,
         max_candidate_passages=max_candidate_passages,
-        max_posting_visits=max_posting_visits)
-    return answer_broad_qa_candidates(question, candidates, trace)
+        max_posting_visits=max_posting_visits,
+        learned_evidence_term_weights=learned_evidence_term_weights,
+        learned_typed_obligation=learned_typed_obligation,
+        learned_relation_evidence_model=learned_relation_evidence_model)
+    return answer_broad_qa_candidates(
+        question, candidates, trace,
+        learned_typed_obligation=learned_typed_obligation)
 
 
 __all__ = [

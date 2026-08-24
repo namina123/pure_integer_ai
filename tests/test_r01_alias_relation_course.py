@@ -28,6 +28,9 @@ from pure_integer_ai.experiments.alias_relation_course import (
     AliasRelationCourseLoader,
     AliasRelationCourseManifest,
     AliasRelationCourseRecognition,
+    AliasRelationCourseReport,
+    AliasRelationPreflightCache,
+    AliasRelationPreflightCertificate,
     AliasRelationStatementMetadata,
 )
 from pure_integer_ai.experiments.evaluation_isolation import (
@@ -331,6 +334,146 @@ def test_relation_course_isolated_evaluation_fast_path_is_guarded_and_equal(
     finally:
         host_backend.close()
         normal_backend.close()
+
+
+def test_relation_course_preflight_cache_reuses_only_isolated_certificate(
+        monkeypatch):
+    """命中只跳过 isolated preflight，fresh context 仍独立 apply。"""
+    manifest = _manifest(variant=8)
+    loader = AliasRelationCourseLoader(manifest, manifest.sha256())
+    cache = AliasRelationPreflightCache()
+    calls = 0
+    original = AliasRelationCourseLoader._preflight_isolated
+
+    def counted(self):
+        """统计每个 manifest 只执行一次独立预演。"""
+        nonlocal calls
+        calls += 1
+        return original(self)
+
+    monkeypatch.setattr(
+        AliasRelationCourseLoader, "_preflight_isolated", counted)
+    first_backend = DictBackend()
+    second_backend = DictBackend()
+    try:
+        first = loader.load(
+            make_train_context(first_backend),
+            preflight_cache=cache,
+        )
+        second = loader.load(
+            make_train_context(second_backend),
+            preflight_cache=cache,
+        )
+        assert calls == 1
+        assert cache.entry_count == 1
+        assert cache.miss_count == 1
+        assert cache.hit_count == 1
+        assert second.report == first.report
+        assert second.alias is not first.alias
+        assert (second.alias.closure.semantic_graph.ontology
+                is not first.alias.closure.semantic_graph.ontology)
+        certificate = cache.get(manifest.sha256())
+        assert certificate is not None
+        assert all(type(item) is int for item in certificate.canonical_record())
+        import pure_integer_ai.experiments.alias_relation_course as course_module
+        monkeypatch.setattr(course_module, "_PREFLIGHT_IMPLEMENTATION_ID", (1, 3))
+        third_backend = DictBackend()
+        try:
+            loader.load(
+                make_train_context(third_backend),
+                preflight_cache=cache,
+            )
+            assert calls == 2
+        finally:
+            third_backend.close()
+        cache.clear()
+        assert cache.entry_count == 0
+    finally:
+        second_backend.close()
+        first_backend.close()
+
+
+def test_relation_course_preflight_cache_rejects_external_certificate_write(
+        monkeypatch) -> None:
+    """公开纯值 certificate 不能让调用方伪造已完成 isolated preflight。"""
+    manifest = _manifest(variant=9)
+    loader = AliasRelationCourseLoader(manifest, manifest.sha256())
+    cache = AliasRelationPreflightCache()
+    original = AliasRelationCourseLoader._preflight_isolated
+    calls = 0
+
+    def counted(self):
+        """确认拒绝外部写入后，Loader 仍须亲自完成 isolated preflight。"""
+        nonlocal calls
+        calls += 1
+        return original(self)
+
+    monkeypatch.setattr(
+        AliasRelationCourseLoader, "_preflight_isolated", counted)
+    forged = AliasRelationPreflightCertificate(
+        (1, 2),
+        manifest.sha256(),
+        AliasRelationCourseReport(
+            manifest.sha256(),
+            manifest.schema_version,
+            manifest.course_version,
+            len(manifest.entries),
+            sum(len(item.recognitions) for item in manifest.entries),
+            0,
+            0,
+            0,
+            len(manifest.entries),
+            0,
+        ),
+    )
+    assert not hasattr(cache, "put")
+    with pytest.raises(AliasRelationCourseError, match="writer capability"):
+        cache._store_verified(forged, writer_token=object())
+    backend = DictBackend()
+    try:
+        loader.load(make_train_context(backend), preflight_cache=cache)
+        assert calls == 1
+        assert cache.entry_count == 1
+    finally:
+        backend.close()
+
+
+def test_relation_course_preflight_cache_manifest_drift_and_fifo_bound() -> None:
+    """证书按当前实现/manifest 命中，且 FIFO 上限保留最新已验证 entry。"""
+    import pure_integer_ai.experiments.alias_relation_course as course_module
+
+    cache = AliasRelationPreflightCache()
+    digests = []
+    for ordinal in range(9):
+        digest = f"{ordinal + 1:064x}"
+        digests.append(digest)
+        report = AliasRelationCourseReport(
+            digest,
+            1,
+            (1, ordinal + 1),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        cache._store_verified(
+            AliasRelationPreflightCertificate(
+                course_module._PREFLIGHT_IMPLEMENTATION_ID,
+                digest,
+                report,
+            ),
+            writer_token=course_module._PREFLIGHT_CACHE_WRITE_TOKEN,
+        )
+
+    assert cache.entry_count == 8
+    assert cache.get(digests[0]) is None
+    assert cache.miss_count == 1
+    assert cache.hit_count == 0
+    assert cache.get(digests[-1]) is not None
+    assert cache.hit_count == 1
 
 
 def test_relation_course_rejects_forming_timestamp_drift_before_write():

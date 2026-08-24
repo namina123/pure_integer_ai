@@ -65,6 +65,14 @@ from pure_integer_ai.cognition.shared.training_hypothesis import (
 
 
 _COURSE_SCHEMA_VERSION = 1
+_PREFLIGHT_CERTIFICATE_SCHEMA_VERSION = 1
+# 修改 isolated preflight 的语义、报告字段或校验规则时必须递增此 id；进程内
+# 证书不能跨该版本复用。
+_PREFLIGHT_IMPLEMENTATION_ID = (1, 2)
+_PREFLIGHT_CACHE_MAX_ENTRIES = 8
+# 这是进程内、非语义 cache 的私有 writer capability。公开 certificate 是可审计
+# 的纯值 record，但不能作为“已经实际完成 isolated preflight”的调用方断言。
+_PREFLIGHT_CACHE_WRITE_TOKEN = object()
 
 
 class AliasRelationCourseError(RuntimeError):
@@ -496,6 +504,158 @@ class AliasRelationCourseReport:
     active_count: int
     relation_use_count: int
 
+    def stable_key(self) -> tuple[int, ...]:
+        """返回只含整数的预演报告投影，排除对象地址和宿主类型。"""
+        course_version = self.course_version
+        if (not isinstance(course_version, tuple)
+                or any(type(item) is not int for item in course_version)):
+            raise AliasRelationCourseError(
+                "relation course report course_version 非法")
+        try:
+            digest = tuple(bytes.fromhex(self.manifest_sha256))
+        except ValueError as error:
+            raise AliasRelationCourseError(
+                "relation course report manifest SHA-256 非法") from error
+        if len(digest) != 32:
+            raise AliasRelationCourseError(
+                "relation course report manifest SHA-256 长度非法")
+        values = (
+            self.schema_version,
+            *_packed(course_version),
+            self.entry_count,
+            self.recognition_count,
+            self.evidence_count,
+            self.decision_count,
+            self.projection_event_count,
+            self.active_count,
+            self.relation_use_count,
+        )
+        if any(type(item) is not int for item in values):
+            raise AliasRelationCourseError(
+                "relation course report 计数必须是严格整数")
+        return (*digest, *_packed(values))
+
+
+# object-model: value; representation=struct; interop=R-01-PREFLIGHT
+@dataclass(frozen=True, slots=True)
+class AliasRelationPreflightCertificate:
+    """隔离 R-01 预演的纯值证明；不携带任何 backend、图或 runtime。"""
+
+    implementation_id: tuple[int, ...]
+    manifest_sha256: str
+    report: AliasRelationCourseReport
+    certificate_schema_version: int = _PREFLIGHT_CERTIFICATE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        """冻结实现版本、manifest digest 和报告的同一性。"""
+        if (type(self.certificate_schema_version) is not int
+                or self.certificate_schema_version
+                != _PREFLIGHT_CERTIFICATE_SCHEMA_VERSION):
+            raise AliasRelationCourseError(
+                "relation preflight certificate schema 未注册")
+        if (not isinstance(self.implementation_id, tuple)
+                or not self.implementation_id
+                or any(type(item) is not int
+                       for item in self.implementation_id)):
+            raise AliasRelationCourseError(
+                "relation preflight certificate implementation id 非法")
+        if (not isinstance(self.manifest_sha256, str)
+                or len(self.manifest_sha256) != 64
+                or any(item not in "0123456789abcdef"
+                       for item in self.manifest_sha256)):
+            raise AliasRelationCourseError(
+                "relation preflight certificate manifest SHA-256 非法")
+        if not isinstance(self.report, AliasRelationCourseReport):
+            raise TypeError("relation preflight certificate report 类型错误")
+        if self.report.manifest_sha256 != self.manifest_sha256:
+            raise AliasRelationCourseError(
+                "relation preflight certificate report/manifest 漂移")
+
+    def canonical_record(self) -> tuple[int, ...]:
+        """导出可由其他语言重放的证书整数 record。"""
+        return (
+            self.certificate_schema_version,
+            *_packed(self.implementation_id),
+            *tuple(bytes.fromhex(self.manifest_sha256)),
+            *_packed(self.report.stable_key()),
+        )
+
+
+# object-model: resource-owner; semantic-state=none; interop=R-01-PREFLIGHT
+class AliasRelationPreflightCache:
+    """进程内可删除的预演证书 cache，不保存任何语义 runtime 状态。"""
+
+    __slots__ = ("_entries", "_hit_count", "_miss_count")
+
+    def __init__(self) -> None:
+        """创建空 cache；删除它只会恢复每轮完整隔离预演。"""
+        self._entries: tuple[AliasRelationPreflightCertificate, ...] = ()
+        self._hit_count = 0
+        self._miss_count = 0
+
+    @property
+    def hit_count(self) -> int:
+        """返回非语义证书命中次数，仅用于性能诊断。"""
+        return self._hit_count
+
+    @property
+    def miss_count(self) -> int:
+        """返回实际执行隔离预演的次数，仅用于性能诊断。"""
+        return self._miss_count
+
+    @property
+    def entry_count(self) -> int:
+        """返回当前 cache entry 数。"""
+        return len(self._entries)
+
+    def get(self, manifest_sha256: str) -> AliasRelationPreflightCertificate | None:
+        """按当前实现版本和 manifest SHA 查找纯值证书。"""
+        if (not isinstance(manifest_sha256, str)
+                or len(manifest_sha256) != 64
+                or any(item not in "0123456789abcdef"
+                       for item in manifest_sha256)):
+            raise ValueError("relation preflight cache manifest SHA-256 非法")
+        for entry in self._entries:
+            if (entry.implementation_id == _PREFLIGHT_IMPLEMENTATION_ID
+                    and entry.certificate_schema_version
+                    == _PREFLIGHT_CERTIFICATE_SCHEMA_VERSION
+                    and entry.manifest_sha256 == manifest_sha256):
+                self._hit_count += 1
+                return entry
+        self._miss_count += 1
+        return None
+
+    def _store_verified(
+            self,
+            certificate: AliasRelationPreflightCertificate,
+            *,
+            writer_token: object,
+            ) -> None:
+        """仅接收 Loader 在同次实际 isolated preflight 后交付的证书。"""
+        if writer_token is not _PREFLIGHT_CACHE_WRITE_TOKEN:
+            raise AliasRelationCourseError(
+                "relation preflight cache 缺少已验证 writer capability")
+        if not isinstance(certificate, AliasRelationPreflightCertificate):
+            raise TypeError("relation preflight cache certificate 类型错误")
+        if certificate.implementation_id != _PREFLIGHT_IMPLEMENTATION_ID:
+            raise AliasRelationCourseError(
+                "relation preflight cache implementation id 漂移")
+        retained = tuple(
+            item for item in self._entries
+            if (item.implementation_id == _PREFLIGHT_IMPLEMENTATION_ID
+                    and item.certificate_schema_version
+                    == _PREFLIGHT_CERTIFICATE_SCHEMA_VERSION
+                    and item.manifest_sha256 != certificate.manifest_sha256)
+        )
+        # FIFO 仅决定可删除的性能 entry，不进入语义 record；新完成的 preflight
+        # 必须可被下一轮复用，不能因 SHA 字典序在满容量时被立即丢弃。
+        overflow = len(retained) + 1 - _PREFLIGHT_CACHE_MAX_ENTRIES
+        self._entries = (*retained[max(overflow, 0):], certificate)
+
+    def clear(self) -> None:
+        """删除全部可再生证书，保留诊断计数。"""
+        self._entries = ()
+
 
 @dataclass(frozen=True)
 class LoadedAliasRelationCourse:
@@ -579,13 +739,40 @@ class AliasRelationCourseLoader:
         self.manifest = manifest
         self.expected_sha256 = digest
 
-    def load(self, ctx: TrainContext) -> LoadedAliasRelationCourse:
-        """核验版本和内容锁，经隔离全链预演后幂等写入正式 Core。"""
+    def load(
+            self,
+            ctx: TrainContext,
+            *,
+            preflight_cache: AliasRelationPreflightCache | None = None,
+            ) -> LoadedAliasRelationCourse:
+        """核验内容锁并幂等装配 Core；命中时仅跳过已证明的隔离预演。"""
         if not isinstance(ctx, TrainContext):
             raise TypeError("relation course ctx 类型错误")
+        if (preflight_cache is not None
+                and not isinstance(preflight_cache, AliasRelationPreflightCache)):
+            raise TypeError("relation course preflight cache 类型错误")
         self._validate_manifest()
         prepared = self._preflight_host(ctx)
-        self._preflight_isolated()
+        certificate = (
+            None if preflight_cache is None
+            else preflight_cache.get(self.expected_sha256)
+        )
+        if certificate is None:
+            report = self._preflight_isolated()
+            if preflight_cache is not None:
+                if report is None:
+                    raise AliasRelationCourseError(
+                        "relation course isolated preflight 缺少报告")
+                preflight_cache._store_verified(
+                    AliasRelationPreflightCertificate(
+                        _PREFLIGHT_IMPLEMENTATION_ID,
+                        self.expected_sha256,
+                        report,
+                    ),
+                    writer_token=_PREFLIGHT_CACHE_WRITE_TOKEN,
+                )
+        else:
+            self._validate_preflight_certificate(certificate)
         return self._load_prepared(ctx, prepared)
 
     def load_for_isolated_evaluation(
@@ -617,6 +804,38 @@ class AliasRelationCourseLoader:
         if self.manifest.schema_version != _COURSE_SCHEMA_VERSION:
             raise AliasRelationCourseError(
                 "relation course schema 版本不受支持")
+
+    def _validate_preflight_certificate(
+            self,
+            certificate: AliasRelationPreflightCertificate,
+            ) -> None:
+        """核验 cache 证书只证明同一 manifest 的完整隔离报告。"""
+        if not isinstance(certificate, AliasRelationPreflightCertificate):
+            raise TypeError("relation preflight certificate 类型错误")
+        if (certificate.implementation_id != _PREFLIGHT_IMPLEMENTATION_ID
+                or certificate.manifest_sha256 != self.expected_sha256):
+            raise AliasRelationCourseError(
+                "relation preflight certificate identity 漂移")
+        report = certificate.report
+        expected_recognitions = sum(
+            len(entry.recognitions) for entry in self.manifest.entries)
+        if (report.manifest_sha256 != self.expected_sha256
+                or report.schema_version != self.manifest.schema_version
+                or report.course_version != self.manifest.course_version
+                or report.entry_count != len(self.manifest.entries)
+                or report.recognition_count != expected_recognitions
+                or report.active_count != len(self.manifest.entries)
+                or any(type(item) is not int or item < 0 for item in (
+                    report.entry_count,
+                    report.recognition_count,
+                    report.evidence_count,
+                    report.decision_count,
+                    report.projection_event_count,
+                    report.active_count,
+                    report.relation_use_count,
+                ))):
+            raise AliasRelationCourseError(
+                "relation preflight certificate report 不符合当前 manifest")
 
     def _load_prepared(
             self,
@@ -745,7 +964,7 @@ class AliasRelationCourseLoader:
             use_owner,
         )
 
-    def _preflight_isolated(self) -> None:
+    def _preflight_isolated(self) -> AliasRelationCourseReport:
         """在独立 DictBackend 真实预演 S-00、forming、reveal、投影和 owner 恢复。"""
         backend = DictBackend()
         try:
@@ -758,6 +977,7 @@ class AliasRelationCourseLoader:
             if alias.closure.use_owner is None:
                 raise AliasRelationCourseError(
                     "relation course 预演未建立 Core Use owner")
+            return report
         finally:
             backend.close()
 
@@ -905,6 +1125,8 @@ __all__ = [
     "AliasRelationCourseManifest",
     "AliasRelationCourseRecognition",
     "AliasRelationCourseReport",
+    "AliasRelationPreflightCache",
+    "AliasRelationPreflightCertificate",
     "AliasRelationRuntimeFactory",
     "AliasRelationStatementMetadata",
     "LoadedAliasRelationCourse",

@@ -186,10 +186,16 @@ def test_build_query_answer_unknown_and_bit_identical_rebuild(
     connection = sqlite3.connect(str(first))
     try:
         result = query_broad_qa(connection, "谁主持修建都江堰用于防洪？")
+        framed = query_broad_qa(
+            connection,
+            "根据都江堰条目的工程资料，谁主持修建都江堰用于防洪？",
+        )
         unknown = query_broad_qa(connection, "火星上的都江堰由谁修建？")
     finally:
         connection.close()
     assert result.status == "ANSWER"
+    assert framed.status == "ANSWER"
+    assert framed.answer == result.answer
     assert result.title == "都江堰"
     assert "李冰" in result.answer
     assert result.evidence_raw_sha256 is not None
@@ -752,6 +758,7 @@ def test_question_slot_artifact_is_external_canonical_and_tamper_evident(
     slots = load_broad_qa_question_slots()
     assert {"多少", "何时", "哪些", "是谁"}.issubset(
         set(slots.surfaces))
+    assert "有什么作用" in slots.surfaces
     assert "矮寨大桥" in slots.strip_slots("矮寨大桥何时通车？")
     assert "何时" not in slots.strip_slots("矮寨大桥何时通车？")
     assert "地区" in slots.strip_slots("黄山松分布在哪些地区？")
@@ -768,8 +775,10 @@ def test_question_slot_artifact_is_external_canonical_and_tamper_evident(
     ("为什么形成该现象？", "\n形成该现象？", ("CAUSE",)),
     ("魔弹理论又被称为什么理论？", "魔弹理论又被称为\n理论？", ("ENTITY",)),
     ("魔彈理論又被稱為什麼理論？", "魔彈理論又被稱為\n理論？", ("ENTITY",)),
+    ("五月艾称之为什么？", "五月艾称之为\n？", ("ENTITY",)),
     ("事件发生在什么时候？", "事件发生在\n？", ("TIME",)),
     ("河水上涨的原因是什么？", "河水上涨的\n？", ("CAUSE",)),
+    ("大写锁定键有什么作用？", "大写锁定键\n？", ("MANNER",)),
 ])
 def test_question_slots_select_contextual_non_overlapping_spans(
         question: str, expected_surface: str,

@@ -14,11 +14,11 @@ from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_byte
 
 
 REPOSITORY = Path(__file__).resolve().parents[3]
-QUESTION_SLOT_RELATIVE_PATH = Path("data/ph2/broad_qa_question_slots_v1.json")
+QUESTION_SLOT_RELATIVE_PATH = Path("data/ph2/broad_qa_question_slots_v2.json")
 QUESTION_SLOT_PATH = REPOSITORY / QUESTION_SLOT_RELATIVE_PATH
 QUESTION_SLOT_DISTRIBUTION_SUBDIRECTORY = Path("share/pure_integer_ai")
 QUESTION_SLOT_SHA256 = (
-    "932f5ed9b95c4501e64dc06ca769f9fb6b5a79b529f2e09b4a2c5b322c59f2ee")
+    "f3783c7c38bf05f9e099edb80e9e0e1ff90aa5d1b7dd868ac4285e3e2c65c7ca")
 _ANSWER_KINDS = (
     "CAUSE", "ENTITY", "LOCATION", "MANNER", "QUANTITY", "TIME", "TYPE")
 _TO_SIMPLIFIED = OpenCC("t2s")
@@ -36,11 +36,18 @@ def _aligned_simplified_surface(value: str) -> str:
 def _is_contextual_slot(
         question: str, start: int, kind: str, surface: str) -> bool:
     """拒绝侵入关系谓词的歧义槽，同时保留独立因果问式。"""
+    if kind != "CAUSE" or surface != "为什么":
+        return True
+    prefix = question[:start]
+    # “称之为什么/称作为什么”与“最常见的 X 为什么”询问名称或实体，
+    # 不是因果解释；让更短的“什么”槽接管，避免把答案页排序到因果桶。
     return not (
-        kind == "CAUSE"
-        and surface == "为什么"
-        and start > 0
-        and question[start - 1] in {"称", "稱"}
+        prefix.endswith(("称", "稱", "称之", "稱之"))
+        or
+        prefix.endswith(("称之为", "稱之為", "称为", "稱為", "称作", "稱作",
+                         "叫做", "叫作"))
+        or "最常见的" in prefix
+        or "最常見的" in prefix
     )
 
 
@@ -161,11 +168,11 @@ def load_broad_qa_question_slots(
         "license_id", "source_identity",
     }
     if (not isinstance(value, dict) or set(value) != keys
-            or value["artifact_kind"] != "PH2_BROAD_QA_QUESTION_SLOTS_V1"
-            or value["format_version"] != 1 or value["language"] != "zh"
+            or value["artifact_kind"] != "PH2_BROAD_QA_QUESTION_SLOTS_V2"
+            or value["format_version"] != 2 or value["language"] != "zh"
             or value["license_id"] != "CC0-1.0"
             or value["source_identity"]
-            != "AUTHORED_CC0_BROAD_QA_QUESTION_SLOTS_V1"
+            != "AUTHORED_CC0_BROAD_QA_QUESTION_SLOTS_V2"
             or not isinstance(value["entries"], list)):
         raise BroadQaQuestionSlotError("broad QA 问式 artifact envelope 漂移")
     entries = []

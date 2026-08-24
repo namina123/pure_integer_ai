@@ -80,6 +80,7 @@ from pure_integer_ai.cognition.shared.identity import (
     OBJECT_LANGUAGE_BRANCH,
     OBJECT_PROPOSITION,
     ObjectIdentity,
+    OwnerScope,
     SourceRef,
     VersionBundle,
     concept_identity,
@@ -186,30 +187,53 @@ _POSTCHECK_BASE = 13600
 _POSTCHECK_MAPPER_BASE = 19700
 
 
-def _source(source_id: int) -> SourceRef:
-    """构造 relation closure 使用的独立公开夹具来源。"""
-    return SourceRef(131, source_id, 0, GLOBAL_OWNER_SCOPE, VersionBundle())
+def _source(
+        source_id: int,
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
+        ) -> SourceRef:
+    """构造指定身份边界内 relation closure 使用的独立夹具来源。"""
+    if not isinstance(owner, OwnerScope) or not isinstance(versions, VersionBundle):
+        raise TypeError("设施 source owner/version 类型非法")
+    return SourceRef(131, source_id, 0, owner, versions)
 
 
-def _semantic_graph(ontology: Any) -> SemanticGraph:
-    """安装可从相同 ontology 重建的原子命题 predicate 协议。"""
+def _semantic_graph(
+        ontology: Any,
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
+        ) -> SemanticGraph:
+    """在指定边界内安装可从相同 ontology 重建的原子命题协议。"""
     identities = tuple(
-        relation_concept_identity((8100, ordinal))
+        relation_concept_identity(
+            (8100, ordinal), owner=owner, versions=versions)
         for ordinal in range(1, 7)
     )
     refs = tuple(ontology.materialize(item) for item in identities)
     return SemanticGraph(ontology, AtomicPropositionPredicates(*refs))
 
 
-def _projection_protocol() -> CandidateProjectionProtocol:
-    """构造互不复用字段的候选 lifecycle 图协议。"""
-    values = tuple(concept_identity((8200, ordinal)) for ordinal in range(13))
+def _projection_protocol(
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
+        ) -> CandidateProjectionProtocol:
+    """构造指定边界内互不复用字段的候选 lifecycle 图协议。"""
+    values = tuple(
+        concept_identity((8200, ordinal), owner=owner, versions=versions)
+        for ordinal in range(13))
     return CandidateProjectionProtocol(*values, (8201, 1))
 
 
-def _evidence_protocol() -> EvidenceCandidateProtocol:
-    """构造要求两个独立形成来源的候选 aggregate 协议。"""
-    aggregate = _source(900)
+def _evidence_protocol(
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
+        ) -> EvidenceCandidateProtocol:
+    """构造指定边界内要求两个独立形成来源的候选 aggregate 协议。"""
+    aggregate = _source(900, owner=owner, versions=versions)
     return EvidenceCandidateProtocol(
         (8300, 1),
         (8300, 2),
@@ -219,10 +243,14 @@ def _evidence_protocol() -> EvidenceCandidateProtocol:
     )
 
 
-def _verifier() -> IndependentObjectVerifier:
-    """构造只消费显式 reveal 的三态对象 verifier。"""
+def _verifier(
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
+        ) -> IndependentObjectVerifier:
+    """构造指定边界内只消费显式 reveal 的三态对象 verifier。"""
     return IndependentObjectVerifier(IndependentVerifierProtocol(
-        concept_identity((8400, 1)),
+        concept_identity((8400, 1), owner=owner, versions=versions),
         (8400, 2),
         (8400, 3),
         (8400, 4),
@@ -230,22 +258,31 @@ def _verifier() -> IndependentObjectVerifier:
     ))
 
 
-def _relation_protocol() -> RelationClosureProtocol:
-    """构造 relation/schema 两个互异候选字段。"""
+def _relation_protocol(
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
+        ) -> RelationClosureProtocol:
+    """构造指定边界内 relation/schema 两个互异候选字段。"""
     return RelationClosureProtocol(
-        RelationClosureField(concept_identity((8500, 1))),
-        RelationClosureField(concept_identity((8500, 2))),
+        RelationClosureField(
+            concept_identity((8500, 1), owner=owner, versions=versions)),
+        RelationClosureField(
+            concept_identity((8500, 2), owner=owner, versions=versions)),
     )
 
 
 def _candidate_runtime(
         graph: CandidateProjectionGraph,
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
         ) -> CandidateLearningRuntime:
-    """把共享候选 engine、verifier 和图装成真实 relation owner。"""
+    """把指定边界的候选 engine、verifier 和图装成真实 relation owner。"""
     return CandidateLearningRuntime(
-        EvidenceCandidateEngine(_evidence_protocol()),
+        EvidenceCandidateEngine(_evidence_protocol(owner=owner, versions=versions)),
         graph,
-        _verifier(),
+        _verifier(owner=owner, versions=versions),
         CandidateProjectionMetadata(SOURCE_BARE_TEXT, EPI_STRUCTURED),
     )
 
@@ -287,7 +324,9 @@ def _recognition(
         source_id: int,
         ) -> RelationClosureRecognitionInput:
     """为一个 relation spec 构造独立 support reveal。"""
-    observation = _source(source_id)
+    owner = spec.proposition.proposition.owner
+    versions = spec.proposition.proposition.versions
+    observation = _source(source_id, owner=owner, versions=versions)
     anchor = occurrence_identity(observation, start=0, end=1, ordinal=0)
     proposition = spec.proposition.proposition
     return RelationClosureRecognitionInput(
@@ -302,7 +341,7 @@ def _recognition(
             observation,
             document_scope(observation),
             (9201, source_id),
-            _source(700 + source_id),
+            _source(700 + source_id, owner=owner, versions=versions),
             supported_targets=(proposition,),
             trace=(9202, source_id),
         ),
@@ -326,36 +365,55 @@ def _alias_fixture(
         branch: ObjectIdentity,
         realizations: tuple[tuple[ObjectIdentity, ObjectIdentity], ...],
         ) -> FacilityAliasFixture:
-    """为权威对象建立 active realizes fact 和唯一 surface route。"""
+    """在 branch 的 owner/version 内建立 active realizes fact 和 surface route。"""
     if branch.object_kind != OBJECT_LANGUAGE_BRANCH:
         raise ValueError("设施 branch 必须是 LanguageBranch")
+    if (not isinstance(realizations, tuple) or not realizations
+            or any(not isinstance(item, tuple) or len(item) != 2
+                   or any(not isinstance(value, ObjectIdentity) for value in item)
+                   for item in realizations)):
+        raise TypeError("设施 realizations 必须是非空 ObjectIdentity 对")
+    if any(value.owner != branch.owner or value.versions != branch.versions
+           for item in realizations for value in item):
+        raise ValueError("设施 realizations 跨 branch owner/version")
+    owner = branch.owner
+    versions = branch.versions
     backend = DictBackend()
     ctx = make_train_context(backend)
-    semantic_graph = _semantic_graph(ctx.graph_ontology)
+    semantic_graph = _semantic_graph(
+        ctx.graph_ontology, owner=owner, versions=versions)
     candidate_graph = CandidateProjectionGraph(
         ctx.graph_ontology,
-        _projection_protocol(),
+        _projection_protocol(owner=owner, versions=versions),
     )
-    candidate_runtime = _candidate_runtime(candidate_graph)
-    closure_protocol = _relation_protocol()
-    alias_relation = concept_identity((_ALIAS_BASE + 1, 1))
-    refers_relation = concept_identity((_ALIAS_BASE + 1, 2))
-    realizes_relation = concept_identity((_ALIAS_BASE + 1, 3))
+    candidate_runtime = _candidate_runtime(
+        candidate_graph, owner=owner, versions=versions)
+    closure_protocol = _relation_protocol(owner=owner, versions=versions)
+    alias_relation = concept_identity(
+        (_ALIAS_BASE + 1, 1), owner=owner, versions=versions)
+    refers_relation = concept_identity(
+        (_ALIAS_BASE + 1, 2), owner=owner, versions=versions)
+    realizes_relation = concept_identity(
+        (_ALIAS_BASE + 1, 3), owner=owner, versions=versions)
     alias_roles = (
-        role_identity((_ALIAS_BASE + 2, 1)),
-        role_identity((_ALIAS_BASE + 2, 2)),
+        role_identity((_ALIAS_BASE + 2, 1), owner=owner, versions=versions),
+        role_identity((_ALIAS_BASE + 2, 2), owner=owner, versions=versions),
     )
     refers_roles = (
-        role_identity((_ALIAS_BASE + 2, 3)),
-        role_identity((_ALIAS_BASE + 2, 4)),
+        role_identity((_ALIAS_BASE + 2, 3), owner=owner, versions=versions),
+        role_identity((_ALIAS_BASE + 2, 4), owner=owner, versions=versions),
     )
     realizes_roles = tuple(
-        role_identity((_ALIAS_BASE + 2, value))
+        role_identity(
+            (_ALIAS_BASE + 2, value), owner=owner, versions=versions)
         for value in range(5, 8)
     )
-    alias_schema_identity = structure_concept_identity((_ALIAS_BASE + 3, 1))
-    refers_schema_identity = structure_concept_identity((_ALIAS_BASE + 3, 2))
-    realizes_schema_identity = structure_concept_identity((_ALIAS_BASE + 3, 3))
+    alias_schema_identity = structure_concept_identity(
+        (_ALIAS_BASE + 3, 1), owner=owner, versions=versions)
+    refers_schema_identity = structure_concept_identity(
+        (_ALIAS_BASE + 3, 2), owner=owner, versions=versions)
+    realizes_schema_identity = structure_concept_identity(
+        (_ALIAS_BASE + 3, 3), owner=owner, versions=versions)
     alias_schema = RelationSchema(
         alias_schema_identity,
         alias_relation,
@@ -399,7 +457,8 @@ def _alias_fixture(
     definitions: list[tuple[AtomicPropositionDefinition, RelationSchema]] = []
     for index, (origin, representation) in enumerate(realizations, start=1):
         definition, _ = _relation_definition(
-            _source(_ALIAS_BASE + 40 + index),
+            _source(
+                _ALIAS_BASE + 40 + index, owner=owner, versions=versions),
             family=_ALIAS_BASE + 200 + index,
             relation=realizes_relation,
             schema_identity=realizes_schema_identity,
@@ -434,7 +493,10 @@ def _alias_fixture(
             definition,
             schema,
             (_ALIAS_BASE + 300, index),
-            (_source(_ALIAS_BASE + 301), _source(_ALIAS_BASE + 302)),
+            (
+                _source(_ALIAS_BASE + 301, owner=owner, versions=versions),
+                _source(_ALIAS_BASE + 302, owner=owner, versions=versions),
+            ),
         )
         closure.form(spec)
         trace = closure.recognize(_recognition(spec, _ALIAS_BASE + 400 + index))
@@ -444,18 +506,24 @@ def _alias_fixture(
         alias_relation,
         (alias_schema_identity,),
         *alias_roles,
-        minimal_instruction_identity((_ALIAS_BASE + 4, 1)),
+        minimal_instruction_identity(
+            (_ALIAS_BASE + 4, 1), owner=owner, versions=versions),
         refers_relation,
         (refers_schema_identity,),
         *refers_roles,
-        minimal_instruction_identity((_ALIAS_BASE + 4, 2)),
+        minimal_instruction_identity(
+            (_ALIAS_BASE + 4, 2), owner=owner, versions=versions),
         realizes_relation,
         (realizes_schema_identity,),
         *realizes_roles,
-        minimal_instruction_identity((_ALIAS_BASE + 4, 3)),
-        minimal_instruction_identity((_ALIAS_BASE + 4, 4)),
-        minimal_instruction_identity((_ALIAS_BASE + 4, 5)),
-        minimal_instruction_identity((_ALIAS_BASE + 4, 6)),
+        minimal_instruction_identity(
+            (_ALIAS_BASE + 4, 3), owner=owner, versions=versions),
+        minimal_instruction_identity(
+            (_ALIAS_BASE + 4, 4), owner=owner, versions=versions),
+        minimal_instruction_identity(
+            (_ALIAS_BASE + 4, 5), owner=owner, versions=versions),
+        minimal_instruction_identity(
+            (_ALIAS_BASE + 4, 6), owner=owner, versions=versions),
     )
     return FacilityAliasFixture(
         backend,
@@ -502,32 +570,52 @@ def _world() -> tuple[SourceRef, Any, Any]:
     return source, scope, bound
 
 
-def _plan_protocol(seed: int) -> GenerationPlanProtocol:
-    """注入 G-00 六层和结果身份。"""
+def _plan_protocol(
+        seed: int,
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
+        ) -> GenerationPlanProtocol:
+    """在显式 owner/version 边界内注入 G-00 六层和结果身份。"""
     return GenerationPlanProtocol(*tuple(
-        minimal_instruction_identity((seed, index))
+        minimal_instruction_identity(
+            (seed, index), owner=owner, versions=versions)
         for index in range(1, 11)
     ))
 
 
-def build_facility_generation_plan_protocol(seed: int) -> GenerationPlanProtocol:
-    """构造调用方命名空间内互异的 G-00 六层协议。"""
-    return _plan_protocol(seed)
+def build_facility_generation_plan_protocol(
+        seed: int,
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
+        ) -> GenerationPlanProtocol:
+    """构造调用方指定边界内互异的 G-00 六层协议。"""
+    return _plan_protocol(seed, owner=owner, versions=versions)
 
 
-def _surface_protocol(seed: int) -> GenerationSurfaceProtocol:
-    """构造互异 emit/silent 动作和七类 surface 原因。"""
+def _surface_protocol(
+        seed: int,
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
+        ) -> GenerationSurfaceProtocol:
+    """在显式边界内构造 emit/silent 动作和七类 surface 原因。"""
     return GenerationSurfaceProtocol(*tuple(
-        minimal_instruction_identity((seed, index))
+        minimal_instruction_identity(
+            (seed, index), owner=owner, versions=versions)
         for index in range(1, 10)
     ))
 
 
 def build_facility_generation_surface_protocol(
         seed: int,
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
         ) -> GenerationSurfaceProtocol:
-    """构造调用方命名空间内互异的 G-03 surface 协议。"""
-    return _surface_protocol(seed)
+    """构造调用方指定边界内互异的 G-03 surface 协议。"""
+    return _surface_protocol(seed, owner=owner, versions=versions)
 
 
 def _manual_execution(structure: Any) -> GenerationStructureExecutionPlan:
@@ -851,23 +939,31 @@ def build_question_fixture(
     return FacilityQuestionFixture(runtime, request, alias)
 
 
-def _postcheck_protocol() -> GenerationPostcheckProtocol:
-    """构造六维复核键和全部内置失败原因。"""
+def _postcheck_protocol(
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
+        ) -> GenerationPostcheckProtocol:
+    """在显式边界内构造六维复核键和全部内置失败原因。"""
     keys = tuple(
         ProtocolKey((_POSTCHECK_BASE + 1, index))
         for index in range(1, 13)
     )
     reasons = tuple(
-        minimal_instruction_identity((_POSTCHECK_BASE + 2, index))
+        minimal_instruction_identity(
+            (_POSTCHECK_BASE + 2, index), owner=owner, versions=versions)
         for index in range(1, 16)
     )
     return GenerationPostcheckProtocol(*keys, *reasons)
 
 
 def build_facility_generation_postcheck_protocol(
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
         ) -> GenerationPostcheckProtocol:
-    """构造设施场景使用的完整六维 G-04 协议。"""
-    return _postcheck_protocol()
+    """构造设施场景指定边界内的完整六维 G-04 协议。"""
+    return _postcheck_protocol(owner=owner, versions=versions)
 
 
 class _ExecutionParser:
@@ -1020,20 +1116,29 @@ class FacilityStructureOrderOwner:
 
 def build_facility_structure_order_owner(
         seed: int,
+        *,
+        owner: OwnerScope = GLOBAL_OWNER_SCOPE,
+        versions: VersionBundle = VersionBundle(),
         ) -> FacilityStructureOrderOwner:
-    """在独立 GraphOntology 上建立可供生产 factory 使用的 S-07 owner。"""
+    """在指定边界的独立 GraphOntology 上建立生产 S-07 owner。"""
     if type(seed) is not int or seed <= 0:
         raise ValueError("structure-order seed 必须是正严格整数")
+    if not isinstance(owner, OwnerScope) or not isinstance(versions, VersionBundle):
+        raise TypeError("structure-order owner/version 类型非法")
     backend = DictBackend()
     context = make_train_context(backend)
     ontology = context.graph_ontology
     identities = tuple(
-        concept_identity((seed, 40, index)) for index in range(1, 26))
+        concept_identity(
+            (seed, 40, index), owner=owner, versions=versions)
+        for index in range(1, 26))
     refs = tuple(ontology.materialize(item) for item in identities)
     graph = StructureOrderGraph(
         ontology, StructureOrderGraphPredicates(*refs[:19]))
     states_and_kinds = tuple(
-        concept_identity((seed, 41, index)) for index in range(1, 7))
+        concept_identity(
+            (seed, 41, index), owner=owner, versions=versions)
+        for index in range(1, 7))
     for identity in states_and_kinds:
         ontology.materialize(identity)
     protocol = StructureOrderLifecycleProtocol(

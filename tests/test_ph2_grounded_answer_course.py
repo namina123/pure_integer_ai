@@ -17,10 +17,12 @@ from pure_integer_ai.experiments.ph2_grounded_answer_course import (
     GroundedEvidence,
     audit_grounded_answer_course,
     read_grounded_answer_episodes,
+    read_grounded_answer_episodes_from_payload,
     verify_surface_realization,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_compile import (
     compile_grounded_answer_training_records,
+    compile_grounded_answer_training_records_from_payload,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_learning import (
     learn_grounded_answer_surface_model,
@@ -141,6 +143,53 @@ def test_reader_rejects_noncanonical_json_before_course_use(tmp_path):
     path.write_text(json.dumps(value, ensure_ascii=False) + "\n", encoding="utf-8")
     with pytest.raises(GroundedAnswerCourseError, match="不是规范"):
         read_grounded_answer_episodes(path)
+
+
+def test_payload_reader_rejects_empty_truncated_and_noncanonical_jsonl():
+    """调用方交付的 bytes 仍须通过完整 JSONL/canonical 审计。"""
+    payload = SAMPLE_PATH.read_bytes()
+    value = json.loads(payload.splitlines()[0])
+    noncanonical = (
+        json.dumps(value, ensure_ascii=False).encode("utf-8") + b"\n")
+    for invalid, message in (
+            (b"", "非空并以换行结束"),
+            (payload[:-1], "非空并以换行结束"),
+            (noncanonical, "不是规范")):
+        with pytest.raises(GroundedAnswerCourseError, match=message):
+            read_grounded_answer_episodes_from_payload(invalid)
+        with pytest.raises(GroundedAnswerCourseError, match=message):
+            compile_grounded_answer_training_records_from_payload(
+                invalid,
+                source_relative_path=SAMPLE_PATH.as_posix(),
+            )
+
+
+def test_payload_apis_match_path_bundle_without_path_read(monkeypatch):
+    """runtime 已有受控 payload 后，课程/编译层不得再触发路径读取。"""
+    payload = SAMPLE_PATH.read_bytes()
+    expected_episodes = read_grounded_answer_episodes(SAMPLE_PATH)
+    expected_bundle = compile_grounded_answer_training_records(SAMPLE_PATH)
+
+    def _unexpected_read_bytes(*_args, **_kwargs):
+        raise AssertionError("payload API 不得调用 Path.read_bytes")
+
+    monkeypatch.setattr(Path, "read_bytes", _unexpected_read_bytes)
+    assert read_grounded_answer_episodes_from_payload(payload) == (
+        expected_episodes)
+    assert compile_grounded_answer_training_records_from_payload(
+        payload,
+        source_relative_path=SAMPLE_PATH.as_posix(),
+    ) == expected_bundle
+
+
+def test_payload_compiler_requires_canonical_bound_relative_source_path():
+    """payload 编译不得以绝对路径或越界路径伪造公开来源身份。"""
+    payload = SAMPLE_PATH.read_bytes()
+    with pytest.raises(GroundedAnswerCourseError, match="source_relative_path"):
+        compile_grounded_answer_training_records_from_payload(
+            payload,
+            source_relative_path="../grounded_answer_train_v1.jsonl.sample",
+        )
 
 
 def test_training_compiler_separates_observation_from_teacher_labels():

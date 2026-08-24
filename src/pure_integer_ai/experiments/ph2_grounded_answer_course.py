@@ -1203,14 +1203,13 @@ def audit_grounded_answer_course(
     )
 
 
-def read_grounded_answer_episodes(
-        path: str | Path, *, train_only: bool = True,
+def read_grounded_answer_episodes_from_payload(
+        payload: bytes, *, train_only: bool = True,
         ) -> tuple[GroundedAnswerEpisode, ...]:
-    """严格回读 canonical JSONL，并立即执行课程与 split 审计。"""
-    try:
-        payload = Path(path).read_bytes()
-    except OSError as error:
-        raise GroundedAnswerCourseError("grounded answer sample 无法读取") from error
+    """严格解析调用方已验证的 JSONL bytes，并立即执行课程与 split 审计。"""
+    if not isinstance(payload, bytes):
+        raise GroundedAnswerCourseError(
+            "grounded answer payload 必须是 bytes")
     if not payload or not payload.endswith(b"\n"):
         raise GroundedAnswerCourseError(
             "grounded answer sample 必须非空并以换行结束")
@@ -1231,6 +1230,18 @@ def read_grounded_answer_episodes(
     result = tuple(episodes)
     audit_grounded_answer_course(result, train_only=train_only)
     return result
+
+
+def read_grounded_answer_episodes(
+        path: str | Path, *, train_only: bool = True,
+        ) -> tuple[GroundedAnswerEpisode, ...]:
+    """严格回读 canonical JSONL，并立即执行课程与 split 审计。"""
+    try:
+        payload = Path(path).read_bytes()
+    except OSError as error:
+        raise GroundedAnswerCourseError("grounded answer sample 无法读取") from error
+    return read_grounded_answer_episodes_from_payload(
+        payload, train_only=train_only)
 
 
 __all__ = [
@@ -1260,5 +1271,6 @@ __all__ = [
     "VERIFICATION_VIOLATIONS",
     "audit_grounded_answer_course",
     "read_grounded_answer_episodes",
+    "read_grounded_answer_episodes_from_payload",
     "verify_surface_realization",
 ]

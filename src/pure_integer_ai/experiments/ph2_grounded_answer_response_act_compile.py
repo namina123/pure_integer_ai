@@ -94,6 +94,10 @@ class GroundedResponseActCompileTarget:
                 or self.language_branch.object_kind != OBJECT_LANGUAGE_BRANCH):
             raise GroundedResponseActCompileError(
                 "response-act language branch 类型错误")
+        if (self.stance.owner != self.language_branch.owner
+                or self.stance.versions != self.language_branch.versions):
+            raise GroundedResponseActCompileError(
+                "response-act target crosses language branch owner/version")
         _strict_key(
             self.representation_family,
             where="response-act representation family",

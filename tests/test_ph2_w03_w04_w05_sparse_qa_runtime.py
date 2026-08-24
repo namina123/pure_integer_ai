@@ -9,6 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from pure_integer_ai.experiments.conversation_public_sentence_demo import (
+    build_public_sentence_demo_catalog,
+)
 from pure_integer_ai.experiments.ph2_d03_contract_core import (
     canonical_json_bytes,
 )
@@ -40,10 +43,15 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_runtime import (
     build_public_sparse_qa_runtime,
     run_sparse_qa_queries,
     run_sparse_qa_query,
+    run_sparse_qa_query_with_typed_proof,
+    run_sparse_qa_sentence,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_session import (
     build_sparse_qa_session_probe,
     iter_sparse_qa_jsonl_session,
+)
+from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_snapshot import (
+    load_public_sparse_qa_runtime_snapshot,
 )
 
 
@@ -196,6 +204,102 @@ def test_exact_alias_implicit_unknown_and_resolved_source(runtime) -> None:
     assert unknown.selected_source_record_key is None
     assert unknown.dispatch_probe.sparse_trace_count == 0
     assert unknown.dispatch_probe.created_dispatch_trace_count == 0
+
+
+def test_sentence_projection_uses_actual_learned_proposition_surface(runtime) -> None:
+    """完整句必须来自同次 ANSWER proof，不能把短答案套进固定模板。"""
+    construction = runtime.dispatch_index.entries[0].entry.feature_catalog.catalog[0]
+    projection = run_sparse_qa_sentence(
+        runtime, RawQuestionRequest(construction.question_surface))
+    assert projection.query_result.status == "ANSWER"
+    assert projection.query_result.answer_surface is not None
+    assert projection.generated_proposition_surface is not None
+    assert projection.generated_proposition_surface.endswith("。")
+    assert projection.query_result.answer_surface in projection.generated_proposition_surface
+    assert projection.to_dict()["query_result"]["status"] == "ANSWER"
+
+    unknown = run_sparse_qa_sentence(
+        runtime, RawQuestionRequest("未学习的公开问题？"))
+    assert unknown.query_result.status == "UNKNOWN"
+    assert unknown.generated_proposition_surface is None
+
+
+def test_host_proof_projection_keeps_one_dispatch_proof_without_rerun(
+        monkeypatch) -> None:
+    """host-only carrier 必须直接保留一次 dispatch 的 proof，不可由文本反推。"""
+    from pure_integer_ai.experiments import (
+        ph2_w03_w04_w05_sparse_qa_runtime as query_runtime,
+    )
+
+    runtime = load_public_sparse_qa_runtime_snapshot()
+    construction = (
+        runtime.dispatch_index.entries[0].entry.feature_catalog.catalog[0])
+    calls = {"dispatch": 0}
+    original = query_runtime.run_sparse_question_dispatch
+
+    def counted_dispatch(*args, **kwargs):
+        calls["dispatch"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        query_runtime,
+        "run_sparse_question_dispatch",
+        counted_dispatch,
+    )
+    projection = run_sparse_qa_query_with_typed_proof(
+        runtime,
+        RawQuestionRequest(construction.question_surface),
+    )
+    assert calls == {"dispatch": 1}
+    assert projection.host_adapter_only == 1
+    assert projection.query_result.status == "ANSWER"
+    assert projection.raw_result is not None
+    assert projection.raw_result.typed_result is not None
+    assert projection.raw_result.typed_result.proof is projection.typed_proof
+    assert projection.typed_proof is not None
+    assert projection.raw_result.typed_result.answer_surface == (
+        projection.query_result.answer_surface)
+    assert projection.generated_proposition_surface == (
+        projection.typed_proof.generated_proposition_surface)
+    assert projection.typed_proof.source_record_key == (
+        projection.query_result.selected_source_record_key)
+
+
+def test_host_proof_projection_has_zero_proof_for_non_answer() -> None:
+    """UNKNOWN 不能借 host carrier 泄漏任何 typed proof 或生成表层。"""
+    runtime = load_public_sparse_qa_runtime_snapshot()
+    projection = run_sparse_qa_query_with_typed_proof(
+        runtime,
+        RawQuestionRequest("未学习的公开问题？"),
+    )
+    assert projection.query_result.status == "UNKNOWN"
+    assert projection.raw_result is None
+    assert projection.typed_proof is None
+    assert projection.generated_proposition_surface is None
+
+
+def test_host_proof_projection_preserves_normalized_alias_and_implicit_routes() -> None:
+    """alias/implicit 可规范化 request，但 proof 必须仍来自原 dispatch 的已选来源。"""
+    runtime = load_public_sparse_qa_runtime_snapshot()
+    catalog = build_public_sentence_demo_catalog(runtime)
+    observed_kinds = set()
+
+    for route in catalog.routes:
+        projection = run_sparse_qa_query_with_typed_proof(
+            runtime,
+            route.request,
+        )
+        assert projection.query_result.status == "ANSWER"
+        assert projection.typed_proof is not None
+        assert projection.raw_result is not None
+        assert projection.raw_result.typed_result is not None
+        assert projection.raw_result.typed_result.proof is projection.typed_proof
+        assert projection.typed_proof.source_record_key == route.source_record_key
+        assert projection.query_result.selected_source_record_key == (
+            route.source_record_key)
+        observed_kinds.add(route.route_kind)
+
+    assert observed_kinds == {1, 2, 3}
 
 
 def test_audit_is_explicit_and_ft16_byte_identical(runtime) -> None:
@@ -433,6 +537,96 @@ def test_jsonl_cli_builds_once_and_emits_final_probe(
     assert values[-1]["probe"]["error_count"] == 1
     assert values[0]["result_sha256"] == values[2]["result_sha256"]
     assert len(values[-1]["probe"]["record_commitment_sha256"]) == 64
+
+
+def test_interactive_cli_renders_runtime_results_without_session_memory(
+        monkeypatch) -> None:
+    from pure_integer_ai.experiments import (
+        run_ph2_w03_w04_w05_sparse_qa as cli,
+    )
+
+    snapshot_runtime = load_public_sparse_qa_runtime_snapshot()
+    calls = {"load": 0}
+
+    def load_once():
+        calls["load"] += 1
+        return snapshot_runtime
+
+    monkeypatch.setattr(
+        cli, "load_or_rebuild_public_sparse_qa_runtime", load_once)
+    construction = (
+        snapshot_runtime.dispatch_index.entries[0].entry.feature_catalog.catalog[0])
+    expected = run_sparse_qa_query(
+        snapshot_runtime, RawQuestionRequest(construction.question_surface))
+    assert expected.status == "ANSWER"
+    assert expected.answer_surface is not None
+    input_stream = StringIO("\n".join((
+        construction.question_surface,
+        "未学习的公开问题？",
+        "",
+        ":quit",
+    )))
+    output_stream = StringIO()
+    assert cli.main(
+        ["--interactive"], stdin=input_stream, stdout=output_stream) == 0
+    output = output_stream.getvalue()
+    assert calls == {"load": 1}
+    assert f"系统> {expected.answer_surface}\n" in output
+    assert "系统> [UNKNOWN]\n" in output
+    assert "系统> [INVALID_QUESTION]\n" in output
+    assert "我不知道" not in output
+
+
+def test_interactive_sentence_cli_renders_actual_generated_surface_without_memory(
+        monkeypatch) -> None:
+    """完整句 shell 与短答案 shell 分离，且不把会话行写回 runtime。"""
+    from pure_integer_ai.experiments import (
+        run_ph2_w03_w04_w05_sparse_qa as cli,
+    )
+
+    snapshot_runtime = load_public_sparse_qa_runtime_snapshot()
+    construction = (
+        snapshot_runtime.dispatch_index.entries[0].entry.feature_catalog.catalog[0])
+    expected = run_sparse_qa_sentence(
+        snapshot_runtime, RawQuestionRequest(construction.question_surface))
+    assert expected.generated_proposition_surface is not None
+    monkeypatch.setattr(
+        cli, "load_or_rebuild_public_sparse_qa_runtime",
+        lambda: snapshot_runtime)
+    output_stream = StringIO()
+    assert cli.main(
+        ["--interactive-sentence"],
+        stdin=StringIO("\n".join((
+            construction.question_surface,
+            "未学习的公开问题？",
+            ":quit",
+        ))),
+        stdout=output_stream,
+    ) == 0
+    output = output_stream.getvalue()
+    assert f"系统> {expected.generated_proposition_surface}\n" in output
+    assert "系统> [UNKNOWN]\n" in output
+    assert "答案是" not in output
+
+
+@pytest.mark.parametrize("argv", (
+    ("--interactive", "什么使得河水上涨？"),
+    ("--interactive", "--jsonl"),
+    ("--interactive", "--audit"),
+    ("--interactive", "--repeat", "2"),
+    ("--interactive", "--source-ref", "1,2"),
+    ("--interactive-sentence", "什么使得河水上涨？"),
+    ("--interactive-sentence", "--jsonl"),
+    ("--interactive", "--interactive-sentence"),
+))
+def test_interactive_cli_rejects_incompatible_options(argv) -> None:
+    from pure_integer_ai.experiments import (
+        run_ph2_w03_w04_w05_sparse_qa as cli,
+    )
+
+    with pytest.raises(SystemExit) as error:
+        cli.main(list(argv), stdin=StringIO(), stdout=StringIO())
+    assert error.value.code == 2
 
 
 def test_runtime_contains_no_question_or_answer_dispatch_table() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 from pure_integer_ai.experiments.ph2_dataset_contract import (
@@ -23,7 +24,8 @@ from pure_integer_ai.experiments.ph2_dataset_validation import (
 from pure_integer_ai.experiments.ph2_grounded_answer_course import (
     LICENSE_ID,
     GroundedAnswerEpisode,
-    read_grounded_answer_episodes,
+    GroundedAnswerCourseError,
+    read_grounded_answer_episodes_from_payload,
     verify_surface_realization,
 )
 
@@ -48,13 +50,23 @@ def _record_key(namespace: str, *parts: Any) -> StableRecordKey:
     return StableRecordKey((1, value if value > 0 else 1))
 
 
-def _sha256_file(path: Path) -> str:
-    """流式计算公开 sample 的 SHA-256。"""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while block := handle.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
+def _source_relative_path(value: str) -> str:
+    """只接受调用方已绑定的 data/ph2 POSIX 相对来源身份。"""
+    if not isinstance(value, str) or not value:
+        raise GroundedAnswerCourseError(
+            "grounded answer source_relative_path 必须是非空 str")
+    if "\\" in value:
+        raise GroundedAnswerCourseError(
+            "grounded answer source_relative_path 必须使用 POSIX 分隔符")
+    path = PurePosixPath(value)
+    if (path.is_absolute()
+            or tuple(path.parts[:2]) != ("data", "ph2")
+            or len(path.parts) != 3
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or path.as_posix() != value):
+        raise GroundedAnswerCourseError(
+            "grounded answer source_relative_path 必须是 data/ph2 下的规范相对文件")
+    return value
 
 
 def _observation_payload(episode: GroundedAnswerEpisode) -> dict[str, object]:
@@ -123,13 +135,14 @@ class GroundedAnswerTrainingBundle:
     validation: DatasetBundleValidationReport
 
 
-def compile_grounded_answer_training_records(
-        sample_path: str | Path,
+def compile_grounded_answer_training_records_from_payload(
+        payload: bytes, *, source_relative_path: str,
         ) -> GroundedAnswerTrainingBundle:
-    """严格回读公开 sample，并构造不含 evaluator/held-out 的训练分账。"""
-    path = Path(sample_path).resolve()
-    episodes = read_grounded_answer_episodes(path, train_only=True)
-    sample_sha256 = _sha256_file(path)
+    """从已验证 bytes 编译训练分账，不读取或伪造本地来源路径。"""
+    relative_path = _source_relative_path(source_relative_path)
+    episodes = read_grounded_answer_episodes_from_payload(
+        payload, train_only=True)
+    sample_sha256 = hashlib.sha256(payload).hexdigest()
     dataset_key = _record_key("dataset", "PH2", SOURCE_KEY, SCHEMA_VERSION)
     artifact_key = _record_key(
         "artifact", SOURCE_KEY, SUBSTAGE, sample_sha256, 1)
@@ -137,7 +150,6 @@ def compile_grounded_answer_training_records(
     sources = []
     observations = []
     teachers = []
-    relative_path = f"data/ph2/{path.name}"
     for ordinal, episode in enumerate(episodes, start=1):
         source_key = _record_key(
             "source_ref", SOURCE_KEY, sample_sha256, episode.episode_id)
@@ -243,6 +255,21 @@ def compile_grounded_answer_training_records(
         source_tuple, observation_tuple, teacher_tuple, validation)
 
 
+def compile_grounded_answer_training_records(
+        sample_path: str | Path,
+        ) -> GroundedAnswerTrainingBundle:
+    """兼容路径入口；读取一次后复用 payload 编译核心。"""
+    path = Path(sample_path).resolve()
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise GroundedAnswerCourseError("grounded answer sample 无法读取") from error
+    return compile_grounded_answer_training_records_from_payload(
+        payload,
+        source_relative_path=f"data/ph2/{path.name}",
+    )
+
+
 __all__ = [
     "ATTRIBUTION",
     "GroundedAnswerTrainingBundle",
@@ -252,4 +279,5 @@ __all__ = [
     "STAGE",
     "SUBSTAGE",
     "compile_grounded_answer_training_records",
+    "compile_grounded_answer_training_records_from_payload",
 ]

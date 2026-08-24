@@ -1,9 +1,11 @@
-"""DLG-05 v4 独立 owner handoff 的 metadata-only 合同。
+"""DLG-05 v4 owner handoff 的 metadata-only 边界。
 
 候选侧只读取 owner receipt 的公开元数据，以及 label 文件的路径、大小和物理
 链接属性；绝不打开、解压、哈希或解析 label payload。receipt 必须绑定当前 K 盘
-source bundle、freeze、中文投影和一次性状态 ``SEALED_UNREAD``。本模块不创建
-owner receipt、不创建 guard、不执行 selection/formal，也不改变任何运行状态。
+source bundle、freeze、中文投影和一次性状态 ``SEALED_UNREAD``。当前旧 v4 family 是
+synthetic fixture，本模块会在读取 receipt 或 label 前拒绝它；external source capsule 的
+runtime artifact reader 建立前，任何 owner handoff 都保持关闭。本模块不创建 owner receipt、
+不创建 guard、不执行 selection/formal，也不改变任何运行状态。
 """
 from __future__ import annotations
 
@@ -16,7 +18,6 @@ from pathlib import Path, PurePosixPath
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.experiments.conversation_heldout_v4_family import (
     ConversationHeldOutV4Family,
-    build_v4_family,
 )
 from pure_integer_ai.experiments.conversation_heldout_v4_metadata_audit import (
     ConversationHeldOutV4MetadataAudit,
@@ -322,18 +323,21 @@ def read_v4_owner_metadata(
     """只读验证 owner handoff；label 文件只读取 stat，不读取内容。"""
     owner = _root(owner_root, require_k_drive=require_k_drive, label="owner root")
     source = _root(source_root, require_k_drive=require_k_drive, label="source root")
-    current = family if family is not None else build_v4_family()
+    if not isinstance(family, ConversationHeldOutV4Family):
+        _fail("owner handoff 不得默认回落到 synthetic family")
     audit: ConversationHeldOutV4MetadataAudit = audit_v4_family_artifacts(
-        source, require_k_drive=False, family=current)
+        source, require_k_drive=False, family=family)
+    if not audit.source_qualified:
+        _fail("synthetic fixture 不得进入 owner handoff")
     receipt_path = owner / _RECEIPT_NAME
     _plain_file(receipt_path, label="owner receipt", read=True)
     document = _read_receipt(receipt_path)
     metadata = _parse_metadata(document)
     projection_md, projection_html = _projection_digests(source)
-    if metadata.bundle_payload_sha256 != current.bundle.payload_sha256:
+    if metadata.bundle_payload_sha256 != family.bundle.payload_sha256:
         _fail("owner receipt bundle SHA 与 source bundle 不一致")
-    if (metadata.bundle_payload_size != current.bundle.payload_size
-            or metadata.bundle_index != current.bundle.index
+    if (metadata.bundle_payload_size != family.bundle.payload_size
+            or metadata.bundle_index != family.bundle.index
             or metadata.case_count != 6
             or metadata.turn_count != audit.turn_count
             or metadata.source_count != audit.source_count

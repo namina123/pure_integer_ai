@@ -29,6 +29,7 @@ from pure_integer_ai.cognition.shared.representation_rendering import (
 )
 from pure_integer_ai.cognition.shared.scope_identity import ScopeIdentity
 from pure_integer_ai.experiments.generation_verification_runtime import (
+    GenerationSourceCheckRequest,
     GenerationStructureCheckRequest,
     GenerationTaskCheckRequest,
 )
@@ -297,6 +298,46 @@ class GroundedResponseActStructureVerifier:
 
 # object-model: verifier; state=immutable
 @dataclass(frozen=True, slots=True)
+class GroundedResponseActSourceVerifier:
+    """核验 non-answer readback 没有伪造命题、引用或来源要求。"""
+
+    matched_reason: ObjectIdentity
+    mismatched_reason: ObjectIdentity
+
+    def __post_init__(self) -> None:
+        """固定成功与失败分型理由，避免 verifier 在运行时补造语义。"""
+        _instruction(self.matched_reason, where="response-act source match")
+        _instruction(
+            self.mismatched_reason, where="response-act source mismatch")
+
+    def verify(
+            self,
+            request: GenerationSourceCheckRequest,
+            ) -> VerificationEvaluation:
+        """要求完整 G-04 请求和 readback 都保持零来源性 non-answer 边界。"""
+        if not isinstance(request, GenerationSourceCheckRequest):
+            raise TypeError("response-act source verifier request 类型错误")
+        matches = (
+            not request.postcheck.source_requirements
+            and not request.requirements
+            and not request.observation.propositions
+            and not request.propositions
+            and not request.observation.cited_sources
+        )
+        goal = request.postcheck.execution.plan.request.goal
+        return VerificationEvaluation(
+            VERDICT_SUPPORT if matches else VERDICT_REFUTE,
+            (request.postcheck.execution.stable_key(),),
+            detail=(1 if matches else 2,
+                    *(self.matched_reason if matches
+                      else self.mismatched_reason).stable_key()),
+            source=goal.source,
+            scope=goal.scope,
+        )
+
+
+# object-model: verifier; state=immutable
+@dataclass(frozen=True, slots=True)
 class GroundedResponseActTaskVerifier:
     """独立比较显式 task requirement 与 parser task observation。"""
 
@@ -391,6 +432,7 @@ __all__ = [
     "GroundedResponseActParserGrammar",
     "GroundedResponseActParserProtocol",
     "GroundedResponseActPostcheckMapper",
+    "GroundedResponseActSourceVerifier",
     "GroundedResponseActStructureVerifier",
     "GroundedResponseActSurfaceParser",
     "GroundedResponseActTaskVerifier",

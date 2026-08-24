@@ -15,8 +15,12 @@ from pure_integer_ai.experiments.ph2_w03_w04_w05_question_sparse_dispatch_contra
     RawQuestionSparseDispatchProbe,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_raw_question_contract import (
+    RawQuestionAnswerResult,
     RAW_QUESTION_STATUSES,
     RawQuestionRequest,
+)
+from pure_integer_ai.experiments.ph2_w03_w04_w05_question_answer_contract import (
+    W03W04W05AnswerProof,
 )
 
 
@@ -371,6 +375,94 @@ class SparseQAResult:
 
 # object-model: value; representation=struct; interop=pending
 @dataclass(frozen=True, slots=True)
+class SparseQASentenceProjection:
+    """从已选择 W03-W05 proof 读取完整已学习命题句的只读投影。"""
+
+    query_result: SparseQAResult
+    generated_proposition_surface: str | None
+
+    def __post_init__(self) -> None:
+        """拒绝固定模板、短答案替换或非 ANSWER 状态的伪句子。"""
+        if not isinstance(self.query_result, SparseQAResult):
+            raise TypeError("FT22 sentence projection 缺少 query result")
+        surface = self.generated_proposition_surface
+        if self.query_result.status == "ANSWER":
+            if (not isinstance(surface, str) or not surface
+                    or surface.strip() != surface):
+                raise W03W04W05SparseQARuntimeError(
+                    "FT22 ANSWER lacks a generated proposition surface")
+        elif surface is not None:
+            raise W03W04W05SparseQARuntimeError(
+                "FT22 non-answer projected a proposition surface")
+
+    def to_dict(self) -> dict[str, object]:
+        """导出 query 与实际命题句，保留两者不同的承重角色。"""
+        return {
+            "generated_proposition_surface": (
+                self.generated_proposition_surface),
+            "query_result": self.query_result.to_dict(),
+        }
+
+    def sha256(self) -> str:
+        """返回当前 projection 的规范内容摘要。"""
+        return _sha(self.to_dict())
+
+
+# object-model: host-adapter; representation=legacy-carrier; interop=not-canonical
+@dataclass(frozen=True, slots=True)
+class SparseQASameDispatchProofProjection:
+    """仅供 Python host adapter 保留同次 sparse dispatch 的 legacy proof。
+
+    此载体故意不提供 ``canonical_record``、``to_dict`` 或 ``sha256``：其中的
+    Python dataclass、字符串和对象引用不能定义跨语言语义。后续调用者必须先把
+    已核验的 proof 显式投影为独立的有限整数 record，才可进入任何可迁移状态。
+    """
+
+    query_result: SparseQAResult
+    raw_result: RawQuestionAnswerResult | None
+    typed_proof: W03W04W05AnswerProof | None
+    generated_proposition_surface: str | None
+    host_adapter_only: int = 1
+
+    def __post_init__(self) -> None:
+        """保证 proof 直接保留自同一次 ANSWER raw result，拒绝重新构造或泄漏。"""
+        if not isinstance(self.query_result, SparseQAResult):
+            raise TypeError("FT22 host proof projection 缺少 query result")
+        if type(self.host_adapter_only) is not int or self.host_adapter_only != 1:
+            raise W03W04W05SparseQARuntimeError(
+                "FT22 proof projection 失去 host-adapter-only 标记")
+        result = self.query_result
+        if result.status != "ANSWER":
+            if (self.raw_result is not None or self.typed_proof is not None
+                    or self.generated_proposition_surface is not None):
+                raise W03W04W05SparseQARuntimeError(
+                    "FT22 non-answer leaked a legacy typed proof")
+            return
+        raw = self.raw_result
+        if (not isinstance(raw, RawQuestionAnswerResult)
+                or raw.status != "ANSWER"
+                or raw.answer_surface != result.answer_surface
+                or raw.selected_construction is None
+                or raw.typed_result is None
+                or raw.typed_result.status != "ANSWER"
+                or raw.typed_result.answer_surface != result.answer_surface
+                or raw.typed_result.proof is None):
+            raise W03W04W05SparseQARuntimeError(
+                "FT22 ANSWER lost its same-dispatch typed result")
+        proof = raw.typed_result.proof
+        if (self.typed_proof is not proof
+                or self.generated_proposition_surface
+                != proof.generated_proposition_surface
+                or proof.source_record_key
+                != raw.selected_construction.source_record_key
+                or proof.source_record_key
+                != result.selected_source_record_key):
+            raise W03W04W05SparseQARuntimeError(
+                "FT22 host proof projection drifted from its answer path")
+
+
+# object-model: value; representation=struct; interop=pending
+@dataclass(frozen=True, slots=True)
 class SparseQAQueryProbe:
     """Deterministic counts for repeated warm queries on one runtime."""
 
@@ -469,6 +561,8 @@ __all__ = [
     "SparseQAQueryBatch",
     "SparseQAQueryProbe",
     "SparseQAResult",
+    "SparseQASameDispatchProofProjection",
+    "SparseQASentenceProjection",
     "SparseQARuntime",
     "SparseQARuntimeBuildProbe",
     "W03W04W05SparseQARuntimeError",

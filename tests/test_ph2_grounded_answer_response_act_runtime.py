@@ -25,6 +25,10 @@ from pure_integer_ai.cognition.shared.question_answer import (
     EvidenceAnswerPolicyProtocol,
     QuestionRequest,
 )
+from pure_integer_ai.cognition.shared.generation_verification import (
+    GenerationSourceRequirement,
+    RecoveredGenerationProposition,
+)
 from pure_integer_ai.cognition.shared.representation_rendering import (
     UnicodeRepresentationRenderer,
 )
@@ -48,8 +52,12 @@ from pure_integer_ai.experiments.ph2_grounded_answer_response_act_choice_use imp
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_response_act_parser import (
     GroundedResponseActParserProtocol,
+    GroundedResponseActSourceVerifier,
     GroundedResponseActStructureVerifier,
     GroundedResponseActTaskVerifier,
+)
+from pure_integer_ai.experiments.generation_verification_runtime import (
+    GenerationSourceCheckRequest,
 )
 from pure_integer_ai.experiments.ph2_grounded_answer_response_act_runtime_factory import (
     GroundedResponseActRunLocalBuild,
@@ -437,6 +445,83 @@ def _rehearse_response_act(requirement, response_act, offset):
         if alias_factory.fixture is not None:
             alias_factory.fixture.close()
         backend.close()
+
+
+def test_response_act_source_verifier_requires_empty_non_answer_sources():
+    """non-answer G-04 只能回读零命题、零引用和零来源 requirement。"""
+    _course, planning_build, _item, run = _rehearse_response_act(
+        "COMMUNICATIVE_TASK", "CLARIFY", 31)
+    postcheck = run.postcheck
+    assert postcheck is not None
+    observation = postcheck.parsed.observation
+    assert observation is not None
+    goal = postcheck.request.execution.plan.request.goal
+    verifier = GroundedResponseActSourceVerifier(
+        minimal_instruction_identity((_BASE, 240, 1)),
+        minimal_instruction_identity((_BASE, 240, 2)),
+    )
+
+    clean = verifier.verify(GenerationSourceCheckRequest(
+        postcheck.request,
+        observation,
+        (),
+        (),
+    ))
+
+    assert clean.verdict == VERDICT_SUPPORT
+    assert clean.claim_keys == (postcheck.request.execution.stable_key(),)
+    assert clean.source == goal.source
+    assert clean.scope == goal.scope
+
+    candidate = planning_build.planning.candidates[0]
+    recovered = RecoveredGenerationProposition(
+        candidate.stable_key(),
+        candidate.proposition,
+        candidate.source,
+        candidate.scope,
+        (_BASE, 241, 1),
+    )
+    requirement = GenerationSourceRequirement(
+        candidate.stable_key(),
+        candidate.source,
+        candidate.scope,
+        True,
+        True,
+        (_BASE, 241, 2),
+        candidate.citation_sources,
+    )
+    violating_requests = (
+        GenerationSourceCheckRequest(
+            postcheck.request,
+            replace(observation, cited_sources=(candidate.source,)),
+            (),
+            (),
+        ),
+        GenerationSourceCheckRequest(
+            postcheck.request,
+            observation,
+            (requirement,),
+            (),
+        ),
+        GenerationSourceCheckRequest(
+            postcheck.request,
+            replace(observation, propositions=(recovered,)),
+            (),
+            (),
+        ),
+        GenerationSourceCheckRequest(
+            postcheck.request,
+            observation,
+            (),
+            (recovered,),
+        ),
+    )
+
+    for request in violating_requests:
+        evaluation = verifier.verify(request)
+        assert evaluation.verdict == VERDICT_REFUTE
+        assert evaluation.source == goal.source
+        assert evaluation.scope == goal.scope
 
 
 def test_response_act_catalog_rehearses_task_and_cross_source_conflict():
