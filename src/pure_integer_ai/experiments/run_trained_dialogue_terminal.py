@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 from pathlib import Path
 import sqlite3
@@ -215,6 +216,42 @@ def _write_protocol_payload(stream_out: BinaryIO,
     stream_out.flush()
 
 
+def _peak_working_set_bytes() -> int:
+    """读取宿主进程峰值工作集，仅用于 K 盘性能诊断。"""
+    if sys.platform == "win32":
+        class _Counters(ctypes.Structure):
+            _fields_ = (
+                ("cb", ctypes.c_ulong),
+                ("page_fault_count", ctypes.c_ulong),
+                ("peak_working_set_size", ctypes.c_size_t),
+                ("working_set_size", ctypes.c_size_t),
+                ("quota_peak_paged_pool_usage", ctypes.c_size_t),
+                ("quota_paged_pool_usage", ctypes.c_size_t),
+                ("quota_peak_non_paged_pool_usage", ctypes.c_size_t),
+                ("quota_non_paged_pool_usage", ctypes.c_size_t),
+                ("pagefile_usage", ctypes.c_size_t),
+                ("peak_pagefile_usage", ctypes.c_size_t),
+            )
+        counters = _Counters()
+        counters.cb = ctypes.sizeof(_Counters)
+        get_process = ctypes.windll.kernel32.GetCurrentProcess
+        get_process.restype = ctypes.c_void_p
+        get_info = ctypes.windll.psapi.GetProcessMemoryInfo
+        get_info.argtypes = (
+            ctypes.c_void_p, ctypes.POINTER(_Counters), ctypes.c_ulong)
+        get_info.restype = ctypes.c_int
+        process = get_process()
+        if get_info(process, ctypes.byref(counters), counters.cb):
+            return int(counters.peak_working_set_size)
+        return 0
+    try:
+        import resource
+        value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except (ImportError, AttributeError, OSError):
+        return 0
+    return value * (1024 if sys.platform != "darwin" else 1)
+
+
 def run_trained_dialogue_terminal(
         *,
         project_root: str | Path,
@@ -392,6 +429,13 @@ def run_trained_dialogue_terminal(
                 raise ValueError(f"会话检查点无法恢复: {error}") from error
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     latency_us: list[int] = []
+    sqlite_statement_counts: list[int] = []
+    sqlite_statement_count = 0
+    if metrics_output is not None:
+        def _trace_statement(_sql: str) -> None:
+            nonlocal sqlite_statement_count
+            sqlite_statement_count += 1
+        connection.set_trace_callback(_trace_statement)
     try:
         while True:
             if not protocol_stream:
@@ -485,6 +529,10 @@ def run_trained_dialogue_terminal(
                 learned_relation_answer_frame_model=(
                     learned_relation_answer_frame_model))
             latency_us.append(max(0, (time.perf_counter_ns() - started_ns) // 1000))
+            if metrics_output is not None:
+                previous_count = sum(sqlite_statement_counts)
+                sqlite_statement_counts.append(
+                    sqlite_statement_count - previous_count)
             if session_capability is not None:
                 try:
                     if runtime_memory_state is None:
@@ -528,6 +576,9 @@ def run_trained_dialogue_terminal(
                     "latency_us": latency_us,
                     "p50_us": p50,
                     "p95_us": p95,
+                    "sqlite_statement_count_total": sqlite_statement_count,
+                    "sqlite_statement_count_per_turn": sqlite_statement_counts,
+                    "peak_working_set_bytes": _peak_working_set_bytes(),
                 }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 + "\n",
                 encoding="utf-8",

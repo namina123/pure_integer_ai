@@ -64,4 +64,4 @@ python -m pure_integer_ai.experiments.run_dialogue_protocol `
 
 ## 已验证边界
 
-真实独立进程已完成六轮 JSONL：来源约束 ANSWER、未知问题 UNKNOWN、无焦点问题 UNKNOWN、来源问答 ANSWER、紧接追问 ANSWER、另一来源事实 ANSWER；会话 checkpoint 可以跨进程回读。热 SQLite 页缓存下协议 p95 与人类终端基线同量级；冷启动另行记录，不把冷页加载时间归因于协议编码。
+真实独立进程已完成六轮 JSONL：来源约束 ANSWER、未知问题 UNKNOWN、无焦点问题 UNKNOWN、来源问答 ANSWER、紧接追问 ANSWER、另一来源事实 ANSWER；会话 checkpoint 可以跨进程回读。metrics 还记录每轮 SQLite 语句读取数和宿主峰值工作集。热 SQLite 页缓存下协议 p95 与人类终端基线同量级；冷启动另行记录，不把冷页加载时间归因于协议编码。
