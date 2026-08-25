@@ -113,7 +113,10 @@ def _course_paths_for_training_run(
     for row in rows:
         if not isinstance(row, list) or not row:
             raise ValueError("training run source_files 记录非法")
-        candidate = Path(str(row[0])).resolve()
+        candidate = Path(str(row[0]))
+        if not candidate.is_absolute():
+            candidate = project_root / candidate
+        candidate = candidate.resolve()
         try:
             candidate.relative_to(project_root)
         except ValueError as error:
@@ -255,7 +258,8 @@ def _peak_working_set_bytes() -> int:
 def run_trained_dialogue_terminal(
         *,
         project_root: str | Path,
-        qa_database: str | Path,
+        qa_database: str | Path | None = None,
+        release_root: str | Path | None = None,
         training_run_root: str | Path | None = None,
         session_root: str | Path | None = None,
         extra_course_paths: tuple[str | Path, ...] = (),
@@ -367,16 +371,41 @@ def run_trained_dialogue_terminal(
                 runtime_material_response = restored_provider.response
             except (RuntimeMaterialBindingPersistenceError, TypeError, ValueError):
                 runtime_material_response = _binding_fail_closed
-    database = _require_k_file(qa_database, label="qa_database")
-    root = Path(project_root).resolve()
+    release = None
+    if release_root is not None:
+        from pure_integer_ai.experiments.public_model_release import (
+            load_public_model_release,
+        )
+        release = load_public_model_release(release_root)
+        root = release.root
+        database = release.qa_database
+        resolved_training_run_root = release.training_root
+        sparse_snapshot = release.sparse_snapshot
+    else:
+        if qa_database is None:
+            raise ValueError("必须指定 release_root 或 qa_database")
+        database = _require_k_file(qa_database, label="qa_database")
+        root = Path(project_root).resolve()
+        resolved_training_run_root = None
+        sparse_snapshot = None
     trained_surface = None
-    if training_run_root is not None:
-        run_root = Path(training_run_root).resolve()
+    if release is not None and training_run_root is not None:
+        if Path(training_run_root).resolve() != resolved_training_run_root:
+            raise ValueError("release_root 与 training_run_root 不得冲突")
+    run_root_value = resolved_training_run_root or training_run_root
+    if run_root_value is not None:
+        run_root = Path(run_root_value).resolve()
         if run_root.drive.upper() != "K:" or not run_root.is_dir():
             raise ValueError("training_run_root 必须是 K 盘已存在目录")
         course_paths = _course_paths_for_training_run(
             root, run_root, extra_course_paths)
-        pack = load_dialogue_training_pack(course_paths)
+        source_identities = None
+        if release is not None:
+            source_identities = {
+                path: f"data/ph2/{path.name}" for path in course_paths
+            }
+        pack = load_dialogue_training_pack(
+            course_paths, source_path_identities=source_identities)
         load_training_observation(
             run_root, expected_pack_sha256=pack.pack_sha256)
         trained_surface = load_trained_surface_runtime(
@@ -393,14 +422,18 @@ def run_trained_dialogue_terminal(
         session_path = Path(session_root).resolve()
         if session_path.drive.upper() != "K:" or not session_path.is_dir():
             raise ValueError("session_root 必须是 K 盘已存在目录")
-        if training_run_root is not None and session_path == Path(training_run_root).resolve():
+        if run_root_value is not None and session_path == Path(run_root_value).resolve():
             raise ValueError("session_root 不得与 training_run_root 相同")
         session_capability = open_existing_run_root(
             session_path, label="broad dialogue session root")
         ensure_normal_relative_directory(
             session_capability, "broad_dialogue_checkpoints",
             label="broad dialogue checkpoint directory")
-    sparse_runtime = load_or_rebuild_public_sparse_qa_runtime()
+    if sparse_snapshot is None:
+        sparse_runtime = load_or_rebuild_public_sparse_qa_runtime()
+    else:
+        sparse_runtime = load_or_rebuild_public_sparse_qa_runtime(
+            sparse_snapshot, repository=root)
     narrow = _narrow_answer(
         sparse_runtime,
         build_public_sentence_demo_catalog(sparse_runtime),
@@ -590,7 +623,10 @@ def run_trained_dialogue_terminal(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="run read-only trained dialogue terminal")
     parser.add_argument("--project-root", default=".")
-    parser.add_argument("--qa-database", required=True)
+    parser.add_argument("--qa-database", default=None,
+                        help="兼容旧入口；独立发布请使用 --release-root")
+    parser.add_argument("--release-root", default=None,
+                        help="K 盘自包含公开模型 release root")
     parser.add_argument("--training-run-root", default=None)
     parser.add_argument("--session-root", default=None,
                         help="可选 K 盘会话根；启用后跨进程恢复最近 8 轮")
@@ -624,6 +660,7 @@ def main(argv: list[str] | None = None) -> int:
     return run_trained_dialogue_terminal(
         project_root=args.project_root,
         qa_database=args.qa_database,
+        release_root=args.release_root,
         training_run_root=args.training_run_root,
         session_root=args.session_root,
         extra_course_paths=tuple(args.extra_course),

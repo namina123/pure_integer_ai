@@ -222,20 +222,21 @@ def _item_token_source_spans(
     """把当前 token 投影回原文码点 span，并为同位 occurrence 分配稳定 ordinal。"""
     if item.raw_text is None:
         return None
+    tokens = tuple(item.tokens) if item.tokens else item.token_values()
     raw_spans: list[tuple[int, int]] = []
     if item.word_form_parse is not None:
         selected = item.word_form_parse.selected
         if selected is None:
-            if item.tokens:
+            if tokens:
                 raise ValueError("无 winner 的词形解析不得携带非空 token")
             return ()
         parts = selected.segmentation.parts
-        if tuple(part.surface for part in parts) != tuple(item.tokens):
+        if tuple(part.surface for part in parts) != tokens:
             raise ValueError("词形 winner 与 CollectedItem.tokens 不一致")
         raw_spans = [(part.start, part.end) for part in parts]
     else:
         cursor = 0
-        for token in item.tokens:
+        for token in tokens:
             if not isinstance(token, str):
                 raise TypeError("CollectedItem.tokens 必须是字符串序列")
             start = item.raw_text.find(token, cursor)
@@ -302,6 +303,10 @@ def _split_item_to_segments(item: CollectedItem, *,
     **代码域分支**（C6 生产闭环·doc/重来_A3_代码域observe设计补充.md §二致命#2）：MODALITY_CODE
     不消费语言句界候选，一段一函数，Segment 带 code_source。
     """
+    # Compact indexed language items materialize only for this round; the
+    # round runner releases the compatibility list after all consumers finish.
+    if item.modality == MODALITY_LANGUAGE:
+        item.materialize_tokens()
     # 代码域：一段一函数·不按句切（代码标点会碎函数体·observe MODALITY_CODE gate 建 COMPOSES 树）
     if item.modality == MODALITY_CODE:
         if not item.code_source:

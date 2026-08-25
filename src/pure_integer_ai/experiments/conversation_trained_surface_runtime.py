@@ -84,7 +84,10 @@ def _surface_evidence_paths_for_run(
     for row in rows:
         if not isinstance(row, list) or len(row) != 2:
             raise TrainedSurfaceRuntimeError("surface evidence commitment 记录非法")
-        candidate = Path(str(row[0])).resolve()
+        candidate = Path(str(row[0]))
+        if not candidate.is_absolute():
+            candidate = project_root / candidate
+        candidate = candidate.resolve()
         try:
             candidate.relative_to(project_root)
         except ValueError as error:

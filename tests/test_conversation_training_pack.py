@@ -1,5 +1,6 @@
 """公开对话训练 pack 的大能力级定向验证。"""
 from pathlib import Path
+import json
 
 from pure_integer_ai.experiments.conversation_training_pack import (
     load_dialogue_training_pack,
@@ -11,6 +12,14 @@ from pure_integer_ai.experiments.dialogue_training_typed_adapter import (
     TypedDialogueCourseAdapter,
 )
 from pure_integer_ai.experiments.run_conversation_training import default_course_paths
+from pure_integer_ai.experiments.integer_token_index import (
+    build_integer_aggregate_index, build_integer_token_index,
+    load_integer_aggregate_index, write_integer_aggregate_index,
+    write_integer_token_index,
+)
+from pure_integer_ai.experiments.split_indexed_dialogue_course import (
+    split_indexed_dialogue_course,
+)
 
 
 def test_public_course_pack_has_train_heldout_negative_and_replays() -> None:
@@ -54,3 +63,127 @@ def test_typed_course_is_explicit_and_stable() -> None:
     assert report.request_keys == adapter.report(pack.cases).request_keys
     assert all(case.typed_payload is None or case.payload_kind is not None
                for case in pack.cases)
+
+
+def test_compact_course_reconstructs_surface_from_integer_sidecar(tmp_path: Path) -> None:
+    sidecar = tmp_path / "course.jsonl.tokens.int.json"
+    course = tmp_path / "course.jsonl"
+    index = build_integer_token_index(("甲乙重复", "丙丁"),
+                                      sequence_keys=("a", "b"))
+    write_integer_token_index(sidecar, index)
+    rows = [
+        {"sample_id": "a", "split": "train", "token_index_file": sidecar.name,
+         "token_index_ordinal": 0, "token_index_sha256": index.sha256},
+        {"sample_id": "b", "split": "heldout", "token_index_file": sidecar.name,
+         "token_index_ordinal": 1, "token_index_sha256": index.sha256},
+    ]
+    course.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n"
+                                  for row in rows), encoding="utf-8")
+    pack = load_dialogue_training_pack((course,),
+                                       source_path_identities={course: "compact/course.jsonl"})
+    assert [case.raw_text for case in pack.cases] == ["甲乙重复", "丙丁"]
+    assert dict(pack.split_counts) == {"train": 1, "heldout": 1, "negative": 0}
+
+
+def test_integer_index_deduplicates_repeated_sequences() -> None:
+    index = build_integer_token_index(("重复内容", "重复内容", "另一条"),
+                                      sequence_keys=("a", "b", "c"))
+    assert len(index.sequences) == 2
+    assert index.occurrence_ordinals == (0, 0, 1)
+    assert [index.render(i) for i in range(3)] == ["重复内容", "重复内容", "另一条"]
+
+
+def test_integer_index_duplicate_roundtrip_is_byte_stable(tmp_path: Path) -> None:
+    path = tmp_path / "index.json"
+    index = build_integer_token_index(("相同", "相同", "不同"),
+                                      sequence_keys=("a", "b", "c"))
+    write_integer_token_index(path, index)
+    from pure_integer_ai.experiments.integer_token_index import load_integer_token_index
+    replay = load_integer_token_index(path)
+    assert replay.sha256 == index.sha256
+    assert replay.occurrence_ordinals == (0, 0, 1)
+
+
+def test_integer_aggregate_index_reuses_sequence_references(tmp_path: Path) -> None:
+    """重复结构只保留一条 aggregate，渲染仍由整数引用完整恢复。"""
+    tokens = build_integer_token_index(
+        ("甲", "乙", "甲乙"), sequence_keys=("a", "b", "c"))
+    # 0/1/2 指向 token sequence；3 指向此前登记的 aggregate 0。
+    aggregate = build_integer_aggregate_index(
+        tokens,
+        (("first", (0, 1)), ("second", (0, 1)), ("nested", (3, 2))),
+    )
+    assert len(aggregate.aggregate_sequences) == 2
+    assert aggregate.occurrence_ordinals == (0, 0, 1)
+    assert [aggregate.render(tokens, i) for i in range(3)] == [
+        "甲乙", "甲乙", "甲乙甲乙"]
+    path = tmp_path / "aggregate.json"
+    write_integer_aggregate_index(path, aggregate)
+    replay = load_integer_aggregate_index(path)
+    assert replay.sha256 == aggregate.sha256
+    assert replay.render(tokens, 2) == "甲乙甲乙"
+
+
+def test_integer_aggregate_index_rejects_forward_reference() -> None:
+    tokens = build_integer_token_index(("甲",), sequence_keys=("a",))
+    try:
+        build_integer_aggregate_index(tokens, (("bad", (2,)),))
+    except ValueError as error:
+        assert "此前 aggregate" in str(error)
+    else:
+        raise AssertionError("forward aggregate reference must fail closed")
+
+
+def test_indexed_course_default_projection_keeps_training_tokens(tmp_path: Path) -> None:
+    sidecar = tmp_path / "course.jsonl.tokens.int.json"
+    course = tmp_path / "course.jsonl"
+    index = build_integer_token_index(("保留训练信号",), sequence_keys=("a",))
+    write_integer_token_index(sidecar, index)
+    course.write_text(json.dumps({
+        "sample_id": "a", "split": "train", "token_index_file": sidecar.name,
+        "token_index_ordinal": 0, "token_index_sha256": index.sha256,
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+    pack = load_dialogue_training_pack((course,))
+    item = pack.training_items()[0]
+    assert item.tokens == list("保留训练信号")
+    assert item.raw_text == "保留训练信号"
+
+
+def test_indexed_course_deferred_projection_materializes_and_releases(tmp_path: Path) -> None:
+    sidecar = tmp_path / "course.jsonl.tokens.int.json"
+    course = tmp_path / "course.jsonl"
+    index = build_integer_token_index(("按需恢复",), sequence_keys=("a",))
+    write_integer_token_index(sidecar, index)
+    course.write_text(json.dumps({
+        "sample_id": "a", "split": "train", "token_index_file": sidecar.name,
+        "token_index_ordinal": 0, "token_index_sha256": index.sha256,
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+    pack = load_dialogue_training_pack((course,))
+    item = pack.training_items(defer_indexed_surface=True)[0]
+    assert item.tokens == []
+    assert item.token_values() == tuple("按需恢复")
+    assert item.materialize_tokens() == list("按需恢复")
+    item.release_index_tokens()
+    assert item.tokens == []
+
+
+def test_indexed_course_split_preserves_sidecar_and_records(tmp_path: Path) -> None:
+    sidecar = tmp_path / "course.jsonl.tokens.int.json"
+    course = tmp_path / "course.jsonl"
+    index = build_integer_token_index(("甲一", "乙二", "丙三"),
+                                      sequence_keys=("a", "b", "c"))
+    write_integer_token_index(sidecar, index)
+    course.write_text("".join(json.dumps({
+        "sample_id": key, "split": "train", "token_index_file": sidecar.name,
+        "token_index_ordinal": ordinal, "token_index_sha256": index.sha256,
+    }, ensure_ascii=False) + "\n" for ordinal, key in enumerate(("a", "b", "c"))),
+                        encoding="utf-8")
+    output = tmp_path / "shards"
+    reports = split_indexed_dialogue_course(course, output, shard_size=2,
+                                            require_k_drive=False)
+    assert [item["record_count"] for item in reports] == [2, 1]
+    assert (output / sidecar.name).read_bytes() == sidecar.read_bytes()
+    shard_paths = tuple(output / str(item["path"]).split("/")[-1]
+                        for item in reports)
+    pack = load_dialogue_training_pack(shard_paths)
+    assert [case.raw_text for case in pack.cases] == ["甲一", "乙二", "丙三"]

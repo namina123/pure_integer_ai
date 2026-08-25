@@ -142,6 +142,11 @@ class CollectedItem:
     # adapter 注入，formal round 不从这些字段猜测语义。
     typed_payload: Any = field(default=None, compare=False, repr=False)
     payload_kind: str | None = field(default=None, compare=False)
+    # Compact public courses share one integer sidecar and only carry an
+    # occurrence ordinal. This transport reference is outside core graph state.
+    token_index: Any = field(default=None, compare=False, repr=False)
+    token_index_ordinal: int | None = field(default=None, compare=False)
+    _tokens_from_index: bool = field(default=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         assert_int(self.collect_type, self.source, self.strength,
@@ -166,6 +171,36 @@ class CollectedItem:
                     "CollectedItem.payload_kind 必须配套 CanonicalJsonObject 样式 payload")
         elif self.typed_payload is not None:
             raise TypeError("CollectedItem.typed_payload 不得脱离 payload_kind")
+        if self.token_index is None and self.token_index_ordinal is not None:
+            raise TypeError("token_index_ordinal 必须配套 token_index")
+        if (self.token_index is not None
+                and (type(self.token_index_ordinal) is not int
+                     or self.token_index_ordinal < 0)):
+            raise TypeError("token_index_ordinal 必须是非负整数")
+
+    def token_values(self) -> tuple[str, ...]:
+        """读取 token 序列；compact sidecar 在此按需渲染且不保留副本。"""
+        if self.tokens:
+            return tuple(self.tokens)
+        if self.token_index is not None:
+            render = getattr(self.token_index, "render", None)
+            if render is None:
+                raise TypeError("token_index 缺少 render 协议")
+            return tuple(render(self.token_index_ordinal))
+        return ()
+
+    def materialize_tokens(self) -> list[str]:
+        """建立兼容 ``tokens`` 视图；调用方应在 round 结束后释放。"""
+        if not self.tokens:
+            self.tokens = list(self.token_values())
+            self._tokens_from_index = self.token_index is not None
+        return self.tokens
+
+    def release_index_tokens(self) -> None:
+        """释放本轮由 compact sidecar 建立的 Python surface 列表。"""
+        if self._tokens_from_index:
+            self.tokens.clear()
+            self._tokens_from_index = False
 
 
 @runtime_checkable
@@ -1155,12 +1190,13 @@ def corpus_relevant_vocab(corpus: list) -> frozenset[str]:
 
     铁律：确定性（frozenset·语料 token 确定）/ 纯 str（token 是 surface 文本）。
     """
-    return frozenset(
-        tok for it in corpus
-        if getattr(it, "modality", None) == MODALITY_LANGUAGE
-        and getattr(it, "tokens", None)
-        for tok in it.tokens
-    )
+    values: set[str] = set()
+    for item in corpus:
+        if getattr(item, "modality", None) != MODALITY_LANGUAGE:
+            continue
+        reader = getattr(item, "token_values", None)
+        values.update(reader() if reader is not None else item.tokens)
+    return frozenset(values)
 
 
 def filter_pairs_to_vocab(pairs: list, vocab: frozenset[str],

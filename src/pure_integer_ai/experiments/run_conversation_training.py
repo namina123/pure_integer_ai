@@ -230,16 +230,24 @@ def run_conversation_training(*, project_root: str | Path,
                               causal_only: bool = False,
                               typed_semantic: bool = True,
                               extra_course_paths: tuple[str | Path, ...] = (),
+                              portable_source_identity: bool = False,
+                              include_default_courses: bool = True,
+                              replay_completed_stages: bool = False,
                               ) -> dict[str, object]:
     """消费公开 train split，并产出真实 SQLite graph/checkpoint 摘要。"""
     root = Path(run_root).resolve()
     if root.drive.upper() != "K:" or not root.is_dir():
         raise ValueError("run_root 必须是已存在的 K 盘目录")
-    paths = (*default_course_paths(project_root), *tuple(
-        Path(item).resolve() for item in extra_course_paths))
+    default_paths = default_course_paths(project_root) if include_default_courses else ()
+    paths = tuple(default_paths) + tuple(
+        Path(item).resolve() for item in extra_course_paths)
     if len(paths) != len(set(paths)):
         raise ValueError("extra course path 与默认课程重复")
-    pack = load_dialogue_training_pack(paths)
+    source_identities = (
+        {path: f"data/ph2/{path.name}" for path in paths}
+        if portable_source_identity else None)
+    pack = load_dialogue_training_pack(
+        paths, source_path_identities=source_identities)
     typed_report = TypedDialogueCourseAdapter().report(pack.cases)
     strict_bundle = None
     if typed_semantic and any(stage >= 3 for stage in active_stages):
@@ -267,8 +275,16 @@ def run_conversation_training(*, project_root: str | Path,
             if item not in train_items
         ]
     else:
-        train_items = pack.training_items(causal_only=causal_only)
-        heldout_items = pack.training_items(split="heldout", causal_only=causal_only)
+        # Long indexed courses keep only raw_text + integer reference in the
+        # corpus; formal_train materializes one item for one round and releases
+        # it afterwards. Stage >=3 strict evaluation keeps its eager contract.
+        defer_indexed_surface = not any(stage >= 3 for stage in active_stages)
+        train_items = pack.training_items(
+            causal_only=causal_only,
+            defer_indexed_surface=defer_indexed_surface)
+        heldout_items = pack.training_items(
+            split="heldout", causal_only=causal_only,
+            defer_indexed_surface=defer_indexed_surface)
     contrast = build_dialogue_training_contrast(pack)
     semantic_protocol = occurrence_protocol = span_protocol = None
     semantic_query_protocol = None
@@ -330,6 +346,7 @@ def run_conversation_training(*, project_root: str | Path,
                 run_id=run_id,
                 rounds_per_stage=1,
                 active_training_stages=active_stages,
+                replay_completed_stages=replay_completed_stages,
                 resume=resume_from is not None,
                 base_run_id=resume_from,
                 probe_holdout=(
@@ -420,6 +437,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="仅运行旧 observe 图；默认接入 typed S-02 课程")
     parser.add_argument("--extra-course", action="append", default=[],
                         help="可选的公开课程 JSONL；不改变默认 v6 pack")
+    parser.add_argument("--portable-source-identity", action="store_true",
+                        help="用 data/ph2 basename 绑定 pack，允许跨机器恢复")
+    parser.add_argument("--no-default-courses", action="store_true",
+                        help="增量 shard 只消费显式 extra course")
+    parser.add_argument("--replay-completed-stages", action="store_true",
+                        help="E1 恢复后显式重放 active stage，供增量 shard 使用")
     args = parser.parse_args(argv)
     summary = run_conversation_training(
         project_root=args.project_root,
@@ -431,6 +454,9 @@ def main(argv: list[str] | None = None) -> int:
         causal_only=args.causal_only,
         typed_semantic=not args.no_typed_semantic,
         extra_course_paths=tuple(args.extra_course),
+        portable_source_identity=args.portable_source_identity,
+        include_default_courses=not args.no_default_courses,
+        replay_completed_stages=args.replay_completed_stages,
     )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True,
                      separators=(",", ":")))

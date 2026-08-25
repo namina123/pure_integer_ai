@@ -400,6 +400,9 @@ class FormalTrainConfig:
     curriculum_active_relations: frozenset[str] | None = None   # #1143 课程增量 boot：None=全 load（bit-identical·既有行为）·frozenset=只该集关系 boot（T-L0~L6 stage-by-stage 有序学习·镜像 arith S1-S8）
     curriculum_boot_relations: frozenset[str] | None = None   # None=沿用 active scope；显式集合=本调用只 boot 该 delta，backend 保留既有关系。
     active_training_stages: tuple[int, ...] | None = None   # None=完整五阶段；课程 runner 可显式只跑当前训练相位，避免每个关系阶段嵌套完整 formal_train。
+    # 增量 shard 续训：E1 已恢复旧图后，显式重放指定 stage 消费新 corpus。
+    # 默认 False 保持 stage-skip；只有外部 runner 已审计 shard identity 时才开启。
+    replay_completed_stages: bool = False
     persist_graph_dump: bool = True   # 课程中间相位可关闭昂贵 dump/cursor；最终相位仍持久化权威图。
     telemetry_clock_ns: Callable[[], int] | None = None   # 核心默认无墙钟；实验 runner 可从外部注入单调 ns 时钟。
     telemetry_enabled: bool = False   # V-01 外层诊断；关闭时不扫描表、不采工作集且不改变 canonical 状态。
@@ -773,7 +776,10 @@ def _formal_train_impl(config: FormalTrainConfig,
                 raise RuntimeError(
                     "续训前置失败：teacher replay 覆盖率未达标（E4·禁续训防静默降级）")
         # E8 stage-skip（跳已完成 skippable·非 skippable 保留须重标 H2）
-        todo_stages = cursor_resume(state, requested_stages, skippable=SKIPPABLE_STAGES)
+        todo_stages = (list(requested_stages)
+                       if config.replay_completed_stages
+                       else cursor_resume(state, requested_stages,
+                                          skippable=SKIPPABLE_STAGES))
 
     if mastery_protocol is not None:
         mastery_runtime = mastery_protocol.bind(backend)

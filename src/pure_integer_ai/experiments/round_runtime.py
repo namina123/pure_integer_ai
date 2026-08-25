@@ -260,6 +260,9 @@ class DefaultRoundRunner:
                 work_memory.end_episode()
             if work_memory.active_document_scope is not None:
                 work_memory.end_document()
+            # Compact indexed courses keep a shared integer sidecar; release
+            # the temporary compatibility token list before the next item.
+            item.release_index_tokens()
 
     def _run_round_full_unscoped(self, ctx: TrainContext, item: CollectedItem,
                                  stage: int, round_id: int) -> RoundResult:

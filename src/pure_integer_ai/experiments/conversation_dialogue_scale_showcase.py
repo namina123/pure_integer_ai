@@ -173,7 +173,10 @@ def load_training_observation(
     if (expected_pack_sha256 is not None
             and summary["pack_sha256"] != expected_pack_sha256):
         raise ValueError("training observation pack identity 漂移")
-    database = Path(str(summary["database"])).resolve()
+    database = Path(str(summary["database"]))
+    if not database.is_absolute():
+        database = root / database
+    database = database.resolve()
     try:
         database.relative_to(root)
     except ValueError as error:

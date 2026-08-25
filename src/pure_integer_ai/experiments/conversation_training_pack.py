@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from pure_integer_ai.cognition.shared.types import (
     DOMAIN_TEXT,
@@ -31,6 +31,10 @@ from pure_integer_ai.experiments.collection import (
     COLLECT_PRECEDES,
     CollectedItem,
     SOURCE_BARE_TEXT,
+)
+from pure_integer_ai.experiments.integer_token_index import (
+    IntegerTokenIndex,
+    load_integer_token_index,
 )
 
 
@@ -155,12 +159,14 @@ def _surface_for_record(record: dict[str, Any]) -> tuple[str, ...]:
     return tuple(result)
 
 
-def _record_id(record: dict[str, Any], path: Path, line_number: int) -> str:
+def _record_id(record: dict[str, Any], path: Path, line_number: int,
+               source_identity: str | None = None) -> str:
+    label = path.as_posix() if source_identity is None else source_identity
     for key in ("seed_id", "episode_id", "item_id", "frame_key"):
         value = record.get(key)
         if isinstance(value, str) and value:
-            return f"{path.as_posix()}::{value}"
-    return f"{path.as_posix()}::line-{line_number}"
+            return f"{label}::{value}"
+    return f"{label}::line-{line_number}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +189,9 @@ class DialogueTrainingCase:
     source_ref: SourceRef | None = None
     expected_state: str | None = None
     expected_payload: CanonicalJsonObject | None = None
+    indexed_surface: bool = False
+    token_index: IntegerTokenIndex | None = None
+    token_index_ordinal: int | None = None
 
     def __post_init__(self) -> None:
         if not self.case_id or self.split not in _SPLITS or not self.surfaces:
@@ -208,6 +217,15 @@ class DialogueTrainingCase:
         if self.expected_payload is not None and not isinstance(
                 self.expected_payload, CanonicalJsonObject):
             raise ConversationTrainingPackError("expected_payload 类型非法")
+        if type(self.indexed_surface) is not bool:
+            raise ConversationTrainingPackError("indexed_surface 类型非法")
+        if self.indexed_surface != (self.token_index is not None):
+            raise ConversationTrainingPackError(
+                "indexed_surface 与 token_index 必须一致")
+        if self.token_index is not None and (
+                type(self.token_index_ordinal) is not int
+                or self.token_index_ordinal < 0):
+            raise ConversationTrainingPackError("token_index ordinal 非法")
 
     @property
     def raw_text(self) -> str:
@@ -239,11 +257,14 @@ class DialogueTrainingPack:
                      for split in ("train", "heldout", "negative"))
 
     def training_items(self, *, split: str = "train",
-                       causal_only: bool = False) -> list[CollectedItem]:
+                       causal_only: bool = False,
+                       defer_indexed_surface: bool = False) -> list[CollectedItem]:
         """把指定 train/heldout split 投影为 formal_train 可直接消费的语言项。"""
         if split not in {"train", "heldout"}:
             raise ConversationTrainingPackError("训练投影只允许 train/heldout")
-        return self.items_for_split(split=split, causal_only=causal_only)
+        return self.items_for_split(
+            split=split, causal_only=causal_only,
+            defer_indexed_surface=defer_indexed_surface)
 
     def evaluation_items(self, *, split: str | None = None,
                          causal_only: bool = False) -> list[CollectedItem]:
@@ -253,7 +274,8 @@ class DialogueTrainingPack:
         return self.items_for_split(split=split, causal_only=causal_only)
 
     def items_for_split(self, *, split: str | None,
-                        causal_only: bool = False) -> list[CollectedItem]:
+                        causal_only: bool = False,
+                        defer_indexed_surface: bool = False) -> list[CollectedItem]:
         """按公开 split 建立统一 CollectedItem；不改变课程标签或来源。"""
         result = []
         for case in self.cases:
@@ -262,7 +284,11 @@ class DialogueTrainingPack:
             if causal_only and not case.causal_pairs:
                 continue
             text = case.raw_text
-            tokens = list(text)
+            # Indexed long-form courses keep the reconstructed raw surface and
+            # let the language provider create the final token sequence once.
+            # Legacy courses retain the historical eager character projection.
+            tokens = ([]) if (case.indexed_surface and defer_indexed_surface) \
+                else list(text)
             source_ref = case.source_ref
             source = SOURCE_BARE_TEXT
             if source_ref is not None:
@@ -284,6 +310,8 @@ class DialogueTrainingPack:
                 source_ref=source_ref,
                 typed_payload=case.typed_payload,
                 payload_kind=case.payload_kind,
+                token_index=case.token_index,
+                token_index_ordinal=case.token_index_ordinal,
             ))
         return result
 
@@ -297,6 +325,9 @@ def _canonical_case_record(case_id: str, split: str, family: str,
                            source_ref: SourceRef | None,
                            expected_state: str | None,
                            expected_payload: CanonicalJsonObject | None,
+                           indexed_surface: bool,
+                           token_index: IntegerTokenIndex | None,
+                           token_index_ordinal: int | None,
                            ) -> tuple[int, ...]:
     values: list[int] = [CONVERSATION_TRAINING_PACK_PROTOCOL_V1, len(case_id)]
     values.extend(ord(item) for item in case_id)
@@ -324,11 +355,19 @@ def _canonical_case_record(case_id: str, split: str, family: str,
     else:
         encoded = canonical_json_bytes(expected_payload.to_value())
         values.extend((1, len(encoded), *encoded))
+    values.append(1 if indexed_surface else 0)
+    if token_index is None:
+        values.append(0)
+    else:
+        encoded = token_index.sha256.encode("ascii")
+        values.extend((1, len(encoded), *encoded,
+                       token_index_ordinal if token_index_ordinal is not None else 0))
     return tuple(values)
 
 
 def _typed_projection(
         record: dict[str, Any], path: Path, line_number: int,
+        source_identity: str | None = None,
         ) -> tuple[CanonicalJsonObject | None, str | None, SourceRef | None]:
     """保留已登记 authored observation；普通对话记录明确返回空。"""
     name = path.name
@@ -357,7 +396,8 @@ def _typed_projection(
         raw = record.get("observation_payload")
         if isinstance(raw, dict):
             source_id = _GENERALIZATION_SOURCE_HASHER.h63(
-                (path.as_posix(), line_number,
+                (path.as_posix() if source_identity is None else source_identity,
+                 line_number,
                  canonical_json_bytes(raw))) or 1
             source = SourceRef(
                 214,
@@ -371,8 +411,57 @@ def _typed_projection(
     return None, None, None
 
 
+def _compact_surface_for_record(
+        record: dict[str, Any], path: Path,
+        sidecars: dict[Path, IntegerTokenIndex],
+        ) -> tuple[tuple[str, ...], IntegerTokenIndex, int] | None:
+    """Resolve an indexed course record without copying its surface text.
+
+    The sidecar path is deliberately relative to the course file.  This keeps
+    the exchange format portable and prevents a course record from reaching
+    outside its source directory.  A declared sidecar is authoritative: any
+    missing, malformed, out-of-range, or hash-drifted reference fails closed.
+    """
+    file_value = record.get("token_index_file")
+    ordinal = record.get("token_index_ordinal")
+    if file_value is None and ordinal is None:
+        return None
+    if (not isinstance(file_value, str) or not file_value.strip()
+            or type(ordinal) is not int or ordinal < 0):
+        raise ConversationTrainingPackError("token index reference 非法")
+    relative = Path(file_value)
+    if relative.is_absolute() or relative.drive or ".." in relative.parts:
+        raise ConversationTrainingPackError("token index path 越界")
+    sidecar = (path.parent / relative).resolve()
+    try:
+        sidecar.relative_to(path.parent.resolve())
+    except ValueError as error:
+        raise ConversationTrainingPackError("token index path 越界") from error
+    try:
+        index = sidecars.get(sidecar)
+        if index is None:
+            index = load_integer_token_index(sidecar)
+            sidecars[sidecar] = index
+    except (OSError, ValueError, TypeError) as error:
+        raise ConversationTrainingPackError(
+            f"token index sidecar 不可回读: {sidecar}") from error
+    declared_hash = record.get("token_index_sha256")
+    if declared_hash is not None and (
+            not isinstance(declared_hash, str) or declared_hash != index.sha256):
+        raise ConversationTrainingPackError("token index hash 漂移")
+    try:
+        surface = index.render(ordinal)
+    except (IndexError, TypeError) as error:
+        raise ConversationTrainingPackError("token index ordinal 越界") from error
+    if len(surface) < 2:
+        raise ConversationTrainingPackError("token index surface 为空或过短")
+    return (surface,), index, ordinal
+
+
 def load_dialogue_training_pack(paths: Iterable[str | Path], *,
-                                max_cases: int | None = None) -> DialogueTrainingPack:
+                                max_cases: int | None = None,
+                                source_path_identities: Mapping[str | Path, str]
+                                | None = None) -> DialogueTrainingPack:
     """读取公开 JSONL 课程并形成确定性 pack；重复 identity 直接失败。"""
     files = tuple(sorted(Path(path).resolve() for path in paths))
     if not files:
@@ -380,6 +469,14 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
     cases: list[DialogueTrainingCase] = []
     source_files: list[tuple[str, str, int]] = []
     seen: set[str] = set()
+    sidecars: dict[Path, IntegerTokenIndex] = {}
+    identities = {
+        Path(key).resolve(): value
+        for key, value in (source_path_identities or {}).items()
+    }
+    if any(not isinstance(value, str) or not value.strip()
+           for value in identities.values()):
+        raise ConversationTrainingPackError("source path identity 非法")
     for path in files:
         if not path.is_file():
             raise ConversationTrainingPackError(f"课程文件不存在: {path}")
@@ -411,10 +508,19 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
                 split = "heldout"
             if split not in _SPLITS:
                 continue
-            surfaces = _surface_for_record(record)
+            compact_reference = _compact_surface_for_record(
+                record, path, sidecars)
+            if compact_reference is None:
+                surfaces = _surface_for_record(record)
+                token_index = None
+                token_index_ordinal = None
+            else:
+                surfaces, token_index, token_index_ordinal = compact_reference
+            indexed_surface = token_index is not None
             if not surfaces:
                 continue
-            case_id = _record_id(record, path, line_number)
+            source_identity = identities.get(path)
+            case_id = _record_id(record, path, line_number, source_identity)
             if case_id in seen:
                 raise ConversationTrainingPackError(f"重复 case identity: {case_id}")
             seen.add(case_id)
@@ -434,7 +540,7 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
                     if len(spans) == 2 and spans[0] != spans[1]:
                         causal_pairs = ((spans[0], spans[1]),)
             typed_payload, payload_kind, source_ref = _typed_projection(
-                record, path, line_number)
+                record, path, line_number, source_identity)
             expected_state = record.get("expected_state")
             if expected_state is not None and not isinstance(expected_state, str):
                 raise ConversationTrainingPackError(
@@ -451,14 +557,20 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
                 case_id, split, family, path.as_posix(), line_number, surfaces,
                 causal_pairs,
                 _canonical_case_record(
-                    case_id, split, family, path.as_posix(), line_number,
+                    case_id, split, family,
+                    path.as_posix() if source_identity is None else source_identity,
+                    line_number,
                     surfaces, causal_pairs, typed_payload, payload_kind,
-                    source_ref, expected_state, expected_payload),
+                    source_ref, expected_state, expected_payload,
+                    indexed_surface, token_index, token_index_ordinal),
                 typed_payload=typed_payload,
                 payload_kind=payload_kind,
                 source_ref=source_ref,
                 expected_state=expected_state,
                 expected_payload=expected_payload,
+                indexed_surface=indexed_surface,
+                token_index=token_index,
+                token_index_ordinal=token_index_ordinal,
             ))
             count += 1
             if max_cases is not None and len(cases) >= max_cases:
