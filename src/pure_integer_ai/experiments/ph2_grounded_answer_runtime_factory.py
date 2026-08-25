@@ -410,11 +410,16 @@ class GroundedAnswerRunLocalFactory:
                 budget=policy.surface_budget,
                 allowed_prefix_steps=(
                     directives[requirement.slot].surface_prefix_steps),
+                expected_value=requirement.representation,
             )
             selected = proposal.result.selected
             if selected is None or selected.value != requirement.representation:
                 raise GroundedAnswerRunLocalFactoryError(
-                    "grounded alias factory 未提供唯一预期 Representation")
+                    "grounded alias factory 未提供唯一预期 Representation: "
+                    f"slot={requirement.slot.stable_key()} "
+                    f"expected={requirement.representation.stable_key()} "
+                    f"outcome={proposal.result.outcome.stable_key()} "
+                    f"options={tuple(item.value.stable_key() for item in proposal.result.options)}")
 
     def build(
             self,
@@ -461,7 +466,10 @@ class GroundedAnswerRunLocalFactory:
         order = install_grounded_answer_order_course(
             variant, self.lifecycle)
         structure_planner = connector.structure_planner()
-        surface_runtime = GenerationSurfaceRuntime(alias)
+        surface_runtime = GenerationSurfaceRuntime(
+            alias,
+            {item.slot: item.representation for item in variant.aliases},
+        )
         surface_builder = connector.surface_request_builder(
             order.execution_planner)
         protocol = components.plan_protocol

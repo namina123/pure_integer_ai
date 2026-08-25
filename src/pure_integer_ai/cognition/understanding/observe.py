@@ -348,12 +348,18 @@ class ObservePipeline:
                         tuple(ref.refs) if isinstance(ref, MultiRef) else (ref,))
                     typed_candidates = []
                     legacy_candidates = []
+                    # Typed language runs may replay the same source across
+                    # training stages.  Legacy concept node ids are mutable
+                    # as the graph grows, so persisting them against a stable
+                    # occurrence would make a later replay collide with a
+                    # different endpoint.  Typed candidates remain eligible;
+                    # the legacy bridge is reserved for the legacy pipeline.
                     for normalized_ref in normalized_refs:
                         typed = self.occurrence_index.typed_candidate_for_node(
                             normalized_ref)
-                        if typed is None:
+                        if typed is None and self.write_legacy_language_sequences:
                             legacy_candidates.append(normalized_ref)
-                        else:
+                        elif typed is not None:
                             typed_candidates.append(typed)
                     if representation_candidate is not None:
                         typed_candidates.append(representation_candidate)

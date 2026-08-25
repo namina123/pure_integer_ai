@@ -26,6 +26,7 @@ from pure_integer_ai.cognition.shared.identity import (
     OBJECT_MINIMAL_INSTRUCTION,
     ObjectIdentity,
     SourceRef,
+    VISIBILITY_SESSION,
 )
 from pure_integer_ai.cognition.shared.logic_executor import LogicEvidenceState
 from pure_integer_ai.cognition.shared.memory_generation import (
@@ -86,7 +87,12 @@ class AnswerGenerationGoal:
         if not isinstance(self.scope, ScopeIdentity):
             raise TypeError("generation goal scope 必须是 ScopeIdentity")
         if semantic_source(self.proposition.template) != self.source:
-            raise ValueError("generation goal Proposition 与 source 不一致")
+            # A read-only evaluation may answer a current query from a
+            # recovered proposition learned under another immutable source.
+            # The candidate retains its evidence/source attribution; the goal
+            # source identifies the query being evaluated.
+            if self.scope.owner.visibility != VISIBILITY_SESSION:
+                raise ValueError("generation goal Proposition 与 source 不一致")
         if self.target_branch is not None:
             if not isinstance(self.target_branch, ObjectIdentity):
                 raise TypeError("generation goal target_branch 类型错误")

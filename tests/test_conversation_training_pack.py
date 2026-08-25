@@ -7,6 +7,9 @@ from pure_integer_ai.experiments.conversation_training_pack import (
 from pure_integer_ai.experiments.conversation_training_contrast import (
     build_dialogue_training_contrast,
 )
+from pure_integer_ai.experiments.dialogue_training_typed_adapter import (
+    TypedDialogueCourseAdapter,
+)
 from pure_integer_ai.experiments.run_conversation_training import default_course_paths
 
 
@@ -34,3 +37,20 @@ def test_public_course_pack_has_train_heldout_negative_and_replays() -> None:
                for item in pack.cases)
     assert any(item.raw_text.startswith("# 计划") for item in pack.cases)
     assert any(item.raw_text.startswith("<article") for item in pack.cases)
+
+
+def test_typed_course_is_explicit_and_stable() -> None:
+    """只有已登记 generation payload 进入 typed 适配器，且键可重放。"""
+    root = Path(__file__).parents[1] / "data" / "ph2"
+    pack = load_dialogue_training_pack(default_course_paths(root.parents[1]))
+    adapter = TypedDialogueCourseAdapter()
+    report = adapter.report(pack.cases)
+    assert report.typed_items == 40
+    assert dict(report.by_kind) == {
+        "GenerationAdoptionPostcheckQuery": 12,
+        "GenerationGeneralizationCandidateV1": 28,
+    }
+    assert len(report.request_keys) == 27
+    assert report.request_keys == adapter.report(pack.cases).request_keys
+    assert all(case.typed_payload is None or case.payload_kind is not None
+               for case in pack.cases)

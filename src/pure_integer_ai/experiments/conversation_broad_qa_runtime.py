@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import re
 import sqlite3
 from typing import Callable, Iterable
 
@@ -29,6 +30,24 @@ from pure_integer_ai.experiments.ph2_broad_qa_relation_answer_frame_learning imp
 
 
 @dataclass(frozen=True, slots=True)
+class DialogueCitation:
+    """用户可见 evidence surface 与单一来源的值记录。"""
+
+    surface: str
+    source_title: str | None
+    source_url: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.surface) is not str or not self.surface.strip():
+            raise ValueError("citation surface 必须是非空文本")
+        for label, value in (("source title", self.source_title),
+                             ("source url", self.source_url)):
+            if value is not None and (
+                    type(value) is not str or not value.strip()):
+                raise ValueError(f"citation {label} 非法")
+
+
+@dataclass(frozen=True, slots=True)
 class DialogueTurn:
     """一次对话轮次的纯值摘要；不持有 SQLite、缓存或宿主对象。"""
 
@@ -41,6 +60,7 @@ class DialogueTurn:
     source_url: str | None
     turn_key: tuple[int, ...]
     retrieval_question: str | None = None
+    citations: tuple[DialogueCitation, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +104,22 @@ _FOLLOWUP_REFERENCE_MARKERS = (
 _REFERENCE_BOUNDARIES = frozenset(" \t，,：:；;。！？!?（(【[")
 _REFERENCE_SINGLE_MARKERS = frozenset(("它", "他", "她", "其"))
 _REFERENCE_EXTENSIONS = frozenset("们們俩倆")
+_EMPTY_LABELED_PARENTHESES_RE = re.compile(
+    r"（[^（）()]{1,64}[:：][ \t]*）|\([^()]{1,64}[:：][ \t]*\)")
+
+
+def _humanize_display_surface(surface: str) -> str:
+    """清除证据表面中没有值的标签括号，不改动原始证据载荷。
+
+    Wikipedia 摘录偶尔保留 ``（学名：）`` 这类空模板投影。它不是事实，
+    但会破坏人类可读性；只在 display projection 中删除这一种结构，避免
+    对来源正文、citation 或 Runtime/Core 数据做不可审计的改写。
+    """
+    if type(surface) is not str:
+        raise TypeError("display surface 必须是字符串")
+    cleaned = _EMPTY_LABELED_PARENTHESES_RE.sub("", surface)
+    cleaned = cleaned.strip()
+    return cleaned or surface.strip()
 
 
 def _has_followup_reference(surface: str) -> bool:
@@ -134,6 +170,11 @@ def answer_broad_dialogue_turn(
         narrow_answer: Callable[[str], tuple[str, str] | None] | None = None,
         surface_consumer: Callable[[str, str, str | None], str | None]
         | None = None,
+        runtime_material_answer: Callable[
+            [str], tuple[str, str | None, str | None] | None] | None = None,
+        runtime_material_response: Callable[
+            [str], tuple[object, ...] | None]
+        | None = None,
         learned_evidence_term_weights: Iterable[tuple[str, int]] | None = None,
         learned_typed_obligation: LearnedTypedObligation | None = None,
         learned_relation_evidence_model: LearnedRelationEvidenceModel | None = None,
@@ -160,12 +201,62 @@ def answer_broad_dialogue_turn(
     source_url = None
     display_answer = None
     retrieval_question = None
-    if narrow_answer is not None:
+    citations: tuple[DialogueCitation, ...] = ()
+    runtime_material_decided = False
+    # 显式 Runtime response 是资格化资料的权威决定；它必须先于窄域/广域
+    # fallback，避免同一问题被未资格化或冲突资料绕过。
+    if runtime_material_response is not None:
+        material_response = runtime_material_response(question)
+        if material_response is not None:
+            if (not isinstance(material_response, tuple)
+                    or len(material_response) not in (4, 5)
+                    or material_response[0] not in {"ANSWER", "UNKNOWN", "CLARIFY"}
+                    or (material_response[1] is not None
+                        and type(material_response[1]) is not str)
+                    or (material_response[2] is not None
+                        and type(material_response[2]) is not str)
+                    or (material_response[3] is not None
+                        and type(material_response[3]) is not str)):
+                raise TypeError("runtime material response 返回值非法")
+            status, answer, source_title, source_url = material_response[:4]
+            if len(material_response) == 5:
+                raw_citations = material_response[4]
+                if (not isinstance(raw_citations, tuple)
+                        or any(not isinstance(item, DialogueCitation)
+                               for item in raw_citations)):
+                    raise TypeError("runtime material citations 返回值非法")
+                citations = raw_citations
+            if status == "ANSWER" and (answer is None or not answer.strip()):
+                raise TypeError("runtime material ANSWER 必须携带 answer")
+            if status != "ANSWER" and answer is not None:
+                raise TypeError("runtime material 非 ANSWER 不得携带 answer")
+            if status != "ANSWER" and citations:
+                raise TypeError("runtime material 非 ANSWER 不得携带 citations")
+            if citations and answer != "\n".join(
+                    item.surface for item in citations):
+                raise TypeError("runtime material answer/citation surface 漂移")
+            display_answer = answer
+            retrieval_question = question
+            runtime_material_decided = True
+    if answer is None and not runtime_material_decided and narrow_answer is not None:
         narrow = narrow_answer(question)
         if narrow is not None:
             answer, status = narrow
             display_answer = answer
-    if answer is None:
+    if (answer is None and not runtime_material_decided
+            and runtime_material_answer is not None):
+        material = runtime_material_answer(question)
+        if material is not None:
+            if (not isinstance(material, tuple) or len(material) != 3
+                    or type(material[0]) is not str or not material[0].strip()
+                    or (material[1] is not None and type(material[1]) is not str)
+                    or (material[2] is not None and type(material[2]) is not str)):
+                raise TypeError("runtime material answer provider 返回值非法")
+            answer, source_title, source_url = material
+            status = "ANSWER"
+            display_answer = answer
+            retrieval_question = question
+    if answer is None and not runtime_material_decided:
         retrieval_question = _resolve_source_followup(state, question)
         if (learned_evidence_term_weights is None
                 and learned_typed_obligation is None
@@ -186,7 +277,7 @@ def answer_broad_dialogue_turn(
         # 使完整句回答可读且不把类别/邻接段落误当成一个答案。
         evidence_chain = getattr(result, "evidence_chain", ())
         display_answer = (
-            evidence_chain[0].selected_text
+            _humanize_display_surface(evidence_chain[0].selected_text)
             if result.status == "ANSWER" and evidence_chain
             else result.answer
         )
@@ -234,8 +325,12 @@ def answer_broad_dialogue_turn(
         _turn_key(state.conversation_key, state.next_ordinal,
                   question, answer, status),
         retrieval_question,
+        citations,
     )
     return state.append(turn), turn
 
 
-__all__ = ["BroadDialogueState", "DialogueTurn", "answer_broad_dialogue_turn"]
+__all__ = [
+    "BroadDialogueState", "DialogueCitation", "DialogueTurn",
+    "answer_broad_dialogue_turn",
+]

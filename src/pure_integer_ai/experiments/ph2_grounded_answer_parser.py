@@ -293,7 +293,9 @@ class GroundedAnswerSurfaceParser:
             item for item in self.catalog.grammars
             if (item.renderer == request.renderer
                 and item.branch == request.branch
-                and item.source == request.source
+                # learned candidate source may differ from the current query
+                # source; source attribution is verified from the recovered
+                # proposition and the postcheck requirement below.
                 and item.scope == request.scope)
         )
         matches = tuple(item for item in relevant if item.units == request.units)

@@ -229,7 +229,18 @@ class DefaultRoundRunner:
         ctx.scoped_identity_store.register_scope(observation_scope)
 
         work_memory = ctx.work_memory
-        if work_memory.active_session_scope is None:
+        active_session = work_memory.active_session_scope
+        if (active_session is not None
+                and (active_session.owner != document_scope.owner
+                     or active_session.versions != document_scope.versions)):
+            # A single formal run may consume authored sources from different
+            # curriculum/parser versions.  WorkMemory is session-version bound;
+            # close the previous transient session before opening the next one
+            # while leaving Core/graph state untouched.  Silently mixing these
+            # scopes would make short-term recall provenance-invalid.
+            work_memory.end_session()
+            active_session = None
+        if active_session is None:
             session_identity = session_scope(
                 ctx.space_id,
                 owner=document_scope.owner,

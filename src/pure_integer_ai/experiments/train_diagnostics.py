@@ -78,11 +78,22 @@ def _weaning_blockers(rep: Any) -> list[str]:
 
 
 def _causes_coverage(ctx: TrainContext) -> int:
-    """CAUSES 覆盖率（有 CAUSES 出边节点占比 ×1000·阶段2 门控）。"""
+    """CAUSES 覆盖率（有 CAUSES 出边节点占比 ×1000·阶段2 门控）。
+
+    typed semantic 课程会在同一 Core backend 建立来源化语义节点。这些节点是
+    Proposition/Structure 的承载物，不是 lexical causal candidate；把它们塞进
+    Stage-2 分母会让同一份 CAUSES 课程随理解图扩张而被稀释。若当前图有明确的
+    ``NODE_WORD`` 词节点，只以这组可承载词面关系的节点计分；旧的无词节点 run
+    保持原有全节点兼容路径。门槛数值不变，度量只恢复了职责边界。
+    """
     from pure_integer_ai.storage.edge_types import EDGE_CAUSES
+    from pure_integer_ai.storage.node_store import NODE_WORD
     nodes = ctx.backend.select("concept_node", where=None)
     if not nodes:
         return 0
+    lexical_nodes = [node for node in nodes if node["type"] == NODE_WORD]
+    if lexical_nodes:
+        nodes = lexical_nodes
     causes_from = {(r["space_id_from"], r["local_id_from"])
                    for r in ctx.backend.select("edge", where={"edge_type": EDGE_CAUSES})}
     covered = sum(1 for n in nodes

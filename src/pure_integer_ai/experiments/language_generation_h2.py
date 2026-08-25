@@ -277,6 +277,42 @@ def run_typed_language_split(
             failure = "typed H2 收到 legacy scalar episode"
         elif len(typed) != 1:
             failure = "typed H2 必须为每个开发样本产生唯一 typed episode"
+            reports = getattr(eval_ctx, "language_semantic_course_reports", ())
+            if reports:
+                latest = reports[-1]
+                recovery = getattr(latest, "recovery", None)
+                if recovery is not None:
+                    candidates = recovery.input_value.candidates
+                    failure += (
+                        f"; semantic_candidates={len(candidates)}"
+                        f",decision_goal={recovery.decision.goal is not None}"
+                    )
+                    if candidates:
+                        # Keep the strict failure diagnostic actionable without
+                        # changing the typed episode contract or selecting a
+                        # candidate on the evaluator's behalf.
+                        failure += "; semantic_sources=" + repr(tuple(
+                            item.materialized.atomic.definition.source.stable_key()
+                            for item in candidates))
+                else:
+                    failure += "; semantic_recovery=none"
+        elif not typed[0].signals:
+            reports = getattr(eval_ctx, "language_semantic_course_reports", ())
+            if reports:
+                latest = reports[-1]
+                recovery = getattr(latest, "recovery", None)
+                if recovery is not None:
+                    # Preserve the diagnostic in the ordinary comparison failure
+                    # without changing the typed episode contract.
+                    failure = (
+                        f"typed H2 episode 无 signals; semantic_candidates="
+                        f"{len(recovery.input_value.candidates)},"
+                        f"decision_goal={recovery.decision.goal is not None}"
+                    )
+                    if recovery.input_value.candidates:
+                        failure += "; semantic_sources=" + repr(tuple(
+                            item.materialized.atomic.definition.source.stable_key()
+                            for item in recovery.input_value.candidates))
         episode = typed[0] if len(typed) == 1 else None
         results.append(_compare_h2_case(
             case,

@@ -12,7 +12,10 @@ from pure_integer_ai.cognition.shared.alias_resolution import (
     ReferenceRouteDiscovery,
     SurfaceRouteDiscovery,
 )
-from pure_integer_ai.cognition.shared.identity import ObjectIdentity
+from pure_integer_ai.cognition.shared.identity import (
+    OBJECT_REPRESENTATION,
+    ObjectIdentity,
+)
 from pure_integer_ai.cognition.shared.relation_closure import (
     ActiveRelationClosureFact,
 )
@@ -187,10 +190,27 @@ class AliasRelationRuntime:
             *,
             budget: AliasRouteSearchBudget,
             allowed_prefix_steps: tuple[ObjectIdentity, ...] | None = None,
+            expected_value: ObjectIdentity | None = None,
             ) -> AliasResolutionProposal:
-        """按注入前缀策略完整发现目标分支词形但不提交采用账。"""
+        """按注入前缀策略发现词形，可选显式约束 Representation。"""
+        if expected_value is not None:
+            if (not isinstance(expected_value, ObjectIdentity)
+                    or expected_value.object_kind != OBJECT_REPRESENTATION):
+                raise TypeError("expected surface value 必须是 Representation")
         discovery = self.route_finder.discover_surface(
             origin, branch, budget, allowed_prefix_steps)
+        if expected_value is not None:
+            discovery = SurfaceRouteDiscovery(
+                discovery.protocol,
+                discovery.origin,
+                discovery.branch,
+                discovery.budget,
+                discovery.explored_states,
+                discovery.considered_facts,
+                tuple(item for item in discovery.routes
+                      if item.target == expected_value),
+                discovery.allowed_prefix_steps,
+            )
         return AliasResolutionProposal(
             self.selector.select_surface(discovery.query()), discovery)
 

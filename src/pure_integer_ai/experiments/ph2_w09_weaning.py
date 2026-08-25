@@ -1,7 +1,7 @@
 """W-09 typed 教师退出协议及其可执行、失败关闭 runtime。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
 import hashlib
 from typing import Any, Callable
@@ -58,6 +58,14 @@ def _commitment_value(value: object) -> object:
         return {"stable_key": list(stable_reader())}
     if isinstance(stable, tuple):
         return {"stable_key": list(stable)}
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return _commitment_value(to_dict())
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            item.name: _commitment_value(getattr(value, item.name))
+            for item in fields(value)
+        }
     if isinstance(value, dict):
         return {str(key): _commitment_value(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):

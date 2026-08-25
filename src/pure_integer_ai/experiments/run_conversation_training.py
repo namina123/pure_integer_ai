@@ -6,10 +6,30 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
+from pathlib import PurePosixPath
 
 from pure_integer_ai.config import gates
+from pure_integer_ai.cognition.shared.identity import (
+    concept_identity,
+    minimal_instruction_identity,
+)
+from pure_integer_ai.cognition.shared.typed_binding import (
+    BindingFailureProtocol,
+    SubstitutionProtocol,
+)
+from pure_integer_ai.cognition.understanding.occurrence_index import (
+    OccurrenceProtocol,
+)
+from pure_integer_ai.cognition.understanding.segmentation_span import (
+    SegmentationSpanProtocol,
+)
+from pure_integer_ai.cognition.understanding.span_index import SpanProtocol
+from pure_integer_ai.cognition.understanding.semantic_builder import (
+    SemanticBuilderProtocol,
+)
 from pure_integer_ai.experiments.conversation_training_pack import (
     load_dialogue_training_pack,
 )
@@ -21,6 +41,41 @@ from pure_integer_ai.experiments.conversation_training_cursor import (
     DialogueTrainingCursor,
     write_training_cursor,
 )
+from pure_integer_ai.experiments.dialogue_training_typed_adapter import (
+    TypedDialogueCourseAdapter,
+)
+from pure_integer_ai.experiments.corpus_identity import assign_corpus_source_refs
+from pure_integer_ai.experiments.evaluation_protocol import (
+    collected_item_content_identity,
+)
+from pure_integer_ai.experiments.typed_dialogue_semantic_course import (
+    TypedDialogueSemanticMapper,
+    TypedDialogueSemanticQueryMapper,
+    build_typed_dialogue_semantic_protocol,
+    build_typed_dialogue_semantic_query_protocol,
+)
+from pure_integer_ai.experiments.typed_dialogue_generation_owner import (
+    TypedDialogueGenerationRuntimeFactory,
+)
+from pure_integer_ai.experiments.typed_dialogue_evaluation import (
+    build_typed_dialogue_evaluation_bundle,
+)
+from pure_integer_ai.experiments.ph2_dataset_io import read_record_artifact
+from pure_integer_ai.experiments.ph2_w09_contract import (
+    make_w09_request,
+    open_w09_frozen_contract,
+)
+from pure_integer_ai.experiments.ph2_w09_firewall import W09PayloadFirewall
+from pure_integer_ai.experiments.ph2_w09_weaning import (
+    W09DevCalibrationOwner,
+    W09FrozenTeacherEvidenceSource,
+    W09ShadowErrorAudit,
+    W09TypedWeaningRuntime,
+    make_w09_typed_weaning_protocol_from_contract,
+    w09_commitment,
+)
+from pure_integer_ai.experiments.ph2_w05_contract import digest_value
+from pure_integer_ai.storage.edge_store import EPI_STRUCTURED
 from pure_integer_ai.storage.backend import SQLiteBackend
 from pure_integer_ai.storage.k_run_boundary import open_existing_run_root
 
@@ -46,6 +101,126 @@ def _write_json(path: Path, value: object) -> None:
                                separators=(",", ":")) + "\n", encoding="utf-8")
 
 
+def _sha256_file(path: Path) -> str:
+    """返回公开课程辅助 evidence 的文件摘要，绑定训练输入版本。"""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _dialogue_semantic_protocol():
+    """建立公开对话 typed 课程使用的最小 S-02/S-03 整数协议。"""
+    namespace = (21402, 1)
+    predicates = tuple(
+        concept_identity((*namespace, 10, ordinal))
+        for ordinal in range(1, 12)
+    )
+    failures = BindingFailureProtocol(*tuple(
+        minimal_instruction_identity((*namespace, 20, ordinal))
+        for ordinal in range(1, 10)
+    ))
+    semantic = build_typed_dialogue_semantic_protocol(
+        TypedDialogueSemanticMapper((21402, 30), 1),
+        builder_identity=SemanticBuilderProtocol(
+            minimal_instruction_identity((*namespace, 40, 1)),
+            (*namespace, 40, 3)),
+        atomic_predicates=predicates[:6],
+        trace_predicates=predicates[6:9],
+        scope_predicates=predicates[9:],
+        substitution=SubstitutionProtocol(
+            minimal_instruction_identity((*namespace, 40, 2)), failures),
+        provenance_kind=EPI_STRUCTURED,
+    )
+    occurrence = OccurrenceProtocol(
+        (*namespace, 50, 1), (*namespace, 50, 2))
+    span = SegmentationSpanProtocol(
+        SpanProtocol(
+            (*namespace, 51, 1), (*namespace, 51, 2),
+            (*namespace, 51, 3), (*namespace, 51, 4)),
+        (*namespace, 52, 1), (*namespace, 52, 2), (*namespace, 52, 3),
+        (*namespace, 52, 4),
+    )
+    return semantic, occurrence, span
+
+
+def dialogue_semantic_protocols():
+    """返回公开对话 Runtime 可复用的 S-02/S-03/L-03/L-04 协议。
+
+    训练入口与 Runtime 资料入口必须共享同一组整数协议身份；此公开包装避免
+    Runtime 调用方复制私有 namespace，且不携带任何训练状态。
+    """
+    return _dialogue_semantic_protocol()
+
+
+def _dialogue_semantic_query_protocol():
+    """建立只读评测使用的 typed candidate recovery mapper。"""
+    return build_typed_dialogue_semantic_query_protocol(
+        TypedDialogueSemanticQueryMapper((21402, 30)))
+
+
+def dialogue_semantic_query_protocol():
+    """返回公开 Runtime 只读查询使用的 typed semantic protocol。"""
+    return _dialogue_semantic_query_protocol()
+
+
+def _w09_dev_observations(project_root: Path, context) -> tuple[object, ...]:
+    """只读载入冻结 W-09 dev Observation，不接触 evaluator labels。"""
+    records = []
+    for binding in context.dev_bindings:
+        if binding.identity.owner_kind != "observation":
+            continue
+        target = (project_root / Path(*PurePosixPath(
+            binding.relative_path).parts)).resolve()
+        local_parts = PurePosixPath(binding.identity.relative_path).parts
+        artifact_root = target.parents[len(local_parts) - 1]
+        records.extend(read_record_artifact(artifact_root, binding.identity))
+    if not records:
+        raise RuntimeError("W-09 dev Observation 为空")
+    return tuple(records)
+
+
+def _build_w09_builder(project_root: Path):
+    """创建动态 W-09 builder，candidate/input 均来自当前真实运行。"""
+    context = open_w09_frozen_contract(project_root)
+    payload = W09PayloadFirewall.open(
+        project_root,
+        context,
+        make_w09_request(context),
+    ).read_training_payload()
+    training_source = W09FrozenTeacherEvidenceSource(context, payload)
+    dev_owner = W09DevCalibrationOwner(
+        context,
+        _w09_dev_observations(project_root, context),
+    )
+    shadow_auditor = W09ShadowErrorAudit()
+    input_commitment = w09_commitment(payload.training_evidence)
+
+    def build(_ctx: object, stage4_report: object):
+        candidate_identity = w09_commitment(stage4_report)
+        protocol = make_w09_typed_weaning_protocol_from_contract(
+            context,
+            candidate_identity=candidate_identity,
+            input_commitment=input_commitment,
+            threshold_key=digest_value((
+                "W09_TYPED_DIALOGUE_THRESHOLD",
+                candidate_identity,
+                input_commitment,
+            )),
+        )
+        runtime = W09TypedWeaningRuntime(
+            protocol,
+            training_material_source=training_source,
+            dev_calibrator=dev_owner,
+            shadow_auditor=shadow_auditor,
+            frozen_contract=context,
+        )
+        return protocol, runtime
+
+    return build
+
+
 def run_conversation_training(*, project_root: str | Path,
                               run_root: str | Path,
                               run_id: str = "dialogue-pack-v1",
@@ -53,6 +228,7 @@ def run_conversation_training(*, project_root: str | Path,
                               resume_from: str | None = None,
                               with_heldout_probe: bool = False,
                               causal_only: bool = False,
+                              typed_semantic: bool = True,
                               extra_course_paths: tuple[str | Path, ...] = (),
                               ) -> dict[str, object]:
     """消费公开 train split，并产出真实 SQLite graph/checkpoint 摘要。"""
@@ -64,11 +240,50 @@ def run_conversation_training(*, project_root: str | Path,
     if len(paths) != len(set(paths)):
         raise ValueError("extra course path 与默认课程重复")
     pack = load_dialogue_training_pack(paths)
-    train_items = pack.training_items(causal_only=causal_only)
-    heldout_items = pack.training_items(split="heldout", causal_only=causal_only)
+    typed_report = TypedDialogueCourseAdapter().report(pack.cases)
+    strict_bundle = None
+    if typed_semantic and any(stage >= 3 for stage in active_stages):
+        all_items = pack.items_for_split(split=None, causal_only=causal_only)
+        assign_corpus_source_refs(all_items, source_namespace=pack.pack_sha256)
+        by_case = {
+            case.case_id: item for case, item in zip(pack.cases, all_items)
+        }
+        strict_bundle = build_typed_dialogue_evaluation_bundle(pack, by_case)
+        assignments = strict_bundle.evaluation_plan.assignments
+        training_keys = {
+            item.identity.lookup_key()
+            for item in assignments
+            if item.split == strict_bundle.evaluation_plan.protocol.training_split
+        }
+        train_items = [
+            item for item in strict_bundle.corpus
+            if item.source_ref is not None and (
+                item.source_ref.stable_key(),
+                collected_item_content_identity(item).payload,
+            ) in training_keys
+        ]
+        heldout_items = [
+            item for item in strict_bundle.corpus
+            if item not in train_items
+        ]
+    else:
+        train_items = pack.training_items(causal_only=causal_only)
+        heldout_items = pack.training_items(split="heldout", causal_only=causal_only)
     contrast = build_dialogue_training_contrast(pack)
+    semantic_protocol = occurrence_protocol = span_protocol = None
+    semantic_query_protocol = None
+    if typed_semantic:
+        (semantic_protocol, occurrence_protocol,
+         span_protocol) = _dialogue_semantic_protocol()
+        semantic_query_protocol = _dialogue_semantic_query_protocol()
     run_dir = root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+    project_root_path = Path(project_root).resolve()
+    surface_evidence_path = (
+        project_root_path / "data" / "ph2"
+        / "dlg_raw16_surface_slot_evidence_v1.jsonl.sample")
+    if not surface_evidence_path.is_file():
+        raise ValueError("DLG-RAW-16 surface evidence 缺失")
     _write_json(run_dir / "dialogue_pack_manifest.json", {
         "protocol": 1,
         "pack_sha256": pack.pack_sha256,
@@ -77,14 +292,35 @@ def run_conversation_training(*, project_root: str | Path,
         "split_counts": pack.split_counts,
         "train_surface_count": len(train_items),
         "heldout_surface_count": len(heldout_items),
+        "typed_course": typed_report.to_dict(),
         "causal_only": causal_only,
         "extra_course_paths": tuple(Path(item).resolve().as_posix()
                                      for item in extra_course_paths),
+        "surface_evidence_files": ((
+            surface_evidence_path.as_posix(),
+            _sha256_file(surface_evidence_path),
+        ),),
     })
     _write_json(run_dir / "contrast_report.json", contrast.to_dict())
     database_path = run_dir / "training.sqlite3"
     backend = SQLiteBackend(str(database_path))
-    corpus = train_items + heldout_items if with_heldout_probe else train_items
+    corpus = (
+        list(strict_bundle.corpus)
+        if strict_bundle is not None
+        else train_items + heldout_items if with_heldout_probe else train_items
+    )
+    if typed_semantic:
+        # L-03 occurrence identity needs one corpus-wide ordinal pass; doing
+        # this lazily per item would collapse repeated surfaces to one source.
+        assign_corpus_source_refs(corpus, source_namespace=pack.pack_sha256)
+    generation_factory = (
+        TypedDialogueGenerationRuntimeFactory.from_project_root(project_root)
+        if typed_semantic else None
+    )
+    w09_builder = (
+        _build_w09_builder(Path(project_root).resolve())
+        if typed_semantic and 4 in active_stages else None
+    )
     previous = gates.TRAINING_MODE
     try:
         gates.TRAINING_MODE = True
@@ -96,9 +332,29 @@ def run_conversation_training(*, project_root: str | Path,
                 active_training_stages=active_stages,
                 resume=resume_from is not None,
                 base_run_id=resume_from,
-                probe_holdout=len(heldout_items) if with_heldout_probe else 0,
-                probe_version=1 if with_heldout_probe else 0,
+                probe_holdout=(
+                    0 if strict_bundle is not None
+                    else len(heldout_items) if with_heldout_probe else 0),
+                probe_version=(
+                    0 if strict_bundle is not None
+                    else 1 if with_heldout_probe else 0),
                 persist_graph_dump=True,
+                evaluation_plan=(
+                    None if strict_bundle is None
+                    else strict_bundle.evaluation_plan),
+                language_generation_h2_protocol=(
+                    None if strict_bundle is None
+                    else strict_bundle.h2_protocol),
+                language_generation_floor_protocol=(
+                    None if strict_bundle is None
+                    else strict_bundle.floor_protocol),
+                language_occurrence_protocol=occurrence_protocol,
+                language_span_protocol=span_protocol,
+                language_semantic_course_protocol=semantic_protocol,
+                language_semantic_query_protocol=semantic_query_protocol,
+                language_generation_runtime_factory=generation_factory,
+                w09_weaning_builder=w09_builder,
+                w09_execute_zero_call_windows=w09_builder is not None,
             ),
             corpus,
             backend=backend,
@@ -128,7 +384,9 @@ def run_conversation_training(*, project_root: str | Path,
         "split_counts": pack.split_counts,
         "training_item_count": len(train_items),
         "heldout_probe_count": len(heldout_items) if with_heldout_probe else 0,
+        "typed_course": typed_report.to_dict(),
         "causal_only": causal_only,
+        "typed_semantic": typed_semantic,
         "lang_generalization": None if result.lang_generalization is None else {
             "total_held_out": result.lang_generalization.total_held_out,
             "recognized": result.lang_generalization.recognized,
@@ -158,6 +416,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume-from", default=None)
     parser.add_argument("--with-heldout-probe", action="store_true")
     parser.add_argument("--causal-only", action="store_true")
+    parser.add_argument("--no-typed-semantic", action="store_true",
+                        help="仅运行旧 observe 图；默认接入 typed S-02 课程")
     parser.add_argument("--extra-course", action="append", default=[],
                         help="可选的公开课程 JSONL；不改变默认 v6 pack")
     args = parser.parse_args(argv)
@@ -169,6 +429,7 @@ def main(argv: list[str] | None = None) -> int:
         resume_from=args.resume_from,
         with_heldout_probe=args.with_heldout_probe,
         causal_only=args.causal_only,
+        typed_semantic=not args.no_typed_semantic,
         extra_course_paths=tuple(args.extra_course),
     )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True,
@@ -180,4 +441,10 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["default_course_paths", "main", "run_conversation_training"]
+__all__ = [
+    "default_course_paths",
+    "dialogue_semantic_protocols",
+    "dialogue_semantic_query_protocol",
+    "main",
+    "run_conversation_training",
+]

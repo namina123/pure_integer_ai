@@ -254,6 +254,43 @@ class SemanticCandidateGraphAdapter:
             result.append(restored)
         return tuple(result)
 
+    def lookup_by_structure(
+            self,
+            structures: tuple[ObjectIdentity, ...],
+            ) -> tuple[MaterializedSemanticCandidate, ...]:
+        """按显式结构身份跨来源反查候选。
+
+        结构身份是课程声明的可迁移索引；命题自身仍保留原始来源，调用方
+        必须在 query 层重新绑定来源/scope，不能把这里的结果当作答案。
+        """
+        if (not isinstance(structures, tuple)
+                or any(not isinstance(item, ObjectIdentity)
+                       for item in structures)):
+            raise TypeError("semantic structure lookup 必须是 ObjectIdentity tuple")
+        by_proposition: dict[ObjectIdentity, MaterializedSemanticCandidate] = {}
+        for structure in structures:
+            if structure.object_kind != OBJECT_STRUCTURE_CONCEPT:
+                raise ValueError("semantic structure lookup 必须是 StructureConcept")
+            structure_ref = self.ontology.resolve(structure)
+            if structure_ref is None:
+                continue
+            for statement in self.ontology.statements(
+                    predicate=self.predicates.proposition_structure,
+                    object_ref=structure_ref):
+                candidate = self.read(statement.subject)
+                if candidate.structure != structure:
+                    raise SemanticBuilderGraphError(
+                        "structure 反向索引命中的候选结构身份不一致")
+                existing = by_proposition.get(candidate.atomic.definition.proposition)
+                if existing is not None and existing != candidate:
+                    raise SemanticBuilderGraphError(
+                        "同一 Proposition 跨结构恢复结果不一致")
+                by_proposition[candidate.atomic.definition.proposition] = candidate
+        return tuple(
+            by_proposition[key]
+            for key in sorted(by_proposition, key=ObjectIdentity.stable_key)
+        )
+
     def _validate_predicates(self) -> None:
         """核验三个 predicate 为本图内互异 Concept，且不复用 S-00 定义槽。"""
         refs = self.predicates.refs()

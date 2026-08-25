@@ -310,6 +310,27 @@ class LanguageSemanticQueryRuntime:
             anchors=anchors,
             fillers=fillers,
         )
+        # 某些 typed mapper 明确声明可按结构索引跨来源恢复。该路径仍只读
+        # S-02 图；结构键来自 payload 的显式身份，不能由 surface 推断。
+        lookup_structures = getattr(self.protocol.mapper, "lookup_structures", None)
+        if callable(lookup_structures):
+            structures = lookup_structures(current)
+            if not isinstance(structures, tuple):
+                raise TypeError("semantic mapper structure lookup 必须返回 tuple")
+            structural = self.graph.lookup_by_structure(structures)
+            merged = {
+                item.atomic.definition.proposition: item
+                for item in materialized
+            }
+            for item in structural:
+                existing = merged.get(item.atomic.definition.proposition)
+                if existing is not None and existing != item:
+                    raise RuntimeError("semantic query 结构/anchor 恢复结果不一致")
+                merged[item.atomic.definition.proposition] = item
+            materialized = tuple(
+                merged[key]
+                for key in sorted(merged, key=ObjectIdentity.stable_key)
+            )
         recovered = []
         for item in materialized:
             if item.builder != self.builder:
@@ -424,7 +445,10 @@ class LanguageSemanticQueryRuntime:
             decision.goal_kind,
             bound[goal_definition.proposition],
             decision.required,
-            goal_definition.source,
+            # The recovered Proposition keeps its learned source in the
+            # candidate/Evidence chain; the goal source is the current query
+            # source so read-only evaluation can verify the episode boundary.
+            input_value.current.source,
             request_scope,
             decision.target_branch,
         )

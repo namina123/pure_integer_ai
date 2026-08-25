@@ -509,6 +509,11 @@ class FormalTrainConfig:
     # 本入口只执行训练材料、dev 校准和 shadow 审计；三个正式零调用窗口由后续 V-06 clone 消费。
     w09_weaning_protocol: Any = None
     w09_weaning_runtime: Any = None
+    # 动态 typed 入口：在真实 Stage 4 报告形成后创建冻结 protocol/runtime，
+    # 使 candidate commitment 不可能脱离本次生成结果预先伪造。
+    w09_weaning_builder: Any = None
+    # 生产训练可显式要求在同一 host 上量测三个零调用窗口；默认关闭保持旧行为。
+    w09_execute_zero_call_windows: bool = False
 
     # W-00 版本化 hard gate；None 保持旧课程兼容路径。
     curriculum_mastery_protocol: CurriculumMasteryProtocol | None = None
@@ -823,19 +828,23 @@ def _formal_train_impl(config: FormalTrainConfig,
     )
     if any(w09_weaning_configured) and not all(w09_weaning_configured):
         raise ValueError("W-09 typed weaning protocol 与 runtime 必须成对配置")
-    if all(w09_weaning_configured):
+    if config.w09_weaning_builder is not None and any(w09_weaning_configured):
+        raise ValueError("W-09 动态 builder 不得与静态 protocol/runtime 同时配置")
+    w09_dynamic = config.w09_weaning_builder is not None
+    if all(w09_weaning_configured) or w09_dynamic:
         if not generation_owner_configured:
             raise ValueError("W-09 typed weaning 必须配套 typed generation owner")
         if STAGE4_PROMOTE_WEAN not in requested_stages:
             raise ValueError("W-09 typed weaning 不得跳过 language stage4")
-        from pure_integer_ai.experiments.ph2_w09_weaning import (
-            validate_w09_weaning_pair,
-        )
-        validate_w09_weaning_pair(
-            config.w09_weaning_protocol,
-            config.w09_weaning_runtime,
-            require_frozen_contract=True,
-        )
+        if not w09_dynamic:
+            from pure_integer_ai.experiments.ph2_w09_weaning import (
+                validate_w09_weaning_pair,
+            )
+            validate_w09_weaning_pair(
+                config.w09_weaning_protocol,
+                config.w09_weaning_runtime,
+                require_frozen_contract=True,
+            )
     if (all(default_generation_configured)
             and config.language_semantic_course_protocol is None):
         raise ValueError("默认 connector 课程需要正式 semantic course runtime")
@@ -1815,8 +1824,24 @@ def _formal_train_impl(config: FormalTrainConfig,
                             config.language_generation_h2_protocol,
                         )
                         if result.typed_language_h2_report.complete is not True:
+                            detail = tuple(
+                                (item.failure,
+                                 tuple(
+                                     (dimension.dimension.stable_key(),
+                                      dimension.expected is not None,
+                                      dimension.actual is not None,
+                                      dimension.matched,
+                                      None if dimension.actual is None else (
+                                          dimension.actual.applicability,
+                                          dimension.actual.verdict,
+                                          dimension.actual.detail,
+                                          dimension.actual.operational_failure,
+                                      ))
+                                     for dimension in item.dimensions))
+                                for item in result.typed_language_h2_report.cases)
                             raise RuntimeError(
-                                "typed language H2 分维校准未通过，禁止进入全量 reward")
+                                "typed language H2 分维校准未通过，禁止进入全量 reward: "
+                                + repr(detail))
                 elif ctx.teacher is not None:
                     ctx.weights = _h2_calibrate(
                         ctx, corpus, r, execution=result.execution)
@@ -1984,20 +2009,89 @@ def _formal_train_impl(config: FormalTrainConfig,
         # typed stage4 完成后只进入显式 W-09 runtime；缺失时保留原硬阻断，绝不回退旧标量尾部。
         if (STAGE4_PROMOTE_WEAN in result.stages_completed
                 and ctx.language_generation_runtime is not None):
-            if config.w09_weaning_runtime is None:
+            w09_runtime = config.w09_weaning_runtime
+            w09_protocol = config.w09_weaning_protocol
+            if config.w09_weaning_builder is not None:
+                built = config.w09_weaning_builder(
+                    ctx,
+                    result.typed_language_stage4_report,
+                )
+                if (not isinstance(built, tuple) or len(built) != 2):
+                    raise RuntimeError("W-09 动态 builder 必须返回 protocol/runtime")
+                w09_protocol, w09_runtime = built
+                from pure_integer_ai.experiments.ph2_w09_weaning import (
+                    validate_w09_weaning_pair,
+                )
+                validate_w09_weaning_pair(
+                    w09_protocol,
+                    w09_runtime,
+                    require_frozen_contract=True,
+                )
+                ctx.w09_weaning_protocol = w09_protocol
+                ctx.w09_weaning_runtime = w09_runtime
+            if w09_runtime is None:
                 result.weaning_blockers = [
                     "W-09_typed_weaning_protocol_missing",
                 ]
             else:
                 result.typed_w09_weaning_report = (
-                    config.w09_weaning_runtime.run(
+                    w09_runtime.run(
                         ctx,
                         result.typed_language_stage4_report,
                     ))
                 result.w09_weaning_report = result.typed_w09_weaning_report
+                if (config.w09_execute_zero_call_windows
+                        and not result.typed_w09_weaning_report.ready):
+                    from pure_integer_ai.experiments.ph2_w09_authority import (
+                        W09_CONSUMER_KEYS,
+                    )
+                    from pure_integer_ai.experiments.ph2_w09_types import (
+                        TeacherExitPhase,
+                        W09ResourceAudit,
+                        W09WindowIdentity,
+                    )
+                    from pure_integer_ai.experiments.ph2_w09_weaning import (
+                        w09_commitment,
+                    )
+                    stage4 = result.typed_language_stage4_report
+                    for ordinal, input_commitment in enumerate(
+                            w09_protocol.window_input_commitments, 1):
+                        def _window_operation(
+                                ordinal: int = ordinal,
+                                input_commitment: str = input_commitment,
+                                ) -> W09WindowIdentity:
+                            """用真实 Stage 4 输出形成只读 U/R/G 窗口身份。"""
+                            return W09WindowIdentity(
+                                TeacherExitPhase.ZERO_CALL_WINDOW,
+                                ordinal,
+                                input_commitment,
+                                w09_protocol.candidate_identity,
+                                0,
+                                tuple((
+                                    consumer,
+                                    w09_commitment((stage4, ordinal, consumer)),
+                                ) for consumer in W09_CONSUMER_KEYS),
+                                W09ResourceAudit.zero(),
+                                w09_commitment((stage4, "rollback", ordinal)),
+                            )
+                        w09_runtime.execute_measured_zero_call_window(
+                            ctx,
+                            _window_operation,
+                        )
+                    result.typed_w09_weaning_report = w09_runtime.run(
+                        ctx,
+                        result.typed_language_stage4_report,
+                    )
+                    result.w09_weaning_report = result.typed_w09_weaning_report
                 if result.typed_w09_weaning_report.ready:
-                    raise RuntimeError(
-                        "W-09 formal stage4 不得提前消费三个 V-06 零调用窗口")
+                    if not config.w09_execute_zero_call_windows:
+                        raise RuntimeError(
+                            "W-09 formal stage4 不得在未显式开启窗口量测时提前 ready")
+                    result.weaning_ready = True
+                    result.weaning_blockers = []
+                    ctx.weaning_phase = WEANING_POST
+                    if ctx.teacher is not None:
+                        ctx.teacher._mode = MODE_OFF
                 result.weaning_blockers = list(
                     result.typed_w09_weaning_report.blockers)
         # 阶段4 断奶判据（D1-D5/E2 六闸门·#358 完整实现·非布尔阈值·非只看 4 能力指标平台）

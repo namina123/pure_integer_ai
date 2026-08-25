@@ -14,12 +14,14 @@ from pure_integer_ai.cognition.shared.evidence_candidate import (
 )
 from pure_integer_ai.cognition.shared.hypothesis import HypothesisKey
 from pure_integer_ai.cognition.shared.identity import (
+    GLOBAL_OWNER_SCOPE,
     OBJECT_CONCEPT,
     OBJECT_HYPOTHESIS,
     OBJECT_LANGUAGE_BRANCH,
     OBJECT_PROPOSITION,
     ObjectIdentity,
     SourceRef,
+    VISIBILITY_SESSION,
 )
 from pure_integer_ai.cognition.shared.scope_identity import (
     SCOPE_EPISODE,
@@ -228,8 +230,20 @@ def _sources(
 def _same_boundary(scope: ScopeIdentity, value: ObjectIdentity | SourceRef,
                    *, where: str) -> None:
     if value.owner != scope.owner or value.versions != scope.versions:
+        # Strictly isolated evaluation runs deliberately use a disposable
+        # session owner.  Immutable semantic/source identities remain in the
+        # global owner domain and are safe to reference read-only; runtime
+        # identities (including hypotheses and conditions) must still carry
+        # the evaluation owner and are rejected by this guard.
+        if (scope.owner.visibility == VISIBILITY_SESSION
+                and value.owner == GLOBAL_OWNER_SCOPE):
+            return
         raise GenerationChoiceContractError(
-            f"{where} crosses owner or version boundary")
+            f"{where} crosses owner or version boundary: "
+            f"scope_owner={scope.owner.stable_key()} "
+            f"value_owner={value.owner.stable_key()} "
+            f"scope_versions={scope.versions.stable_key()} "
+            f"value_versions={value.versions.stable_key()}")
 
 
 def _object_value(value: ObjectIdentity) -> list[int]:

@@ -8,6 +8,8 @@ typed slot 结构重建可读完整句。它只对已能解析为因果命题的
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
@@ -51,6 +53,49 @@ _CAUSAL_SURFACE_RE = re.compile(
 
 class TrainedSurfaceRuntimeError(ValueError):
     """训练状态、公开结构课程或表层重建发生漂移。"""
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _surface_evidence_paths_for_run(
+        project_root: Path, training_run_root: Path,
+        default_path: Path,
+        ) -> tuple[Path, ...]:
+    """读取新 run 的 evidence commitment；旧 run 使用固定公开 evidence。"""
+    manifest_path = training_run_root / "dialogue_pack_manifest.json"
+    if not manifest_path.is_file():
+        raise TrainedSurfaceRuntimeError("training run 缺少 dialogue pack manifest")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise TrainedSurfaceRuntimeError("training run manifest 不可回读") from error
+    rows = manifest.get("surface_evidence_files") if isinstance(manifest, dict) else None
+    if rows is None:
+        return (default_path,)
+    if not isinstance(rows, list) or not rows:
+        raise TrainedSurfaceRuntimeError("surface evidence commitment 非法")
+    result: list[Path] = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) != 2:
+            raise TrainedSurfaceRuntimeError("surface evidence commitment 记录非法")
+        candidate = Path(str(row[0])).resolve()
+        try:
+            candidate.relative_to(project_root)
+        except ValueError as error:
+            raise TrainedSurfaceRuntimeError(
+                "surface evidence 越出 project_root") from error
+        if not candidate.is_file() or _sha256_file(candidate) != str(row[1]):
+            raise TrainedSurfaceRuntimeError("surface evidence digest 漂移")
+        result.append(candidate)
+    if len(result) != len(set(result)):
+        raise TrainedSurfaceRuntimeError("surface evidence commitment 重复")
+    return tuple(result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,10 +344,13 @@ def load_trained_surface_runtime(*, project_root: str | Path,
     """从公开课程和 K 盘训练 run 建立只读表层消费者。"""
     root = Path(project_root).resolve()
     course_path = root / "data" / "ph2" / "dlg_raw16_surface_organization_v1.jsonl.sample"
-    evidence_path = root / "data" / "ph2" / "dlg_raw16_surface_slot_evidence_v1.jsonl.sample"
+    default_evidence_path = (
+        root / "data" / "ph2" / "dlg_raw16_surface_slot_evidence_v1.jsonl.sample")
+    evidence_paths = _surface_evidence_paths_for_run(
+        root, Path(training_run_root).resolve(), default_evidence_path)
     course_paths = (course_path, *tuple(
         Path(item).resolve() for item in extra_course_paths))
-    evidence_paths = (evidence_path, *tuple(
+    evidence_paths = (*evidence_paths, *tuple(
         Path(item).resolve() for item in extra_evidence_paths))
     if (any(not item.is_file() for item in course_paths)
             or any(not item.is_file() for item in evidence_paths)):

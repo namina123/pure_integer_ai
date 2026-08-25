@@ -17,6 +17,16 @@ from pure_integer_ai.cognition.shared.types import (
     LANG_ZH,
     MODALITY_LANGUAGE,
 )
+from pure_integer_ai.cognition.shared.identity import (
+    GLOBAL_OWNER_SCOPE,
+    SourceRef,
+    VersionBundle,
+)
+from pure_integer_ai.crosscut.determinism.hasher import Hasher
+from pure_integer_ai.experiments.ph2_dataset_contract import (
+    CanonicalJsonObject,
+    canonical_json_bytes,
+)
 from pure_integer_ai.experiments.collection import (
     COLLECT_PRECEDES,
     CollectedItem,
@@ -24,7 +34,9 @@ from pure_integer_ai.experiments.collection import (
 )
 
 
-CONVERSATION_TRAINING_PACK_PROTOCOL_V1 = 1
+CONVERSATION_TRAINING_PACK_PROTOCOL_V1 = 2
+_GENERALIZATION_SOURCE_HASHER = Hasher(
+    "conversation.typed.generalization.source.v1")
 _SPLITS = frozenset({"train", "heldout", "negative"})
 _SKIP_KEYS = frozenset({
     "license_id", "raw_sha256", "sha256", "source_key", "source_namespace",
@@ -52,6 +64,20 @@ class ConversationTrainingPackError(ValueError):
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _encode_integer_record(values: tuple[int, ...]) -> bytes:
+    """跨语言编码非负整数记录，避免把稳定键截断为固定 32 位。"""
+    out = bytearray()
+    for value in values:
+        if type(value) is not int or value < 0:
+            raise ConversationTrainingPackError(
+                "integer record 只能包含非负严格整数")
+        raw = value.to_bytes(max(1, (value.bit_length() + 7) // 8),
+                             "big", signed=False)
+        out.extend(len(raw).to_bytes(4, "big", signed=False))
+        out.extend(raw)
+    return bytes(out)
 
 
 def _scalar_text(value: Any) -> tuple[str, ...]:
@@ -149,12 +175,39 @@ class DialogueTrainingCase:
     surfaces: tuple[str, ...]
     causal_pairs: tuple[tuple[int, int], ...]
     integer_record: tuple[int, ...]
+    # Optional typed-course attachments are appended after the legacy fields so
+    # older positional constructors remain valid.  They are never inferred
+    # from raw surface text.
+    typed_payload: CanonicalJsonObject | None = None
+    payload_kind: str | None = None
+    source_ref: SourceRef | None = None
+    expected_state: str | None = None
+    expected_payload: CanonicalJsonObject | None = None
 
     def __post_init__(self) -> None:
         if not self.case_id or self.split not in _SPLITS or not self.surfaces:
             raise ConversationTrainingPackError("dialogue case 字段非法")
         if any(type(item) is not int or item < 0 for item in self.integer_record):
             raise ConversationTrainingPackError("dialogue case integer record 非法")
+        if (self.typed_payload is None) != (self.payload_kind is None):
+            raise ConversationTrainingPackError(
+                "typed payload 与 payload_kind 必须成对存在")
+        if self.typed_payload is not None and not isinstance(
+                self.typed_payload, CanonicalJsonObject):
+            raise ConversationTrainingPackError("typed payload 类型非法")
+        if self.payload_kind is not None and (
+                not self.payload_kind or self.payload_kind.strip() != self.payload_kind):
+            raise ConversationTrainingPackError("payload_kind 非法")
+        if self.source_ref is not None and not isinstance(self.source_ref, SourceRef):
+            raise ConversationTrainingPackError("typed source_ref 类型非法")
+        if self.expected_state is not None and (
+                not isinstance(self.expected_state, str)
+                or not self.expected_state
+                or self.expected_state.strip() != self.expected_state):
+            raise ConversationTrainingPackError("expected_state 非法")
+        if self.expected_payload is not None and not isinstance(
+                self.expected_payload, CanonicalJsonObject):
+            raise ConversationTrainingPackError("expected_payload 类型非法")
 
     @property
     def raw_text(self) -> str:
@@ -187,28 +240,50 @@ class DialogueTrainingPack:
 
     def training_items(self, *, split: str = "train",
                        causal_only: bool = False) -> list[CollectedItem]:
-        """把指定 split 投影为 formal_train 可直接消费的语言项。"""
+        """把指定 train/heldout split 投影为 formal_train 可直接消费的语言项。"""
         if split not in {"train", "heldout"}:
             raise ConversationTrainingPackError("训练投影只允许 train/heldout")
+        return self.items_for_split(split=split, causal_only=causal_only)
+
+    def evaluation_items(self, *, split: str | None = None,
+                         causal_only: bool = False) -> list[CollectedItem]:
+        """投影公开评测项，允许显式 negative/ambiguous 进入只读 V-00。"""
+        if split is not None and split not in _SPLITS:
+            raise ConversationTrainingPackError("评测投影 split 非法")
+        return self.items_for_split(split=split, causal_only=causal_only)
+
+    def items_for_split(self, *, split: str | None,
+                        causal_only: bool = False) -> list[CollectedItem]:
+        """按公开 split 建立统一 CollectedItem；不改变课程标签或来源。"""
         result = []
         for case in self.cases:
-            if case.split != split:
+            if split is not None and case.split != split:
                 continue
             if causal_only and not case.causal_pairs:
                 continue
             text = case.raw_text
             tokens = list(text)
+            source_ref = case.source_ref
+            source = SOURCE_BARE_TEXT
+            if source_ref is not None:
+                # Authored typed records carry authoritative provenance.  The
+                # round runtime switches WorkMemory sessions at version
+                # boundaries, so this source must remain intact.
+                source = source_ref.source_kind
             result.append(CollectedItem(
                 tokens=tokens,
                 raw_text=text,
                 role_seq=[1] * len(tokens),
                 causal_pairs=list(case.causal_pairs),
                 collect_type=COLLECT_PRECEDES,
-                source=SOURCE_BARE_TEXT,
+                source=source,
                 strength=1,
                 domain=DOMAIN_TEXT,
                 lang=LANG_ZH,
                 modality=MODALITY_LANGUAGE,
+                source_ref=source_ref,
+                typed_payload=case.typed_payload,
+                payload_kind=case.payload_kind,
             ))
         return result
 
@@ -216,7 +291,13 @@ class DialogueTrainingPack:
 def _canonical_case_record(case_id: str, split: str, family: str,
                            source_path: str, line: int,
                            surfaces: tuple[str, ...],
-                           causal_pairs: tuple[tuple[int, int], ...]) -> tuple[int, ...]:
+                           causal_pairs: tuple[tuple[int, int], ...],
+                           typed_payload: CanonicalJsonObject | None,
+                           payload_kind: str | None,
+                           source_ref: SourceRef | None,
+                           expected_state: str | None,
+                           expected_payload: CanonicalJsonObject | None,
+                           ) -> tuple[int, ...]:
     values: list[int] = [CONVERSATION_TRAINING_PACK_PROTOCOL_V1, len(case_id)]
     values.extend(ord(item) for item in case_id)
     values.extend((len(split), *map(ord, split), len(family), *map(ord, family)))
@@ -226,7 +307,68 @@ def _canonical_case_record(case_id: str, split: str, family: str,
     values.append(len(causal_pairs))
     for left, right in causal_pairs:
         values.extend((left, right))
+    values.append(0 if typed_payload is None else 1)
+    if typed_payload is not None:
+        encoded = canonical_json_bytes(typed_payload.to_value())
+        values.extend((len(encoded), *encoded))
+        assert payload_kind is not None
+        values.extend((len(payload_kind), *payload_kind.encode("utf-8")))
+    source_key = () if source_ref is None else source_ref.stable_key()
+    values.extend((len(source_key), *source_key))
+    if expected_state is None:
+        values.append(0)
+    else:
+        values.extend((1, len(expected_state), *map(ord, expected_state)))
+    if expected_payload is None:
+        values.append(0)
+    else:
+        encoded = canonical_json_bytes(expected_payload.to_value())
+        values.extend((1, len(encoded), *encoded))
     return tuple(values)
+
+
+def _typed_projection(
+        record: dict[str, Any], path: Path, line_number: int,
+        ) -> tuple[CanonicalJsonObject | None, str | None, SourceRef | None]:
+    """保留已登记 authored observation；普通对话记录明确返回空。"""
+    name = path.name
+    if name in {
+            "authored_generation_postcheck_seed_v1.jsonl.sample",
+            "dialogue_postcheck_bridge_train_v1.course.jsonl.sample",
+    }:
+        from pure_integer_ai.experiments.ph2_authored_generation_compile import (
+            compile_generation_seed,
+        )
+        from pure_integer_ai.experiments.ph2_authored_generation_schema import (
+            AuthoredGenerationSeed,
+        )
+        try:
+            seed = AuthoredGenerationSeed.from_dict(record)
+            compiled = compile_generation_seed(seed)
+            payload = compiled.observation_payload
+            value = payload.to_value()
+            raw_source = value.get("source_ref_key")
+            source = (SourceRef.from_stable_key(tuple(raw_source))
+                      if isinstance(raw_source, list) else None)
+            return payload, compiled.payload_kind, source
+        except (TypeError, ValueError, KeyError, RuntimeError):
+            return None, None, None
+    if name == "authored_generation_generalization_seed_v1.jsonl.sample":
+        raw = record.get("observation_payload")
+        if isinstance(raw, dict):
+            source_id = _GENERALIZATION_SOURCE_HASHER.h63(
+                (path.as_posix(), line_number,
+                 canonical_json_bytes(raw))) or 1
+            source = SourceRef(
+                214,
+                source_id,
+                line_number,
+                GLOBAL_OWNER_SCOPE,
+                VersionBundle(),
+            )
+            return (CanonicalJsonObject.from_value(raw),
+                    "GenerationGeneralizationCandidateV1", source)
+    return None, None, None
 
 
 def load_dialogue_training_pack(paths: Iterable[str | Path], *,
@@ -291,11 +433,32 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
                                 spans.append(start)
                     if len(spans) == 2 and spans[0] != spans[1]:
                         causal_pairs = ((spans[0], spans[1]),)
+            typed_payload, payload_kind, source_ref = _typed_projection(
+                record, path, line_number)
+            expected_state = record.get("expected_state")
+            if expected_state is not None and not isinstance(expected_state, str):
+                raise ConversationTrainingPackError(
+                    f"expected_state 非法: {path.name}:{line_number}")
+            expected_payload_value = record.get("expected_payload")
+            if (expected_payload_value is not None
+                    and not isinstance(expected_payload_value, dict)):
+                raise ConversationTrainingPackError(
+                    f"expected_payload 非法: {path.name}:{line_number}")
+            expected_payload = (
+                None if expected_payload_value is None
+                else CanonicalJsonObject.from_value(expected_payload_value))
             cases.append(DialogueTrainingCase(
                 case_id, split, family, path.as_posix(), line_number, surfaces,
                 causal_pairs,
-                _canonical_case_record(case_id, split, family, path.as_posix(),
-                                       line_number, surfaces, causal_pairs),
+                _canonical_case_record(
+                    case_id, split, family, path.as_posix(), line_number,
+                    surfaces, causal_pairs, typed_payload, payload_kind,
+                    source_ref, expected_state, expected_payload),
+                typed_payload=typed_payload,
+                payload_kind=payload_kind,
+                source_ref=source_ref,
+                expected_state=expected_state,
+                expected_payload=expected_payload,
             ))
             count += 1
             if max_cases is not None and len(cases) >= max_cases:
@@ -307,8 +470,7 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
     if not ordered:
         raise ConversationTrainingPackError("公开课程没有可消费记录")
     digest_payload = b"".join(
-        b"".join(int(value).to_bytes(4, "big", signed=False)
-                 for value in item.canonical_record())
+        _encode_integer_record(item.canonical_record())
         for item in ordered
     )
     return DialogueTrainingPack(

@@ -890,9 +890,29 @@ def _isolated_evaluation_impl(ctx: Any, *, label: str) -> Iterator[Any]:
     backend = clone_backend(ctx.backend)
     try:
         eval_ctx = clone_train_context(ctx, backend, label=label)
+        # Evaluation runtime scopes have their own disposable owner, but must
+        # inherit the corpus version bundle.  Leaving the session at the
+        # default zero version makes every query/generation scope appear to
+        # cross a version boundary when it references the immutable course
+        # identities (whose source version is explicit).
+        runtime_versions = None
+        for split_items in eval_ctx.evaluation_corpora.values():
+            for item in split_items:
+                source_ref = getattr(item, "source_ref", None)
+                if source_ref is not None:
+                    runtime_versions = source_ref.versions
+                    break
+            if runtime_versions is not None:
+                break
+        if runtime_versions is None:
+            active_session = ctx.work_memory.active_session_scope
+            if active_session is not None:
+                runtime_versions = active_session.versions
         eval_ctx.work_memory.begin_session(session_scope(
             eval_ctx.space_id,
             owner=eval_ctx.scope_owner,
+            **({} if runtime_versions is None
+               else {"versions": runtime_versions}),
         ))
     except BaseException:
         try:

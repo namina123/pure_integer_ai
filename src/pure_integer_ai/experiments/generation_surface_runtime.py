@@ -226,10 +226,24 @@ class GenerationSurfaceRun:
 class GenerationSurfaceRuntime:
     """先完成全部 R-01 preview，再一次性提交词形和照应采用账。"""
 
-    def __init__(self, alias: AliasRelationRuntime) -> None:
+    def __init__(
+            self,
+            alias: AliasRelationRuntime,
+            expected_representations: dict[ObjectIdentity, ObjectIdentity]
+            | None = None,
+            ) -> None:
         if not isinstance(alias, AliasRelationRuntime):
             raise TypeError("surface runtime alias 类型错误")
+        if expected_representations is None:
+            expected_representations = {}
+        if (not isinstance(expected_representations, dict)
+                or any(
+                    not isinstance(slot, ObjectIdentity)
+                    or not isinstance(value, ObjectIdentity)
+                    for slot, value in expected_representations.items())):
+            raise TypeError("surface runtime expected representations 类型错误")
         self._alias = alias
+        self._expected_representations = dict(expected_representations)
 
     def preview(
             self, request: GenerationSurfaceRequest,
@@ -303,6 +317,7 @@ class GenerationSurfaceRuntime:
                 request.branch,
                 budget=directive.surface_budget,
                 allowed_prefix_steps=directive.surface_prefix_steps,
+                expected_value=self._expected_representations.get(value.slot),
             )
             representation = (
                 None

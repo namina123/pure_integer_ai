@@ -138,6 +138,10 @@ class CollectedItem:
     source_ref: SourceRef | None = field(default=None, compare=False)   # 稳定来源记录；生产 source 应显式填，旧 fixture 可由 corpus_identity 补匿名来源
     document_scope_hash: int = field(default=0, compare=False, repr=False)   # identity registry 索引缓存；完整身份仍在 SourceRef/ScopeIdentity
     speaker_identity: ObjectIdentity | None = field(default=None, compare=False)
+    # typed course observation 是课程输入附件，不是 Core 状态。它只能由显式
+    # adapter 注入，formal round 不从这些字段猜测语义。
+    typed_payload: Any = field(default=None, compare=False, repr=False)
+    payload_kind: str | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         assert_int(self.collect_type, self.source, self.strength,
@@ -151,6 +155,17 @@ class CollectedItem:
         if (self.speaker_identity is not None
                 and not isinstance(self.speaker_identity, ObjectIdentity)):
             raise TypeError("CollectedItem.speaker_identity 必须是 ObjectIdentity 或 None")
+        if self.payload_kind is not None:
+            if (not isinstance(self.payload_kind, str)
+                    or not self.payload_kind
+                    or self.payload_kind.strip() != self.payload_kind):
+                raise TypeError("CollectedItem.payload_kind 必须是无首尾空白文本")
+            if self.typed_payload is None or not hasattr(
+                    self.typed_payload, "to_value"):
+                raise TypeError(
+                    "CollectedItem.payload_kind 必须配套 CanonicalJsonObject 样式 payload")
+        elif self.typed_payload is not None:
+            raise TypeError("CollectedItem.typed_payload 不得脱离 payload_kind")
 
 
 @runtime_checkable

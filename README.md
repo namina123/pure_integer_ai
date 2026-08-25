@@ -47,6 +47,56 @@ PIDSLCA 目前适合作为研究和工程验证基础：
 
 项目当前处于持续开发的研究原型阶段，已经公开：
 
+### 当前可见成果（2026-08-25）
+
+公开对话训练主线已经完成一轮最大规模的四阶段训练，课程覆盖完整句、关系、因果、问答、
+指代、拒答边界，以及 Markdown、HTML、源代码、表格、数学记号、引用/嵌入和 OCR/ASR
+等语言与结构载体。训练结果已接入只读中文终端，能够在有来源的窄域资料和冻结中文百科
+索引上进行真实问答；未知、冲突或候选不唯一时会保持 `UNKNOWN` 或 `CLARIFY`，不会用
+固定答案补齐。
+
+运行时资料入口支持用户显式导入带来源、版本、许可和资格的资料，并在后续会话中恢复。
+多份资料的回答会把每个证据段分别对齐到自己的来源标题和链接；对话检查点使用可跨语言
+复现的整数记录保存有限热历史。上述能力属于来源约束的研究原型，不等同于自由生成、
+无限上下文、通用智能或已完成的自主语言学习。
+
+在 Windows PowerShell 中可以沿同一生产入口复跑当前公开课程、导入自己的资料并启动
+中文终端。所有训练、索引、资料和会话产物必须使用调用者自己的 K 盘目录：
+
+```powershell
+python -m pure_integer_ai.experiments.run_conversation_training `
+  --project-root . `
+  --run-root "K:\your_project\dialogue_runs" `
+  --run-id "public-dialogue-stage4-v1" `
+  --stages 1,2,3,4 `
+  --extra-course data\ph2\dialogue_relation_causes_scale_v1.course.jsonl.sample `
+  --extra-course data\ph2\dialogue_postcheck_bridge_train_v1.course.jsonl.sample
+
+python -m pure_integer_ai.experiments.run_runtime_material_ingest `
+  --material-file "K:\your_project\materials\manual.txt" `
+  --output-root "K:\your_project\runtime\manual-v1" `
+  --source-kind 100 --source-id 1 --scope-id 1 `
+  --license-id CC0-1.0 --batch-id 1 `
+  --authority-key 7,1 --version-key 1,1 `
+  --question "这份资料说明了什么操作顺序？" `
+  --qualification-state SUPPORTED `
+  --reason-id explicit-source-authority `
+  --source-title "用户手册"
+
+python -m pure_integer_ai.experiments.run_trained_dialogue_terminal `
+  --project-root . `
+  --qa-database "K:\your_project\indexes\broad-qa.sqlite3" `
+  --training-run-root "K:\your_project\dialogue_runs\public-dialogue-stage4-v1" `
+  --session-root "K:\your_project\sessions\dialogue-v1" `
+  --runtime-material-sqlite "K:\your_project\runtime\manual-v1\runtime.sqlite3" `
+  --runtime-material-ledger-root "K:\your_project\runtime\manual-v1"
+```
+
+资料文件必须是无 BOM UTF-8；`output-root` 必须尚不存在，`session-root` 则需由调用者先
+建立。资料资格只能由调用者显式声明为 `SUPPORTED`、`UNKNOWN` 或 `CONFLICT`，程序不会
+从原文猜资格，也不会把 Runtime 资料写成 Core 学习。`qa-database` 是可选广域资料来源
+所需的既有 K 盘 SQLite 索引；当前仓库不提交大型索引或训练数据库。
+
 - 可安装的纯整数参考实现，以及确定性工具、图存储、记忆与恢复等基础模块。
 - 关系机制、认知流程、训练编排、生成、程序执行和评估设施。
 - 与当前实现对应的回归测试、跨平台持续集成、格式样例和开发辅助脚本。
@@ -64,9 +114,9 @@ formal 纵切后又公开了一个不消费 held-out 的 100 问交互开发集�
 
 这仍是来源约束的抽取式广域事实问答纵切，不是自由生成、通用问答或断奶结果。它证明了当前中文 Wikipedia 冻结快照内的稀疏页面检索、来源约束证据选择和逐引用核验可以在预声明评测上闭合；没有证明任意问题、任意来源更新、长对话或自主语言学习已经闭合。详细合同和诚实边界见[20k 开发预览](docs/broad_qa_20k_preview.md)、[外部评测报告](docs/broad_qa_external_evidence_eval_cn.md)与[联合评测报告](docs/broad_qa_joint_retrieval_eval_cn.md)。
 
-2026-08-24 起，公开对话课程开始进入真实训练主线：清洗后的统一 pack 回读为 `731` 条（`365 train / 184 heldout / 182 negative`），pack SHA-256 为 `1c907caac90c6edb687ad45e0db490da9188028374d90757af8fc28b720ce03d`。其中保留完整句和 Markdown、HTML、源代码、表格、引用/嵌入等结构载体的原文；元数据不会被送入语言通道。该 pack 已在 `K:` 盘完成新的 stage-1 observe 训练，产生 SQLite 图、checkpoint/dump、cursor 和运行 manifest。训练结果目前只证明公开课程被真实消费并改变了图状态，不宣称生成能力或语言 mastered。可选的组合入口 `run_integrated_dialogue` 会保留有限对话热历史，先尝试公开完整命题句运行时，未命中再查询来源约束的中文 Wikipedia 索引；回答带来源标题和链接，无法确认时保持 UNKNOWN/CLARIFY/CONFLICT。
+早期开发记录（2026-08-24）：公开对话课程首次进入真实训练主线，清洗后的统一 pack 回读为 `731` 条（`365 train / 184 heldout / 182 negative`），其中保留完整句和 Markdown、HTML、源代码、表格、引用/嵌入等结构载体的原文；元数据不会被送入语言通道。该早期 pack 在 `K:` 盘完成过 stage-1 observe 训练，产生 SQLite 图、checkpoint/dump、cursor 和运行 manifest。它只证明公开课程被真实消费并改变了图状态；当前主线已由后续四阶段最大规模训练接替。
 
-公开 split 对照显示，held-out 与 negative 均和训练集保持零身份重叠；这只是数据隔离和输入新颖性证据，不是问答正确率。当前 K 盘训练仍处于 stage-1 observe 阶段，广域入口仍是来源约束抽取式问答。可复跑的规模展示入口固定执行窄域完整句、长问句、来源绑定追问和广域问题，并对同一只读数据库重放：最近一次展示为 `14` 轮、`13 ANSWER / 1 UNKNOWN`、`5` 条长问句、`10` 个来源绑定回答，重放逐位一致；其中“它/该条目”等紧接追问会复用上一轮已确认的来源标题作为检索焦点。展示同时实际读取 v6 K 盘训练状态，并用 DLG-RAW-16 两个独立 family 学到的结构消费 3 条窄域回答和 4 条新值 typed probe，覆盖限定事实、UNKNOWN、CLARIFY、REPAIR（`trained_surface_consumer.bound=true`、`typed_probe_used_count=4`）。摘要同时绑定 `dialogue-pack-v6-clean-surface` 的训练 pack SHA 和只读 SQLite graph 状态。展示摘要会写入调用者指定的 K 盘路径；它不是通用问答或自由生成评测。
+公开 split 对照显示，held-out 与 negative 均和训练集保持零身份重叠；这只是数据隔离和输入新颖性证据，不是问答正确率。早期 v6/stage-1 结果属于历史开发记录；当前公开训练主线已经推进到四阶段最大规模 run，广域入口仍是来源约束抽取式问答。可复跑的规模展示入口固定执行窄域完整句、长问句、来源绑定追问和广域问题，并对同一只读数据库重放：最近一次展示为 `14` 轮、`13 ANSWER / 1 UNKNOWN`、`5` 条长问句、`10` 个来源绑定回答，重放逐位一致；其中“它/该条目”等紧接追问会复用上一轮已确认的来源标题作为检索焦点。展示同时实际读取训练状态，并用 DLG-RAW-16 两个独立 family 学到的结构消费窄域回答和新值 typed probe，覆盖限定事实、UNKNOWN、CLARIFY、REPAIR。摘要写入调用者指定的 K 盘路径；它不是通用问答或自由生成评测。
 
 为验证“让人听懂的完整句子”不是只回放训练实体，项目又增加了独立的表层结构 held-out 开发评估：10 条新实体、新限定和新组合，覆盖 `ANSWER/UNKNOWN/CLARIFY/REPAIR`，每条生成结果均为长句（至少 48 UTF-8 bytes）。接入训练表层消费者后为 `10/10 PASS`，未接消费者的对照为 `10/10 NO_LEARNED_SURFACE`；报告 SHA-256 为 `7e77514e4b074eb46e2fa0e524f977c1fdafa28175430ccd4345f429f29479ec`。该结果证明的是已学表层结构对新 typed 输入的组合能力，不证明从原始文本自动理解、事实真值判断、自由生成或广域知识泛化；广域知识路径仍是带来源约束的检索与证据选择。
 

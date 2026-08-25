@@ -7,7 +7,7 @@ predicate、Role、StructureConcept、Evidence 与生成目标均由课程显式
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pure_integer_ai.cognition.shared.candidate_projection import (
     CandidateGraphProjection,
@@ -119,6 +119,10 @@ class LanguageSemanticCourseInput:
     spans: tuple[TypedRef, ...]
     active_senses: tuple[ActiveSenseCourseView, ...] = ()
     read_only: bool = False
+    # Explicit authored course attachment.  The semantic mapper may consume
+    # this typed object, but must not infer semantics from surface text.
+    typed_payload: Any = None
+    payload_kind: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, SourceRef):
@@ -142,6 +146,16 @@ class LanguageSemanticCourseInput:
             raise TypeError("active_senses 必须是 ActiveSenseCourseView tuple")
         if type(self.read_only) is not bool:
             raise TypeError("semantic course read_only 必须是 bool")
+        if self.payload_kind is not None:
+            if (not isinstance(self.payload_kind, str)
+                    or not self.payload_kind
+                    or self.payload_kind.strip() != self.payload_kind):
+                raise TypeError("semantic course payload_kind 非法")
+            if self.typed_payload is None or not hasattr(
+                    self.typed_payload, "to_value"):
+                raise TypeError("semantic course typed_payload 必须是 canonical object")
+        elif self.typed_payload is not None:
+            raise TypeError("semantic course typed_payload 与 payload_kind 必须成对")
 
 
 @dataclass(frozen=True)

@@ -26,6 +26,7 @@ from pure_integer_ai.cognition.shared.evidence_candidate import (
 )
 from pure_integer_ai.cognition.shared.identity import (
     OBJECT_CONCEPT,
+    OBJECT_PROPOSITION,
     ObjectIdentity,
 )
 from pure_integer_ai.cognition.shared.relation_closure import (
@@ -938,7 +939,11 @@ class AliasRelationCourseLoader:
             }
             restored_definitions = set(
                 candidate_runtime.engine.definitions())
-            if not restored_definitions.issubset(expected_definitions):
+            historical_definitions = (
+                restored_definitions - expected_definitions)
+            if any(not self._history_definition_compatible(
+                    definition, manifest)
+                    for definition in historical_definitions):
                 raise AliasRelationCourseError(
                     "relation Core 历史包含当前 manifest 未声明的候选")
             candidate_runtime.preflight_register_many(tuple(
@@ -962,6 +967,39 @@ class AliasRelationCourseLoader:
             candidate_graph,
             candidate_runtime,
             use_owner,
+        )
+
+    @staticmethod
+    def _history_definition_compatible(
+            definition,
+            manifest: AliasRelationCourseManifest,
+            ) -> bool:
+        """允许同一候选协议下已写入的历史跨请求复用。"""
+        if not hasattr(definition, "candidate"):
+            return False
+        aggregate = manifest.learning_protocol.aggregate_source
+        if (definition.candidate.object_kind != OBJECT_PROPOSITION
+                or definition.candidate.owner != aggregate.owner
+                or definition.candidate.versions != aggregate.versions):
+            return False
+        expected_slots = {
+            (manifest.relation_protocol.relation.predicate,
+             manifest.relation_protocol.relation.ordinal,
+             manifest.relation_protocol.relation.candidate_endpoint),
+            (manifest.relation_protocol.schema.predicate,
+             manifest.relation_protocol.schema.ordinal,
+             manifest.relation_protocol.schema.candidate_endpoint),
+        }
+        actual_slots = {
+            (item.predicate, item.ordinal, item.candidate_endpoint)
+            for item in definition.bindings
+        }
+        if actual_slots != expected_slots:
+            return False
+        return all(
+            source.owner == aggregate.owner
+            and source.versions == aggregate.versions
+            for source in definition.forming_sources
         )
 
     def _preflight_isolated(self) -> AliasRelationCourseReport:

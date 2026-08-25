@@ -185,7 +185,10 @@ class TypedLanguageEpisode:
         request = self.production.decision.request
         if request is not None:
             if request.goal.source != self.source:
-                raise ValueError("typed language episode 替换了请求知识来源")
+                raise ValueError(
+                    "typed language episode 替换了请求知识来源: "
+                    f"request={request.goal.source.stable_key()} "
+                    f"episode={self.source.stable_key()}")
             if request.goal.scope.parent != self.scope:
                 raise ValueError("typed language episode 请求未绑定当前 episode scope")
         postcheck = self.production.postcheck

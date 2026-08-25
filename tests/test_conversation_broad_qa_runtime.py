@@ -85,6 +85,30 @@ def test_broad_answer_keeps_full_evidence_but_projects_readable_primary_surface(
         module.query_broad_qa = original
 
 
+def test_display_projection_removes_empty_labeled_parentheses_only() -> None:
+    import pure_integer_ai.experiments.conversation_broad_qa_runtime as module
+
+    class _Citation:
+        selected_text = "黄山松（學名：），松科松属的一种。"
+
+    class _Result:
+        status = "ANSWER"
+        answer = "黄山松（學名：），松科松属的一种。\n相邻证据句。"
+        title = "黄山松"
+        source_url = "https://example.invalid/source"
+        evidence_chain = (_Citation(),)
+
+    original = module.query_broad_qa
+    module.query_broad_qa = lambda *_args, **_kwargs: _Result()
+    try:
+        _, turn = answer_broad_dialogue_turn(
+            BroadDialogueState((12, 13, 14)), "分布在哪些地区？", object())
+        assert turn.display_answer == "黄山松，松科松属的一种。"
+        assert turn.answer == _Result.answer
+    finally:
+        module.query_broad_qa = original
+
+
 def test_surface_consumer_only_changes_display_surface() -> None:
     import pure_integer_ai.experiments.conversation_broad_qa_runtime as module
 

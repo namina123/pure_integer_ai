@@ -319,6 +319,8 @@ class LanguageSemanticCourseRuntime:
             tuple(observation.span_refs),
             tuple(active_senses),
             ctx.scope_owner is not None,
+            item.typed_payload,
+            item.payload_kind,
         )
 
     def _validate_lesson_input(

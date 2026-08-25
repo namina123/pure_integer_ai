@@ -272,6 +272,22 @@ def _decode_runtime_state(record: tuple[int, ...]) -> RuntimeMemoryState:
         raise PersistentDialogueRunError("runtime state 无法恢复") from error
 
 
+def encode_runtime_memory_state(state: RuntimeMemoryState) -> tuple[int, ...]:
+    """公开复用 Runtime Memory 的纯整数 codec，不绑定任何对话入口。"""
+    try:
+        return _encode_runtime_state(state)
+    except (TypeError, ValueError) as error:
+        raise PersistentDialogueRunError("runtime state 编码失败") from error
+
+
+def decode_runtime_memory_state(record: tuple[int, ...]) -> RuntimeMemoryState:
+    """公开恢复 Runtime Memory 整数 record，供其他持久化载体复用。"""
+    try:
+        return _decode_runtime_state(record)
+    except (TypeError, ValueError, IntegerCodecError) as error:
+        raise PersistentDialogueRunError("runtime state 解码失败") from error
+
+
 def _checkpoint_record(
         ordinal: int,
         core_state: CoreLearningState,
@@ -491,6 +507,8 @@ __all__ = [
     "PersistentDialogueCheckpoint",
     "PersistentDialogueRecovery",
     "PersistentDialogueRunError",
+    "decode_runtime_memory_state",
+    "encode_runtime_memory_state",
     "recover_dialogue_checkpoint",
     "write_dialogue_checkpoint",
 ]
