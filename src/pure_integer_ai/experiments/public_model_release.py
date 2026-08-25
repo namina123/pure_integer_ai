@@ -24,6 +24,7 @@ PUBLIC_MODEL_RELEASE_FORMAT = "PURE_INTEGER_AI_PUBLIC_MODEL_RELEASE"
 PUBLIC_MODEL_RELEASE_SCHEMA_VERSION = 1
 PUBLIC_MODEL_RELEASE_MANIFEST = "public_model_release.json"
 PUBLIC_MODEL_RELEASE_DIGEST = "public_model_release.sha256"
+PUBLIC_DIALOGUE_PROTOCOL_CONFIG = "model/dialogue_protocol.json"
 
 
 class PublicModelReleaseError(ValueError):
@@ -81,6 +82,7 @@ class PublicModelRelease:
     training_root: Path
     sparse_snapshot: Path
     source_manifest: Path
+    protocol_config: Path
     manifest: dict[str, object]
 
 
@@ -143,7 +145,9 @@ def load_public_model_release(
     training_root = _resolve(target, entry.get("training_root"), label="entry.training_root")
     sparse_snapshot = _resolve(target, entry.get("sparse_snapshot"), label="entry.sparse_snapshot")
     source_manifest = _resolve(target, value.get("source_manifest"), label="source_manifest")
-    for path in (qa_database, sparse_snapshot, source_manifest):
+    protocol_config = _resolve(
+        target, entry.get("protocol_config"), label="entry.protocol_config")
+    for path in (qa_database, sparse_snapshot, source_manifest, protocol_config):
         if not path.is_file():
             raise PublicModelReleaseError(f"release entry 缺失: {path.name}")
     if not training_root.is_dir():
@@ -154,9 +158,20 @@ def load_public_model_release(
         raise PublicModelReleaseError("source manifest 不可回读") from error
     if not isinstance(sources, dict) or sources.get("format") != "PUBLIC_SOURCE_MANIFEST_V1":
         raise PublicModelReleaseError("source manifest 格式不兼容")
+    try:
+        protocol = json.loads(protocol_config.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PublicModelReleaseError("dialogue protocol config 不可回读") from error
+    if (not isinstance(protocol, dict)
+            or protocol.get("format") != "PURE_INTEGER_AI_DIALOGUE_PROTOCOL_CONFIG"
+            or protocol.get("schema_version") != 1
+            or protocol.get("transport") != "jsonl"
+            or protocol.get("encoding") != "utf-8"
+            or protocol.get("operations") != ["turn", "quit", "exit"]):
+        raise PublicModelReleaseError("dialogue protocol config 格式不兼容")
     return PublicModelRelease(
         target, release_id, qa_database, training_root, sparse_snapshot,
-        source_manifest, value,
+        source_manifest, protocol_config, value,
     )
 
 
@@ -411,6 +426,19 @@ def build_public_model_release(
         },
     }
     (target / "source_manifest.json").write_bytes(_canonical_json(source_manifest))
+    protocol_config = {
+        "format": "PURE_INTEGER_AI_DIALOGUE_PROTOCOL_CONFIG",
+        "schema_version": 1,
+        "transport": "jsonl",
+        "encoding": "utf-8",
+        "byte_order": "big",
+        "operations": ["turn", "quit", "exit"],
+        "request": {"required": ["op", "text"], "id_optional": True},
+        "response": {"type": "response", "status_field": "status"},
+        "checkpoint": {"optional": True, "integer_only": True},
+    }
+    (target / PUBLIC_DIALOGUE_PROTOCOL_CONFIG).write_bytes(
+        _canonical_json(protocol_config))
     payload_files = sorted(
         path for path in target.rglob("*")
         if path.is_file() and path.name not in {
@@ -437,6 +465,7 @@ def build_public_model_release(
             "qa_database": "knowledge/broad_qa.sqlite3",
             "training_root": "model",
             "sparse_snapshot": "data/ph2/sparse_qa_runtime_snapshot_v1.json",
+            "protocol_config": PUBLIC_DIALOGUE_PROTOCOL_CONFIG,
             "protocol": "jsonl",
         },
         "files": entries,
@@ -478,6 +507,7 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "PUBLIC_MODEL_RELEASE_DIGEST", "PUBLIC_MODEL_RELEASE_FORMAT",
     "PUBLIC_MODEL_RELEASE_MANIFEST", "PUBLIC_MODEL_RELEASE_SCHEMA_VERSION",
+    "PUBLIC_DIALOGUE_PROTOCOL_CONFIG",
     "PublicModelRelease", "PublicModelReleaseError",
     "build_public_model_release", "load_public_model_release", "main",
 ]

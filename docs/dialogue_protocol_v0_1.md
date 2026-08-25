@@ -7,21 +7,20 @@
 
 ## 运行准备
 
-训练 artifact 位于调用者自己的 K 盘 release root，例如：
+完整 artifact 位于调用者自己的 K 盘 release root，例如：
 
 ```text
 K:\pure_integer_ai_work\model_releases\public-dialogue-v0.1-publish-20260825-r2
 ```
 
-另需一个已经构建好的 K 盘广域 QA SQLite 索引。仓库不携带训练数据库、索引或大文件。
+release root 已包含广域 QA SQLite 索引、训练状态、公开课程、整数 sidecar、来源清单和协议
+配置。仓库不携带这些 K 盘大文件；发布包本身可以脱离外部 QA SQLite 独立启动。
 
 ## 人类终端
 
 ```powershell
 python -m pure_integer_ai.experiments.run_trained_dialogue_terminal `
-  --project-root . `
-  --qa-database "K:\your_project\indexes\broad-qa.sqlite3" `
-  --training-run-root "K:\your_project\model_releases\public-dialogue-v0.1-publish-20260825-r2" `
+  --release-root "K:\your_project\model_releases\public-dialogue-independent-v10-shard2-stage1-20260826" `
   --session-root "K:\your_project\sessions\dialogue-v0.1"
 ```
 
@@ -43,13 +42,14 @@ python -m pure_integer_ai.experiments.run_trained_dialogue_terminal `
 
 ```powershell
 python -m pure_integer_ai.experiments.run_dialogue_protocol `
-  --project-root . `
-  --qa-database "K:\your_project\indexes\broad-qa.sqlite3" `
-  --training-run-root "K:\your_project\model_releases\public-dialogue-v0.1-publish-20260825-r2" `
+  --release-root "K:\your_project\model_releases\public-dialogue-independent-v10-shard2-stage1-20260826" `
   --session-root "K:\your_project\sessions\dialogue-v0.1"
 ```
 
 `session-root` 可选但必须是 K 盘已存在目录；启用后会话 checkpoint 使用项目的整数格式，关闭进程再启动可以恢复最近有限热历史。协议错误返回 `type=error` 和 `status=INVALID_REQUEST`，不会把错误请求当作问题消费。
+
+release root 中的 `model/dialogue_protocol.json` 声明 JSONL、UTF-8、操作集合和 checkpoint
+格式；启动器会在读取 release manifest 时校验该配置。
 
 ## 发布训练身份
 
