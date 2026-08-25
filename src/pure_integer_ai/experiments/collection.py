@@ -146,6 +146,11 @@ class CollectedItem:
     # occurrence ordinal. This transport reference is outside core graph state.
     token_index: Any = field(default=None, compare=False, repr=False)
     token_index_ordinal: int | None = field(default=None, compare=False)
+    # Aggregate sidecars compose token-sequence references without duplicating
+    # repeated surface blocks. The underlying token index remains attached so
+    # the aggregate can be rendered and independently verified.
+    aggregate_index: Any = field(default=None, compare=False, repr=False)
+    aggregate_index_ordinal: int | None = field(default=None, compare=False)
     _tokens_from_index: bool = field(default=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -174,14 +179,28 @@ class CollectedItem:
         if self.token_index is None and self.token_index_ordinal is not None:
             raise TypeError("token_index_ordinal 必须配套 token_index")
         if (self.token_index is not None
+                and self.aggregate_index is None
                 and (type(self.token_index_ordinal) is not int
                      or self.token_index_ordinal < 0)):
             raise TypeError("token_index_ordinal 必须是非负整数")
+        if self.aggregate_index is None and self.aggregate_index_ordinal is not None:
+            raise TypeError("aggregate_index_ordinal 必须配套 aggregate_index")
+        if (self.aggregate_index is not None
+                and (self.token_index is None
+                     or type(self.aggregate_index_ordinal) is not int
+                     or self.aggregate_index_ordinal < 0)):
+            raise TypeError(
+                "aggregate_index 必须配套 token_index 与 aggregate_index_ordinal")
 
     def token_values(self) -> tuple[str, ...]:
         """读取 token 序列；compact sidecar 在此按需渲染且不保留副本。"""
         if self.tokens:
             return tuple(self.tokens)
+        if self.aggregate_index is not None:
+            render = getattr(self.aggregate_index, "render", None)
+            if render is None:
+                raise TypeError("aggregate_index 缺少 render 协议")
+            return tuple(render(self.token_index, self.aggregate_index_ordinal))
         if self.token_index is not None:
             render = getattr(self.token_index, "render", None)
             if render is None:

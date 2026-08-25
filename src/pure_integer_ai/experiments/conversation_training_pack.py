@@ -33,7 +33,9 @@ from pure_integer_ai.experiments.collection import (
     SOURCE_BARE_TEXT,
 )
 from pure_integer_ai.experiments.integer_token_index import (
+    IntegerAggregateIndex,
     IntegerTokenIndex,
+    load_integer_aggregate_index,
     load_integer_token_index,
 )
 
@@ -192,9 +194,12 @@ class DialogueTrainingCase:
     indexed_surface: bool = False
     token_index: IntegerTokenIndex | None = None
     token_index_ordinal: int | None = None
+    aggregate_index: IntegerAggregateIndex | None = None
+    aggregate_index_ordinal: int | None = None
 
     def __post_init__(self) -> None:
-        if not self.case_id or self.split not in _SPLITS or not self.surfaces:
+        if (not self.case_id or self.split not in _SPLITS
+                or (not self.surfaces and self.aggregate_index is None)):
             raise ConversationTrainingPackError("dialogue case 字段非法")
         if any(type(item) is not int or item < 0 for item in self.integer_record):
             raise ConversationTrainingPackError("dialogue case integer record 非法")
@@ -222,14 +227,26 @@ class DialogueTrainingCase:
         if self.indexed_surface != (self.token_index is not None):
             raise ConversationTrainingPackError(
                 "indexed_surface 与 token_index 必须一致")
-        if self.token_index is not None and (
+        if (self.token_index is not None and self.aggregate_index is None and (
                 type(self.token_index_ordinal) is not int
-                or self.token_index_ordinal < 0):
+                or self.token_index_ordinal < 0)):
             raise ConversationTrainingPackError("token_index ordinal 非法")
+        if self.aggregate_index is None and self.aggregate_index_ordinal is not None:
+            raise ConversationTrainingPackError(
+                "aggregate_index_ordinal 必须配套 aggregate_index")
+        if self.aggregate_index is not None and (
+                self.token_index is None
+                or type(self.aggregate_index_ordinal) is not int
+                or self.aggregate_index_ordinal < 0):
+            raise ConversationTrainingPackError(
+                "aggregate_index 必须配套 token_index 与 ordinal")
 
     @property
     def raw_text(self) -> str:
         """返回供 observe 消费的完整表层，保留问句、上下文和回答顺序。"""
+        if not self.surfaces and self.aggregate_index is not None:
+            return self.aggregate_index.render(
+                self.token_index, self.aggregate_index_ordinal)
         return "\n".join(self.surfaces)
 
     def canonical_record(self) -> tuple[int, ...]:
@@ -312,6 +329,8 @@ class DialogueTrainingPack:
                 payload_kind=case.payload_kind,
                 token_index=case.token_index,
                 token_index_ordinal=case.token_index_ordinal,
+                aggregate_index=case.aggregate_index,
+                aggregate_index_ordinal=case.aggregate_index_ordinal,
             ))
         return result
 
@@ -328,6 +347,8 @@ def _canonical_case_record(case_id: str, split: str, family: str,
                            indexed_surface: bool,
                            token_index: IntegerTokenIndex | None,
                            token_index_ordinal: int | None,
+                           aggregate_index: IntegerAggregateIndex | None,
+                           aggregate_index_ordinal: int | None,
                            ) -> tuple[int, ...]:
     values: list[int] = [CONVERSATION_TRAINING_PACK_PROTOCOL_V1, len(case_id)]
     values.extend(ord(item) for item in case_id)
@@ -362,6 +383,13 @@ def _canonical_case_record(case_id: str, split: str, family: str,
         encoded = token_index.sha256.encode("ascii")
         values.extend((1, len(encoded), *encoded,
                        token_index_ordinal if token_index_ordinal is not None else 0))
+    # Keep legacy records byte-identical; aggregate-bearing records carry a
+    # trailing versioned reference so existing pack identities remain stable.
+    if aggregate_index is not None:
+        encoded = aggregate_index.sha256.encode("ascii")
+        values.extend((1, len(encoded), *encoded,
+                       aggregate_index_ordinal
+                       if aggregate_index_ordinal is not None else 0))
     return tuple(values)
 
 
@@ -413,8 +441,10 @@ def _typed_projection(
 
 def _compact_surface_for_record(
         record: dict[str, Any], path: Path,
-        sidecars: dict[Path, IntegerTokenIndex],
-        ) -> tuple[tuple[str, ...], IntegerTokenIndex, int] | None:
+        token_sidecars: dict[Path, IntegerTokenIndex],
+        aggregate_sidecars: dict[Path, IntegerAggregateIndex],
+        ) -> tuple[tuple[str, ...], IntegerTokenIndex, int,
+                   IntegerAggregateIndex | None, int | None] | None:
     """Resolve an indexed course record without copying its surface text.
 
     The sidecar path is deliberately relative to the course file.  This keeps
@@ -424,10 +454,16 @@ def _compact_surface_for_record(
     """
     file_value = record.get("token_index_file")
     ordinal = record.get("token_index_ordinal")
-    if file_value is None and ordinal is None:
+    aggregate_file_value = record.get("aggregate_index_file")
+    aggregate_ordinal = record.get("aggregate_index_ordinal")
+    if (file_value is None and ordinal is None
+            and aggregate_file_value is None and aggregate_ordinal is None):
         return None
+    has_aggregate = (aggregate_file_value is not None
+                     or aggregate_ordinal is not None)
     if (not isinstance(file_value, str) or not file_value.strip()
-            or type(ordinal) is not int or ordinal < 0):
+            or (not has_aggregate
+                and (type(ordinal) is not int or ordinal < 0))):
         raise ConversationTrainingPackError("token index reference 非法")
     relative = Path(file_value)
     if relative.is_absolute() or relative.drive or ".." in relative.parts:
@@ -438,10 +474,10 @@ def _compact_surface_for_record(
     except ValueError as error:
         raise ConversationTrainingPackError("token index path 越界") from error
     try:
-        index = sidecars.get(sidecar)
+        index = token_sidecars.get(sidecar)
         if index is None:
             index = load_integer_token_index(sidecar)
-            sidecars[sidecar] = index
+            token_sidecars[sidecar] = index
     except (OSError, ValueError, TypeError) as error:
         raise ConversationTrainingPackError(
             f"token index sidecar 不可回读: {sidecar}") from error
@@ -449,13 +485,51 @@ def _compact_surface_for_record(
     if declared_hash is not None and (
             not isinstance(declared_hash, str) or declared_hash != index.sha256):
         raise ConversationTrainingPackError("token index hash 漂移")
-    try:
-        surface = index.render(ordinal)
-    except (IndexError, TypeError) as error:
-        raise ConversationTrainingPackError("token index ordinal 越界") from error
+    aggregate = None
+    if aggregate_file_value is not None or aggregate_ordinal is not None:
+        if (not isinstance(aggregate_file_value, str)
+                or not aggregate_file_value.strip()
+                or type(aggregate_ordinal) is not int
+                or aggregate_ordinal < 0):
+            raise ConversationTrainingPackError("aggregate index reference 非法")
+        aggregate_relative = Path(aggregate_file_value)
+        if (aggregate_relative.is_absolute() or aggregate_relative.drive
+                or ".." in aggregate_relative.parts):
+            raise ConversationTrainingPackError("aggregate index path 越界")
+        aggregate_path = (path.parent / aggregate_relative).resolve()
+        try:
+            aggregate_path.relative_to(path.parent.resolve())
+        except ValueError as error:
+            raise ConversationTrainingPackError("aggregate index path 越界") from error
+        try:
+            aggregate = aggregate_sidecars.get(aggregate_path)
+            if aggregate is None:
+                aggregate = load_integer_aggregate_index(aggregate_path)
+                aggregate_sidecars[aggregate_path] = aggregate
+        except (OSError, ValueError, TypeError) as error:
+            raise ConversationTrainingPackError(
+                f"aggregate index sidecar 不可回读: {aggregate_path}") from error
+        declared_aggregate_hash = record.get("aggregate_index_sha256")
+        if (declared_aggregate_hash is not None
+                and (not isinstance(declared_aggregate_hash, str)
+                     or declared_aggregate_hash != aggregate.sha256)):
+            raise ConversationTrainingPackError("aggregate index hash 漂移")
+        try:
+            surface = aggregate.render(index, aggregate_ordinal)
+        except (IndexError, TypeError, ValueError) as error:
+            raise ConversationTrainingPackError(
+                "aggregate index ordinal 或绑定越界") from error
+    else:
+        try:
+            surface = index.render(ordinal)
+        except (IndexError, TypeError) as error:
+            raise ConversationTrainingPackError("token index ordinal 越界") from error
     if len(surface) < 2:
         raise ConversationTrainingPackError("token index surface 为空或过短")
-    return (surface,), index, ordinal
+    # Aggregate-only records intentionally keep no duplicated surface tuple in
+    # the course object; raw_text is reconstructed from the referenced index.
+    return (() if has_aggregate else (surface,)), index, (
+        None if has_aggregate else ordinal), aggregate, aggregate_ordinal
 
 
 def load_dialogue_training_pack(paths: Iterable[str | Path], *,
@@ -469,7 +543,8 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
     cases: list[DialogueTrainingCase] = []
     source_files: list[tuple[str, str, int]] = []
     seen: set[str] = set()
-    sidecars: dict[Path, IntegerTokenIndex] = {}
+    token_sidecars: dict[Path, IntegerTokenIndex] = {}
+    aggregate_sidecars: dict[Path, IntegerAggregateIndex] = {}
     identities = {
         Path(key).resolve(): value
         for key, value in (source_path_identities or {}).items()
@@ -509,15 +584,18 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
             if split not in _SPLITS:
                 continue
             compact_reference = _compact_surface_for_record(
-                record, path, sidecars)
+                record, path, token_sidecars, aggregate_sidecars)
             if compact_reference is None:
                 surfaces = _surface_for_record(record)
                 token_index = None
                 token_index_ordinal = None
+                aggregate_index = None
+                aggregate_index_ordinal = None
             else:
-                surfaces, token_index, token_index_ordinal = compact_reference
+                (surfaces, token_index, token_index_ordinal,
+                 aggregate_index, aggregate_index_ordinal) = compact_reference
             indexed_surface = token_index is not None
-            if not surfaces:
+            if not surfaces and aggregate_index is None:
                 continue
             source_identity = identities.get(path)
             case_id = _record_id(record, path, line_number, source_identity)
@@ -562,7 +640,8 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
                     line_number,
                     surfaces, causal_pairs, typed_payload, payload_kind,
                     source_ref, expected_state, expected_payload,
-                    indexed_surface, token_index, token_index_ordinal),
+                    indexed_surface, token_index, token_index_ordinal,
+                    aggregate_index, aggregate_index_ordinal),
                 typed_payload=typed_payload,
                 payload_kind=payload_kind,
                 source_ref=source_ref,
@@ -571,6 +650,8 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
                 indexed_surface=indexed_surface,
                 token_index=token_index,
                 token_index_ordinal=token_index_ordinal,
+                aggregate_index=aggregate_index,
+                aggregate_index_ordinal=aggregate_index_ordinal,
             ))
             count += 1
             if max_cases is not None and len(cases) >= max_cases:

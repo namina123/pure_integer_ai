@@ -183,24 +183,37 @@ def _copy_file(source: Path, target: Path) -> None:
     shutil.copyfile(source, target)
 
 
-def _course_sidecar(source: Path) -> Path | None:
-    """Resolve an indexed course's declared sidecar beside the course file."""
+def _course_sidecars(source: Path) -> tuple[Path, ...]:
+    """Resolve all declared integer sidecars beside an indexed course file."""
+    found: list[Path] = []
+    fields = ("token_index_file", "aggregate_index_file")
     try:
         for raw in source.read_bytes().splitlines():
             if not raw.strip():
                 continue
             value = json.loads(raw.decode("utf-8"))
             if not isinstance(value, dict):
-                return None
-            name = value.get("token_index_file")
-            if not isinstance(name, str) or not name:
-                return None
-            candidate = (source.parent / Path(name)).resolve()
-            candidate.relative_to(source.parent.resolve())
-            return candidate if candidate.is_file() else None
+                return ()
+            for field in fields:
+                name = value.get(field)
+                if name is None:
+                    continue
+                if not isinstance(name, str) or not name:
+                    return ()
+                candidate = (source.parent / Path(name)).resolve()
+                candidate.relative_to(source.parent.resolve())
+                if not candidate.is_file():
+                    return ()
+                if candidate not in found:
+                    found.append(candidate)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        return None
-    return None
+        return ()
+    return tuple(found)
+
+
+def _course_sidecar(source: Path) -> Path | None:
+    """Backward-compatible token sidecar resolver."""
+    return next(iter(_course_sidecars(source)), None)
 
 
 def _license_ids(paths: Iterable[Path]) -> tuple[str, ...]:
@@ -315,6 +328,7 @@ def build_public_model_release(
     copied_courses: list[Path] = []
     copied_course_sidecars: list[Path] = []
     seen_names: set[str] = set()
+    copied_sidecar_digests: dict[str, str] = {}
     rewritten_rows = []
     for source, original in source_files:
         name = source.name
@@ -324,12 +338,20 @@ def build_public_model_release(
         relative = Path("data/ph2") / name
         _copy_file(source, target / relative)
         copied_courses.append(source)
-        sidecar = _course_sidecar(source)
-        if sidecar is not None and sidecar.is_file():
+        for sidecar in _course_sidecars(source):
             sidecar_relative = Path("data/ph2") / sidecar.name
+            if sidecar.name in seen_names:
+                digest = _sha256(sidecar)
+                if copied_sidecar_digests.get(sidecar.name) != digest:
+                    raise PublicModelReleaseError(
+                        f"训练 sidecar basename 冲突: {sidecar.name}")
+                # Multiple shards intentionally share one immutable sidecar;
+                # publish it once and keep a single manifest entry.
+                continue
             _copy_file(sidecar, target / sidecar_relative)
             copied_course_sidecars.append(sidecar)
             seen_names.add(sidecar.name)
+            copied_sidecar_digests[sidecar.name] = _sha256(sidecar)
         digest = _sha256(source)
         count = next((int(row[2]) for row in source_rows if str(row[0]) == original), 0)
         rewritten_rows.append([relative.as_posix(), digest, count])

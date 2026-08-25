@@ -13,7 +13,9 @@ from pathlib import Path
 import sqlite3
 
 from pure_integer_ai.experiments.integer_token_index import (
+    build_integer_aggregate_index,
     build_integer_token_index, write_integer_token_index,
+    write_integer_aggregate_index,
 )
 
 
@@ -64,6 +66,16 @@ def build_broad_dialogue_course(
     keys = tuple(f"{source_key}:{int(row[0])}" for row in valid_rows)
     token_index = build_integer_token_index(texts, sequence_keys=keys)
     sidecar = target.with_name(target.name + ".tokens.int.json")
+    # Compose one aggregate occurrence per source record.  The aggregate stores
+    # only references to unique token sequences; duplicate passages therefore
+    # share both the token sequence and the aggregate body while source keys
+    # remain distinct occurrence evidence.
+    aggregate_index = build_integer_aggregate_index(
+        token_index,
+        ((key, (token_index.occurrence_ordinals[ordinal],))
+         for ordinal, key in enumerate(keys)),
+    )
+    aggregate_sidecar = target.with_name(target.name + ".aggregates.int.json")
     records = []
     counts = {"train": 0, "heldout": 0, "negative": 0}
     for ordinal, (passage_id, text, title, page_id, revision_id) in enumerate(valid_rows):
@@ -89,8 +101,10 @@ def build_broad_dialogue_course(
                 f"{int(page_id)}&oldid={int(revision_id)}"),
             "split": split,
             "token_index_file": sidecar.name,
-            "token_index_ordinal": ordinal,
             "token_index_sha256": token_index.sha256,
+            "aggregate_index_file": aggregate_sidecar.name,
+            "aggregate_index_ordinal": ordinal,
+            "aggregate_index_sha256": aggregate_index.sha256,
             "title": str(title),
         }
         records.append(record)
@@ -104,6 +118,7 @@ def build_broad_dialogue_course(
         for item in records)
     target.write_bytes(payload)
     write_integer_token_index(sidecar, token_index)
+    write_integer_aggregate_index(aggregate_sidecar, aggregate_index)
     return {
         "course_path": target.as_posix(),
         "course_sha256": hashlib.sha256(payload).hexdigest(),
@@ -114,8 +129,10 @@ def build_broad_dialogue_course(
         "snapshot_id": snapshot_id,
         "license_id": license_id,
         "token_index_path": sidecar.as_posix(),
+        "aggregate_index_path": aggregate_sidecar.as_posix(),
         "token_vocabulary_count": len(token_index.vocabulary),
         "unique_sequence_count": len(token_index.sequences),
+        "unique_aggregate_count": len(aggregate_index.aggregate_sequences),
         "occurrence_sequence_count": len(token_index.occurrence_ordinals),
         "token_occurrence_count": token_index.token_count(),
         "raw_surface_bytes": sum(len(item.encode("utf-8")) for item in texts),

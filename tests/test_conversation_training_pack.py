@@ -134,6 +134,48 @@ def test_integer_aggregate_index_rejects_forward_reference() -> None:
         raise AssertionError("forward aggregate reference must fail closed")
 
 
+def test_aggregate_course_projection_replays_without_surface_storage(
+        tmp_path: Path) -> None:
+    """课程 occurrence 只保存 aggregate ordinal，重复段落共享聚合正文。"""
+    token_path = tmp_path / "course.jsonl.tokens.int.json"
+    aggregate_path = tmp_path / "course.jsonl.aggregates.int.json"
+    course_path = tmp_path / "course.jsonl"
+    token_index = build_integer_token_index(
+        ("重复段落", "重复段落", "另一段"),
+        sequence_keys=("source:a", "source:b", "source:c"),
+    )
+    aggregate_index = build_integer_aggregate_index(
+        token_index,
+        ((key, (token_index.occurrence_ordinals[index],))
+         for index, key in enumerate(("source:a", "source:b", "source:c"))),
+    )
+    write_integer_token_index(token_path, token_index)
+    write_integer_aggregate_index(aggregate_path, aggregate_index)
+    rows = [
+        {"sample_id": key, "split": "train",
+         "token_index_file": token_path.name,
+         "token_index_sha256": token_index.sha256,
+         "aggregate_index_file": aggregate_path.name,
+         "aggregate_index_ordinal": index,
+         "aggregate_index_sha256": aggregate_index.sha256}
+        for index, key in enumerate(("source:a", "source:b", "source:c"))
+    ]
+    course_path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    pack = load_dialogue_training_pack((course_path,))
+    assert pack.cases[0].surfaces == ()
+    assert pack.cases[0].raw_text == "重复段落"
+    assert len(pack.cases[0].aggregate_index.aggregate_sequences) == 2
+    items = pack.training_items(defer_indexed_surface=True)
+    assert [item.token_values() for item in items] == [
+        tuple("重复段落"), tuple("重复段落"), tuple("另一段")]
+    items[0].materialize_tokens()
+    items[0].release_index_tokens()
+    assert items[0].tokens == []
+
+
 def test_indexed_course_default_projection_keeps_training_tokens(tmp_path: Path) -> None:
     sidecar = tmp_path / "course.jsonl.tokens.int.json"
     course = tmp_path / "course.jsonl"

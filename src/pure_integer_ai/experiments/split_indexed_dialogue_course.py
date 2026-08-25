@@ -1,8 +1,8 @@
 """将 compact JSONL 课程切成可恢复 shard，不复制整数 sidecar 内容。
 
 每个 shard 保存原记录的顺序子集，并复制同一个 sidecar；记录中的相对
-``token_index_file`` 不变。shard 仅是训练编排边界，不改变 course identity、
-split 或 sidecar hash。
+``token_index_file``/``aggregate_index_file`` 不变。shard 仅是训练编排边界，
+不改变 course identity、split 或 sidecar hash。
 """
 from __future__ import annotations
 
@@ -48,10 +48,33 @@ def split_indexed_dialogue_course(
                                   separators=(",", ":")).encode("utf-8") + b"\n")
     if not records:
         raise IndexedCourseSplitError("课程为空")
+    aggregate_names = {
+        json.loads(item.decode("utf-8")).get("aggregate_index_file")
+        for item in records
+    }
+    aggregate_names.discard(None)
+    if len(aggregate_names) > 1:
+        raise IndexedCourseSplitError("课程 aggregate_index_file 不一致")
+    aggregate_sidecar = None
+    aggregate_sha = None
+    if aggregate_names:
+        aggregate_name = next(iter(aggregate_names))
+        if not isinstance(aggregate_name, str) or not aggregate_name:
+            raise IndexedCourseSplitError("课程 aggregate_index_file 非法")
+        aggregate_sidecar = (source_path.parent / Path(aggregate_name)).resolve()
+        try:
+            aggregate_sidecar.relative_to(source_path.parent.resolve())
+        except ValueError as error:
+            raise IndexedCourseSplitError("aggregate sidecar 路径越界") from error
+        if not aggregate_sidecar.is_file():
+            raise IndexedCourseSplitError("aggregate sidecar 缺失")
+        aggregate_sha = hashlib.sha256(aggregate_sidecar.read_bytes()).hexdigest()
     target.mkdir(parents=True)
     sidecar_target = target / sidecar.name
     shutil.copyfile(sidecar, sidecar_target)
     sidecar_sha = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+    if aggregate_sidecar is not None:
+        shutil.copyfile(aggregate_sidecar, target / aggregate_sidecar.name)
     reports: list[dict[str, object]] = []
     for shard_no, start in enumerate(range(0, len(records), shard_size), 1):
         rows = records[start:start + shard_size]
@@ -67,11 +90,15 @@ def split_indexed_dialogue_course(
             "sidecar": sidecar_target.as_posix(),
             "sidecar_sha256": sidecar_sha,
         })
+    manifest_value = {"format": "PURE_INTEGER_AI_INDEXED_COURSE_SHARDS_V1",
+                      "source": source_path.name, "record_count": len(records),
+                      "shard_size": shard_size, "sidecar": sidecar.name,
+                      "sidecar_sha256": sidecar_sha, "shards": reports}
+    if aggregate_sidecar is not None:
+        manifest_value["aggregate_sidecar"] = aggregate_sidecar.name
+        manifest_value["aggregate_sidecar_sha256"] = aggregate_sha
     (target / "shards.manifest.json").write_text(
-        json.dumps({"format": "PURE_INTEGER_AI_INDEXED_COURSE_SHARDS_V1",
-                    "source": source_path.name, "record_count": len(records),
-                    "shard_size": shard_size, "sidecar": sidecar.name,
-                    "sidecar_sha256": sidecar_sha, "shards": reports},
+        json.dumps(manifest_value,
                    ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8", newline="\n")
     return tuple(reports)

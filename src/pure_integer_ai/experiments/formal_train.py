@@ -74,6 +74,11 @@ from pure_integer_ai.storage.word_form_index import (
     WORD_FORM_LEGACY_BRIDGE_TABLE,
     register_word_form_index,
 )
+from pure_integer_ai.storage.integer_index_store import (
+    INTEGER_INDEX_HEADER_TABLE,
+    INTEGER_INDEX_MEMBER_TABLE,
+    INTEGER_INDEX_OCCURRENCE_TABLE,
+)
 from pure_integer_ai.experiments.curriculum_mastery_runtime import (
     CurriculumGateCheck,
     CurriculumMasteryProtocol,
@@ -345,7 +350,10 @@ class FormalTrainConfig:
                                                    ABSTRACT_MARK_TABLE,
                                                    CONCEPT_CORRESPONDENCE_TABLE,
                                                    WORD_FORM_INDEX_TABLE,
-                                                   WORD_FORM_LEGACY_BRIDGE_TABLE)   # 词形 legacy 目录及显式迁移桥
+                                                   WORD_FORM_LEGACY_BRIDGE_TABLE,
+                                                   INTEGER_INDEX_HEADER_TABLE,
+                                                   INTEGER_INDEX_MEMBER_TABLE,
+                                                   INTEGER_INDEX_OCCURRENCE_TABLE)   # 词形 legacy 目录及显式迁移桥
     # #723 G 归因：collect_episodes=True 时主循环收集全 episode 列表挂 result.episodes（G_meta 5 字段活·
     # judge/verify/task-driven 三路）。harness 跑考核时开·生产训练默认 OFF（防大 corpus episodes 爆内存）。
     # 默认 False 守 bit-identical（既有测零感知·result.episodes default 空 list·to_json 不序列化 episodes）。
@@ -698,6 +706,26 @@ def _formal_train_impl(config: FormalTrainConfig,
         mastery_stage_keys = mastery_protocol.stage_keys_for(
             tuple(requested_stages))
     ctx = make_train_context(backend, teacher=teacher, weights=weights)
+    # Compact courses carry their immutable integer sidecars outside Core.  Bind
+    # each unique token/aggregate index once into the backend so a resumed run
+    # can reconstruct repeated content from integer members rather than storing
+    # another full surface copy.  Occurrence/source/span rows remain distinct.
+    from pure_integer_ai.storage.integer_index_store import IntegerIndexStore
+    integer_index_store = IntegerIndexStore(backend)
+    bound_token_indexes: set[str] = set()
+    bound_aggregate_indexes: set[str] = set()
+    for indexed_item in corpus:
+        token_index = indexed_item.token_index
+        if token_index is None:
+            continue
+        if token_index.sha256 not in bound_token_indexes:
+            integer_index_store.bind(token_index)
+            bound_token_indexes.add(token_index.sha256)
+        aggregate_index = indexed_item.aggregate_index
+        if (aggregate_index is not None
+                and aggregate_index.sha256 not in bound_aggregate_indexes):
+            integer_index_store.bind(token_index, aggregate_index)
+            bound_aggregate_indexes.add(aggregate_index.sha256)
     ctx.w09_weaning_protocol = config.w09_weaning_protocol
     ctx.w09_weaning_runtime = config.w09_weaning_runtime
     ctx.language_property_attr_instruction_key = (
