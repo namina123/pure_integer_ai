@@ -1,0 +1,53 @@
+{
+  "release_id": "public-dialogue-v0.1-20260825",
+  "artifact_kind": "deterministic_integer_dialogue_state",
+  "artifact_root": "<K_RUN_ROOT>/public-dialogue-v0.1-publish-20260825-r2",
+  "training_run_id": "public-dialogue-v0.1-train-20260825",
+  "pack_sha256": "96c7d6abcf421ddd8130f9ed6ef74663fed69083f9d42923395903bf56b00615",
+  "protocol": {
+    "entrypoint": "python -m pure_integer_ai.experiments.run_dialogue_protocol",
+    "format": "utf-8-jsonl-without-bom",
+    "request": {"required": ["id", "op", "text"], "operations": ["turn", "quit", "exit"]},
+    "response_statuses": ["ANSWER", "UNKNOWN", "CLARIFY", "REPAIR", "INVALID_REQUEST"]
+  },
+  "training": {
+    "case_count": 812,
+    "split_counts": {"train": 446, "heldout": 184, "negative": 182},
+    "training_item_count": 445,
+    "stages_completed": [1, 2, 3, 4],
+    "training_cursor_identity": [5, 137, 24, 41, 94, 21, 233, 81, 217, 69, 132, 127, 155, 173, 115, 221, 56, 152, 130, 104, 119, 243, 62, 223, 219, 170, 111, 139, 63, 108, 18, 137],
+    "typed_course_counts": {
+      "GenerationAdoptionPostcheckQuery": 13,
+      "GenerationGeneralizationCandidateV1": 28
+    }
+  },
+  "capabilities": {
+    "source_bound_chinese_qa": true,
+    "finite_multiturn_focus": true,
+    "unknown_and_clarify": true,
+    "cross_process_integer_checkpoint": true,
+    "free_generation": false,
+    "unbounded_memory": false,
+    "general_qa_truth": false
+  },
+  "artifact_files": [
+    "training.sqlite3",
+    "global_identity.dump",
+    "space_1.dump",
+    "space_2.dump",
+    "space_3.dump",
+    "training_cursor.int",
+    "training_summary.json",
+    "dialogue_pack_manifest.json",
+    "run.manifest.json",
+    "run.manifest.sha256",
+    "metrics.jsonl",
+    "execution.json",
+    "contrast_report.json",
+    "cursor.json",
+    "release_receipt.json"
+  ],
+  "source_and_license": "The pack manifest and source files in the public repository define course provenance and license boundaries; external QA indexes retain their own source licenses.",
+  "status": "development_release",
+  "non_claims": ["not a neural-weight release", "not free generation", "not universal truth", "not infinite context", "not autonomous post-weaning learning"]
+}

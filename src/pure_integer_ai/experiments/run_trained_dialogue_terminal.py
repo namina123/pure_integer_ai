@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
+import time
 from typing import BinaryIO, Callable
 from typing import Any
 
@@ -177,6 +178,43 @@ def _display(turn) -> str:
     return answer
 
 
+def _protocol_turn_payload(turn) -> dict[str, object]:
+    """把 DialogueTurn 投影为稳定的机器可读响应，不改变语义。"""
+    return {
+        "type": "response",
+        "ordinal": turn.ordinal,
+        "question": turn.question,
+        "retrieval_question": turn.retrieval_question,
+        "status": turn.status,
+        "answer": turn.answer,
+        "display_answer": turn.display_answer,
+        "source_title": turn.source_title,
+        "source_url": turn.source_url,
+        "citations": [
+            {
+                "surface": citation.surface,
+                "source_title": citation.source_title,
+                "source_url": citation.source_url,
+            }
+            for citation in turn.citations
+        ],
+        "turn_key": list(turn.turn_key),
+    }
+
+
+def _write_protocol_payload(stream_out: BinaryIO,
+                            payload: dict[str, object]) -> None:
+    """以无 BOM UTF-8 JSONL 写出一条协议响应。"""
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8") + b"\n"
+    stream_out.write(encoded)
+    stream_out.flush()
+
+
 def run_trained_dialogue_terminal(
         *,
         project_root: str | Path,
@@ -204,8 +242,15 @@ def run_trained_dialogue_terminal(
         learned_relation_answer_frame_model: Any | None = None,
         input_stream: BinaryIO | None = None,
         output_stream: BinaryIO | None = None,
+        protocol_stream: bool = False,
+        metrics_output: str | Path | None = None,
         ) -> int:
-    """运行可回放的只读交互会话，``:quit`` 结束。"""
+    """运行可回放的只读交互会话。
+
+    默认使用人类终端；``protocol_stream=True`` 时读取无 BOM UTF-8 JSONL，
+    每行一个 ``{"id": ..., "op": "turn", "text": ...}`` 请求并输出一条
+    稳定 JSON 响应。两种入口共享完全相同的查询、证据、拒答和 checkpoint 路径。
+    """
     runtime_sqlite_runtime = None
     runtime_material_response_provider = None
     if runtime_material_runtime_database is not None:
@@ -346,20 +391,52 @@ def run_trained_dialogue_terminal(
                     BroadDialogueRuntimeMemoryError) as error:
                 raise ValueError(f"会话检查点无法恢复: {error}") from error
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    latency_us: list[int] = []
     try:
         while True:
-            stream_out.write("你> ".encode("utf-8"))
-            stream_out.flush()
-            raw = stream_in.readline()
-            if raw == b"" or raw.rstrip(b"\r\n") in {b":quit", b":exit"}:
-                break
-            payload = raw.rstrip(b"\r\n")
-            try:
-                question = payload.decode("utf-8")
-            except UnicodeDecodeError:
-                stream_out.write("系统> 输入必须是 UTF-8 文本。\n".encode("utf-8"))
+            if not protocol_stream:
+                stream_out.write("你> ".encode("utf-8"))
                 stream_out.flush()
-                continue
+            raw = stream_in.readline()
+            if raw == b"":
+                break
+            if protocol_stream:
+                request: dict[str, object] = {}
+                try:
+                    request = json.loads(raw.decode("utf-8"))
+                    if not isinstance(request, dict):
+                        raise ValueError("请求必须是 JSON 对象")
+                    request_id = request.get("id")
+                    operation = request.get("op", "turn")
+                    if operation in {"quit", "exit"}:
+                        _write_protocol_payload(stream_out, {
+                            "id": request_id, "type": "bye", "status": "OK",
+                        })
+                        break
+                    if operation != "turn":
+                        raise ValueError("op 必须是 turn、quit 或 exit")
+                    question = request.get("text")
+                    if type(question) is not str or not question.strip():
+                        raise ValueError("turn.text 必须是非空字符串")
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                    _write_protocol_payload(stream_out, {
+                        "id": request.get("id") if 'request' in locals()
+                        and isinstance(request, dict) else None,
+                        "type": "error",
+                        "status": "INVALID_REQUEST",
+                        "error": str(error),
+                    })
+                    continue
+            else:
+                payload = raw.rstrip(b"\r\n")
+                if payload in {b":quit", b":exit"}:
+                    break
+                try:
+                    question = payload.decode("utf-8")
+                except UnicodeDecodeError:
+                    stream_out.write("系统> 输入必须是 UTF-8 文本。\n".encode("utf-8"))
+                    stream_out.flush()
+                    continue
             if not question.strip():
                 continue
             runtime_response = runtime_material_response
@@ -394,6 +471,7 @@ def run_trained_dialogue_terminal(
                     return None
 
                 runtime_response = _runtime_response_with_focus
+            started_ns = time.perf_counter_ns()
             state, turn = answer_broad_dialogue_turn(
                 state, question, connection, narrow_answer=narrow,
                 runtime_material_answer=runtime_material_answer,
@@ -406,6 +484,7 @@ def run_trained_dialogue_terminal(
                     learned_relation_marker_evidence_model),
                 learned_relation_answer_frame_model=(
                     learned_relation_answer_frame_model))
+            latency_us.append(max(0, (time.perf_counter_ns() - started_ns) // 1000))
             if session_capability is not None:
                 try:
                     if runtime_memory_state is None:
@@ -421,12 +500,39 @@ def run_trained_dialogue_terminal(
                 except (BroadDialoguePersistenceError,
                         BroadDialogueRuntimeMemoryError) as error:
                     raise ValueError(f"会话记忆写入失败: {error}") from error
-            stream_out.write(("系统> " + _display(turn) + "\n").encode("utf-8"))
-            stream_out.flush()
+            if protocol_stream:
+                response = _protocol_turn_payload(turn)
+                response["id"] = request_id
+                _write_protocol_payload(stream_out, response)
+            else:
+                stream_out.write(("系统> " + _display(turn) + "\n").encode("utf-8"))
+                stream_out.flush()
     finally:
         connection.close()
         if runtime_sqlite_runtime is not None:
             runtime_sqlite_runtime.close()
+        if metrics_output is not None:
+            metrics_path = Path(metrics_output).resolve()
+            if metrics_path.drive.upper() != "K:":
+                raise ValueError("metrics_output 必须是 K 盘路径")
+            if not latency_us:
+                raise ValueError("metrics_output 没有可记录的对话轮次")
+            ordered = sorted(latency_us)
+            p50 = ordered[(len(ordered) - 1) * 50 // 100]
+            p95 = ordered[(len(ordered) - 1) * 95 // 100]
+            metrics_path.parent.mkdir(parents=True, exist_ok=True)
+            metrics_path.write_text(
+                json.dumps({
+                    "protocol": "jsonl" if protocol_stream else "terminal",
+                    "turn_count": len(latency_us),
+                    "latency_us": latency_us,
+                    "p50_us": p50,
+                    "p95_us": p95,
+                }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
     return 0
 
 
@@ -437,6 +543,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--training-run-root", default=None)
     parser.add_argument("--session-root", default=None,
                         help="可选 K 盘会话根；启用后跨进程恢复最近 8 轮")
+    parser.add_argument("--protocol", choices=("terminal", "jsonl"),
+                        default="terminal",
+                        help="交互入口：人类终端或 UTF-8 JSONL 协议")
+    parser.add_argument("--metrics-output", default=None,
+                        help="可选 K 盘性能摘要 JSON 路径")
     parser.add_argument("--extra-course", action="append", default=[])
     parser.add_argument("--variant-course", action="append", default=[])
     parser.add_argument("--variant-evidence", action="append", default=[])
@@ -469,6 +580,8 @@ def main(argv: list[str] | None = None) -> int:
         extra_variant_evidence_paths=tuple(args.variant_evidence),
         runtime_material_runtime_root=args.runtime_material_ledger_root,
         runtime_material_runtime_database=args.runtime_material_sqlite,
+        protocol_stream=(args.protocol == "jsonl"),
+        metrics_output=args.metrics_output,
         learned_relation_evidence_model=(
             learn_relation_evidence_model(relation_courses)
             if relation_courses else None),

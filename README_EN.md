@@ -47,6 +47,13 @@ It is not currently a chat product, a general intelligence system, or a deployab
 
 The project is an actively developed research prototype. The public repository now includes:
 
+The first independently replayable constrained dialogue release is available as
+`public-dialogue-v0.1-20260825`. It is a deterministic integer state artifact with the same
+source, evidence, refusal, and recovery path, plus a UTF-8 JSONL machine protocol. See the
+[release manifest](data/ph2/public_dialogue_model_v0_1_release.json) and [protocol guide](docs/dialogue_protocol_v0_1.md).
+This is a runnable development release, not a neural-weight package; it does not claim free-form
+generation, unbounded memory, or general question answering.
+
 - an installable pure-integer reference implementation with deterministic utilities, graph storage, memory, and recovery foundations;
 - relation mechanisms, cognitive processes, training orchestration, generation, program execution, and evaluation facilities;
 - regression tests aligned with the current implementation, cross-platform CI, format samples, and development helpers;
