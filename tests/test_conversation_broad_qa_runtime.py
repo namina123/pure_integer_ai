@@ -101,6 +101,36 @@ def test_defer_narrow_rejects_non_boolean_flag() -> None:
         )
 
 
+def test_fast_explicit_non_real_query_keeps_unknown_without_narrow_startup() -> None:
+    calls = []
+
+    class _Connection:
+        pass
+
+    class _Unknown:
+        status = "UNKNOWN"
+        answer = None
+        title = None
+        source_url = None
+        evidence_chain = ()
+
+    import pure_integer_ai.experiments.conversation_broad_qa_runtime as module
+    original = module.query_broad_qa
+    module.query_broad_qa = lambda *_args, **_kwargs: _Unknown()
+    try:
+        _, turn = answer_broad_dialogue_turn(
+            BroadDialogueState((1, 2, 3)), "虚构的不存在对象是什么？",
+            _Connection(),
+            narrow_answer=lambda question: calls.append(question),
+            defer_narrow=True,
+            fast_path=True,
+        )
+        assert turn.status == "UNKNOWN"
+        assert calls == []
+    finally:
+        module.query_broad_qa = original
+
+
 def test_broad_answer_keeps_full_evidence_but_projects_readable_primary_surface() -> None:
     import pure_integer_ai.experiments.conversation_broad_qa_runtime as module
 

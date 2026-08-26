@@ -7,7 +7,11 @@ import re
 import sqlite3
 from typing import Callable, Iterable
 
-from pure_integer_ai.experiments.ph2_broad_qa_query import query_broad_qa
+from pure_integer_ai.experiments.ph2_broad_qa_query import (
+    BroadQaQueryCache,
+    has_explicit_non_real_constraint,
+    query_broad_qa,
+)
 from pure_integer_ai.experiments.ph2_broad_qa_contract import BroadQaResult
 from pure_integer_ai.experiments.ph2_broad_qa_obligation_learning import (
     LearnedTypedObligation,
@@ -169,6 +173,8 @@ def answer_broad_dialogue_turn(
         *,
         narrow_answer: Callable[[str], tuple[str, str] | None] | None = None,
         defer_narrow: bool = False,
+        query_cache: BroadQaQueryCache | None = None,
+        fast_path: bool = False,
         surface_consumer: Callable[[str, str, str | None], str | None]
         | None = None,
         runtime_material_answer: Callable[
@@ -196,6 +202,10 @@ def answer_broad_dialogue_turn(
         raise TypeError("dialogue state/question 类型错误")
     if type(defer_narrow) is not bool:
         raise TypeError("defer_narrow 必须是严格 bool")
+    if query_cache is not None and not isinstance(query_cache, BroadQaQueryCache):
+        raise TypeError("query_cache 类型错误")
+    if type(fast_path) is not bool:
+        raise TypeError("fast_path 必须是严格 bool")
     if not question.strip():
         raise ValueError("question 不能为空")
     answer = None
@@ -264,17 +274,24 @@ def answer_broad_dialogue_turn(
         retrieval_question = _resolve_source_followup(state, question)
         if (learned_evidence_term_weights is None
                 and learned_typed_obligation is None
-                and learned_relation_evidence_model is None):
+                and learned_relation_evidence_model is None
+                and query_cache is None
+                and not fast_path):
             # Preserve the narrow callable contract used by existing embedders;
             # the learned path is opt-in and must not alter legacy callers.
             result: BroadQaResult = query_broad_qa(
                 database, retrieval_question)
         else:
+            query_kwargs = {
+                "learned_evidence_term_weights": learned_evidence_term_weights,
+                "learned_typed_obligation": learned_typed_obligation,
+                "learned_relation_evidence_model": learned_relation_evidence_model,
+                "fast_path": fast_path,
+            }
+            if query_cache is not None:
+                query_kwargs["query_cache"] = query_cache
             result = query_broad_qa(
-                database, retrieval_question,
-                learned_evidence_term_weights=learned_evidence_term_weights,
-                learned_typed_obligation=learned_typed_obligation,
-                learned_relation_evidence_model=learned_relation_evidence_model)
+                database, retrieval_question, **query_kwargs)
         status = result.status
         answer = result.answer
         # 保留 BroadQaResult.answer 的完整证据链；终端只展示主证据窗口，
@@ -323,7 +340,9 @@ def answer_broad_dialogue_turn(
     # several seconds of snapshot construction from ordinary broad questions
     # without changing the strict mode ordering above.
     if (defer_narrow and answer is None and status == "UNKNOWN"
-            and not runtime_material_decided and narrow_answer is not None):
+            and not runtime_material_decided and narrow_answer is not None
+            and not (fast_path
+                     and has_explicit_non_real_constraint(question))):
         narrow = narrow_answer(question)
         if narrow is not None:
             answer, status = narrow

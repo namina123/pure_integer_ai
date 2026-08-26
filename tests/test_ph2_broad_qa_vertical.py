@@ -24,8 +24,14 @@ from pure_integer_ai.experiments.ph2_broad_qa_index import (
 from pure_integer_ai.experiments.ph2_broad_qa_interactive import (
     render_broad_qa_text,
 )
-from pure_integer_ai.experiments.ph2_broad_qa_query import query_broad_qa
-from pure_integer_ai.experiments.ph2_broad_qa_query import BroadQaQueryError
+from pure_integer_ai.experiments.ph2_broad_qa_query import (
+    BroadQaQueryCache,
+    BroadQaQueryError,
+    BroadQaResult,
+    _restore_postings,
+    query_broad_qa,
+)
+from pure_integer_ai.storage.integer_codec import encode_integer_tuple
 from pure_integer_ai.experiments.ph2_broad_qa_question_slots import (
     BroadQaQuestionSlotError,
     load_broad_qa_question_slots,
@@ -52,6 +58,37 @@ from pure_integer_ai.experiments.run_ph2_broad_qa import (
     _stdin_questions,
     _work_path,
 )
+
+
+def test_fast_posting_decoder_preserves_delta_projection_and_rejects_nonpositive():
+    assert _restore_postings(encode_integer_tuple((1, 2, 3))) == (1, 3, 6)
+    with pytest.raises(BroadQaQueryError, match="非正"):
+        _restore_postings(encode_integer_tuple((0,)))
+    with pytest.raises(BroadQaQueryError, match="尾随"):
+        _restore_postings(encode_integer_tuple((1, 2)) + b"\x00")
+
+
+def test_broad_query_cache_is_connection_bound_and_bounded():
+    connection = sqlite3.connect(":memory:")
+    other = sqlite3.connect(":memory:")
+    try:
+        cache = BroadQaQueryCache(connection, limit=1)
+        value = BroadQaResult(
+            status="UNKNOWN", question="测试问题？", answer=None,
+            title=None, page_id=None, revision_id=None, evidence_text=None,
+            evidence_raw_start=None, evidence_raw_end=None,
+            evidence_raw_sha256=None, source_url=None,
+            snapshot_id="snapshot", license_id="CC-BY-SA-4.0",
+            matched_term_count=0, candidate_document_count=0,
+        )
+        key = ("测试问题？", 24, 20, 500_000, False)
+        cache.put(key, value)
+        assert cache.get(key) is value
+        assert cache.owns(connection)
+        assert not cache.owns(other)
+    finally:
+        connection.close()
+        other.close()
 
 
 def _page(page_id: int, title: str, text: str) -> bytes:
@@ -208,6 +245,35 @@ def test_build_query_answer_unknown_and_bit_identical_rebuild(
         "https://zh.wikipedia.org/w/index.php?curid=1&oldid=1001")
     assert unknown.status in {"UNKNOWN", "CLARIFY"}
     assert unknown.answer is None
+
+
+def test_fast_exact_title_reads_only_one_source_passage(
+        tmp_path: Path) -> None:
+    """快速标题档只读取首段一次，仍经来源回答门产生真实答案。"""
+    manifest, xml = _fixture(tmp_path)
+    database = tmp_path / "fast-title.sqlite3"
+    build_broad_qa_index(
+        manifest, xml_path=xml, database_path=database,
+        accepted_page_limit=3)
+    connection = sqlite3.connect(str(database))
+    cache = BroadQaQueryCache(connection)
+    cache.prepare()
+    statements = []
+    connection.set_trace_callback(statements.append)
+    try:
+        result = query_broad_qa(
+            connection, "都江堰是什么？", query_cache=cache,
+            fast_path=True)
+    finally:
+        connection.close()
+    assert result.status == "ANSWER"
+    assert result.title == "都江堰"
+    assert any("MIN(passage_id)" in item for item in statements)
+    assert not any("FROM metadata" in item for item in statements)
+    assert not any("FROM sqlite_master" in item for item in statements)
+    assert sum(
+        "FROM passage AS p JOIN document AS d" in item
+        for item in statements) == 1
 
 
 def test_interactive_text_preserves_answer_source_and_refusal(

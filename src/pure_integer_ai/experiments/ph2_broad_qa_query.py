@@ -1,7 +1,7 @@
 """在紧凑整数 postings 上执行有界检索和来源约束回答。"""
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
 import re
@@ -25,7 +25,6 @@ from pure_integer_ai.experiments.ph2_broad_qa_obligation_learning import (
 from pure_integer_ai.experiments.ph2_broad_qa_relation_evidence_learning import (
     LearnedRelationEvidenceModel,
 )
-from pure_integer_ai.storage.integer_codec import decode_integer_tuple
 
 
 _SENTENCE_RE = re.compile(r"[^。！？!?\n]+[。！？!?]?|[^。！？!?\n]+$")
@@ -69,6 +68,81 @@ _QUERY_INSTRUCTION_PREFIX_PATTERNS = (
 # object-model: exception
 class BroadQaQueryError(RuntimeError):
     """索引 schema、posting、查询预算或来源身份发生漂移。"""
+
+
+def has_explicit_non_real_constraint(question: str) -> bool:
+    """返回问题是否携带明确的不存在/虚构实体限定。"""
+    if not isinstance(question, str):
+        raise TypeError("broad QA question 类型错误")
+    return _NON_REAL_ENTITY_RE.search(question) is not None
+
+
+# object-model: runtime cache; representation=bounded map; not persisted
+class BroadQaQueryCache:
+    """绑定单个只读 SQLite 连接的有界问答结果缓存。
+
+    缓存只接受无 learned overlay 的静态 broad index 查询；调用方显式传入
+    实例即可启用，默认 query API 保持每次完整检索，避免可变数据库被误缓存。
+    """
+
+    __slots__ = (
+        "_connection", "_entries", "_limit", "_metadata_values",
+        "_schema_tables",
+    )
+
+    def __init__(self, connection: sqlite3.Connection, *, limit: int = 128):
+        if not isinstance(connection, sqlite3.Connection):
+            raise TypeError("BroadQaQueryCache connection 类型错误")
+        if type(limit) is not int or not 1 <= limit <= 4096:
+            raise ValueError("BroadQaQueryCache limit 非法")
+        self._connection = connection
+        self._entries: OrderedDict[tuple[object, ...], BroadQaResult] = (
+            OrderedDict())
+        self._limit = limit
+        self._metadata_values: dict[str, str] | None = None
+        self._schema_tables: frozenset[str] | None = None
+
+    def get(self, key: tuple[object, ...]) -> BroadQaResult | None:
+        if not isinstance(key, tuple):
+            raise TypeError("BroadQaQueryCache key 必须是 tuple")
+        value = self._entries.get(key)
+        if value is not None:
+            self._entries.move_to_end(key)
+        return value
+
+    def put(self, key: tuple[object, ...], value: BroadQaResult) -> None:
+        if not isinstance(key, tuple) or not isinstance(value, BroadQaResult):
+            raise TypeError("BroadQaQueryCache entry 类型错误")
+        self._entries[key] = value
+        self._entries.move_to_end(key)
+        while len(self._entries) > self._limit:
+            self._entries.popitem(last=False)
+
+    def owns(self, connection: sqlite3.Connection) -> bool:
+        """拒绝将一个连接的结果误用于另一数据库。"""
+        return connection is self._connection
+
+    def prepare(self) -> None:
+        """在请求计时前读取只读 release 的元数据与可选 schema。"""
+        if self._metadata_values is not None:
+            return
+        metadata_values = _metadata(self._connection)
+        schema_tables = frozenset(
+            str(row[0]) for row in self._connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('alias','alias_term')")
+        )
+        self._metadata_values = metadata_values
+        self._schema_tables = schema_tables
+
+    def _retrieval_context(
+            self,
+            ) -> tuple[dict[str, str], frozenset[str]]:
+        """返回当前连接已经核验的静态检索上下文。"""
+        self.prepare()
+        if self._metadata_values is None or self._schema_tables is None:
+            raise BroadQaQueryError("broad QA query cache 未完成准备")
+        return self._metadata_values, self._schema_tables
 
 
 def _strip_query_instruction_prefix(surface: str) -> str:
@@ -157,17 +231,65 @@ def _metadata(connection: sqlite3.Connection) -> dict[str, str]:
     return values
 
 
-def _restore_postings(payload: bytes) -> tuple[int, ...]:
-    """把正 delta varint 流恢复为严格递增 passage id。"""
-    deltas = decode_integer_tuple(payload)
+def _read_unsigned_canonical(data: bytes, cursor: int) -> tuple[int, int]:
+    """读取一个规范 unsigned varint，避免通用 codec 的往返重编码。"""
+    start = cursor
+    value = 0
+    shift = 0
+    while True:
+        if cursor >= len(data):
+            raise BroadQaQueryError("broad QA posting varint 被截断")
+        byte = data[cursor]
+        cursor += 1
+        value |= (byte & 127) << shift
+        if byte < 128:
+            break
+        shift += 7
+    encoded_size = cursor - start
+    minimum_size = max(1, (value.bit_length() + 6) // 7)
+    if encoded_size != minimum_size:
+        raise BroadQaQueryError("broad QA posting varint 非规范")
+    return value, cursor
+
+
+def _decode_postings(payload: bytes) -> tuple[int, ...]:
+    """把正 delta varint 流恢复为严格递增 passage id。
+
+    posting payload 已由整数 codec 约束为正 delta；这里保留计数、最短
+    varint、尾随字节和正值校验，但直接解析 zigzag 数值，避免
+    ``decode_integer_tuple`` 为每个 posting 再分配 tuple 并完整重编码。
+    """
+    if not isinstance(payload, bytes) or not payload:
+        raise BroadQaQueryError("broad QA posting payload 非空 bytes")
+    size, cursor = _read_unsigned_canonical(payload, 0)
     result = []
     current = 0
-    for value in deltas:
+    for _ in range(size):
+        unsigned, cursor = _read_unsigned_canonical(payload, cursor)
+        # 正 delta 的 zigzag 编码只能是偶数；奇数表示负整数。
+        if unsigned & 1:
+            raise BroadQaQueryError("broad QA posting delta 非正")
+        value = unsigned // 2
         if value <= 0:
             raise BroadQaQueryError("broad QA posting delta 非正")
         current += value
         result.append(current)
+    if cursor != len(payload):
+        raise BroadQaQueryError("broad QA posting payload 存在尾随字节")
     return tuple(result)
+
+
+@lru_cache(maxsize=2048)
+def _restore_small_postings(payload: bytes) -> tuple[int, ...]:
+    """缓存小 posting 的规范解码结果，限制长会话常驻工作集。"""
+    return _decode_postings(payload)
+
+
+def _restore_postings(payload: bytes) -> tuple[int, ...]:
+    """恢复 posting；大 payload 直接解码，避免按条数缓存大整数 tuple。"""
+    if isinstance(payload, bytes) and len(payload) <= 512:
+        return _restore_small_postings(payload)
+    return _decode_postings(payload)
 
 
 @lru_cache(maxsize=16384)
@@ -610,6 +732,7 @@ def _structural_residue_penalty(text: str) -> int:
     return 0
 
 
+@lru_cache(maxsize=32768)
 def _title_span(question: str, title: str) -> tuple[int, int] | None:
     """在原文或简繁标准化问题中定位完整页面标题。"""
     candidates = (
@@ -735,6 +858,77 @@ def _has_explicit_non_real_entity(
     return _NON_REAL_ENTITY_RE.search(slot_free_question) is not None
 
 
+def _exact_document_title_matches(
+        connection: sqlite3.Connection,
+        slot_free_question: str,
+        ) -> dict[int, str]:
+    """从通用定义问式解析标题，并查询实际 document 索引。"""
+    title_hint = None
+    for suffix in ("是\n？", "是\n?", "是？", "是?"):
+        if slot_free_question.endswith(suffix):
+            candidate = slot_free_question[:-len(suffix)].strip()
+            if candidate and "\n" not in candidate:
+                title_hint = candidate
+                break
+    if title_hint is None:
+        return {}
+    variants = tuple(dict.fromkeys((
+        title_hint,
+        _TO_SIMPLIFIED.convert(title_hint),
+        _TO_TRADITIONAL.convert(title_hint),
+    )))
+    placeholders = ",".join("?" for _ in variants)
+    rows = connection.execute(
+        "SELECT doc_id,title FROM document "
+        f"WHERE title IN ({placeholders})",
+        variants,
+    ).fetchall()
+    return {int(doc_id): str(title) for doc_id, title in rows}
+
+
+def _anchor_matches(
+        connection: sqlite3.Connection,
+        raw_terms: tuple[str, ...],
+        slot_free_question: str,
+        max_candidate_passages: int,
+        schema_tables: frozenset[str] | None = None,
+        ) -> tuple[bool, bool, dict[int, str]]:
+    """读取标题/别名锚点，供快速路径和常规路径共享。"""
+    if not raw_terms:
+        return False, False, {}
+    placeholders = ",".join("?" for _ in raw_terms)
+    if schema_tables is None:
+        schema_tables = frozenset(
+            str(row[0]) for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('alias','alias_term')")
+        )
+    alias_table_exists = "alias" in schema_tables
+    alias_term_exists = "alias_term" in schema_tables
+    matches: dict[int, str] = {}
+    if alias_term_exists:
+        alias_rows = tuple(connection.execute(
+            "SELECT surface,doc_id,COUNT(*) AS matched_count "
+            "FROM alias_term WHERE term IN (" + placeholders + ") "
+            "GROUP BY surface,doc_id "
+            "ORDER BY matched_count DESC,LENGTH(surface) DESC,surface,doc_id "
+            "LIMIT ?",
+            (*raw_terms, max_candidate_passages * 32),
+        ))
+        for surface, doc_id, _ in alias_rows:
+            if _title_span(slot_free_question, surface) is None:
+                continue
+            prior = matches.get(int(doc_id))
+            if prior is None or (-len(surface), surface) < (-len(prior), prior):
+                matches[int(doc_id)] = surface
+    # v14 保留紧凑 document 表但可能省略 alias_term。通用单实体
+    # ``X 是什么`` 问式先做语义标题查询，不把标题或回答写死在代码中。
+    if not matches:
+        matches = _exact_document_title_matches(
+            connection, slot_free_question)
+    return alias_table_exists, alias_term_exists, matches
+
+
 def select_broad_qa_evidence_sentence(question: str, context: str) -> str:
     """从调用方给定的来源上下文中确定性选择一条完整证据句。"""
     if (not isinstance(question, str) or not question.strip()
@@ -756,6 +950,9 @@ def retrieve_broad_qa_candidates(
         learned_evidence_term_weights: Iterable[tuple[str, int]] | None = None,
         learned_typed_obligation: LearnedTypedObligation | None = None,
         learned_relation_evidence_model: LearnedRelationEvidenceModel | None = None,
+        fast_path: bool = False,
+        _metadata_values: dict[str, str] | None = None,
+        _schema_tables: frozenset[str] | None = None,
         ) -> tuple[tuple[BroadQaRetrievalCandidate, ...], BroadQaRetrievalTrace]:
     """返回有界 passage 排名与资源轨迹，不执行回答、澄清或拒答门。"""
     if not isinstance(connection, sqlite3.Connection):
@@ -769,7 +966,13 @@ def retrieve_broad_qa_candidates(
             or type(max_posting_visits) is not int
             or not 1 <= max_posting_visits <= 2_000_000):
         raise BroadQaQueryError("broad QA query budget 非法")
-    metadata = _metadata(connection)
+    if type(fast_path) is not bool:
+        raise TypeError("broad QA fast_path 必须是严格 bool")
+    if (_metadata_values is None) != (_schema_tables is None):
+        raise BroadQaQueryError("broad QA 预载检索上下文不完整")
+    metadata = (
+        _metadata(connection)
+        if _metadata_values is None else _metadata_values)
     if learned_relation_evidence_model is not None and not isinstance(
             learned_relation_evidence_model, LearnedRelationEvidenceModel):
         raise BroadQaQueryError("relation evidence model 类型错误")
@@ -779,22 +982,53 @@ def retrieve_broad_qa_candidates(
     answer_kinds = _answer_kinds(
         question, question_slots, learned_typed_obligation)
     slot_free_question = _query_surface(question, question_slots)
-    raw_terms = tuple(sorted(_script_terms(slot_free_question)))
+    fast_exact_matches = (
+        _exact_document_title_matches(connection, slot_free_question)
+        if fast_path else {})
+    if (fast_path and not fast_exact_matches
+            and has_explicit_non_real_constraint(slot_free_question)):
+        # 显式非真实限定构成完整负约束；严格档仍执行完整检索，快速档可在
+        # 查询真实标题后、解码无关 posting 前拒答，不削弱 UNKNOWN 安全边界。
+        return (), BroadQaRetrievalTrace(
+            metadata["snapshot_id"], metadata["license_id"], 0, 0, 0,
+            int(metadata["passage_count"]))
+    raw_terms = (
+        () if fast_exact_matches
+        else tuple(sorted(_script_terms(slot_free_question))))
     if len(raw_terms) > 512:
         raise BroadQaQueryError("broad QA 原始 query term 超预算")
-    if not raw_terms:
+    if not raw_terms and not fast_exact_matches:
         return (), BroadQaRetrievalTrace(
             metadata["snapshot_id"], metadata["license_id"], 0, 0, 0,
             int(metadata["passage_count"]))
     placeholders = ",".join("?" for _ in raw_terms)
-    all_rows = tuple(connection.execute(
-        "SELECT term,document_frequency,passage_deltas FROM posting "
-        f"WHERE term IN ({placeholders})",
-        raw_terms,
-    ))
-    all_rows = tuple(sorted(all_rows, key=lambda item: (item[1], item[0])))
-    rows = all_rows[:max_query_terms]
-    if not rows:
+    alias_table_exists = False
+    alias_term_exists = False
+    anchor_matches: dict[int, str] = {}
+    if fast_exact_matches:
+        alias_table_exists = bool(
+            _schema_tables and "alias" in _schema_tables)
+        alias_term_exists = bool(
+            _schema_tables and "alias_term" in _schema_tables)
+        anchor_matches = fast_exact_matches
+    elif fast_path:
+        alias_table_exists, alias_term_exists, anchor_matches = _anchor_matches(
+            connection, raw_terms, slot_free_question, max_candidate_passages,
+            _schema_tables)
+    if anchor_matches:
+        # 精确标题/别名已经确定页面，无需解码全部 posting；后续仍对来源
+        # passage 排序并执行回答门，这里只在显式快速档去除无关全局候选。
+        all_rows = ()
+        rows = ()
+    else:
+        all_rows = tuple(connection.execute(
+            "SELECT term,document_frequency,passage_deltas FROM posting "
+            f"WHERE term IN ({placeholders})",
+            raw_terms,
+        ))
+        all_rows = tuple(sorted(all_rows, key=lambda item: (item[1], item[0])))
+        rows = all_rows[:max_query_terms]
+    if not rows and not anchor_matches:
         return (), BroadQaRetrievalTrace(
             metadata["snapshot_id"], metadata["license_id"], 0, 0, 0,
             int(metadata["passage_count"]))
@@ -814,36 +1048,37 @@ def retrieve_broad_qa_candidates(
             matched[passage_id] += 1
     # 标题/alias 是来源合同的一部分；精确出现在问题中时，补入对应页面，
     # 防止低频关系词截断 max_query_terms 后把正确页排除。
-    alias_table_exists = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='alias'"
-    ).fetchone() is not None
-    alias_term_exists = connection.execute(
-        "SELECT 1 FROM sqlite_master "
-        "WHERE type='table' AND name='alias_term'"
-    ).fetchone() is not None
-    anchor_matches: dict[int, str] = {}
-    if alias_term_exists:
-        alias_rows = tuple(connection.execute(
-            "SELECT surface,doc_id,COUNT(*) AS matched_count "
-            "FROM alias_term WHERE term IN (" + placeholders + ") "
-            "GROUP BY surface,doc_id "
-            "ORDER BY matched_count DESC,LENGTH(surface) DESC,surface,doc_id "
-            "LIMIT ?",
-            (*raw_terms, max_candidate_passages * 32),
-        ))
-        for surface, doc_id, _ in alias_rows:
-            if _title_span(slot_free_question, surface) is None:
-                continue
-            prior = anchor_matches.get(int(doc_id))
-            if prior is None or (-len(surface), surface) < (-len(prior), prior):
-                anchor_matches[int(doc_id)] = surface
+    if not fast_path:
+        alias_table_exists, alias_term_exists, anchor_matches = _anchor_matches(
+            connection, raw_terms, slot_free_question, max_candidate_passages,
+            _schema_tables)
     anchor_passage_ids = []
+    anchor_passages_by_doc: dict[int, tuple[int, ...]] = {}
+    if anchor_matches:
+        anchor_doc_ids = tuple(sorted(anchor_matches))
+        anchor_placeholders = ",".join("?" for _ in anchor_doc_ids)
+        if fast_path:
+            anchor_rows = connection.execute(
+                "SELECT doc_id,MIN(passage_id) FROM passage "
+                f"WHERE doc_id IN ({anchor_placeholders}) GROUP BY doc_id",
+                anchor_doc_ids,
+            ).fetchall()
+        else:
+            anchor_rows = connection.execute(
+                "SELECT doc_id,passage_id FROM passage "
+                f"WHERE doc_id IN ({anchor_placeholders})",
+                anchor_doc_ids,
+            ).fetchall()
+        grouped_anchor: dict[int, list[int]] = defaultdict(list)
+        for doc_id, passage_id in anchor_rows:
+            grouped_anchor[int(doc_id)].append(int(passage_id))
+        anchor_passages_by_doc = {
+            doc_id: tuple(values) for doc_id, values in grouped_anchor.items()
+        }
     for doc_id, _ in sorted(
             anchor_matches.items(), key=lambda item: (
                 -len(item[1]), item[1], item[0])):
-        passages = tuple(
-            int(row[0]) for row in connection.execute(
-                "SELECT passage_id FROM passage WHERE doc_id=? ", (doc_id,)))
+        passages = anchor_passages_by_doc.get(doc_id, ())
         if passages:
             anchor_passage_ids.append(max(
                 passages,
@@ -863,32 +1098,56 @@ def retrieve_broad_qa_candidates(
     for term, weight in learned_weights.items():
         if term in term_weights:
             term_weights[term] += weight
-    for passage_id in ranked_ids:
-        row = connection.execute("""
+    # release 内候选 passage 与 alias 不可变；用两次有界批量查询替代逐
+    # passage/doc SQL，排序仍严格遵循 ranked_ids 与规范 surface 顺序。
+    candidate_rows_by_id = {}
+    if ranked_ids:
+        id_placeholders = ",".join("?" for _ in ranked_ids)
+        candidate_rows = connection.execute(f"""
             SELECT p.passage_id,p.raw_start,p.raw_end,p.raw_sha256,p.text,
                    d.doc_id,d.title,d.page_id,d.revision_id,d.timestamp,
                    d.contributor_json
             FROM passage AS p JOIN document AS d ON d.doc_id=p.doc_id
-            WHERE p.passage_id=?
-        """, (passage_id,)).fetchone()
+            WHERE p.passage_id IN ({id_placeholders})
+        """, ranked_ids).fetchall()
+        candidate_rows_by_id = {int(row[0]): row for row in candidate_rows}
+    aliases_by_doc: dict[int, tuple[str, ...]] = {}
+    if alias_table_exists and candidate_rows_by_id:
+        doc_ids = tuple(sorted({int(row[5]) for row in candidate_rows_by_id.values()}))
+        doc_placeholders = ",".join("?" for _ in doc_ids)
+        alias_rows = connection.execute(
+            "SELECT doc_id,surface FROM alias "
+            f"WHERE doc_id IN ({doc_placeholders}) ORDER BY doc_id,surface",
+            doc_ids,
+        ).fetchall()
+        grouped: dict[int, list[str]] = defaultdict(list)
+        for doc_id, surface in alias_rows:
+            grouped[int(doc_id)].append(surface)
+        aliases_by_doc = {
+            doc_id: tuple(values) for doc_id, values in grouped.items()
+        }
+    for passage_id in ranked_ids:
+        row = candidate_rows_by_id.get(passage_id)
         if row is None:
             raise BroadQaQueryError("broad QA posting 指向缺失 passage")
-        aliases = tuple(
-            item[0] for item in connection.execute(
-                "SELECT surface FROM alias WHERE doc_id=? ORDER BY surface",
-                (row[5],))
-        ) if alias_table_exists else ()
+        aliases = aliases_by_doc.get(int(row[5]), ())
         title_surfaces = (row[6],) + aliases
-        matching_titles = tuple(
-            title for title in title_surfaces
-            if _title_span(slot_free_question, title) is not None)
+        if fast_path and int(row[5]) in anchor_matches:
+            matching_titles = (anchor_matches[int(row[5])],)
+        else:
+            matching_titles = tuple(
+                title for title in title_surfaces
+                if _title_span(slot_free_question, title) is not None)
         candidate_inputs.append((row, title_surfaces, matching_titles))
-    dominated_titles = _dominated_title_surfaces(
-        question,
-        frozenset(
-            title
-            for _, _, matching_titles in candidate_inputs
-            for title in matching_titles),
+    dominated_titles = (
+        frozenset() if fast_path and len(candidate_inputs) <= 1 else
+        _dominated_title_surfaces(
+            question,
+            frozenset(
+                title
+                for _, _, matching_titles in candidate_inputs
+                for title in matching_titles),
+        )
     )
     candidate_rows = []
     for row, title_surfaces, matching_titles in candidate_inputs:
@@ -900,6 +1159,14 @@ def retrieve_broad_qa_candidates(
             if scoring_titles else (
                 sorted(matching_titles, key=lambda item: (-len(item), item))[0]
                 if matching_titles else row[6]))
+        if (fast_path and len(anchor_matches) == 1
+                and len(candidate_inputs) == 1 and matching_titles):
+            candidate_rows.append(BroadQaRetrievalCandidate(
+                1_000_000_000 + len(query_anchor_title) * 1_000_000,
+                matched[passage_id], row[0], row[1], row[2], row[3],
+                row[4], row[5], row[6], query_anchor_title, row[7], row[8],
+                row[9], row[10]))
+            continue
         passage_terms = _script_terms(row[4])
         title_terms = frozenset().union(*(
             _script_terms(title) for title in title_surfaces))
@@ -934,13 +1201,18 @@ def retrieve_broad_qa_candidates(
         # 页面已由标题/alias 锚定后，仅在该页面的有限段落内重选证据，
         # 避免把“找对页、选错段”误判为全库检索失败。
         page_candidate = candidate_rows[0]
-        page_rows = tuple(connection.execute("""
-            SELECT p.passage_id,p.raw_start,p.raw_end,p.raw_sha256,p.text,
-                   d.doc_id,d.title,d.page_id,d.revision_id,d.timestamp,
-                   d.contributor_json
-            FROM passage AS p JOIN document AS d ON d.doc_id=p.doc_id
-            WHERE d.doc_id=? ORDER BY p.passage_id
-        """, (page_candidate.doc_id,)))
+        if fast_path:
+            # 快速档已按 MIN(passage_id) 取得首段，直接复用同一规范行，
+            # 避免重复 SQL；严格档保留整页扫描及原有完整度。
+            page_rows = (candidate_rows_by_id[page_candidate.passage_id],)
+        else:
+            page_rows = tuple(connection.execute("""
+                SELECT p.passage_id,p.raw_start,p.raw_end,p.raw_sha256,p.text,
+                       d.doc_id,d.title,d.page_id,d.revision_id,d.timestamp,
+                       d.contributor_json
+                FROM passage AS p JOIN document AS d ON d.doc_id=p.doc_id
+                WHERE d.doc_id=? ORDER BY p.passage_id
+            """, (page_candidate.doc_id,)))
         page_terms = _script_terms(slot_free_question)
         anchor_span = _title_span(slot_free_question,
                                   page_candidate.query_anchor_title)
@@ -1131,8 +1403,34 @@ def query_broad_qa(
         learned_evidence_term_weights: Iterable[tuple[str, int]] | None = None,
         learned_typed_obligation: LearnedTypedObligation | None = None,
         learned_relation_evidence_model: LearnedRelationEvidenceModel | None = None,
+        query_cache: BroadQaQueryCache | None = None,
+        fast_path: bool = False,
         ) -> BroadQaResult:
     """以稀有 term postings 缩小候选，并从 top-K 页面投影可引用回答。"""
+    if query_cache is not None:
+        if not isinstance(query_cache, BroadQaQueryCache):
+            raise TypeError("query_cache 类型错误")
+        if not query_cache.owns(connection):
+            raise ValueError("query_cache 未绑定当前 SQLite 连接")
+    if type(fast_path) is not bool:
+        raise TypeError("broad QA fast_path 必须是严格 bool")
+    cacheable = (
+        query_cache is not None
+        and learned_evidence_term_weights is None
+        and learned_typed_obligation is None
+        and learned_relation_evidence_model is None
+    )
+    cache_key = (
+        question, max_query_terms, max_candidate_passages, max_posting_visits,
+        fast_path)
+    if cacheable:
+        cached = query_cache.get(cache_key)
+        if cached is not None:
+            return cached
+    metadata_values = None
+    schema_tables = None
+    if query_cache is not None:
+        metadata_values, schema_tables = query_cache._retrieval_context()
     candidates, trace = retrieve_broad_qa_candidates(
         connection, question,
         max_query_terms=max_query_terms,
@@ -1140,18 +1438,26 @@ def query_broad_qa(
         max_posting_visits=max_posting_visits,
         learned_evidence_term_weights=learned_evidence_term_weights,
         learned_typed_obligation=learned_typed_obligation,
-        learned_relation_evidence_model=learned_relation_evidence_model)
-    return answer_broad_qa_candidates(
+        learned_relation_evidence_model=learned_relation_evidence_model,
+        fast_path=fast_path,
+        _metadata_values=metadata_values,
+        _schema_tables=schema_tables)
+    result = answer_broad_qa_candidates(
         question, candidates, trace,
         learned_typed_obligation=learned_typed_obligation)
+    if cacheable:
+        query_cache.put(cache_key, result)
+    return result
 
 
 __all__ = [
     "answer_broad_qa_candidates",
     "BroadQaRetrievalCandidate",
     "BroadQaRetrievalTrace",
+    "BroadQaQueryCache",
     "BroadQaQueryError",
     "query_broad_qa",
+    "has_explicit_non_real_constraint",
     "retrieve_broad_qa_candidates",
     "select_broad_qa_evidence_sentence",
 ]

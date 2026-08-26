@@ -21,6 +21,7 @@ from pure_integer_ai.experiments.conversation_broad_qa_runtime import (
     BroadDialogueState,
     answer_broad_dialogue_turn,
 )
+from pure_integer_ai.experiments.ph2_broad_qa_query import BroadQaQueryCache
 from pure_integer_ai.experiments.conversation_broad_dialogue_persistence import (
     BroadDialoguePersistenceError,
     recover_broad_dialogue_checkpoint,
@@ -73,6 +74,9 @@ from pure_integer_ai.experiments.ph2_broad_qa_relation_marker_evidence_learning 
 )
 from pure_integer_ai.experiments.ph2_broad_qa_relation_answer_frame_learning import (
     learn_relation_answer_frame_model,
+)
+from pure_integer_ai.experiments.ph2_broad_qa_question_slots import (
+    load_broad_qa_question_slots,
 )
 from pure_integer_ai.storage.k_run_boundary import (
     ensure_normal_relative_directory,
@@ -268,6 +272,21 @@ def _peak_working_set_bytes() -> int:
     except (ImportError, AttributeError, OSError):
         return 0
     return value * (1024 if sys.platform != "darwin" else 1)
+
+
+def _nearest_rank_latency_us(
+        ordered_values: list[int], percentile: int,
+        ) -> int:
+    """用纯整数 nearest-rank 计算延迟分位，短序列不漏掉 p95 尾点。"""
+    if (not isinstance(ordered_values, list) or not ordered_values
+            or any(type(value) is not int or value < 0
+                   for value in ordered_values)
+            or ordered_values != sorted(ordered_values)):
+        raise ValueError("latency values 必须是非空有序非负整数 list")
+    if type(percentile) is not int or not 1 <= percentile <= 100:
+        raise ValueError("latency percentile 必须是 1..100 严格整数")
+    rank = (len(ordered_values) * percentile + 99) // 100
+    return ordered_values[rank - 1]
 
 
 def run_trained_dialogue_terminal(
@@ -514,7 +533,14 @@ def run_trained_dialogue_terminal(
                     BroadDialogueRuntimeMemoryError) as error:
                 raise ValueError(f"会话检查点无法恢复: {error}") from error
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    # release/index 连接在整个会话中只读；有界缓存让重复问题直接复用
+    # 不可变结果，不再重复执行 SQLite 与排序路径。
+    query_cache = BroadQaQueryCache(connection)
+    query_cache.prepare()
+    # 在首个用户请求计时前完成一次性规范问式加载。
+    load_broad_qa_question_slots()
     latency_us: list[int] = []
+    turn_statuses: list[str] = []
     sqlite_statement_counts: list[int] = []
     sqlite_statement_count = 0
     if metrics_output is not None:
@@ -614,8 +640,11 @@ def run_trained_dialogue_terminal(
                 learned_relation_marker_evidence_model=(
                     learned_relation_marker_evidence_model),
                 learned_relation_answer_frame_model=(
-                    learned_relation_answer_frame_model))
+                    learned_relation_answer_frame_model),
+                query_cache=query_cache,
+                fast_path=(performance_tier == "deferred-narrow-fast"))
             latency_us.append(max(0, (time.perf_counter_ns() - started_ns) // 1000))
+            turn_statuses.append(turn.status)
             if metrics_output is not None:
                 previous_count = sum(sqlite_statement_counts)
                 sqlite_statement_counts.append(
@@ -653,8 +682,8 @@ def run_trained_dialogue_terminal(
             if not latency_us:
                 raise ValueError("metrics_output 没有可记录的对话轮次")
             ordered = sorted(latency_us)
-            p50 = ordered[(len(ordered) - 1) * 50 // 100]
-            p95 = ordered[(len(ordered) - 1) * 95 // 100]
+            p50 = _nearest_rank_latency_us(ordered, 50)
+            p95 = _nearest_rank_latency_us(ordered, 95)
             metrics_path.parent.mkdir(parents=True, exist_ok=True)
             metrics_path.write_text(
                 json.dumps({
@@ -663,6 +692,12 @@ def run_trained_dialogue_terminal(
                     "latency_us": latency_us,
                     "p50_us": p50,
                     "p95_us": p95,
+                    "max_us": ordered[-1],
+                    "status_count": {
+                        status: turn_statuses.count(status)
+                        for status in sorted(set(turn_statuses))
+                    },
+                    "status_per_turn": turn_statuses,
                     "sqlite_statement_count_total": sqlite_statement_count,
                     "sqlite_statement_count_per_turn": sqlite_statement_counts,
                     "peak_working_set_bytes": _peak_working_set_bytes(),
@@ -695,7 +730,7 @@ def main(argv: list[str] | None = None) -> int:
         default="strict",
         help=("strict 完整校验并窄域优先；deferred-narrow 延迟构建窄域；"
               "deferred-narrow-fast 另跳过启动逐文件 SHA，仍保留 manifest "
-              "闭合/大小检查"),
+              "闭合/大小检查，并使用有界首段证据快速路径"),
     )
     parser.add_argument("--extra-course", action="append", default=[])
     parser.add_argument("--variant-course", action="append", default=[])

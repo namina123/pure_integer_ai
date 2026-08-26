@@ -6,6 +6,7 @@ from pure_integer_ai.experiments.conversation_broad_qa_runtime import (
     DialogueTurn,
 )
 from pure_integer_ai.experiments.run_trained_dialogue_terminal import (
+    _nearest_rank_latency_us,
     _protocol_turn_payload,
     _write_protocol_payload,
 )
@@ -43,6 +44,13 @@ def test_protocol_writer_is_utf8_jsonl_and_sorted():
     assert raw.startswith(b"{\"a\":1,\"z\":")
     assert raw.endswith(b"\n")
     assert json.loads(raw.decode("utf-8")) == {"a": 1, "z": "末"}
+
+
+def test_latency_percentile_uses_conservative_integer_nearest_rank():
+    values = [366, 366, 1785, 1955, 2481, 4024, 9076]
+    assert _nearest_rank_latency_us(values, 50) == 1955
+    assert _nearest_rank_latency_us(values, 95) == 9076
+    assert _nearest_rank_latency_us(values, 100) == 9076
 
 
 def test_dedicated_protocol_entrypoint_forces_jsonl(monkeypatch):
