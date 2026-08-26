@@ -473,19 +473,31 @@ def build_public_model_release(
             source_seen.add(source)
             source_files.append((source, str(value)))
     # A resumed training run's graph contains the base run state, so its
-    # public release must carry the base run's course identity as well.
+    # public release must carry every ancestor course identity as well.  A
+    # resumed run may itself resume another run (for example v13 -> portable
+    # CAUSES -> Wikipedia shard); stopping after one hop produces a release
+    # that validates structurally but cannot rebuild the training pack.
     resume_from = summary.get("resume_from") if isinstance(summary, dict) else None
-    if isinstance(resume_from, str) and resume_from.strip():
+    visited_runs: set[Path] = {training}
+    while isinstance(resume_from, str) and resume_from.strip():
         base_dir = (training.parent / resume_from).resolve()
+        if base_dir in visited_runs:
+            raise PublicModelReleaseError("resume lineage 出现循环")
+        visited_runs.add(base_dir)
         base_manifest_path = base_dir / "dialogue_pack_manifest.json"
-        if not base_manifest_path.is_file():
-            raise PublicModelReleaseError("resume 基座课程 manifest 缺失")
+        base_summary_path = base_dir / "training_summary.json"
+        if not base_manifest_path.is_file() or not base_summary_path.is_file():
+            raise PublicModelReleaseError("resume 基座课程 manifest/summary 缺失")
         try:
-            base_manifest = json.loads(base_manifest_path.read_text(encoding="utf-8"))
+            base_manifest = json.loads(
+                base_manifest_path.read_text(encoding="utf-8"))
+            base_summary = json.loads(
+                base_summary_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise PublicModelReleaseError("resume 基座课程 manifest 不可回读") from error
-        if not isinstance(base_manifest, dict):
-            raise PublicModelReleaseError("resume 基座课程 manifest 非法")
+            raise PublicModelReleaseError(
+                "resume 基座课程 manifest/summary 不可回读") from error
+        if not isinstance(base_manifest, dict) or not isinstance(base_summary, dict):
+            raise PublicModelReleaseError("resume 基座课程 manifest/summary 非法")
         for row in base_manifest.get("source_files", ()):
             if not isinstance(row, list) or len(row) != 3:
                 raise PublicModelReleaseError("resume 基座 source_files 记录非法")
@@ -500,6 +512,7 @@ def build_public_model_release(
             if source not in source_seen:
                 source_seen.add(source)
                 inherited_files.append((source, value))
+        resume_from = base_summary.get("resume_from")
     evidence_files: list[Path] = []
     for row in training_manifest.get("surface_evidence_files", ()):
         if not isinstance(row, list) or not row:
