@@ -132,6 +132,18 @@ def test_release_rejects_absolute_nested_manifest_path(tmp_path: Path) -> None:
         load_public_model_release(tmp_path, require_k_drive=False)
 
 
+def test_release_rejects_absolute_source_identity(tmp_path: Path) -> None:
+    _write_fixture(tmp_path)
+    nested = tmp_path / "model/dialogue_pack_manifest.json"
+    value = json.loads(nested.read_text(encoding="utf-8"))
+    value["source_identities"] = [[
+        "data/course.jsonl", "D:/host/course.jsonl"]]
+    nested.write_bytes(_canonical(value))
+    _refresh_manifest(tmp_path)
+    with pytest.raises(PublicModelReleaseError, match="本机绝对路径"):
+        load_public_model_release(tmp_path, require_k_drive=False)
+
+
 def test_release_rejects_private_declaration_payload(tmp_path: Path) -> None:
     _write_fixture(tmp_path)
     nested = tmp_path / "model/dialogue_pack_manifest.json"

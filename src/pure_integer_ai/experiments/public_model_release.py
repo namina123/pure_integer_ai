@@ -54,6 +54,16 @@ _PRIVATE_DECLARATION_KEYS = frozenset({
 })
 
 
+def _reject_local_path_identity(value: object, *, label: str) -> None:
+    """Source identities are portable names, never host filesystem paths."""
+    if not isinstance(value, str) or not value:
+        raise PublicModelReleaseError(f"{label} identity 非法")
+    if (value.startswith(("/", "\\"))
+            or re.match(r"^[A-Za-z]:[/\\]", value)
+            or "\\" in value):
+        raise PublicModelReleaseError(f"{label} 不得包含本机绝对路径")
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -119,6 +129,23 @@ def _validate_nested_manifest_paths(value: object, *, label: str,
                     _relative_path(
                         candidate,
                         label=f"{label}.{child_key}[{ordinal}]")
+                continue
+            if child_key == "source_identities":
+                if not isinstance(child, list):
+                    raise PublicModelReleaseError(
+                        f"{label}.source_identities 必须是身份列表")
+                for ordinal, item in enumerate(child):
+                    if (not isinstance(item, list) or len(item) != 2
+                            or not isinstance(item[0], str)
+                            or not isinstance(item[1], str)):
+                        raise PublicModelReleaseError(
+                            f"{label}.source_identities[{ordinal}] 非法")
+                    _relative_path(
+                        item[0],
+                        label=f"{label}.source_identities[{ordinal}].path")
+                    _reject_local_path_identity(
+                        item[1],
+                        label=f"{label}.source_identities[{ordinal}]")
                 continue
             _validate_nested_manifest_paths(
                 child, label=f"{label}.{child_key}", key=child_key)
