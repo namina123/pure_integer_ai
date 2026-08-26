@@ -226,6 +226,7 @@ def run_conversation_training(*, project_root: str | Path,
                               run_id: str = "dialogue-pack-v1",
                               active_stages: tuple[int, ...] = (1,),
                               resume_from: str | None = None,
+                              max_cases: int | None = None,
                               with_heldout_probe: bool = False,
                               causal_only: bool = False,
                               typed_semantic: bool = True,
@@ -235,6 +236,8 @@ def run_conversation_training(*, project_root: str | Path,
                               replay_completed_stages: bool = False,
                               ) -> dict[str, object]:
     """消费公开 train split，并产出真实 SQLite graph/checkpoint 摘要。"""
+    if max_cases is not None and (type(max_cases) is not int or max_cases <= 0):
+        raise ValueError("max_cases 必须是正整数")
     root = Path(run_root).resolve()
     if root.drive.upper() != "K:" or not root.is_dir():
         raise ValueError("run_root 必须是已存在的 K 盘目录")
@@ -247,7 +250,7 @@ def run_conversation_training(*, project_root: str | Path,
         {path: f"data/ph2/{path.name}" for path in paths}
         if portable_source_identity else None)
     pack = load_dialogue_training_pack(
-        paths, source_path_identities=source_identities)
+        paths, max_cases=max_cases, source_path_identities=source_identities)
     typed_report = TypedDialogueCourseAdapter().report(pack.cases)
     strict_bundle = None
     if typed_semantic and any(stage >= 3 for stage in active_stages):
@@ -305,6 +308,7 @@ def run_conversation_training(*, project_root: str | Path,
         "pack_sha256": pack.pack_sha256,
         "source_files": pack.source_files,
         "case_count": len(pack.cases),
+        "max_cases": max_cases,
         "split_counts": pack.split_counts,
         "train_surface_count": len(train_items),
         "heldout_surface_count": len(heldout_items),
@@ -398,6 +402,7 @@ def run_conversation_training(*, project_root: str | Path,
         "run_id": run_id,
         "pack_sha256": pack.pack_sha256,
         "case_count": len(pack.cases),
+        "max_cases": max_cases,
         "split_counts": pack.split_counts,
         "training_item_count": len(train_items),
         "heldout_probe_count": len(heldout_items) if with_heldout_probe else 0,
@@ -431,6 +436,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stages", default="1",
                         help="comma-separated formal_train stages")
     parser.add_argument("--resume-from", default=None)
+    parser.add_argument("--max-cases", type=int, default=None,
+                        help="只读取公开课程的确定性前缀，用于有界恢复/关系分片")
     parser.add_argument("--with-heldout-probe", action="store_true")
     parser.add_argument("--causal-only", action="store_true")
     parser.add_argument("--no-typed-semantic", action="store_true",
@@ -450,6 +457,7 @@ def main(argv: list[str] | None = None) -> int:
         run_id=args.run_id,
         active_stages=tuple(int(item) for item in args.stages.split(",") if item),
         resume_from=args.resume_from,
+        max_cases=args.max_cases,
         with_heldout_probe=args.with_heldout_probe,
         causal_only=args.causal_only,
         typed_semantic=not args.no_typed_semantic,

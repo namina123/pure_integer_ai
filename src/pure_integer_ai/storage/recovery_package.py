@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import heapq
 from dataclasses import dataclass
 from typing import Any, BinaryIO, Callable
 
@@ -889,6 +890,66 @@ def _read_table_rows(
     return rows
 
 
+def _iter_table_rows_stream(
+        package: InspectedRecoveryPackage,
+        table: str,
+        ):
+    """按 segment 流式合并一个表，避免把整张大表 materialize 到内存。"""
+    streams = []
+    handles = []
+    try:
+        for index in package.indexes:
+            span = index.table_spans.get(table)
+            if span is None:
+                continue
+            handle = open(index.path, "rb")
+            handles.append(handle)
+            handle.seek(span.start)
+
+            def read_one(handle=handle, span=span, segment=index.segment):
+                if handle.tell() >= span.end:
+                    return None
+                line = handle.readline()
+                if not line or handle.tell() > span.end:
+                    raise RecoveryIntegrityError("segment 表范围提前结束")
+                try:
+                    record = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise RecoveryIntegrityError("segment 表记录不是完整 JSON") from exc
+                actual_table, ordinal, row = _validate_record(
+                    record, package.manifest, segment)
+                if actual_table != table:
+                    raise RecoveryIntegrityError("segment 表偏移索引漂移")
+                return ordinal, row
+
+            first = read_one()
+            if first is not None:
+                heapq.heappush(streams, (first[0], len(streams), first[1], read_one))
+        digest = hashlib.sha256()
+        count = 0
+        while streams:
+            ordinal, stream_id, row, reader = heapq.heappop(streams)
+            next_row = reader()
+            if next_row is not None:
+                heapq.heappush(streams, (next_row[0], stream_id, next_row[1], reader))
+            while streams and streams[0][0] == ordinal:
+                _, other_id, other_row, other_reader = heapq.heappop(streams)
+                if other_row != row:
+                    raise RecoveryIntegrityError("同一原表 ordinal 的跨空间副本漂移")
+                next_row = other_reader()
+                if next_row is not None:
+                    heapq.heappush(streams, (next_row[0], other_id, next_row[1], other_reader))
+            digest.update(_canonical_bytes({"_ordinal": ordinal, **row}))
+            count += 1
+            yield row
+        expected = {item.table: item for item in package.manifest.table_states}[table]
+        if count != expected.row_count or tuple(digest.digest()) != expected.checksum_key:
+            raise RecoveryIntegrityError(f"表 {table} 逻辑行数或校验不匹配")
+    finally:
+        for handle in handles:
+            handle.close()
+
+
 def _target_schema(
         backend: StorageBackend,
         manifest: RecoveryManifest,
@@ -926,15 +987,24 @@ def load_recovery_package(
     )
     _target_schema(backend, package.manifest)
     tables_to_load: list[str] = []
+    stream_tables: set[str] = set()
+    expected_counts = {
+        item.table: item.row_count for item in package.manifest.table_states}
     for table in package.manifest.table_order:
+        # 新建恢复 backend 通常只含 bootstrap 的少量 space 行。对真正为空
+        # 的大表走流式路径，避免把数百万行 materialize 成 list[dict]；非空
+        # 表仍使用旧幂等比较语义（通常仅 space 表）。
+        if backend.count(table, where=None) == 0:
+            stream_tables.add(table)
+            if expected_counts[table] > 0:
+                tables_to_load.append(table)
+            continue
         rows = _read_table_rows(package, table)
         existing = backend.select(table, where=None)
         if existing == rows:
             continue
-        if existing:
-            raise RecoveryConflictError(
-                f"目标表 {table} 非空且与恢复包漂移")
-        tables_to_load.append(table)
+        raise RecoveryConflictError(
+            f"目标表 {table} 非空且与恢复包漂移")
     hit_fault(fault_injector, FAULT_LOAD_AFTER_PREFLIGHT, {
         "run_id": run_id,
         "publish_epoch": package.manifest.publish_epoch,
@@ -944,21 +1014,31 @@ def load_recovery_package(
     try:
         floor_by_space: dict[int, int] = {}
         for table in package.manifest.table_order:
-            rows = _read_table_rows(package, table)
-            if table in tables_to_load:
+            if table in stream_tables:
+                rows = _iter_table_rows_stream(package, table)
                 for row in rows:
-                    backend.insert(table, row)
-                hit_fault(fault_injector, FAULT_LOAD_AFTER_TABLE, {
-                    "run_id": run_id,
-                    "table": table,
-                    "row_count": len(rows),
-                })
-            for row in rows:
-                space_id = row.get("space_id")
-                local_id = row.get("local_id")
-                if type(space_id) is int and type(local_id) is int:
-                    floor_by_space[space_id] = max(
-                        local_id, floor_by_space.get(space_id, 0))
+                    if table in tables_to_load:
+                        backend.insert(table, row)
+                    space_id = row.get("space_id")
+                    local_id = row.get("local_id")
+                    if type(space_id) is int and type(local_id) is int:
+                        floor_by_space[space_id] = max(
+                            local_id, floor_by_space.get(space_id, 0))
+            else:
+                rows = _read_table_rows(package, table)
+            hit_fault(fault_injector, FAULT_LOAD_AFTER_TABLE, {
+                "run_id": run_id,
+                "table": table,
+                "row_count": (backend.count(table, where=None)
+                              if table in stream_tables else len(rows)),
+            })
+            if table not in stream_tables:
+                for row in rows:
+                    space_id = row.get("space_id")
+                    local_id = row.get("local_id")
+                    if type(space_id) is int and type(local_id) is int:
+                        floor_by_space[space_id] = max(
+                            local_id, floor_by_space.get(space_id, 0))
         for space_id, floor in sorted(floor_by_space.items()):
             backend.advance_id_pool(space_id, floor)
         hit_fault(fault_injector, FAULT_LOAD_BEFORE_COMMIT, {
