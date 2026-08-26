@@ -168,6 +168,7 @@ def answer_broad_dialogue_turn(
         database: sqlite3.Connection,
         *,
         narrow_answer: Callable[[str], tuple[str, str] | None] | None = None,
+        defer_narrow: bool = False,
         surface_consumer: Callable[[str, str, str | None], str | None]
         | None = None,
         runtime_material_answer: Callable[
@@ -193,6 +194,8 @@ def answer_broad_dialogue_turn(
     """
     if type(state) is not BroadDialogueState or type(question) is not str:
         raise TypeError("dialogue state/question 类型错误")
+    if type(defer_narrow) is not bool:
+        raise TypeError("defer_narrow 必须是严格 bool")
     if not question.strip():
         raise ValueError("question 不能为空")
     answer = None
@@ -238,7 +241,8 @@ def answer_broad_dialogue_turn(
             display_answer = answer
             retrieval_question = question
             runtime_material_decided = True
-    if answer is None and not runtime_material_decided and narrow_answer is not None:
+    if (answer is None and not runtime_material_decided
+            and not defer_narrow and narrow_answer is not None):
         narrow = narrow_answer(question)
         if narrow is not None:
             answer, status = narrow
@@ -314,6 +318,16 @@ def answer_broad_dialogue_turn(
         if result.title is not None:
             source_title = result.title
             source_url = result.source_url
+    # Fast/deferred mode queries the broad index first.  The narrow runtime is
+    # initialized lazily only when broad retrieval cannot answer; this removes
+    # several seconds of snapshot construction from ordinary broad questions
+    # without changing the strict mode ordering above.
+    if (defer_narrow and answer is None and status == "UNKNOWN"
+            and not runtime_material_decided and narrow_answer is not None):
+        narrow = narrow_answer(question)
+        if narrow is not None:
+            answer, status = narrow
+            display_answer = answer
     if (surface_consumer is not None and status == "ANSWER"
             and display_answer):
         consumed = surface_consumer(display_answer, status, source_title)

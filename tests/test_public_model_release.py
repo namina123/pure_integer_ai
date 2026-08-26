@@ -153,3 +153,22 @@ def test_release_rejects_private_declaration_payload(tmp_path: Path) -> None:
     _refresh_manifest(tmp_path)
     with pytest.raises(PublicModelReleaseError, match="private evaluator 数据"):
         load_public_model_release(tmp_path, require_k_drive=False)
+
+
+def test_release_fast_validation_is_explicit_and_keeps_closed_manifest(
+        tmp_path: Path) -> None:
+    _write_fixture(tmp_path)
+    payload = tmp_path / "knowledge/broad_qa.sqlite3"
+    payload.write_bytes(b"QX")  # same size: only the payload digest changes
+    loaded = load_public_model_release(
+        tmp_path, require_k_drive=False, verify_payload_hashes=False)
+    assert loaded.release_id == "fixture"
+    with pytest.raises(PublicModelReleaseError, match="release file hash 漂移"):
+        load_public_model_release(tmp_path, require_k_drive=False)
+
+
+def test_release_hash_validation_flag_requires_strict_bool(tmp_path: Path) -> None:
+    _write_fixture(tmp_path)
+    with pytest.raises(TypeError, match="严格 bool"):
+        load_public_model_release(
+            tmp_path, require_k_drive=False, verify_payload_hashes=1)

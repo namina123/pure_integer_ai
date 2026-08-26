@@ -118,6 +118,12 @@ class EdgeStore:
         # REFERS_TO/PROPERTY 边（refers_occurrence.py:134/177）·通用 version 会误失效零收益。纯整数单调计数·
         # 零存储语义影响·bit-identical（缓存仅加速·失效即 fresh 重算·永不 stale·尊重原 fresh-compute 设计 :68-69）。
         self._cooccurs_version: int = 0
+        # DEDUP 热路径的五元端点索引。首次调用时从后端一次性建立；
+        # 后续只在内存判断 INSERT/UPDATE，仍保留重复行 >=2 的 fail-fast。
+        # EdgeStore facade 会按 episode 重建，但 backend 生命周期更长；把
+        # 索引挂在 backend 上，避免每个 facade 再做一次全 edge 表扫描。
+        self._cooccurs_row_counts: dict[tuple[int, int, int, int], int] | None = getattr(
+            backend, "_cooccurs_row_counts_cache", None)
 
     @property
     def cooccurs_version(self) -> int:
@@ -209,6 +215,29 @@ class EdgeStore:
             "content_version": content_version,
         })
         self._bump_if_cooccurs(edge_type)   # perf round3：COOCCURS 插入 bump version（compute_hub_set cache 失效）
+        if edge_type == EDGE_COOCCURS:
+            row_counts = getattr(self._b, "_cooccurs_row_counts_cache", None)
+            if row_counts is None:
+                row_counts = self._cooccurs_row_counts
+            if row_counts is None:
+                return
+            key = (space_id_from, local_id_from, space_id_to, local_id_to)
+            row_counts[key] = row_counts.get(key, 0) + 1
+            self._cooccurs_row_counts = row_counts
+
+    def _ensure_cooccurs_row_counts(self) -> dict[tuple[int, int, int, int], int]:
+        """一次读取既有 COOCCURS 行，供 dedup 后续 O(1) 命中。"""
+        if self._cooccurs_row_counts is None:
+            counts: dict[tuple[int, int, int, int], int] = {}
+            for row in self.query_type(EDGE_COOCCURS):
+                key = (
+                    row["space_id_from"], row["local_id_from"],
+                    row["space_id_to"], row["local_id_to"],
+                )
+                counts[key] = counts.get(key, 0) + 1
+            self._cooccurs_row_counts = counts
+            setattr(self._b, "_cooccurs_row_counts_cache", counts)
+        return self._cooccurs_row_counts
 
     def add_cooccurs_dedup(self, *, space_id_from: int, local_id_from: int,
                            space_id_to: int, local_id_to: int, edge_type: int,
@@ -238,16 +267,15 @@ class EdgeStore:
                    edge_type, source, tier, _where="EdgeStore.add_cooccurs_dedup")
         assert edge_type == EDGE_COOCCURS, (
             f"add_cooccurs_dedup 仅 EDGE_COOCCURS（防误用合并其他类型破语义）·got edge_type={edge_type}")
-        rows = self._b.count("edge", where={
-            "space_id_from": space_id_from, "local_id_from": local_id_from,
-            "space_id_to": space_id_to, "local_id_to": local_id_to,
-            "edge_type": edge_type,
-        })
+        key = (space_id_from, local_id_from, space_id_to, local_id_to)
+        row_counts = self._ensure_cooccurs_row_counts()
+        rows = row_counts.get(key, 0)
         if rows == 0:
             self.add(space_id_from=space_id_from, local_id_from=local_id_from,
                      space_id_to=space_id_to, local_id_to=local_id_to,
                      edge_type=edge_type, strength=1, source=source,
                      epistemic_origin=None, tier=tier)
+            row_counts[key] = 1
             return True
         if rows >= 2:
             # 旧 append-only 重复行（跨 gate cursor 续训迁移）·append-only 禁 DELETE 不能合并·
@@ -256,9 +284,31 @@ class EdgeStore:
                 f"add_cooccurs_dedup 遇 {rows} 行重复 COOCCURS 边 ({space_id_from},"
                 f"{local_id_from})->({space_id_to},{local_id_to})·DEDUP 不合并旧 append-only 重复行"
                 f"（append-only 禁 DELETE）·跨 gate cursor 续训须重跑非续训")
-        self.add_strength(space_id_from=space_id_from, local_id_from=local_id_from,
-                          space_id_to=space_id_to, local_id_to=local_id_to,
-                          edge_type=edge_type, delta=1)
+        where = {
+            "space_id_from": space_id_from,
+            "local_id_from": local_id_from,
+            "space_id_to": space_id_to,
+            "local_id_to": local_id_to,
+            "edge_type": edge_type,
+        }
+        increment = getattr(self._b, "increment", None)
+        affected = (
+            increment("edge", where, {"strength": 1})
+            if callable(increment)
+            else None
+        )
+        if affected is None:
+            self.add_strength(
+                space_id_from=space_id_from,
+                local_id_from=local_id_from,
+                space_id_to=space_id_to,
+                local_id_to=local_id_to,
+                edge_type=edge_type,
+                delta=1,
+            )
+        elif affected != 1:
+            raise EdgeMutationConflict(
+                f"COOCCURS dedup 更新命中 {affected} 行，期望唯一行")
         return False
 
     def add_precedes_dedup(self, *, space_id_from: int, local_id_from: int,

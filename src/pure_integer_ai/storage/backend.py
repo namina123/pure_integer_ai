@@ -76,6 +76,8 @@ class StorageBackend(Protocol):
             ) -> None: ...
     def update(self, table: str, where: dict[str, Any],
                set_: dict[str, Any]) -> int: ...
+    def increment(self, table: str, where: dict[str, Any],
+                  increments: dict[str, int]) -> int: ...
     def select(self, table: str, where: dict[str, Any] | None = None,
                where_gt: dict[str, int] | None = None,
                order_by: str | None = None, *, descending: bool = False,
@@ -145,6 +147,20 @@ class _BaseBackend:
         self._protected_owner_space_ids: set[int] = set()
         # 进程内逐表写代次；选择性恢复用它拒绝等行数 update 逃逸。
         self._table_write_epochs: dict[str, int] = {}
+        # 运行时性能诊断计数；不进入 schema、快照或发布状态。
+        # insert_many 计一次物理写调用并记录其行数，便于比较批写收益。
+        self._storage_write_calls = 0
+        self._storage_write_rows = 0
+
+    @property
+    def storage_write_calls(self) -> int:
+        """返回本实例成功执行的物理写操作次数（诊断字段）。"""
+        return self._storage_write_calls
+
+    @property
+    def storage_write_rows(self) -> int:
+        """返回本实例成功写入/更新的行数（诊断字段）。"""
+        return self._storage_write_rows
 
     # -- 表元数据 --
     def register_table(self, table: str, columns: list[tuple[str, str]],
@@ -274,6 +290,8 @@ class _BaseBackend:
                 telemetry.record("insert", table, failed=True)
             raise
         self._table_write_epochs[table] += 1
+        self._storage_write_calls += 1
+        self._storage_write_rows += 1
         if telemetry is not None:
             telemetry.record("insert", table, rows=1)
         # perf #1144：IS_A 拓扑版本 bump（ancestor_map cache O(1) 命中信号）。IS_A 拓扑仅经 insert 变
@@ -308,6 +326,8 @@ class _BaseBackend:
                 telemetry.record("insert", table, failed=True)
             raise
         self._table_write_epochs[table] += len(items)
+        self._storage_write_calls += 1
+        self._storage_write_rows += len(items)
         if telemetry is not None:
             telemetry.record("insert", table, rows=len(items))
         if table == "edge":
@@ -353,6 +373,45 @@ class _BaseBackend:
             raise
         if affected:
             self._table_write_epochs[table] += 1
+        self._storage_write_calls += 1
+        self._storage_write_rows += max(affected, 0)
+        if telemetry is not None:
+            telemetry.record("update", table, rows=affected)
+        return affected
+
+    def increment(self, table: str, where: dict[str, Any],
+                  increments: dict[str, int]) -> int:
+        """对已知存在的行执行整数增量，省略重复的写前回读。
+
+        仅供 append/mutable 计数器在自身缓存已确认键存在时使用。若当前
+        backend 有 owner 写保护，退回完整 ``update`` 以保留逐行核验。
+        """
+        if not isinstance(increments, dict) or not increments:
+            raise ValueError("increment increments 必须是非空 dict")
+        normalized: dict[str, tuple[str, int]] = {}
+        for column, value in increments.items():
+            if not isinstance(column, str) or not column:
+                raise TypeError("increment 列名必须是非空字符串")
+            if type(value) is not int:
+                assert_int(value, _where=f"increment {column}")
+                raise ValueError(f"increment {column} 必须是严格整数")
+            normalized[column] = ("+=", value)
+        if self._protected_owner_space_ids:
+            return self.update(table, where, normalized)
+        m = self._meta(table)
+        require_write_allowed(table, "update")
+        disc.check_write(table, "update", m["discipline"], m["core"])
+        telemetry = active_backend_telemetry()
+        try:
+            affected = self._do_update(table, where, normalized)
+        except BaseException:
+            if telemetry is not None:
+                telemetry.record("update", table, failed=True)
+            raise
+        if affected:
+            self._table_write_epochs[table] += 1
+        self._storage_write_calls += 1
+        self._storage_write_rows += max(affected, 0)
         if telemetry is not None:
             telemetry.record("update", table, rows=affected)
         return affected
@@ -374,6 +433,8 @@ class _BaseBackend:
             raise
         if affected:
             self._table_write_epochs[table] += 1
+        self._storage_write_calls += 1
+        self._storage_write_rows += max(affected, 0)
         if telemetry is not None:
             telemetry.record("delete", table, rows=affected)
         return affected
@@ -810,9 +871,18 @@ class SQLiteBackend(_BaseBackend):
             *,
             capability_profile: BackendCapabilityProfile | None = None,
             device_budget: BackendDeviceBudget | None = None,
+            performance_mode: str = "durable",
             ) -> None:
-        """创建 SQLite 后端，并按实例持久性或注入配置绑定能力 profile。"""
+        """创建 SQLite 后端，并按实例持久性或注入配置绑定能力 profile。
+
+        ``bulk`` 是训练期显式性能档位：关闭 journal 并降低同步等待，适合
+        可从源课程重建的临时训练 run；``durable`` 默认保持 SQLite 的正常
+        崩溃恢复语义。两档不改变表结构、整数记录或查询结果。
+        """
         super().__init__()
+        if performance_mode not in {"durable", "bulk"}:
+            raise ValueError("performance_mode 必须是 durable 或 bulk")
+        self._performance_mode = performance_mode
         if capability_profile is not None and device_budget is not None:
             raise ValueError("不能同时注入 capability_profile 和 device_budget")
         if capability_profile is not None and not isinstance(
@@ -823,11 +893,23 @@ class SQLiteBackend(_BaseBackend):
             if capability_profile is not None
             else sqlite_backend_profile(
                 persistent=path not in {"", ":memory:"},
+                durable_commit=(performance_mode == "durable"),
                 budget=device_budget,
             )
         )
         self._conn = sqlite3.connect(path)
         self._conn.execute("PRAGMA foreign_keys=ON")
+        if performance_mode == "bulk":
+            # This mode is opt-in and intended for rebuildable training roots.
+            # The final caller still commits explicitly before publishing.
+            self._conn.execute("PRAGMA journal_mode=OFF")
+            self._conn.execute("PRAGMA synchronous=OFF")
+            self._conn.execute("PRAGMA temp_store=MEMORY")
+
+    @property
+    def performance_mode(self) -> str:
+        """返回实例启动时选择的 SQLite 性能档位。"""
+        return self._performance_mode
 
     def storage_capabilities(self) -> BackendCapabilityProfile:
         """返回当前 SQLiteBackend 实例的显式物理能力和预算。"""

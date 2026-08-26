@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from pure_integer_ai.cognition.shared.alias_resolution import (
@@ -57,6 +58,41 @@ from pure_integer_ai.experiments.ph2_grounded_answer_learning import (
 
 
 _NAMESPACE = 20916
+
+# Compilation is a pure projection of the immutable surface model, claim,
+# target and protocol.  Keep a small process-local cache for repeated training
+#/generation requests; run-local owners, mappers and verifiers remain uncached.
+_COMPILATION_CACHE_LIMIT = 64
+_COMPILATION_CACHE: OrderedDict[
+    tuple[object, ...], "GroundedAnswerConnectorCompilation"] = OrderedDict()
+
+
+def _compilation_cache_key(
+        model: GroundedAnswerSurfaceModel,
+        question: GroundedQuestionEpisode | GroundedAnswerClaimInput,
+        target: "GroundedAnswerConnectorTarget",
+        surface_protocol: GenerationSurfaceProtocol,
+        carrier_kind: str,
+        ) -> tuple[object, ...]:
+    """Build a content key without retaining large text/model objects."""
+    claim_text = _claim_text(question)
+    model_payload = tuple(
+        (item.pattern_id, item.response_act, item.carrier_kind,
+         item.claim_count, tuple(part.stable_value() for part in item.parts),
+         item.support_episode_ids, item.support_teacher_keys)
+        for item in model.patterns)
+    model_digest = hashlib.sha256(
+        canonical_json_bytes(model_payload)).digest()
+    claim_digest = hashlib.sha256(claim_text.encode("utf-8")).digest()
+    return (
+        model_digest,
+        claim_digest,
+        target.proposition.stable_key(),
+        target.language_branch.stable_key(),
+        target.representation_family,
+        surface_protocol.stable_key(),
+        carrier_kind,
+    )
 
 
 # object-model: exception
@@ -715,6 +751,12 @@ def compile_grounded_answer_connectors(
         raise TypeError("grounded connector surface protocol 类型错误")
     if target.proposition.template.object_kind != OBJECT_PROPOSITION:
         raise GroundedAnswerConnectorError("target 必须绑定 Proposition 本体")
+    cache_key = _compilation_cache_key(
+        model, question, target, surface_protocol, carrier_kind)
+    cached = _COMPILATION_CACHE.get(cache_key)
+    if cached is not None:
+        _COMPILATION_CACHE.move_to_end(cache_key)
+        return cached
     _claim_text(question)
     patterns = tuple(
         item for item in model.patterns
@@ -734,8 +776,13 @@ def compile_grounded_answer_connectors(
         ),
         key=lambda item: item.option.pattern_id,
     ))
-    return GroundedAnswerConnectorCompilation(
+    compilation = GroundedAnswerConnectorCompilation(
         value_protocol, _structure_options(variants), variants)
+    _COMPILATION_CACHE[cache_key] = compilation
+    _COMPILATION_CACHE.move_to_end(cache_key)
+    while len(_COMPILATION_CACHE) > _COMPILATION_CACHE_LIMIT:
+        _COMPILATION_CACHE.popitem(last=False)
+    return compilation
 
 
 def select_grounded_answer_structure(

@@ -265,13 +265,17 @@ class IntegerIdentityRegistry:
             raise IdentityIncompleteError(
                 f"identity hash={identity_hash} 存在无 header 的外部记录")
 
-        for index, value in enumerate(key):
-            self._backend.insert(IDENTITY_PART_TABLE, {
+        # 同一身份的 part 没有跨行副作用；一次 insert_many 保持原顺序，
+        # 同时将每个 part 的 Python/SQLite 调用从 O(key_size) 降为一次批写。
+        self._backend.insert_many(
+            IDENTITY_PART_TABLE,
+            ({
                 "identity_kind": identity_kind,
                 "identity_hash": identity_hash,
                 "part_index": index,
                 "part_value": value,
-            })
+            } for index, value in enumerate(key)),
+        )
         self._backend.insert(IDENTITY_HEADER_TABLE, {
             "identity_kind": identity_kind,
             "identity_hash": identity_hash,

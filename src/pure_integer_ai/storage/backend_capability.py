@@ -352,11 +352,18 @@ def dict_backend_profile(
 def sqlite_backend_profile(
         *,
         persistent: bool,
+        durable_commit: bool = True,
         budget: BackendDeviceBudget | None = None,
         ) -> BackendCapabilityProfile:
-    """按 SQLite 实例是否持久化返回能力声明，不暴露路径给上层。"""
+    """按 SQLite 实例是否持久化返回能力声明，不暴露路径给上层。
+
+    ``durable_commit=False`` 用于显式 bulk/rebuild 模式；此时不宣称
+    CAPABILITY_DURABLE_COMMIT，避免把低同步档位误报为耐久存储。
+    """
     if type(persistent) is not bool:
         raise TypeError("persistent 必须是 bool")
+    if type(durable_commit) is not bool:
+        raise TypeError("durable_commit 必须是严格 bool")
     native = {
         CAPABILITY_STABLE_ORDER_SCAN,
         CAPABILITY_RANGE_SCAN,
@@ -367,8 +374,9 @@ def sqlite_backend_profile(
     if persistent:
         native.update({
             CAPABILITY_PERSISTENCE,
-            CAPABILITY_DURABLE_COMMIT,
         })
+        if durable_commit:
+            native.add(CAPABILITY_DURABLE_COMMIT)
     return _profile((2, 2 if persistent else 1), frozenset(native), budget)
 
 

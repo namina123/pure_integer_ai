@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
@@ -169,6 +170,10 @@ _STAGE4_TRIAL_PURPOSE = minimal_instruction_identity((*_NAMESPACE, 19, 2))
 _STAGE4_VERIFIER_SOURCE = SourceRef(
     21405, 60001, 0, GLOBAL_OWNER_SCOPE, VersionBundle())
 
+_GENERATION_PROTOCOL_CACHE_LIMIT = 16
+_GENERATION_PROTOCOL_CACHE: OrderedDict[
+    tuple[int, ...], tuple[object, ...]] = OrderedDict()
+
 
 def _instruction_series(group: int, count: int, branch):
     """在当前 LanguageBranch owner/version 中建立 run-local identities。"""
@@ -184,6 +189,11 @@ def _instruction_series(group: int, count: int, branch):
 
 def _generation_protocols(branch):
     """建立 grounded connector 所需的 G-00..G-04 协议。"""
+    branch_key = branch.stable_key()
+    cached = _GENERATION_PROTOCOL_CACHE.get(branch_key)
+    if cached is not None:
+        _GENERATION_PROTOCOL_CACHE.move_to_end(branch_key)
+        return cached
     content = AnswerContentProtocol(*_instruction_series(10, 5, branch))
     selector = AnswerContentSelector(
         content,
@@ -204,7 +214,12 @@ def _generation_protocols(branch):
         *_instruction_series(16, 15, branch),
     )
     question = QuestionAnswerProtocol(*_instruction_series(17, 3, branch))
-    return content, selector, plan, structure, surface, postcheck, question
+    result = (content, selector, plan, structure, surface, postcheck, question)
+    _GENERATION_PROTOCOL_CACHE[branch_key] = result
+    _GENERATION_PROTOCOL_CACHE.move_to_end(branch_key)
+    while len(_GENERATION_PROTOCOL_CACHE) > _GENERATION_PROTOCOL_CACHE_LIMIT:
+        _GENERATION_PROTOCOL_CACHE.popitem(last=False)
+    return result
 
 
 def _claim_text(payload: Any) -> str | None:
@@ -365,6 +380,10 @@ class _DynamicExecutor(TypedGenerationExecutor):
         self.mapper = mapper
         self.postcheck_runtime = postcheck_runtime
         self.stage4_owner = stage4_owner
+        # S-07 facade construction materializes the same branch protocol on
+        # every request; retain only immutable branch-local facades here.
+        self._lifecycle_cache: dict[
+            tuple[int, ...], StructureOrderLifecycleGraph] = {}
 
     def execute(self, request: GenerationPlanningRequest) -> TypedGenerationExecution:
         spec = self.mapper.specs.get(request.stable_key())
@@ -381,6 +400,11 @@ class _DynamicExecutor(TypedGenerationExecutor):
             candidate.proposition, branch, _REPRESENTATION_FAMILY)
         content, selector, plan_protocol, structure_protocol, surface_protocol, postcheck_protocol, question_protocol = (
             _generation_protocols(branch))
+        branch_key = branch.stable_key()
+        lifecycle = self._lifecycle_cache.get(branch_key)
+        if lifecycle is None:
+            lifecycle = _build_lifecycle_for_branch(self.ctx, branch)
+            self._lifecycle_cache[branch_key] = lifecycle
         compilation = compile_grounded_answer_connectors(
             self.model, claim, target, surface_protocol)
         # 选择模型中稳定排序的首个单 claim ANSWER pattern；其 literal/claim
@@ -428,7 +452,7 @@ class _DynamicExecutor(TypedGenerationExecutor):
         )
         installation = GroundedAnswerRunLocalFactory(
             surface_protocol,
-            _build_lifecycle_for_branch(self.ctx, branch),
+            lifecycle,
             components,
         ).build(GroundedAnswerRunLocalBuild(
             self.model,

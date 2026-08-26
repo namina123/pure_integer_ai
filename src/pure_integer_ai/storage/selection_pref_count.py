@@ -122,6 +122,29 @@ def record_selection_pref_cooccur(backend: StorageBackend, *,
     sid_a, lid_a = ref_a
     sid_c, lid_c = ref_class
     assert_int(sid_a, lid_a, sid_c, lid_c, _where="record_selection_pref_cooccur.args")
+    key = (sid_a, lid_a, sid_c, lid_c)
+    # 同一训练进程内该表只通过本函数追加/递增。首次调用一次读取确认
+    # 冷启动，之后直接走 INSERT/UPDATE，避免每个共现对都重复 SELECT。
+    # cache 只属运行时，不进入整数图或发布产物。
+    cache = getattr(backend, "_selection_pref_pair_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(backend, "_selection_pref_pair_cache", cache)
+    if key in cache:
+        updater = getattr(backend, "increment", None)
+        if callable(updater):
+            updater(SELECTION_PREF_COUNT_TABLE, where={
+                "space_id_from": sid_a, "local_id_from": lid_a,
+                "space_id_to": sid_c, "local_id_to": lid_c,
+            }, increments={
+                "sp_tn": 1, "sp_observe_tn": 1,
+            })
+            return
+        backend.update(SELECTION_PREF_COUNT_TABLE, where={
+            "space_id_from": sid_a, "local_id_from": lid_a,
+            "space_id_to": sid_c, "local_id_to": lid_c,
+        }, set_={"sp_tn": ("+=", 1), "sp_observe_tn": ("+=", 1)})
+        return
     try:
         existing = backend.select(SELECTION_PREF_COUNT_TABLE, where={
             "space_id_from": sid_a, "local_id_from": lid_a,
@@ -135,7 +158,9 @@ def record_selection_pref_cooccur(backend: StorageBackend, *,
             "space_id_to": sid_c, "local_id_to": lid_c,
             "base_count": 0, "sp_sn": 0, "sp_tn": 1, "sp_observe_tn": 1,
         })
+        cache[key] = True
         return
+    cache[key] = True
     backend.update(SELECTION_PREF_COUNT_TABLE, where={
         "space_id_from": sid_a, "local_id_from": lid_a,
         "space_id_to": sid_c, "local_id_to": lid_c,

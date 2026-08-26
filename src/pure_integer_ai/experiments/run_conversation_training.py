@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 from pathlib import Path
 from pathlib import PurePosixPath
+import sys
 
 from pure_integer_ai.config import gates
 from pure_integer_ai.cognition.shared.identity import (
@@ -78,6 +80,41 @@ from pure_integer_ai.experiments.ph2_w05_contract import digest_value
 from pure_integer_ai.storage.edge_store import EPI_STRUCTURED
 from pure_integer_ai.storage.backend import SQLiteBackend
 from pure_integer_ai.storage.k_run_boundary import open_existing_run_root
+
+
+def _peak_working_set_bytes() -> int:
+    """返回训练宿主进程峰值工作集，作为性能记录而非能力信号。"""
+    if sys.platform == "win32":
+        class _Counters(ctypes.Structure):
+            _fields_ = (
+                ("cb", ctypes.c_ulong),
+                ("page_fault_count", ctypes.c_ulong),
+                ("peak_working_set_size", ctypes.c_size_t),
+                ("working_set_size", ctypes.c_size_t),
+                ("quota_peak_paged_pool_usage", ctypes.c_size_t),
+                ("quota_paged_pool_usage", ctypes.c_size_t),
+                ("quota_peak_non_paged_pool_usage", ctypes.c_size_t),
+                ("quota_non_paged_pool_usage", ctypes.c_size_t),
+                ("pagefile_usage", ctypes.c_size_t),
+                ("peak_pagefile_usage", ctypes.c_size_t),
+            )
+        counters = _Counters()
+        counters.cb = ctypes.sizeof(_Counters)
+        get_process = ctypes.windll.kernel32.GetCurrentProcess
+        get_process.restype = ctypes.c_void_p
+        get_info = ctypes.windll.psapi.GetProcessMemoryInfo
+        get_info.argtypes = (
+            ctypes.c_void_p, ctypes.POINTER(_Counters), ctypes.c_ulong)
+        get_info.restype = ctypes.c_int
+        if get_info(get_process(), ctypes.byref(counters), counters.cb):
+            return int(counters.peak_working_set_size)
+        return 0
+    try:
+        import resource
+        value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except (ImportError, AttributeError, OSError):
+        return 0
+    return value * (1024 if sys.platform != "darwin" else 1)
 
 
 def default_course_paths(project_root: str | Path) -> tuple[Path, ...]:
@@ -234,10 +271,14 @@ def run_conversation_training(*, project_root: str | Path,
                               portable_source_identity: bool = False,
                               include_default_courses: bool = True,
                               replay_completed_stages: bool = False,
+                              storage_performance_mode: str = "durable",
                               ) -> dict[str, object]:
     """消费公开 train split，并产出真实 SQLite graph/checkpoint 摘要。"""
     if max_cases is not None and (type(max_cases) is not int or max_cases <= 0):
         raise ValueError("max_cases 必须是正整数")
+    if storage_performance_mode not in {"durable", "bulk"}:
+        raise ValueError(
+            "storage_performance_mode 必须是 durable 或 bulk")
     root = Path(run_root).resolve()
     if root.drive.upper() != "K:" or not root.is_dir():
         raise ValueError("run_root 必须是已存在的 K 盘目录")
@@ -342,7 +383,8 @@ def run_conversation_training(*, project_root: str | Path,
     })
     _write_json(run_dir / "contrast_report.json", contrast.to_dict())
     database_path = run_dir / "training.sqlite3"
-    backend = SQLiteBackend(str(database_path))
+    backend = SQLiteBackend(
+        str(database_path), performance_mode=storage_performance_mode)
     corpus = (
         list(strict_bundle.corpus)
         if strict_bundle is not None
@@ -439,6 +481,10 @@ def run_conversation_training(*, project_root: str | Path,
         "stages_completed": tuple(result.stages_completed),
         "weaning_ready": bool(result.weaning_ready),
         "weaning_blockers": tuple(result.weaning_blockers),
+        "storage_performance_mode": storage_performance_mode,
+        "storage_write_calls": getattr(backend, "storage_write_calls", 0),
+        "storage_write_rows": getattr(backend, "storage_write_rows", 0),
+        "peak_working_set_bytes": _peak_working_set_bytes(),
         "database": str(database_path),
         "training_cursor": str(cursor_path),
         "training_cursor_identity": list(cursor.identity()),
@@ -469,6 +515,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="增量 shard 只消费显式 extra course")
     parser.add_argument("--replay-completed-stages", action="store_true",
                         help="E1 恢复后显式重放 active stage，供增量 shard 使用")
+    parser.add_argument(
+        "--storage-performance-mode", choices=("durable", "bulk"),
+        default="durable",
+        help=("SQLite 训练存储档位；durable 默认保崩溃恢复，bulk 仅用于可重建 "
+              "训练 run 并降低同步写开销"),
+    )
     args = parser.parse_args(argv)
     summary = run_conversation_training(
         project_root=args.project_root,
@@ -484,6 +536,7 @@ def main(argv: list[str] | None = None) -> int:
         portable_source_identity=args.portable_source_identity,
         include_default_courses=not args.no_default_courses,
         replay_completed_stages=args.replay_completed_stages,
+        storage_performance_mode=args.storage_performance_mode,
     )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True,
                      separators=(",", ":")))

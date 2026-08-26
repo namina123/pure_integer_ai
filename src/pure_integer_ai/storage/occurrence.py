@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.storage import discipline as disc
 from pure_integer_ai.storage.backend import StorageBackend, TYPE_INT
-from pure_integer_ai.storage.telemetry import telemetry_scope_if_active
+from pure_integer_ai.storage.telemetry import (
+    active_backend_telemetry,
+    telemetry_scope_if_active,
+)
 
 
 OCCURRENCE_TABLE = "occurrence"
@@ -144,12 +147,43 @@ class OccurrenceStore:
 
     def __init__(self, backend: StorageBackend) -> None:
         self._backend = backend
+        # occurrence 是 append-only：一旦详情写入，后续只能核验同一内容。
+        # 进程内缓存可安全消除 record() 写后立即 read() 的重复 SQL；
+        # 外部恢复仍会走 backend 查询并在首次命中后填充缓存。
+        self._records_by_ref: dict[tuple[int, int], OccurrenceStorageRecord] = {}
+        self._candidates_by_ref: dict[
+            tuple[int, int], tuple[OccurrenceCandidateStorage, ...]
+        ] = {}
+        self._fresh_namespace: bool | None = None
 
     def add(self, record: OccurrenceStorageRecord) -> OccurrenceStorageRecord:
         """幂等追加 occurrence 详情，同身份异内容拒绝。"""
         if not isinstance(record, OccurrenceStorageRecord):
             raise TypeError("OccurrenceStore.add 需要 OccurrenceStorageRecord")
         _validate_occurrence(record)
+        key = (record.space_id, record.local_id)
+        cached = self._records_by_ref.get(key)
+        if cached is not None:
+            if cached != record:
+                raise OccurrenceStorageIntegrityError(
+                    "occurrence 身份已绑定冲突详情")
+            return record
+        # 新建训练/导入根的 occurrence 表在首条写入前只需探测一次为空；
+        # 后续 identity 仍由本进程缓存保证幂等，避免每个 token 先做一次
+        # 等值 SELECT。已有根则退回原有冲突核验路径。
+        if self._fresh_namespace is None:
+            self._fresh_namespace = (
+                self._backend.count(OCCURRENCE_TABLE, where=None) == 0)
+        if self._fresh_namespace:
+            with telemetry_scope_if_active(
+                    occurrence_key=key,
+                    query="occurrence.add"):
+                self._backend.insert(OCCURRENCE_TABLE, dict(record.__dict__))
+                self._records_by_ref[key] = record
+                self._candidates_by_ref.setdefault(key, ())
+                if active_backend_telemetry() is not None:
+                    return self.read(record.space_id, record.local_id)
+                return record
         with telemetry_scope_if_active(
                 occurrence_key=(record.space_id, record.local_id),
                 query="occurrence.add"):
@@ -162,13 +196,37 @@ class OccurrenceStore:
                         or self._occurrence_from_row(rows[0]) != record):
                     raise OccurrenceStorageIntegrityError(
                         "occurrence 身份已绑定冲突详情")
+                self._records_by_ref[key] = record
                 return record
             self._backend.insert(OCCURRENCE_TABLE, dict(record.__dict__))
-            return self.read(record.space_id, record.local_id)
+            self._records_by_ref[key] = record
+            self._candidates_by_ref.setdefault(key, ())
+            # 保留诊断协议中“写后回读”事件；性能路径未启用遥测时直接
+            # 返回已校验记录，避免为每个 token 再做一次完整 SELECT。
+            if active_backend_telemetry() is not None:
+                return self.read(record.space_id, record.local_id)
+            return record
 
     def read(self, space_id: int, local_id: int) -> OccurrenceStorageRecord:
         """按 occurrence 图节点回读唯一详情。"""
         assert_int(space_id, local_id, _where="OccurrenceStore.read")
+        cached = self._records_by_ref.get((space_id, local_id))
+        if cached is not None:
+            if active_backend_telemetry() is None:
+                return cached
+            # 遥测协议要求 read 仍对应一次真实后端核验；仅在诊断模式
+            # 保留该 SELECT，生产路径直接命中 append-only 缓存。
+            with telemetry_scope_if_active(
+                    occurrence_key=(space_id, local_id),
+                    query="occurrence.read"):
+                rows = self._backend.select(OCCURRENCE_TABLE, where={
+                    "space_id": space_id,
+                    "local_id": local_id,
+                })
+                if len(rows) != 1 or self._occurrence_from_row(rows[0]) != cached:
+                    raise OccurrenceStorageIntegrityError(
+                        "occurrence 缓存与详情表不一致")
+            return cached
         with telemetry_scope_if_active(
                 occurrence_key=(space_id, local_id),
                 query="occurrence.read"):
@@ -178,7 +236,9 @@ class OccurrenceStore:
             })
             if len(rows) != 1:
                 raise OccurrenceStorageIntegrityError("occurrence 没有唯一详情记录")
-            return self._occurrence_from_row(rows[0])
+            record = self._occurrence_from_row(rows[0])
+            self._records_by_ref[(space_id, local_id)] = record
+            return record
 
     def add_candidate(
             self, record: OccurrenceCandidateStorage
@@ -187,6 +247,10 @@ class OccurrenceStore:
         if not isinstance(record, OccurrenceCandidateStorage):
             raise TypeError("add_candidate 需要 OccurrenceCandidateStorage")
         _validate_candidate(record)
+        key = (record.space_id, record.local_id)
+        cached = self._candidates_by_ref.get(key)
+        if cached is not None and record in cached:
+            return record
         with telemetry_scope_if_active(
                 occurrence_key=(record.space_id, record.local_id),
                 query="occurrence.add_candidate"):
@@ -196,6 +260,7 @@ class OccurrenceStore:
             })
             existing = tuple(self._candidate_from_row(row) for row in rows)
             if record in existing:
+                self._candidates_by_ref[key] = tuple(existing)
                 return record
             endpoint = (
                 record.candidate_object_kind,
@@ -214,6 +279,7 @@ class OccurrenceStore:
                         "occurrence candidate 顺序或端点冲突")
             self._backend.insert(
                 OCCURRENCE_CANDIDATE_TABLE, dict(record.__dict__))
+            self._candidates_by_ref[key] = (*existing, record)
             return record
 
     def candidates(self, space_id: int, local_id: int
@@ -223,13 +289,18 @@ class OccurrenceStore:
         with telemetry_scope_if_active(
                 occurrence_key=(space_id, local_id),
                 query="occurrence.candidates"):
-            return tuple(sorted(
+            cached = self._candidates_by_ref.get((space_id, local_id))
+            if cached is not None:
+                return cached
+            candidates = tuple(sorted(
                 (self._candidate_from_row(row) for row in self._backend.select(
                     OCCURRENCE_CANDIDATE_TABLE,
                     where={"space_id": space_id, "local_id": local_id},
                 )),
                 key=lambda item: item.candidate_ordinal,
             ))
+            self._candidates_by_ref[(space_id, local_id)] = candidates
+            return candidates
 
     def occurrence_count(self) -> int:
         """返回当前后端的唯一 occurrence 详情行数。"""

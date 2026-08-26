@@ -190,6 +190,48 @@ def test_sqlite_file_commit_recovers_but_memory_modes_do_not_claim_durability(
             memory_backend.close()
 
 
+def test_sqlite_bulk_mode_is_explicit_and_does_not_claim_durable_commit(
+        tmp_path: Path,
+        ):
+    """可重建训练 bulk 档位降低同步开销，但能力声明诚实降级。"""
+    backend = SQLiteBackend(
+        str(tmp_path / "k00-bulk.sqlite3"), performance_mode="bulk")
+    try:
+        assert backend.performance_mode == "bulk"
+        profile = capability_profile(backend)
+        assert profile.mode(CAPABILITY_PERSISTENCE) == CAPABILITY_MODE_NATIVE
+        assert profile.mode(CAPABILITY_DURABLE_COMMIT) == (
+            CAPABILITY_MODE_UNSUPPORTED)
+    finally:
+        backend.close()
+
+
+def test_sqlite_performance_mode_rejects_unknown_value(tmp_path: Path):
+    with pytest.raises(ValueError, match="durable 或 bulk"):
+        SQLiteBackend(str(tmp_path / "bad.sqlite3"), performance_mode="fast")
+
+
+@pytest.mark.parametrize("backend_kind", ("dict", "sqlite"))
+def test_integer_increment_updates_known_counter_without_changing_schema(
+        tmp_path: Path, backend_kind: str):
+    """计数器增量保持整数和后端一致，供批量性能路径复用。"""
+    backend = (DictBackend() if backend_kind == "dict" else
+               SQLiteBackend(str(tmp_path / "increment.sqlite3")))
+    try:
+        backend.register_table(
+            "increment_counter",
+            [("key", TYPE_INT), ("value", TYPE_INT)],
+            disc.DISC_MUTABLE_MONOTONE,
+            [("key",)],
+        )
+        backend.insert("increment_counter", {"key": 1, "value": 1})
+        assert backend.increment(
+            "increment_counter", {"key": 1}, {"value": 2}) == 1
+        assert backend.select("increment_counter") == [{"key": 1, "value": 3}]
+    finally:
+        backend.close()
+
+
 def test_supported_backends_declare_physical_reclamation():
     """Dict 和 SQLite 均能在逻辑墓碑可见后删除 K-02 非核心物理行。"""
     for backend in (DictBackend(), SQLiteBackend()):

@@ -102,6 +102,7 @@ class ObservePipeline:
                  occurrence_order_writer=None,
                  position_histogram_state=None,
                  hub_degree_state=None,
+                 scoped_identity_store: ScopedIdentityStore | None = None,
                  language_signal_runtime=None,
                  property_attr_instruction_key: tuple[int, ...] | None = None,
                  pronoun_instruction_bindings: tuple[
@@ -151,7 +152,11 @@ class ObservePipeline:
         if type(write_legacy_language_sequences) is not bool:
             raise TypeError("write_legacy_language_sequences 必须是 bool")
         self.write_legacy_language_sequences = write_legacy_language_sequences
-        self.scoped_identity_store = ScopedIdentityStore(self.backend)
+        # 训练/运行期可注入长生命周期 store；便捷 observe 默认仍创建
+        # 独立实例以保持旧调用隔离。共享 store 可复用 scope/clock identity
+        # 缓存，避免每个 item 重复扫描 identity 表。
+        self.scoped_identity_store = (
+            scoped_identity_store or ScopedIdentityStore(self.backend))
 
     def _next_timestamp(self, clock: LogicalClock | None) -> int:
         """推进 scoped 时钟；无 scope 的旧调用只走运行期兼容序号。"""

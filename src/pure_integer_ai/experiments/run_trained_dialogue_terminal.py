@@ -300,6 +300,7 @@ def run_trained_dialogue_terminal(
         output_stream: BinaryIO | None = None,
         protocol_stream: bool = False,
         metrics_output: str | Path | None = None,
+        performance_tier: str = "strict",
         ) -> int:
     """运行可回放的只读交互会话。
 
@@ -307,6 +308,11 @@ def run_trained_dialogue_terminal(
     每行一个 ``{"id": ..., "op": "turn", "text": ...}`` 请求并输出一条
     稳定 JSON 响应。两种入口共享完全相同的查询、证据、拒答和 checkpoint 路径。
     """
+    if performance_tier not in {
+            "strict", "deferred-narrow", "deferred-narrow-fast"}:
+        raise ValueError(
+            "performance_tier 必须是 strict、deferred-narrow 或 "
+            "deferred-narrow-fast")
     runtime_sqlite_runtime = None
     runtime_material_response_provider = None
     if runtime_material_runtime_database is not None:
@@ -391,7 +397,13 @@ def run_trained_dialogue_terminal(
         from pure_integer_ai.experiments.public_model_release import (
             load_public_model_release,
         )
-        release = load_public_model_release(release_root)
+        release = load_public_model_release(
+            release_root,
+            # The fast tier is explicit and opt-in.  It keeps path/size/closed
+            # manifest checks but leaves full payload SHA auditing to strict
+            # startup and the independent release validator.
+            verify_payload_hashes=(performance_tier != "deferred-narrow-fast"),
+        )
         root = release.root
         database = release.qa_database
         resolved_training_run_root = release.training_root
@@ -445,16 +457,41 @@ def run_trained_dialogue_terminal(
         ensure_normal_relative_directory(
             session_capability, "broad_dialogue_checkpoints",
             label="broad dialogue checkpoint directory")
-    if sparse_snapshot is None:
-        sparse_runtime = load_or_rebuild_public_sparse_qa_runtime()
+    if performance_tier in {"deferred-narrow", "deferred-narrow-fast"}:
+        # Broad retrieval is the common path for a published release.  Keep
+        # the heavier sparse snapshot construction behind the first narrow
+        # miss, while preserving exact strict-mode behavior and answer data.
+        deferred_narrow = True
+        narrow_runtime = None
+        narrow_catalog = None
+        narrow_answer = None
+
+        def _lazy_narrow_answer(question: str):
+            nonlocal narrow_runtime, narrow_catalog, narrow_answer
+            if narrow_answer is None:
+                if sparse_snapshot is None:
+                    narrow_runtime = load_or_rebuild_public_sparse_qa_runtime()
+                else:
+                    narrow_runtime = load_or_rebuild_public_sparse_qa_runtime(
+                        sparse_snapshot, repository=root)
+                narrow_catalog = build_public_sentence_demo_catalog(narrow_runtime)
+                narrow_answer = _narrow_answer(
+                    narrow_runtime, narrow_catalog, trained_surface)
+            return narrow_answer(question)
+
+        narrow = _lazy_narrow_answer
     else:
-        sparse_runtime = load_or_rebuild_public_sparse_qa_runtime(
-            sparse_snapshot, repository=root)
-    narrow = _narrow_answer(
-        sparse_runtime,
-        build_public_sentence_demo_catalog(sparse_runtime),
-        trained_surface,
-    )
+        deferred_narrow = False
+        if sparse_snapshot is None:
+            sparse_runtime = load_or_rebuild_public_sparse_qa_runtime()
+        else:
+            sparse_runtime = load_or_rebuild_public_sparse_qa_runtime(
+                sparse_snapshot, repository=root)
+        narrow = _narrow_answer(
+            sparse_runtime,
+            build_public_sentence_demo_catalog(sparse_runtime),
+            trained_surface,
+        )
     stream_in = sys.stdin.buffer if input_stream is None else input_stream
     stream_out = sys.stdout.buffer if output_stream is None else output_stream
     state = BroadDialogueState((1, 1, 8))
@@ -567,6 +604,7 @@ def run_trained_dialogue_terminal(
             started_ns = time.perf_counter_ns()
             state, turn = answer_broad_dialogue_turn(
                 state, question, connection, narrow_answer=narrow,
+                defer_narrow=deferred_narrow,
                 runtime_material_answer=runtime_material_answer,
                 runtime_material_response=runtime_response,
                 learned_relation_evidence_model=(
@@ -651,6 +689,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="交互入口：人类终端或 UTF-8 JSONL 协议")
     parser.add_argument("--metrics-output", default=None,
                         help="可选 K 盘性能摘要 JSON 路径")
+    parser.add_argument(
+        "--performance-tier", choices=(
+            "strict", "deferred-narrow", "deferred-narrow-fast"),
+        default="strict",
+        help=("strict 完整校验并窄域优先；deferred-narrow 延迟构建窄域；"
+              "deferred-narrow-fast 另跳过启动逐文件 SHA，仍保留 manifest "
+              "闭合/大小检查"),
+    )
     parser.add_argument("--extra-course", action="append", default=[])
     parser.add_argument("--variant-course", action="append", default=[])
     parser.add_argument("--variant-evidence", action="append", default=[])
@@ -686,6 +732,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime_material_runtime_database=args.runtime_material_sqlite,
         protocol_stream=(args.protocol == "jsonl"),
         metrics_output=args.metrics_output,
+        performance_tier=args.performance_tier,
         learned_relation_evidence_model=(
             learn_relation_evidence_model(relation_courses)
             if relation_courses else None),

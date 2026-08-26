@@ -322,6 +322,7 @@ class DefaultRoundRunner:
                       word_form_providers=ctx.word_form_providers,
                       occurrence_index=ctx.occurrence_index,
                       occurrence_order_writer=ctx.occurrence_order_writer,
+                      scoped_identity_store=ctx.scoped_identity_store,
                       position_histogram_state=ctx.position_histogram_state,
                       hub_degree_state=ctx.hub_degree_state,
                       language_signal_runtime=ctx.language_signal_runtime,

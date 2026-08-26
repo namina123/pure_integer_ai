@@ -370,6 +370,16 @@ def test_grounded_patterns_compile_to_explicit_single_template_variants():
             candidate.proposition, branch, (20916, 901)),
         surface_protocol,
     )
+    # Repeated immutable compilation is served from the bounded process cache;
+    # run-local owners are still created by the caller for every execution.
+    repeated = compile_grounded_answer_connectors(
+        model,
+        question,
+        GroundedAnswerConnectorTarget(
+            candidate.proposition, branch, (20916, 901)),
+        surface_protocol,
+    )
+    assert repeated is compilation
     assert len(compilation.variants) == 3
     assert len(compilation.structures) == 2
     assert sorted(len(item.pattern_ids) for item in compilation.structures) == [

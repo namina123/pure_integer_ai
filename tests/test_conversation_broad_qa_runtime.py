@@ -1,3 +1,5 @@
+import pytest
+
 from pure_integer_ai.experiments.conversation_broad_qa_runtime import (
     BroadDialogueState,
     answer_broad_dialogue_turn,
@@ -58,6 +60,45 @@ def test_narrow_consumer_precedes_broad_query_and_keeps_bounded_history() -> Non
         assert state.turns[-1].turn_key
     finally:
         module.query_broad_qa = original
+
+
+def test_deferred_narrow_queries_broad_first_and_only_falls_back_on_unknown() -> None:
+    calls = []
+
+    class _Connection:
+        pass
+
+    class _Unknown:
+        status = "UNKNOWN"
+        answer = None
+        title = None
+        source_url = None
+        evidence_chain = ()
+
+    import pure_integer_ai.experiments.conversation_broad_qa_runtime as module
+    original = module.query_broad_qa
+    module.query_broad_qa = (
+        lambda _connection, question: calls.append(question) or _Unknown())
+    try:
+        state, turn = answer_broad_dialogue_turn(
+            BroadDialogueState((1, 2, 3)), "窄域问题", _Connection(),
+            narrow_answer=lambda question: ("窄域回答。", "ANSWER"),
+            defer_narrow=True,
+        )
+        assert calls == ["窄域问题"]
+        assert turn.status == "ANSWER"
+        assert turn.answer == "窄域回答。"
+        assert turn.display_answer == "窄域回答。"
+    finally:
+        module.query_broad_qa = original
+
+
+def test_defer_narrow_rejects_non_boolean_flag() -> None:
+    with pytest.raises(TypeError, match="defer_narrow"):
+        answer_broad_dialogue_turn(
+            BroadDialogueState((1, 2, 3)), "问题", object(),
+            defer_narrow=1,
+        )
 
 
 def test_broad_answer_keeps_full_evidence_but_projects_readable_primary_surface() -> None:

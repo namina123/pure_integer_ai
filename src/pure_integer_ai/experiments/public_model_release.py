@@ -211,8 +211,16 @@ class PublicModelRelease:
 
 def load_public_model_release(
         root: str | Path, *, require_k_drive: bool = True,
+        verify_payload_hashes: bool = True,
         ) -> PublicModelRelease:
-    """验证 release root 并返回只读入口路径。"""
+    """验证 release root 并返回只读入口路径。
+
+    ``verify_payload_hashes=False`` 是明确的启动性能档位：仍验证 manifest
+    的闭合集合、文件大小、路径边界和 manifest digest，但跳过逐文件内容
+    SHA-256。默认严格档位保持逐文件 hash；发布校验和篡改审计必须使用默认值。
+    """
+    if type(verify_payload_hashes) is not bool:
+        raise TypeError("verify_payload_hashes 必须是严格 bool")
     target = _require_root(root, require_k_drive=require_k_drive)
     manifest_path = target / PUBLIC_MODEL_RELEASE_MANIFEST
     if not manifest_path.is_file():
@@ -254,7 +262,7 @@ def load_public_model_release(
         path = _resolve(target, key, label=f"files[{ordinal}].path")
         if not path.is_file() or path.stat().st_size != size:
             raise PublicModelReleaseError(f"release file 缺失或大小漂移: {key}")
-        if _sha256(path) != digest:
+        if verify_payload_hashes and _sha256(path) != digest:
             raise PublicModelReleaseError(f"release file hash 漂移: {key}")
     # A manifest is a closed set, not merely an allow-list.  Unlisted files
     # would otherwise be silently shipped beside a valid model and could
