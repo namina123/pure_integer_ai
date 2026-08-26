@@ -121,7 +121,11 @@ class IntegerIndexStore:
         if aggregate_index is not None:
             if not isinstance(aggregate_index, IntegerAggregateIndex):
                 raise TypeError("aggregate_index 类型非法")
-            aggregate_index.render(token_index, 0)
+            # Validate every aggregate occurrence before projecting rows.  A
+            # single first-occurrence probe can miss a damaged later member or
+            # a cycle reachable only from another occurrence.
+            for ordinal in range(len(aggregate_index.occurrence_ordinals)):
+                aggregate_index.render(token_index, ordinal)
         token_words = _hash_words(token_index.sha256)
         aggregate_words = (None if aggregate_index is None
                            else _hash_words(aggregate_index.sha256))

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import sqlite3
 from typing import Iterable
@@ -31,6 +32,28 @@ class PublicModelReleaseError(ValueError):
     """发布根缺失、越界、哈希漂移或携带绝对路径。"""
 
 
+# These are transport/path fields used by the release and its nested public
+# manifests.  URLs and source identities are intentionally not included.
+_MANIFEST_PATH_KEYS = frozenset({
+    "path", "source_manifest", "qa_database", "training_root",
+    "sparse_snapshot", "protocol_config", "pack_manifest", "database",
+    "training_cursor", "snapshot", "token_index_file", "aggregate_index_file",
+})
+_MANIFEST_PATH_LIST_KEYS = frozenset({
+    "course_files", "course_sidecars", "surface_courses", "source_files",
+    "extra_course_paths", "surface_evidence_files", "source_artifacts",
+})
+_PRIVATE_ARTIFACT_RE = re.compile(
+    r"(?:^|[_-])(private(?:[_-](?:evaluator|eval|label|payload|formal))|"
+    r"formal[_-]private|w\d+[_-]private)(?:$|[_./-])",
+    re.IGNORECASE,
+)
+_PRIVATE_DECLARATION_KEYS = frozenset({
+    "private_evaluator", "private_eval", "private_labels",
+    "private_payload", "private_formal_data",
+})
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -48,7 +71,10 @@ def _relative_path(value: object, *, label: str) -> PurePosixPath:
     if not isinstance(value, str) or not value or "\\" in value:
         raise PublicModelReleaseError(f"{label} 必须是规范相对 POSIX 路径")
     path = PurePosixPath(value)
-    if path.is_absolute() or ".." in path.parts or ":" in path.parts:
+    # ``PurePosixPath('C:/x').parts`` is ('C:', 'x'), so checking for a
+    # literal ':' component misses Windows drive-qualified paths.
+    if (path.is_absolute() or ".." in path.parts
+            or any(":" in part for part in path.parts)):
         raise PublicModelReleaseError(f"{label} 越出 release root")
     return path
 
@@ -61,6 +87,76 @@ def _resolve(root: Path, relative: object, *, label: str) -> Path:
     except ValueError as error:
         raise PublicModelReleaseError(f"{label} 越出 release root") from error
     return target
+
+
+def _validate_nested_manifest_paths(value: object, *, label: str,
+                                    key: str | None = None) -> None:
+    """Reject absolute/escaping paths in nested JSON manifests.
+
+    Only fields whose schema denotes a file path are interpreted as paths;
+    ordinary text, source URLs and hashes remain unrestricted.  List records
+    such as ``source_files: [[path, sha256, count], ...]`` validate their first
+    element only.
+    """
+    if isinstance(value, dict):
+        for child_key, child in value.items():
+            if child_key in _MANIFEST_PATH_KEYS:
+                if isinstance(child, str):
+                    _relative_path(child, label=f"{label}.{child_key}")
+                elif child is not None:
+                    raise PublicModelReleaseError(
+                        f"{label}.{child_key} 必须是相对路径")
+                continue
+            if child_key in _MANIFEST_PATH_LIST_KEYS:
+                if not isinstance(child, list):
+                    raise PublicModelReleaseError(
+                        f"{label}.{child_key} 必须是路径列表")
+                for ordinal, item in enumerate(child):
+                    candidate = item[0] if isinstance(item, list) else item
+                    if not isinstance(candidate, str):
+                        raise PublicModelReleaseError(
+                            f"{label}.{child_key}[{ordinal}] 缺少相对路径")
+                    _relative_path(
+                        candidate,
+                        label=f"{label}.{child_key}[{ordinal}]")
+                continue
+            _validate_nested_manifest_paths(
+                child, label=f"{label}.{child_key}", key=child_key)
+    elif isinstance(value, list):
+        for ordinal, child in enumerate(value):
+            _validate_nested_manifest_paths(
+                child, label=f"{label}[{ordinal}]", key=key)
+
+
+def _validate_no_private_artifacts(root: Path, *, manifest_values: tuple[object, ...]
+                                   ) -> None:
+    """Reject actual private evaluator payloads while allowing boundary flags.
+
+    A public snapshot may legitimately say ``private_formal_data=FORBIDDEN``;
+    that declaration is not private data and is therefore explicitly allowed.
+    """
+    for path in root.rglob("*"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        relative = path.relative_to(root).as_posix()
+        if _PRIVATE_ARTIFACT_RE.search(relative):
+            raise PublicModelReleaseError(
+                f"release 不得携带 private evaluator artifact: {relative}")
+    def walk(value: object, label: str) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in _PRIVATE_DECLARATION_KEYS:
+                    # The sole public form is an explicit boundary declaration.
+                    if child != "FORBIDDEN":
+                        raise PublicModelReleaseError(
+                            f"release 携带 private evaluator 数据: {label}.{key}")
+                    continue
+                walk(child, f"{label}.{key}")
+        elif isinstance(value, list):
+            for ordinal, child in enumerate(value):
+                walk(child, f"{label}[{ordinal}]")
+    for ordinal, value in enumerate(manifest_values):
+        walk(value, f"manifest[{ordinal}]")
 
 
 def _require_root(root: str | Path, *, require_k_drive: bool) -> Path:
@@ -133,6 +229,25 @@ def load_public_model_release(
             raise PublicModelReleaseError(f"release file 缺失或大小漂移: {key}")
         if _sha256(path) != digest:
             raise PublicModelReleaseError(f"release file hash 漂移: {key}")
+    # A manifest is a closed set, not merely an allow-list.  Unlisted files
+    # would otherwise be silently shipped beside a valid model and could
+    # contain private evaluator material or alter runtime behavior.
+    actual: set[str] = set()
+    for path in target.rglob("*"):
+        if path.is_dir():
+            continue
+        if path.is_symlink():
+            raise PublicModelReleaseError("release 不得包含符号链接")
+        relative = path.relative_to(target).as_posix()
+        if relative in {PUBLIC_MODEL_RELEASE_MANIFEST,
+                        PUBLIC_MODEL_RELEASE_DIGEST}:
+            continue
+        actual.add(relative)
+    if actual != seen:
+        missing = sorted(seen - actual)
+        extra = sorted(actual - seen)
+        raise PublicModelReleaseError(
+            f"release manifest 文件集合不闭合: missing={missing}, extra={extra}")
     digest_path = target / PUBLIC_MODEL_RELEASE_DIGEST
     if digest_path.is_file():
         expected = digest_path.read_text(encoding="ascii").strip()
@@ -158,6 +273,22 @@ def load_public_model_release(
         raise PublicModelReleaseError("source manifest 不可回读") from error
     if not isinstance(sources, dict) or sources.get("format") != "PUBLIC_SOURCE_MANIFEST_V1":
         raise PublicModelReleaseError("source manifest 格式不兼容")
+    _validate_nested_manifest_paths(sources, label="source_manifest")
+    training_manifest_path = target / "model" / "dialogue_pack_manifest.json"
+    summary_path = target / "model" / "training_summary.json"
+    try:
+        training_manifest = json.loads(
+            training_manifest_path.read_text(encoding="utf-8"))
+        training_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PublicModelReleaseError("嵌套训练 manifest 不可回读") from error
+    if not isinstance(training_manifest, dict):
+        raise PublicModelReleaseError("嵌套 training pack manifest 必须是对象")
+    if not isinstance(training_summary, dict):
+        raise PublicModelReleaseError("嵌套 training summary 必须是对象")
+    _validate_nested_manifest_paths(
+        training_manifest, label="training_pack_manifest")
+    _validate_nested_manifest_paths(training_summary, label="training_summary")
     try:
         protocol = json.loads(protocol_config.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -169,6 +300,10 @@ def load_public_model_release(
             or protocol.get("encoding") != "utf-8"
             or protocol.get("operations") != ["turn", "quit", "exit"]):
         raise PublicModelReleaseError("dialogue protocol config 格式不兼容")
+    _validate_nested_manifest_paths(protocol, label="dialogue_protocol")
+    _validate_no_private_artifacts(
+        target, manifest_values=(value, sources, training_manifest,
+                                 training_summary, protocol))
     return PublicModelRelease(
         target, release_id, qa_database, training_root, sparse_snapshot,
         source_manifest, protocol_config, value,
