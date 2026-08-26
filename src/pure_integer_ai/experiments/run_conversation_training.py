@@ -303,10 +303,29 @@ def run_conversation_training(*, project_root: str | Path,
         / "dlg_raw16_surface_slot_evidence_v1.jsonl.sample")
     if not surface_evidence_path.is_file():
         raise ValueError("DLG-RAW-16 surface evidence 缺失")
+    # A portable run records only release-relative identities in its nested
+    # manifest.  The loader still reads the resolved host paths above, while
+    # the persisted identity remains reproducible after copying the run into
+    # an independent release root.
+    def manifest_identity(path: str | Path) -> str:
+        resolved = Path(path).resolve()
+        if not portable_source_identity:
+            return resolved.as_posix()
+        identity = source_identities.get(resolved) if source_identities else None
+        if identity is not None:
+            return identity
+        if resolved == surface_evidence_path:
+            return "data/ph2/" + resolved.name
+        return "data/ph2/" + resolved.name
+
+    manifest_source_files = [
+        [manifest_identity(row[0]), row[1], row[2]]
+        for row in pack.source_files
+    ]
     _write_json(run_dir / "dialogue_pack_manifest.json", {
         "protocol": 1,
         "pack_sha256": pack.pack_sha256,
-        "source_files": pack.source_files,
+        "source_files": manifest_source_files,
         "case_count": len(pack.cases),
         "max_cases": max_cases,
         "split_counts": pack.split_counts,
@@ -314,10 +333,10 @@ def run_conversation_training(*, project_root: str | Path,
         "heldout_surface_count": len(heldout_items),
         "typed_course": typed_report.to_dict(),
         "causal_only": causal_only,
-        "extra_course_paths": tuple(Path(item).resolve().as_posix()
-                                     for item in extra_course_paths),
+        "extra_course_paths": tuple(
+            manifest_identity(item) for item in extra_course_paths),
         "surface_evidence_files": ((
-            surface_evidence_path.as_posix(),
+            manifest_identity(surface_evidence_path),
             _sha256_file(surface_evidence_path),
         ),),
     })
