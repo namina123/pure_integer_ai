@@ -93,7 +93,7 @@ def _course_paths_for_training_run(
         project_root: Path,
         training_run_root: Path,
         extra_course_paths: tuple[str | Path, ...],
-        ) -> tuple[Path, ...]:
+        ) -> tuple[tuple[Path, ...], int | None]:
     """按训练 run 冻结的 source_files 重建完全相同的公开 pack。
 
     默认课程 glob 会遗漏训练时显式附加的公开课程；终端必须读取 run 自己
@@ -109,6 +109,9 @@ def _course_paths_for_training_run(
     rows = manifest.get("source_files") if isinstance(manifest, dict) else None
     if not isinstance(rows, list) or not rows:
         raise ValueError("training run pack manifest 缺少 source_files")
+    max_cases = manifest.get("max_cases")
+    if max_cases is not None and (type(max_cases) is not int or max_cases <= 0):
+        raise ValueError("training run max_cases 非法")
     resolved: list[Path] = []
     for row in rows:
         if not isinstance(row, list) or not row:
@@ -134,7 +137,19 @@ def _course_paths_for_training_run(
             resolved.append(candidate)
     if len(resolved) != len(set(resolved)):
         raise ValueError("training run source_files 重复")
-    return tuple(resolved)
+    identities = manifest.get("source_identities")
+    if identities is not None:
+        if not isinstance(identities, list) or len(identities) != len(resolved):
+            raise ValueError("training run source_identities 非法")
+        source_identity_map = {}
+        for ordinal, item in enumerate(identities):
+            if (not isinstance(item, list) or len(item) != 2
+                    or not isinstance(item[1], str) or not item[1]):
+                raise ValueError("training run source identity 记录非法")
+            source_identity_map[resolved[ordinal]] = item[1]
+    else:
+        source_identity_map = None
+    return tuple(resolved), max_cases, source_identity_map
 
 
 def _narrow_answer(runtime, catalog, trained_surface: TrainedSurfaceRuntime | None):
@@ -397,7 +412,7 @@ def run_trained_dialogue_terminal(
         run_root = Path(run_root_value).resolve()
         if run_root.drive.upper() != "K:" or not run_root.is_dir():
             raise ValueError("training_run_root 必须是 K 盘已存在目录")
-        course_paths = _course_paths_for_training_run(
+        course_paths, max_cases, source_identity_map = _course_paths_for_training_run(
             root, run_root, extra_course_paths)
         source_identities = None
         if release is not None:
@@ -405,7 +420,8 @@ def run_trained_dialogue_terminal(
                 path: f"data/ph2/{path.name}" for path in course_paths
             }
         pack = load_dialogue_training_pack(
-            course_paths, source_path_identities=source_identities)
+            course_paths, max_cases=max_cases,
+            source_path_identities=(source_identity_map or source_identities))
         load_training_observation(
             run_root, expected_pack_sha256=pack.pack_sha256)
         trained_surface = load_trained_surface_runtime(

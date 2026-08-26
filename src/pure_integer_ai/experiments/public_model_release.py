@@ -419,11 +419,16 @@ def build_public_model_release(
     training_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(training_manifest, dict):
         raise PublicModelReleaseError("training pack manifest 非法")
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    if not isinstance(summary, dict):
+        raise PublicModelReleaseError("training summary 非法")
     source_rows = training_manifest.get("source_files")
     if not isinstance(source_rows, list) or not source_rows:
         raise PublicModelReleaseError("training pack manifest 缺少 source_files")
     source_files: list[tuple[Path, str]] = []
+    inherited_files: list[tuple[Path, str]] = []
     source_seen: set[Path] = set()
+    source_counts: dict[str, int] = {}
     for row in source_rows:
         if not isinstance(row, list) or len(row) != 3:
             raise PublicModelReleaseError("training source_files 记录非法")
@@ -431,6 +436,7 @@ def build_public_model_release(
         if source not in source_seen:
             source_seen.add(source)
             source_files.append((source, str(row[0])))
+        source_counts[str(row[0])] = int(row[2])
     extra_paths = training_manifest.get("extra_course_paths", ())
     if not isinstance(extra_paths, list):
         raise PublicModelReleaseError("extra_course_paths 非法")
@@ -439,6 +445,34 @@ def build_public_model_release(
         if source not in source_seen:
             source_seen.add(source)
             source_files.append((source, str(value)))
+    # A resumed training run's graph contains the base run state, so its
+    # public release must carry the base run's course identity as well.
+    resume_from = summary.get("resume_from") if isinstance(summary, dict) else None
+    if isinstance(resume_from, str) and resume_from.strip():
+        base_dir = (training.parent / resume_from).resolve()
+        base_manifest_path = base_dir / "dialogue_pack_manifest.json"
+        if not base_manifest_path.is_file():
+            raise PublicModelReleaseError("resume 基座课程 manifest 缺失")
+        try:
+            base_manifest = json.loads(base_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise PublicModelReleaseError("resume 基座课程 manifest 不可回读") from error
+        if not isinstance(base_manifest, dict):
+            raise PublicModelReleaseError("resume 基座课程 manifest 非法")
+        for row in base_manifest.get("source_files", ()):
+            if not isinstance(row, list) or len(row) != 3:
+                raise PublicModelReleaseError("resume 基座 source_files 记录非法")
+            source = _source_path(project, base_dir, row[0])
+            if source not in source_seen:
+                source_seen.add(source)
+                inherited_files.append((source, str(row[0])))
+        for value in base_manifest.get("extra_course_paths", ()):
+            if not isinstance(value, str):
+                raise PublicModelReleaseError("resume 基座 extra_course_paths 非法")
+            source = _source_path(project, base_dir, value)
+            if source not in source_seen:
+                source_seen.add(source)
+                inherited_files.append((source, value))
     evidence_files: list[Path] = []
     for row in training_manifest.get("surface_evidence_files", ()):
         if not isinstance(row, list) or not row:
@@ -467,9 +501,6 @@ def build_public_model_release(
     _copy_file(qa, target / "knowledge/broad_qa.sqlite3")
     _copy_file(database_path, target / "model/training.sqlite3")
     _copy_file(cursor_path, target / "model/training_cursor.int")
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    if not isinstance(summary, dict):
-        raise PublicModelReleaseError("training summary 非法")
     # summary paths are resolved relative to entry.training_root (model/).
     summary["database"] = "training.sqlite3"
     summary["training_cursor"] = "training_cursor.int"
@@ -480,6 +511,7 @@ def build_public_model_release(
     seen_names: set[str] = set()
     copied_sidecar_digests: dict[str, str] = {}
     rewritten_rows = []
+    rewritten_identities = []
     for source, original in source_files:
         name = source.name
         if name in seen_names:
@@ -503,8 +535,31 @@ def build_public_model_release(
             seen_names.add(sidecar.name)
             copied_sidecar_digests[sidecar.name] = _sha256(sidecar)
         digest = _sha256(source)
-        count = next((int(row[2]) for row in source_rows if str(row[0]) == original), 0)
+        count = source_counts.get(original, 0)
         rewritten_rows.append([relative.as_posix(), digest, count])
+        rewritten_identities.append([relative.as_posix(), original])
+    # Base-run courses are copied for release-wide held-out inspection and
+    # citation provenance, but remain outside the resumed run's pack identity.
+    for source, _original in inherited_files:
+        name = source.name
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+        relative = Path("data/ph2") / name
+        _copy_file(source, target / relative)
+        copied_courses.append(source)
+        for sidecar in _course_sidecars(source):
+            sidecar_relative = Path("data/ph2") / sidecar.name
+            if sidecar.name in seen_names:
+                digest = _sha256(sidecar)
+                if copied_sidecar_digests.get(sidecar.name) != digest:
+                    raise PublicModelReleaseError(
+                        f"训练 sidecar basename 冲突: {sidecar.name}")
+                continue
+            _copy_file(sidecar, target / sidecar_relative)
+            copied_course_sidecars.append(sidecar)
+            seen_names.add(sidecar.name)
+            copied_sidecar_digests[sidecar.name] = _sha256(sidecar)
     for source in evidence_files:
         if source.name not in seen_names:
             _copy_file(source, target / "data/ph2" / source.name)
@@ -520,6 +575,7 @@ def build_public_model_release(
             seen_names.add(source.name)
     rewritten_manifest = dict(training_manifest)
     rewritten_manifest["source_files"] = rewritten_rows
+    rewritten_manifest["source_identities"] = rewritten_identities
     rewritten_manifest["extra_course_paths"] = [
         (Path("data/ph2") / _source_path(project, training, value).name).as_posix()
         for value in extra_paths
