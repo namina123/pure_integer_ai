@@ -12,6 +12,8 @@ observation、lexical evidence、relation candidate 和 stable key 全部闭合�
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from pathlib import Path
 
 from pure_integer_ai.cognition.shared.learning_input_capsule import (
@@ -47,7 +49,10 @@ from pure_integer_ai.storage.k_run_boundary import (
     open_plain_binary,
     write_exclusive_bytes,
 )
-from pure_integer_ai.storage.source_record import SourceRecordRepository
+from pure_integer_ai.storage.source_record import (
+    SOURCE_RECORD_TABLE,
+    SourceRecordRepository,
+)
 from pure_integer_ai.storage.backend import SQLiteBackend
 
 
@@ -56,6 +61,9 @@ RUNTIME_MATERIAL_EVENT_LEDGER_VERSION = 2
 RUNTIME_MATERIAL_OBSERVATION_LEDGER_VERSION = 1
 RUNTIME_MATERIAL_EVENT_RELATIVE = "runtime_material/events"
 RUNTIME_MATERIAL_OBSERVATION_RELATIVE = "runtime_material/observations"
+RUNTIME_MATERIAL_MANIFEST_RELATIVE = "runtime_material_manifest.json"
+RUNTIME_MATERIAL_MANIFEST_FORMAT = "PURE_INTEGER_AI_RUNTIME_MATERIAL_MANIFEST"
+RUNTIME_MATERIAL_MANIFEST_SCHEMA_VERSION = 1
 
 
 class RuntimeMaterialPersistenceError(ValueError):
@@ -285,6 +293,246 @@ class RuntimeMaterialSQLiteRuntime:
         self.backend.close()
 
 
+def _canonical_manifest_json(value: object) -> bytes:
+    """Encode a manifest with the same deterministic JSON contract everywhere."""
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _manifest_relative_path(value: object, *, label: str) -> str:
+    """Accept only release-relative POSIX paths (never host paths)."""
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise RuntimeMaterialPersistenceError(f"{label} 路径非法")
+    path = Path(value)
+    if (path.is_absolute() or ":" in value
+            or any(part in {"", ".", ".."} for part in path.parts)):
+        raise RuntimeMaterialPersistenceError(f"{label} 必须是相对 POSIX 路径")
+    return value
+
+
+def _manifest_sha256(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise RuntimeMaterialPersistenceError(
+            f"Runtime manifest 无法读取文件: {path.name}") from error
+
+
+def _runtime_manifest_files(root: Path) -> tuple[dict[str, object], ...]:
+    """Return the closed payload file inventory, excluding the manifest itself."""
+    manifest_name = Path(RUNTIME_MATERIAL_MANIFEST_RELATIVE).as_posix()
+    rows: list[dict[str, object]] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.is_symlink():
+            raise RuntimeMaterialPersistenceError(
+                "Runtime manifest 不允许符号链接")
+        relative = path.relative_to(root).as_posix()
+        if relative == manifest_name:
+            continue
+        rows.append({
+            "path": relative,
+            "size_bytes": path.stat().st_size,
+            "sha256": _manifest_sha256(path),
+        })
+    if not rows:
+        raise RuntimeMaterialPersistenceError("Runtime manifest payload 为空")
+    return tuple(rows)
+
+
+def _runtime_manifest_source_rows(
+        source_records: SourceRecordRepository,
+        ) -> tuple[dict[str, object], ...]:
+    """Project SourceRecord rows without copying user text into the manifest."""
+    if not isinstance(source_records, SourceRecordRepository):
+        raise TypeError("source_records 类型错误")
+    try:
+        raw_rows = source_records.backend.select(
+            SOURCE_RECORD_TABLE, where=None)
+    except Exception as error:
+        raise RuntimeMaterialPersistenceError(
+            "Runtime manifest 无法读取 SourceRecord 表") from error
+    result: list[dict[str, object]] = []
+    seen: set[tuple[int, ...]] = set()
+    for row in raw_rows:
+        try:
+            record = source_records.read(int(row["source_hash"]))
+        except (KeyError, TypeError, ValueError, RuntimeError) as error:
+            raise RuntimeMaterialPersistenceError(
+                "Runtime manifest SourceRecord 无法回读") from error
+        if record.source_key in seen:
+            raise RuntimeMaterialPersistenceError(
+                "Runtime manifest SourceRef identity 重复")
+        seen.add(record.source_key)
+        result.append({
+            "source_key": list(record.source_key),
+            "source_hash": record.source_hash,
+            "text_hash": record.text_hash,
+            "codepoint_count": record.codepoint_count,
+            "license_id": record.license_id,
+            "batch_id": record.batch_id,
+            "companion_type_hash": record.companion_type_hash,
+            "companion_name_hash": record.companion_name_hash,
+            "companion_assoc_id": record.companion_assoc_id,
+        })
+    return tuple(sorted(result, key=lambda item: tuple(item["source_key"])))
+
+
+def _read_runtime_manifest(root: Path) -> dict[str, object] | None:
+    path = root / RUNTIME_MATERIAL_MANIFEST_RELATIVE
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeMaterialPersistenceError(
+            "Runtime manifest 必须是普通文件")
+    try:
+        payload = path.read_bytes()
+        if payload[:3] == b"\xef\xbb\xbf":
+            raise RuntimeMaterialPersistenceError(
+                "Runtime manifest 不得包含 UTF-8 BOM")
+        value = json.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeMaterialPersistenceError(
+            "Runtime manifest 不可回读") from error
+    if not isinstance(value, dict):
+        raise RuntimeMaterialPersistenceError("Runtime manifest 根必须是对象")
+    if (value.get("format") != RUNTIME_MATERIAL_MANIFEST_FORMAT
+            or value.get("schema_version") != RUNTIME_MATERIAL_MANIFEST_SCHEMA_VERSION):
+        raise RuntimeMaterialPersistenceError("Runtime manifest 格式不兼容")
+    return value
+
+
+def validate_runtime_material_manifest(
+        root_path: str | Path,
+        *,
+        source_records: SourceRecordRepository,
+        database_path: str | Path | None = None,
+        require_k_drive: bool = True,
+        ) -> bool:
+    """Validate an optional Runtime ledger manifest and its SourceRef closure.
+
+    A missing manifest is accepted for backwards compatibility.  Once present,
+    the manifest is authoritative: every payload file must be listed exactly
+    once, hashes and sizes must match, and every listed SourceRecord must be
+    present with identical integer identity and license metadata.
+    """
+    root = open_existing_run_root(
+        root_path, require_k_drive=require_k_drive,
+        label="runtime material manifest root")
+    value = _read_runtime_manifest(root.path)
+    if value is None:
+        return False
+    files = value.get("files")
+    if not isinstance(files, list) or not files:
+        raise RuntimeMaterialPersistenceError("Runtime manifest files 不能为空")
+    seen: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            raise RuntimeMaterialPersistenceError("Runtime manifest file entry 非法")
+        relative = _manifest_relative_path(item.get("path"), label="Runtime manifest")
+        if relative in seen or relative == RUNTIME_MATERIAL_MANIFEST_RELATIVE:
+            raise RuntimeMaterialPersistenceError("Runtime manifest 文件路径重复")
+        seen.add(relative)
+        path = root.path / Path(relative)
+        try:
+            path.relative_to(root.path)
+        except ValueError as error:
+            raise RuntimeMaterialPersistenceError("Runtime manifest 路径越界") from error
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeMaterialPersistenceError("Runtime manifest 文件缺失或为链接")
+        size = item.get("size_bytes")
+        digest = item.get("sha256")
+        if (type(size) is not int or size < 0
+                or type(digest) is not str or len(digest) != 64):
+            raise RuntimeMaterialPersistenceError("Runtime manifest 文件摘要非法")
+        if path.stat().st_size != size or _manifest_sha256(path) != digest:
+            raise RuntimeMaterialPersistenceError(
+                f"Runtime manifest 文件摘要漂移: {relative}")
+    actual = {
+        path.relative_to(root.path).as_posix()
+        for path in root.path.rglob("*")
+        if path.is_file() and not path.is_symlink()
+        and path.relative_to(root.path).as_posix()
+        != RUNTIME_MATERIAL_MANIFEST_RELATIVE
+    }
+    if actual != seen:
+        raise RuntimeMaterialPersistenceError(
+            "Runtime manifest 文件集合不闭合")
+    sqlite = value.get("sqlite")
+    if not isinstance(sqlite, dict):
+        raise RuntimeMaterialPersistenceError("Runtime manifest 缺少 sqlite")
+    sqlite_relative = _manifest_relative_path(
+        sqlite.get("path"), label="Runtime manifest sqlite")
+    if sqlite_relative != "runtime.sqlite3":
+        raise RuntimeMaterialPersistenceError("Runtime manifest sqlite 路径漂移")
+    sqlite_path = root.path / sqlite_relative
+    if database_path is not None:
+        candidate = Path(database_path).resolve()
+        if candidate != sqlite_path.resolve():
+            raise RuntimeMaterialPersistenceError("Runtime manifest sqlite identity 漂移")
+    entry = next((item for item in files if item.get("path") == sqlite_relative), None)
+    if entry is None or sqlite.get("sha256") != entry.get("sha256"):
+        raise RuntimeMaterialPersistenceError("Runtime manifest sqlite 摘要缺失")
+    sources = value.get("sources")
+    if not isinstance(sources, list):
+        raise RuntimeMaterialPersistenceError("Runtime manifest sources 非法")
+    actual_rows = _runtime_manifest_source_rows(source_records)
+    expected_by_key = {tuple(item["source_key"]): item for item in sources
+                       if isinstance(item, dict)
+                       and isinstance(item.get("source_key"), list)}
+    if len(expected_by_key) != len(sources) or len(expected_by_key) != len(actual_rows):
+        raise RuntimeMaterialPersistenceError("Runtime manifest SourceRef 集合不闭合")
+    for actual_row in actual_rows:
+        expected = expected_by_key.get(tuple(actual_row["source_key"]))
+        if expected != actual_row:
+            raise RuntimeMaterialPersistenceError(
+                "Runtime manifest SourceRef/许可 identity 漂移")
+    return True
+
+
+def write_runtime_material_manifest(
+        root: KRunRoot,
+        *,
+        source_records: SourceRecordRepository,
+        database_path: str | Path | None = None,
+        ) -> Path:
+    """Publish the closed Runtime ledger manifest after all append writes commit."""
+    if not isinstance(root, KRunRoot):
+        raise TypeError("root 必须是 KRunRoot")
+    if not isinstance(source_records, SourceRecordRepository):
+        raise TypeError("source_records 类型错误")
+    database = (root.path / "runtime.sqlite3" if database_path is None
+                else Path(database_path).resolve())
+    if database != (root.path / "runtime.sqlite3").resolve() or not database.is_file():
+        raise RuntimeMaterialPersistenceError("Runtime manifest sqlite 必须位于 root/runtime.sqlite3")
+    # Validate all event/observation/source closures before publishing identity.
+    recovery = load_runtime_material_runtime(
+        root.path, source_records=source_records,
+        require_k_drive=not root.test_transport)
+    files = _runtime_manifest_files(root.path)
+    sqlite_entry = next(item for item in files if item["path"] == "runtime.sqlite3")
+    payload = {
+        "format": RUNTIME_MATERIAL_MANIFEST_FORMAT,
+        "schema_version": RUNTIME_MATERIAL_MANIFEST_SCHEMA_VERSION,
+        "sqlite": {
+            "path": "runtime.sqlite3",
+            "size_bytes": sqlite_entry["size_bytes"],
+            "sha256": sqlite_entry["sha256"],
+        },
+        "files": list(files),
+        "sources": list(_runtime_manifest_source_rows(source_records)),
+        "scopes": [
+            {"scope_key": list(state.scope_key), "event_count": len(state.events)}
+            for state in recovery.runtime_states
+        ],
+        "observation_count": len(recovery.observations),
+    }
+    return write_exclusive_bytes(
+        root, RUNTIME_MATERIAL_MANIFEST_RELATIVE,
+        _canonical_manifest_json(payload), label="runtime material manifest")
+
+
 def open_runtime_material_sqlite(
         database_path: str | Path,
         *,
@@ -307,6 +555,12 @@ def open_runtime_material_sqlite(
         backend = SQLiteBackend(str(path))
         context = make_train_context(backend, companion=True)
         source_records = SourceRecordRepository(backend)
+        validate_runtime_material_manifest(
+            path.parent,
+            source_records=source_records,
+            database_path=path,
+            require_k_drive=require_k_drive,
+        )
     except Exception:
         try:
             backend.close()
@@ -412,6 +666,10 @@ def load_runtime_material_runtime(
         raise TypeError("source_records 类型错误")
     root = open_existing_run_root(root_path, require_k_drive=require_k_drive,
                                   label="runtime material ledger root")
+    validate_runtime_material_manifest(
+        root.path, source_records=source_records,
+        require_k_drive=require_k_drive,
+    )
     event_base = ensure_normal_relative_directory(
         root, relative_events, label="runtime material event directory")
     observation_base = ensure_normal_relative_directory(
@@ -619,4 +877,6 @@ __all__ = [
     "open_runtime_material_sqlite",
     "persist_runtime_material_observation",
     "rebuild_runtime_material_observations",
+    "validate_runtime_material_manifest",
+    "write_runtime_material_manifest",
 ]

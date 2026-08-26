@@ -35,6 +35,7 @@ from pure_integer_ai.experiments.conversation_runtime_material_language import (
 )
 from pure_integer_ai.experiments.conversation_runtime_material_persistence import (
     persist_runtime_material_observation,
+    write_runtime_material_manifest,
 )
 from pure_integer_ai.experiments.conversation_runtime_material_response import (
     RuntimeMaterialResponseSpec,
@@ -488,6 +489,8 @@ def build_runtime_material_run(
             tuple(specs), source_records=repository)
         persist_runtime_material_response_bindings(root, provider)
         backend.commit()
+        write_runtime_material_manifest(
+            root, source_records=repository, database_path=database)
     finally:
         backend.close()
     return root.path, database
@@ -570,6 +573,8 @@ def build_runtime_material_manifest_run(
             tuple(specs), source_records=repository)
         persist_runtime_material_response_bindings(root, provider)
         backend.commit()
+        write_runtime_material_manifest(
+            root, source_records=repository, database_path=database)
     finally:
         backend.close()
     return root.path, database

@@ -12,6 +12,7 @@ from pure_integer_ai.experiments.conversation_runtime_material_cli import (
     build_runtime_material_run,
 )
 from pure_integer_ai.experiments.conversation_runtime_material_persistence import (
+    RuntimeMaterialPersistenceError,
     load_runtime_material_runtime,
     open_runtime_material_sqlite,
     rebuild_runtime_material_observations,
@@ -48,6 +49,14 @@ def test_cli_builder_publishes_recoverable_runtime_run(tmp_path: Path) -> None:
         source_url="https://example.invalid/manual",
         require_k_drive=False,
     )
+    manifest = root / "runtime_material_manifest.json"
+    assert manifest.is_file()
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    assert manifest_value["sqlite"]["path"] == "runtime.sqlite3"
+    assert manifest_value["sources"]
+    assert {item["path"] for item in manifest_value["files"]} >= {
+        "runtime.sqlite3", "runtime_material_response/bindings.int",
+    }
     runtime = open_runtime_material_sqlite(database, require_k_drive=False)
     try:
         recovery = load_runtime_material_runtime(
@@ -79,6 +88,10 @@ def test_cli_builder_publishes_recoverable_runtime_run(tmp_path: Path) -> None:
         assert provider.response_related("设置怎么打开？", "测试手册") is None
     finally:
         runtime.close()
+    binding_path = root / "runtime_material_response" / "bindings.int"
+    binding_path.write_bytes(binding_path.read_bytes() + b"\x00")
+    with pytest.raises(RuntimeMaterialPersistenceError, match="摘要漂移"):
+        open_runtime_material_sqlite(database, require_k_drive=False)
 
 
 def test_cli_rejects_utf8_bom_with_actionable_error(tmp_path: Path) -> None:
@@ -154,6 +167,46 @@ def test_cli_builder_publishes_multiple_explicit_bindings(tmp_path: Path) -> Non
         assert provider.response("夜间模式如何影响屏幕？")[0] == "ANSWER"
         assert provider.response_followup(
             "它如何影响屏幕？", "多问题手册")[0] == "CLARIFY"
+    finally:
+        runtime.close()
+
+
+def test_cli_builder_conflict_binding_returns_clarify_and_never_answers(
+        tmp_path: Path) -> None:
+    material = tmp_path / "conflict-manual.txt"
+    material.write_text(
+        "甲来源说夜间模式降低亮度。乙来源说夜间模式提高亮度。",
+        encoding="utf-8",
+    )
+    root, database = build_runtime_material_run(
+        material_file=material,
+        output_root=tmp_path / "conflict-runtime",
+        source_kind=93,
+        source_id=88031,
+        document_id=0,
+        scope_id=88031,
+        license_id="CC0-1.0",
+        batch_id=1,
+        authority_key=(7, 88031),
+        version_key=(1, 88031),
+        question="夜间模式如何影响亮度？",
+        qualification_state="CONFLICT",
+        reason_id="independent-source-conflict",
+        source_title="冲突手册",
+        require_k_drive=False,
+    )
+    runtime = open_runtime_material_sqlite(database, require_k_drive=False)
+    try:
+        recovery = load_runtime_material_runtime(
+            root, source_records=runtime.source_records, require_k_drive=False)
+        observations = rebuild_runtime_material_observations(
+            runtime.context, recovery, source_records=runtime.source_records)
+        provider = load_runtime_material_response_provider(
+            root, source_records=runtime.source_records,
+            observations=observations, require_k_drive=False,
+        )
+        response = provider.response("夜间模式如何影响亮度？")
+        assert response == ("CLARIFY", None, None, None)
     finally:
         runtime.close()
 
