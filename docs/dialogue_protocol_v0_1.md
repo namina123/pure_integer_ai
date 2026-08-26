@@ -51,6 +51,30 @@ python -m pure_integer_ai.experiments.run_dialogue_protocol `
 release root 中的 `model/dialogue_protocol.json` 声明 JSONL、UTF-8、操作集合和 checkpoint
 格式；启动器会在读取 release manifest 时校验该配置。
 
+## 运行时资料导入
+
+发布包保持不可变；新增资料写入独立的 K 盘 Runtime ledger，再由同一个入口按显式
+SourceRef、许可、资格和问题绑定读取。示例：
+
+```powershell
+python -m pure_integer_ai.experiments.run_runtime_material_ingest `
+  --material-file "K:\your_project\materials\manual.txt" `
+  --output-root "K:\your_project\sessions\manual-runtime" `
+  --source-kind 93 --source-id 1001 --scope-id 1001 `
+  --license-id CC0-1.0 --batch-id 1 `
+  --authority-key 7,1001 --version-key 1,1001 `
+  --question "夜间模式如何影响屏幕？" `
+  --qualification-state SUPPORTED --reason-id manual-authority
+
+python -m pure_integer_ai.experiments.run_trained_dialogue_terminal `
+  --release-root "K:\your_project\model_releases\public-dialogue-independent-v10-shard2-stage1-20260826" `
+  --runtime-material-ledger-root "K:\your_project\sessions\manual-runtime" `
+  --runtime-material-sqlite "K:\your_project\sessions\manual-runtime\runtime.sqlite3"
+```
+
+导入器不会调用 LLM、不会修改 Core，也不会从正文猜答案；问题、资格理由和来源身份
+必须由调用方显式提供。资料 ledger 可单独备份或撤回，不改变 release root 的文件身份。
+
 ## 发布训练身份
 
 - pack SHA-256：`96c7d6abcf421ddd8130f9ed6ef74663fed69083f9d42923395903bf56b00615`
