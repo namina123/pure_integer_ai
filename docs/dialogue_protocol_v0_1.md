@@ -1,9 +1,9 @@
 # 独立对话版本 v0.1
 
-发布日期：2026-08-25
-版本标识：`public-dialogue-v0.1-20260825`
+发布日期：2026-08-26
+版本标识：`public-dialogue-independent-v10-shard2-stage1-20260826`
 
-这是项目首个可独立回读的受限对话版本。它不是神经网络权重包，而是由公开课程训练出的确定性整数状态 artifact，以及复用同一理解、来源、证据、拒答和会话恢复链的运行入口。它能做来源约束的中文事实问答、有限多轮焦点保持和显式 UNKNOWN/CLARIFY；不宣称自由生成、任意来源真值、无限记忆或通用智能。
+这是项目首个可独立回读的受限对话版本。它不是神经网络权重包，而是由公开课程训练出的确定性整数状态 artifact，以及复用同一理解、来源、证据、拒答和会话恢复链的运行入口。它能做来源约束的中文事实问答、有限多轮焦点保持、运行时资料导入和显式 UNKNOWN/CLARIFY；不宣称自由生成、任意来源真值、无限记忆或通用智能。当前 release 仍是 Stage 1 候选，不是最终 readiness。
 
 ## 运行准备
 
@@ -20,7 +20,7 @@ release root 已包含广域 QA SQLite 索引、训练状态、公开课程、�
 
 ```powershell
 python -m pure_integer_ai.experiments.run_trained_dialogue_terminal `
-  --release-root "K:\your_project\model_releases\public-dialogue-independent-v10-shard2-stage1-20260826" `
+    --release-root "K:\your_project\model_releases\public-dialogue-independent-v10-shard2-stage1-20260826" `
   --session-root "K:\your_project\sessions\dialogue-v0.1"
 ```
 
@@ -42,7 +42,7 @@ python -m pure_integer_ai.experiments.run_trained_dialogue_terminal `
 
 ```powershell
 python -m pure_integer_ai.experiments.run_dialogue_protocol `
-  --release-root "K:\your_project\model_releases\public-dialogue-independent-v10-shard2-stage1-20260826" `
+    --release-root "K:\your_project\model_releases\public-dialogue-independent-v10-shard2-stage1-20260826" `
   --session-root "K:\your_project\sessions\dialogue-v0.1"
 ```
 
@@ -77,15 +77,17 @@ python -m pure_integer_ai.experiments.run_trained_dialogue_terminal `
 
 ## 发布训练身份
 
-- pack SHA-256：`96c7d6abcf421ddd8130f9ed6ef74663fed69083f9d42923395903bf56b00615`
-- 训练 run：`public-dialogue-v0.1-train-20260825`
-- 课程记录：812（train 446、held-out 184、negative 182；实际训练项 445）
-- 完成阶段：1、2、3、4
-- typed 课程：`GenerationAdoptionPostcheckQuery` 13，`GenerationGeneralizationCandidateV1` 28
-- artifact 清单：见 `data/ph2/public_dialogue_model_v0_1_release.json`
+- pack SHA-256：`4775c4a1c88d075210e56ae8c2465ec6f34238691ae050f2c0be7447bd5238bc`
+- 训练 run：`compact-20k-v2-shard-0002-stage1-20260826`
+- 课程记录：5000（train 4308、held-out 475、negative 217；实际训练项 4308）
+- 完成阶段：1（由 shard-0001 恢复后重放）
+- typed 课程：本候选未启用 typed generation（`typed_items=0`）
+- 整数索引：token vocabulary/sequence 与 aggregate occurrence 已绑定到训练 SQLite；
+  当前候选输入仍为旧 token-only 分片，aggregate sidecar 的独立训练对照另行记录在 K 盘。
+- artifact 清单：release root 内 `public_model_release.json` 及 `source_manifest.json`
 
 发布 artifact 的大文件只在 K 盘保存；公开 Git 只保存协议、版本身份、来源/许可边界和复跑说明。模型能力必须与其来源索引、课程版本和运行 manifest 一起解释，不能只复制一个 SQLite 文件后声称可迁移。
 
 ## 已验证边界
 
-真实独立进程已完成六轮 JSONL：来源约束 ANSWER、未知问题 UNKNOWN、无焦点问题 UNKNOWN、来源问答 ANSWER、紧接追问 ANSWER、另一来源事实 ANSWER；会话 checkpoint 可以跨进程回读。metrics 还记录每轮 SQLite 语句读取数和宿主峰值工作集。热 SQLite 页缓存下协议 p95 与人类终端基线同量级；冷启动另行记录，不把冷页加载时间归因于协议编码。
+真实独立进程已完成单问 ANSWER、未知问题 UNKNOWN、跨进程焦点追问 ANSWER，以及独立 Runtime ledger 多来源 citation ANSWER；会话 checkpoint 可以跨进程回读。候选 metrics 记录每轮 SQLite 读取数（25 条）和宿主峰值工作集（约 273 MiB），但尚未完成 held-out/negative/冲突全套正式 readiness 评测。热 SQLite 页缓存下协议 p95 与终端基线同量级；冷启动另行记录，不把冷页加载时间归因于协议编码。
