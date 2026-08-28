@@ -88,11 +88,7 @@ def _valid_path(path: tuple[dict[str, object], ...]) -> bool:
 
 
 def _input_surface(path: tuple[dict[str, object], ...]) -> str:
-    values = []
-    for message in path[:-1]:
-        prefix = "用户" if message["role"] == "prompter" else "助手"
-        values.append(f"{prefix}：{_text(message)}")
-    return "\n".join(values)
+    return "\n".join(_text(message) for message in path[:-1])
 
 
 def _dialogue_turns(

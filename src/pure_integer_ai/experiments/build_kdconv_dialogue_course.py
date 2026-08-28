@@ -190,9 +190,7 @@ def build_kdconv_dialogue_course(
                         "intent_support": intent_support,
                         "grounding_attr_count": len(attrs),
                         "input_surface": "\n".join(
-                            ("用户：" if int(turn["speaker_role"]) == SPEAKER_USER
-                             else "助手：") + str(turn["surface"])
-                            for turn in turns[:-1]),
+                            str(turn["surface"]) for turn in turns[:-1]),
                         "response_surface": response,
                     })
     if not records or intent_support_count <= 0:

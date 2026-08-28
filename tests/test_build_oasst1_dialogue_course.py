@@ -68,7 +68,7 @@ def test_builds_reviewed_human_paths_and_pack(tmp_path):
     assert result["record_count"] == 2
     assert result["multi_turn_record_count"] == 1
     assert {row["message_id"] for row in rows} == {"a2", "a4"}
-    assert rows[1]["input_surface"].endswith("用户：那应该先做什么？")
+    assert rows[1]["input_surface"].endswith("那应该先做什么？")
     assert rows[1]["response_surface"] == "可以先补充预算范围。"
     assert rows[0]["split"] == rows[1]["split"]
     assert all(len(row["source_ref_key"]) == 11 for row in rows)
@@ -81,8 +81,10 @@ def test_builds_reviewed_human_paths_and_pack(tmp_path):
     pack = load_dialogue_training_pack((output,))
     assert len(pack.cases) == 2
     case = pack.cases[1]
-    assert "用户：" in case.raw_text
-    assert "助手：" in case.raw_text
+    assert "用户：" not in case.raw_text
+    assert "助手：" not in case.raw_text
+    assert "那应该先做什么？" in case.raw_text
+    assert case.raw_text.endswith("可以先补充预算范围。")
     assert len(case.dialogue_turns) == 4
     assert case.source_ref is not None
     item = pack.training_items()[1]

@@ -112,9 +112,8 @@ class DialogueTurnRecord:
 
     @property
     def rendered_surface(self) -> str:
-        prefix = ("用户" if self.speaker_role == DIALOGUE_SPEAKER_USER
-                  else "助手")
-        return f"{prefix}：{self.surface}"
+        """Return content only; role is carried by the integer speaker span."""
+        return self.surface
 
     def canonical_record(self) -> tuple[int, ...]:
         message = tuple(map(ord, self.message_id))
@@ -578,12 +577,36 @@ def _dialogue_projection(record: dict[str, Any], path: Path,
             or record.get("context_turn_count") != len(result) - 1
             or record.get("prompt_turn_ordinal") != len(result) - 1
             or record.get("response_turn_ordinal") != len(result)
-            or record.get("input_surface") != "\n".join(
-                turn.rendered_surface for turn in result[:-1])
+            or not _input_surface_binds_turns(
+                record.get("input_surface"), result[:-1])
             or record.get("response_surface") != result[-1].surface):
         raise ConversationTrainingPackError(
             f"dialogue prompt/response 绑定漂移: {path.name}:{line_number}")
     return result
+
+
+def _input_surface_binds_turns(
+        value: Any, turns: tuple[DialogueTurnRecord, ...]) -> bool:
+    """Validate prompt content without assigning a human-language role label.
+
+    Older exchange files may contain a localized role prefix.  It is treated
+    as opaque transport text and never copied into the training projection;
+    new courses use the canonical newline-joined content form.
+    """
+    if not isinstance(value, str) or not value.strip() or not turns:
+        return False
+    cursor = 0
+    for ordinal, turn in enumerate(turns):
+        start = value.find(turn.surface, cursor)
+        if start < cursor:
+            return False
+        cursor = start + len(turn.surface)
+        if ordinal + 1 < len(turns):
+            next_start = value.find(turns[ordinal + 1].surface, cursor)
+            if next_start < cursor:
+                return False
+            cursor = next_start
+    return True
 
 
 def _typed_projection(

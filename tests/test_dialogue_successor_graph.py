@@ -37,16 +37,14 @@ def _item(source_id: int, prompt: str, response: str,
     if history is not None:
         turns.extend(((1, history[0]), (2, history[1])))
     turns.extend(((1, prompt), (2, response)))
-    rendered = tuple(
-        ("用户：" if role == 1 else "助手：") + surface
-        for role, surface in turns)
+    rendered = tuple(surface for _role, surface in turns)
     raw_text = "\n".join(rendered)
     speaker_spans = []
     content_spans = []
     cursor = 0
     for index, ((role, surface), value) in enumerate(
             zip(turns, rendered), start=1):
-        content_start = cursor + len(value) - len(surface)
+        content_start = cursor
         content_end = cursor + len(value)
         turn_end = content_end + (1 if index < len(turns) else 0)
         speaker_spans.append(SpeakerSpan(

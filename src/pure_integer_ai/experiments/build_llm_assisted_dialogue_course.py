@@ -317,9 +317,7 @@ def build_llm_assisted_dialogue_course(
                     "generator_model": GENERATOR_MODEL,
                     "human_generated": 0,
                     "input_surface": "\n".join(
-                        ("用户：" if turn["speaker_role"] == SPEAKER_USER
-                         else "助手：") + str(turn["surface"])
-                        for turn in projected_turns[:-1]),
+                        str(turn["surface"]) for turn in projected_turns[:-1]),
                     "intent_support": 1,
                     "license_id": LICENSE_ID,
                     "path_message_ids": [
@@ -340,7 +338,7 @@ def build_llm_assisted_dialogue_course(
                         0, 0, 0, 1, 0, 0, 0, 0,
                     ],
                     "source_sha256": source_sha,
-                    "source_title": "CC0 Chinese dialogue " + family,
+                    "source_title": "CC0 dialogue " + family,
                     "source_url": "urn:pure-integer-ai:" + source_id_text,
                     "split": split,
                 })
