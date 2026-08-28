@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence, TYPE_CHECKING, runtime_checkable
 
 from pure_integer_ai.crosscut.guards.float_guard import assert_no_float
@@ -314,6 +315,9 @@ class FormalTrainConfig:
     rounds_per_stage: int = 4
     resume: bool = False
     base_run_id: str | None = None      # 续训 base 终 dump run_id（E1）
+    # Python/SQLite 大训练可显式传入已验证 page-copy binding；portable JSON
+    # recovery 仍保留，未配置时继续使用原跨语言逐行恢复路径。
+    sqlite_resume_binding_sha256: str | None = None
     metrics_path: str | None = None     # None → <run_dir>/<run_id>/metrics.jsonl
     replay_needed: list[tuple[int, tuple]] | None = None   # 续训 replay 覆盖率前置（E4）
     # E7 pre-flight 放量门接通生产主入口（S12 follow-up·破纸面闭合：collapse_ok 已进 PreFlightReport.passed
@@ -411,6 +415,9 @@ class FormalTrainConfig:
     # 增量 shard 续训：E1 已恢复旧图后，显式重放指定 stage 消费新 corpus。
     # 默认 False 保持 stage-skip；只有外部 runner 已审计 shard identity 时才开启。
     replay_completed_stages: bool = False
+    # 只读 typed 能力诊断：复用恢复后的图和 generation owner，仅运行 H2/floor
+    # 隔离评测；跳过 boot、discovery、训练阶段、生成任务和 dump。默认关闭。
+    typed_language_diagnostic_only: bool = False
     persist_graph_dump: bool = True   # 课程中间相位可关闭昂贵 dump/cursor；最终相位仍持久化权威图。
     telemetry_clock_ns: Callable[[], int] | None = None   # 核心默认无墙钟；实验 runner 可从外部注入单调 ns 时钟。
     telemetry_enabled: bool = False   # V-01 外层诊断；关闭时不扫描表、不采工作集且不改变 canonical 状态。
@@ -473,6 +480,8 @@ class FormalTrainConfig:
     language_semantic_course_protocol: Any = None
     # L-05B2B 只读语义恢复；只能从 S-02 图和 active H-00 Evidence 重建请求。
     language_semantic_query_protocol: Any = None
+    # 普通结构化对话后继学习；复用 occurrence/order/SemanticGraph/H-00。
+    language_dialogue_successor_protocol: Any = None
     # R-06B 事件时间生产链必须同时注入协议、方向语义和 S-02 请求课程。
     language_event_time_protocol: Any = None
     language_event_time_semantics: Any = None
@@ -706,6 +715,16 @@ def _formal_train_impl(config: FormalTrainConfig,
         mastery_stage_keys = mastery_protocol.stage_keys_for(
             tuple(requested_stages))
     ctx = make_train_context(backend, teacher=teacher, weights=weights)
+    # Resume validation fingerprints the already-preloaded SQLite schema.  The
+    # dialogue successor tables are an optional extension (not part of the
+    # global bootstrap), so register them before page-resume validation when
+    # the same successor protocol is requested for this run.  The later
+    # runtime installation remains idempotent and reuses these tables.
+    if config.language_dialogue_successor_protocol is not None:
+        from pure_integer_ai.storage.dialogue_successor import (
+            register_dialogue_successor_tables,
+        )
+        register_dialogue_successor_tables(backend)
     # Compact courses carry their immutable integer sidecars outside Core.  Bind
     # each unique token/aggregate index once into the backend so a resumed run
     # can reconstruct repeated content from integer members rather than storing
@@ -788,11 +807,24 @@ def _formal_train_impl(config: FormalTrainConfig,
     todo_stages = list(requested_stages)
     mastery_runtime: CurriculumMasteryRuntime | None = None
     if config.resume and config.base_run_id is not None:
-        recovery = load_run_package(
-            backend, config.run_dir, config.base_run_id)   # E1 终 dump base
+        if config.sqlite_resume_binding_sha256 is None:
+            recovery_cursor_payload = load_run_package(
+                backend, config.run_dir,
+                config.base_run_id).cursor_payload   # E1 终 dump base
+        else:
+            from pure_integer_ai.experiments.sqlite_training_resume import (
+                validate_preloaded_sqlite_resume,
+            )
+            recovery_cursor_payload = validate_preloaded_sqlite_resume(
+                backend,
+                Path(config.run_dir) / config.base_run_id,
+                expected_manifest_sha256=(
+                    config.sqlite_resume_binding_sha256),
+                require_k_drive=(Path(config.run_dir).drive.upper() == "K:"),
+            )
         # E8：载入 base run 的 cursor state（已完成阶段集·skippable 跳过）
         base_state = cursor_state_from_payload(
-            recovery.cursor_payload,
+            recovery_cursor_payload,
             fallback_run_id=config.base_run_id,
         )
         if base_state is not None:
@@ -949,6 +981,16 @@ def _formal_train_impl(config: FormalTrainConfig,
         boundary_protocol=config.language_boundary_protocol,
         prediction_protocol=config.language_prediction_protocol,
     )
+    if config.language_dialogue_successor_protocol is not None:
+        if (config.language_occurrence_protocol is None
+                or config.language_occurrence_order_protocol is None):
+            raise ValueError(
+                "dialogue successor 必须同时启用 occurrence 与来源顺序协议")
+        from pure_integer_ai.experiments.dialogue_successor_graph import (
+            install_dialogue_successor_runtime,
+        )
+        install_dialogue_successor_runtime(
+            ctx, config.language_dialogue_successor_protocol)
     if config.language_candidate_protocol is not None:
         install_language_candidate_runtime(
             ctx,
@@ -1265,6 +1307,27 @@ def _formal_train_impl(config: FormalTrainConfig,
                         else tuple(sorted(_effective_boot_relations))),
         training_stages=tuple(requested_stages),
     )
+
+    if config.typed_language_diagnostic_only:
+        if (config.language_generation_h2_protocol is None
+                or config.language_generation_floor_protocol is None
+                or config.evaluation_plan is None
+                or ctx.language_generation_runtime is None):
+            raise ValueError(
+                "typed language diagnostic 要求 H2、floor、V-00 与 generation owner")
+        # 这里只读测量：run_typed_language_* 为每个 case 建隔离 savepoint，
+        # 评测结果不会写回恢复基座，也不会进入训练图或能力状态。
+        result.typed_language_h2_report = run_typed_language_h2(
+            ctx, r, config.language_generation_h2_protocol)
+        result.typed_language_floor_report = run_typed_language_floor(
+            ctx, r, config.language_generation_floor_protocol)
+        result.final_metrics = mc.snapshot()
+        result.execution.total_elapsed_ns = (
+            telemetry_clock.now_ns() - _total_started_ns)
+        if own_metrics:
+            mc.close()
+        return result
+
     execution_recorder = ExecutionPhaseRecorder(
         enabled=config.telemetry_enabled,
         backend=backend,
@@ -1852,6 +1915,10 @@ def _formal_train_impl(config: FormalTrainConfig,
             if stage == STAGE3_REWARD and reward_active:
                 if ctx.language_generation_runtime is not None:
                     if config.language_generation_h2_protocol is not None:
+                        # SQLite page backup 不能从同一连接的未提交事务稳定读取。
+                        # H2 是正式阶段边界，先提交已完成的训练图，使隔离 clone
+                        # 走同盘 page backup，避免整库 Python snapshot 的内存放大。
+                        ctx.backend.commit()
                         result.typed_language_h2_report = run_typed_language_h2(
                             ctx,
                             r,
@@ -1872,7 +1939,11 @@ def _formal_train_impl(config: FormalTrainConfig,
                                           dimension.actual.operational_failure,
                                       ))
                                      for dimension in item.dimensions))
-                                for item in result.typed_language_h2_report.cases)
+                                for item in getattr(
+                                    result.typed_language_h2_report,
+                                    "cases",
+                                    (),
+                                ))
                             raise RuntimeError(
                                 "typed language H2 分维校准未通过，禁止进入全量 reward: "
                                 + repr(detail))

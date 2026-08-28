@@ -86,7 +86,7 @@ def clone_backend(source: StorageBackend) -> StorageBackend:
     if isinstance(source, DictBackend):
         target: StorageBackend = DictBackend()
     elif isinstance(source, SQLiteBackend):
-        target = SQLiteBackend()
+        return source.clone_for_evaluation()
     else:
         raise EvaluationIsolationError(
             f"后端类型 {type(source).__name__} 没有评测 clone 协议，拒绝复用正式后端")
@@ -100,6 +100,13 @@ def clone_backend(source: StorageBackend) -> StorageBackend:
     return target
 
 
+def _backend_content_state(backend: StorageBackend) -> Any:
+    """返回隔离前后可比较状态，SQLite 不展开全库 Python 对象。"""
+    if isinstance(backend, SQLiteBackend):
+        return backend.isolation_state_token()
+    return backend.snapshot()
+
+
 def _backend_state(backend: StorageBackend) -> tuple[Any, dict[str, Any], Any]:
     """保存后端数据、整数水位和 schema，供无 TrainContext 的评测入口核验。"""
     attributes = {
@@ -108,7 +115,7 @@ def _backend_state(backend: StorageBackend) -> tuple[Any, dict[str, Any], Any]:
         if hasattr(backend, name)
     }
     return (
-        backend.snapshot(),
+        _backend_content_state(backend),
         attributes,
         copy.deepcopy(getattr(backend, "_tables", None)),
     )
@@ -801,7 +808,7 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
                 "typed generation stage4 owner 缺少状态协议")
         generation_stage4_state = copy.deepcopy(stage4_state_key())
     return (
-        backend.snapshot(),
+        _backend_content_state(backend),
         attributes,
         concept_index,
         scoped_store,
@@ -872,6 +879,64 @@ def _close_evaluation_session(eval_ctx: Any) -> None:
         work_memory.end_session()
 
 
+def _evaluation_runtime_versions(ctx: Any, eval_ctx: Any) -> Any:
+    """选择评测 session 继承的课程版本，不触碰宿主状态。"""
+    runtime_versions = None
+    for split_items in eval_ctx.evaluation_corpora.values():
+        for item in split_items:
+            source_ref = getattr(item, "source_ref", None)
+            if source_ref is not None:
+                runtime_versions = source_ref.versions
+                break
+        if runtime_versions is not None:
+            break
+    if runtime_versions is None:
+        active_session = ctx.work_memory.active_session_scope
+        if active_session is not None:
+            runtime_versions = active_session.versions
+    return runtime_versions
+
+
+def _make_evaluation_context(ctx: Any, backend: StorageBackend,
+                             *, label: str) -> Any:
+    """在已复制 backend 上建立一次全新的评测上下文。"""
+    eval_ctx = clone_train_context(ctx, backend, label=label)
+    runtime_versions = _evaluation_runtime_versions(ctx, eval_ctx)
+    eval_ctx.work_memory.begin_session(session_scope(
+        eval_ctx.space_id,
+        owner=eval_ctx.scope_owner,
+        **({} if runtime_versions is None
+           else {"versions": runtime_versions}),
+    ))
+    return eval_ctx
+
+
+_BATCH_BACKEND_ATTRIBUTES = (
+    "_id_pool",
+    "_isa_edge_gen",
+    "_legacy_observe_timestamp_seq",
+    "_table_write_epochs",
+    "_storage_write_calls",
+    "_storage_write_rows",
+    "_protected_owner_space_ids",
+)
+
+
+def _batch_backend_state(backend: StorageBackend) -> dict[str, Any]:
+    """保存事务回滚不会恢复的 backend Python 侧计数和水位。"""
+    return {
+        name: copy.deepcopy(getattr(backend, name))
+        for name in _BATCH_BACKEND_ATTRIBUTES
+        if hasattr(backend, name)
+    }
+
+
+def _restore_batch_backend_state(backend: StorageBackend,
+                                 state: dict[str, Any]) -> None:
+    for name, value in state.items():
+        setattr(backend, name, value)
+
+
 @contextmanager
 def isolated_evaluation(ctx: Any, *, label: str) -> Iterator[Any]:
     """给独立评测附加 caller 标记，并复用统一沙箱实现。"""
@@ -889,31 +954,11 @@ def _isolated_evaluation_impl(ctx: Any, *, label: str) -> Iterator[Any]:
     baseline = _host_state(ctx)
     backend = clone_backend(ctx.backend)
     try:
-        eval_ctx = clone_train_context(ctx, backend, label=label)
         # Evaluation runtime scopes have their own disposable owner, but must
         # inherit the corpus version bundle.  Leaving the session at the
         # default zero version makes every query/generation scope appear to
-        # cross a version boundary when it references the immutable course
-        # identities (whose source version is explicit).
-        runtime_versions = None
-        for split_items in eval_ctx.evaluation_corpora.values():
-            for item in split_items:
-                source_ref = getattr(item, "source_ref", None)
-                if source_ref is not None:
-                    runtime_versions = source_ref.versions
-                    break
-            if runtime_versions is not None:
-                break
-        if runtime_versions is None:
-            active_session = ctx.work_memory.active_session_scope
-            if active_session is not None:
-                runtime_versions = active_session.versions
-        eval_ctx.work_memory.begin_session(session_scope(
-            eval_ctx.space_id,
-            owner=eval_ctx.scope_owner,
-            **({} if runtime_versions is None
-               else {"versions": runtime_versions}),
-        ))
+        # cross a version boundary when it references immutable course ids.
+        eval_ctx = _make_evaluation_context(ctx, backend, label=label)
     except BaseException:
         try:
             _assert_host_state(ctx, baseline)
@@ -934,6 +979,85 @@ def _isolated_evaluation_impl(ctx: Any, *, label: str) -> Iterator[Any]:
             close = getattr(backend, "close", None)
             if callable(close):
                 close()
+
+
+@contextmanager
+def isolated_evaluation_batch(ctx: Any, *, label: str) -> Iterator[Any]:
+    """在一个 SQLite clone 中逐样本回滚的评测批处理。
+
+    每个 ``begin_case`` 都创建全新的 TrainContext，并在退出时回滚该样本
+    的所有数据库写入和 Python 侧水位。这样 H2 不再为每个 case 复制整库；
+    若被测路径主动 commit 导致 savepoint 消失，则 fail closed，调用方可回退
+    到逐样本 ``isolated_evaluation``，不会把带污染的 clone 当作有效结果。
+    非 SQLite backend 不启用该优化，避免改变跨后端语义。
+    """
+    with telemetry_scope(
+            caller=f"evaluation:{label}",
+            query=label,
+            evaluation=True):
+        baseline = _host_state(ctx)
+        backend = clone_backend(ctx.backend)
+        if not isinstance(backend, SQLiteBackend):
+            try:
+                yield None
+            finally:
+                try:
+                    _assert_host_state(ctx, baseline)
+                finally:
+                    close = getattr(backend, "close", None)
+                    if callable(close):
+                        close()
+            return
+
+        counter = 0
+
+        @contextmanager
+        def begin_case(case_label: str) -> Iterator[Any]:
+            nonlocal counter
+            counter += 1
+            savepoint = f"evaluation_batch_case_{counter}"
+            connection = backend._conn
+            state = _batch_backend_state(backend)
+            connection.execute(f"SAVEPOINT {savepoint}")
+            eval_ctx = None
+            failure: BaseException | None = None
+            try:
+                with telemetry_scope(
+                        caller=f"evaluation:{case_label}",
+                        query=case_label,
+                        evaluation=True):
+                    eval_ctx = _make_evaluation_context(
+                        ctx, backend, label=case_label)
+                    yield eval_ctx
+            except BaseException as error:
+                failure = error
+                raise
+            finally:
+                try:
+                    if eval_ctx is not None:
+                        _close_evaluation_session(eval_ctx)
+                finally:
+                    try:
+                        connection.execute(
+                            f"ROLLBACK TO SAVEPOINT {savepoint}")
+                        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    except BaseException as rollback_error:
+                        # A commit inside an isolated case releases the
+                        # savepoint.  Do not continue with a contaminated clone.
+                        raise EvaluationIsolationError(
+                            "批评测样本内部提交，无法事务回滚") from rollback_error
+                    finally:
+                        _restore_batch_backend_state(backend, state)
+
+        try:
+            yield begin_case
+        finally:
+            try:
+                _assert_host_state(ctx, baseline)
+            finally:
+                close = getattr(backend, "close", None)
+                if callable(close):
+                    close()
 
 
 @contextmanager
@@ -992,4 +1116,5 @@ __all__ = [
     "clone_train_context",
     "isolated_backend_evaluation",
     "isolated_evaluation",
+    "isolated_evaluation_batch",
 ]

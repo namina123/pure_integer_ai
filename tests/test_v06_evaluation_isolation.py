@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -107,6 +108,51 @@ def test_clone_backend_copies_schema_indexes_data_and_watermarks(backend_type):
         finally:
             clone.close()
     finally:
+        source.close()
+
+
+def test_persistent_sqlite_clone_stays_beside_source_and_cleans_up(tmp_path):
+    """大图评测 clone 使用源库同盘临时 SQLite，关闭后只删除该临时文件。"""
+    source_path = tmp_path / "training.sqlite3"
+    source = SQLiteBackend(str(source_path), performance_mode="bulk")
+    clone = None
+    clone_path = None
+    try:
+        ctx = make_train_context(source)
+        ctx.concept_index.ensure("宿主节点", space_id=ctx.space_id)
+        source.commit()
+        clone = clone_backend(source)
+        database_rows = clone._conn.execute("PRAGMA database_list").fetchall()
+        clone_path = next(
+            item[2] for item in database_rows if item[1] == "main")
+        assert clone_path
+        assert Path(clone_path).resolve().parent == tmp_path.resolve()
+        assert Path(clone_path).is_file()
+        assert clone.snapshot() == source.snapshot()
+    finally:
+        if clone is not None:
+            clone.close()
+        source.close()
+    assert clone_path is not None
+    assert not Path(clone_path).exists()
+    assert source_path.is_file()
+
+
+def test_sqlite_clone_preserves_uncommitted_visible_state(tmp_path):
+    """通用 clone 在未提交事务中使用 SQLite bytes 退路，不丢当前可见状态。"""
+    source = SQLiteBackend(str(tmp_path / "uncommitted.sqlite3"))
+    clone = None
+    try:
+        ctx = make_train_context(source)
+        source.commit()
+        ctx.concept_index.ensure("未提交节点", space_id=ctx.space_id)
+        assert source._conn.in_transaction
+        clone = clone_backend(source)
+        assert clone.snapshot() == source.snapshot()
+        assert clone._conn.execute("PRAGMA database_list").fetchone()[2] == ""
+    finally:
+        if clone is not None:
+            clone.close()
         source.close()
 
 

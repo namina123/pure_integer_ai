@@ -29,6 +29,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_query import (
     BroadQaQueryError,
     BroadQaResult,
     _restore_postings,
+    has_exact_broad_qa_title,
     query_broad_qa,
 )
 from pure_integer_ai.storage.integer_codec import encode_integer_tuple
@@ -261,6 +262,8 @@ def test_fast_exact_title_reads_only_one_source_passage(
     statements = []
     connection.set_trace_callback(statements.append)
     try:
+        assert has_exact_broad_qa_title(connection, "都江堰是什么？")
+        assert not has_exact_broad_qa_title(connection, "不存在页面是什么？")
         result = query_broad_qa(
             connection, "都江堰是什么？", query_cache=cache,
             fast_path=True)

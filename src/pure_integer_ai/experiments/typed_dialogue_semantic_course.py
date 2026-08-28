@@ -139,6 +139,14 @@ def _candidate_key(kind: str, row: dict[str, Any], ordinal: int) -> tuple[int, .
     )
 
 
+def _contains_packed(value: tuple[int, ...], part: tuple[int, ...]) -> bool:
+    """查找长度封装的局部键，避免把它误认成完整 Proposition 身份。"""
+    packed = (len(part), *part)
+    width = len(packed)
+    return any(value[index:index + width] == packed
+               for index in range(len(value) - width + 1))
+
+
 def _state(kind: str, row: dict[str, Any], raw: dict[str, Any]) -> LogicEvidenceState:
     if kind == "GenerationAdoptionPostcheckQuery":
         state = row.get("state")
@@ -358,14 +366,65 @@ class TypedDialogueSemanticQueryMapper:
             return LanguageSemanticQueryDecision(reason, (1, 0, 0))
         rows = _candidate_rows(payload_kind, raw)
         recoverable = tuple(
-            item for item in input_value.candidates if item.recoverable)
-        # 当前 production owner 只接受唯一 candidate；不按排序猜测多候选。
-        if (len(rows) != 1 or len(input_value.candidates) != 1
-                or len(recoverable) != 1):
+            item for item in input_value.candidates if item.recoverable
+        )
+        # Adoption payloads carry the complete authored proposition identity.
+        # When a trained graph contains several candidates in the same
+        # structure family, use that explicit identity to disambiguate; never
+        # choose a candidate from storage order.  Other payloads retain the
+        # original unique-candidate requirement.
+        selected = ()
+        if len(rows) == 1 and payload_kind == "GenerationAdoptionPostcheckQuery":
+            row = rows[0]
+            authored_key = row.get("candidate_key")
+            if authored_key is not None:
+                expected_key = _key(authored_key, label="candidate_key")
+                # The authored key is embedded as the local declaration key
+                # inside the runtime Proposition identity.  Match that
+                # length-delimited segment rather than comparing it with the
+                # full source-bound identity.
+                local_key = (*_NAMESPACE, 10, *expected_key)
+                selected = tuple(
+                    item for item in recoverable
+                    if _contains_packed(
+                        item.hypothesis.candidate_key, local_key)
+                )
+            # The authored adoption key belongs to the pre-course fixture and
+            # is not itself the runtime proposition identity.  Its bound
+            # proposition still carries an exact source anchor, predicate and
+            # structure identity, which are sufficient to select the matching
+            # learned candidate across a shared structure family.
+            if not selected:
+                bound = row.get("bound_proposition")
+                if isinstance(bound, dict):
+                    expected_predicate = bound.get("predicate_key")
+                    expected_structure = bound.get("structure_key")
+                    expected_anchor = bound.get("source_anchor_key")
+                    if all(isinstance(value, list) for value in (
+                            expected_predicate, expected_structure,
+                            expected_anchor)):
+                        predicate_key = _key(
+                            expected_predicate, label="predicate_key")
+                        structure_key = _key(
+                            expected_structure, label="structure_key")
+                        anchor_key = _key(
+                            expected_anchor, label="source_anchor_key")
+                        selected = tuple(
+                            item for item in recoverable
+                            if item.materialized.atomic.definition.predicate.stable_key()
+                            == predicate_key
+                            and item.materialized.structure.stable_key()
+                            == structure_key
+                            and item.materialized.atomic.definition.source_anchor.stable_key()
+                            == anchor_key
+                        )
+        if not selected and len(rows) == 1 and len(input_value.candidates) == 1:
+            selected = recoverable
+        if len(selected) != 1:
             return LanguageSemanticQueryDecision(
                 reason, (1, len(rows), len(input_value.candidates),
-                         len(recoverable)))
-        selected = recoverable[0]
+                         len(recoverable), len(selected)))
+        selected = selected[0]
         owner = input_value.current.source.owner
         versions = input_value.current.source.versions
         goal_kind = minimal_instruction_identity(

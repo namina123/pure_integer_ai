@@ -1,16 +1,16 @@
 # 独立对话版本 v0.1
 
-发布日期：2026-08-26
-版本标识：`public-dialogue-independent-v10-shard2-stage1-20260826`
+发布日期：2026-08-28
+版本标识：`public-dialogue-independent-v19-text-organization-20260828`
 
-这是项目首个可独立回读的受限对话版本。它不是神经网络权重包，而是由公开课程训练出的确定性整数状态 artifact，以及复用同一理解、来源、证据、拒答和会话恢复链的运行入口。它能做来源约束的中文事实问答、有限多轮焦点保持、运行时资料导入和显式 UNKNOWN/CLARIFY；不宣称自由生成、任意来源真值、无限记忆或通用智能。当前 release 仍是 Stage 1 候选，不是最终 readiness。
+这是项目首个可独立回读的受限对话版本。它不是神经网络权重包，而是由公开课程训练出的确定性整数状态 artifact，以及复用同一理解、来源、证据、拒答和会话恢复链的运行入口。它能做来源约束的中文事实问答、有限多轮焦点保持和运行时资料导入；内部可以保留不确定性与澄清判定，但正式用户接口只呈现面向人的自然语言，不向调用者暴露内部状态枚举。不宣称自由生成、任意来源真值、无限记忆或通用智能。当前 release 仍是 Stage 1 候选，不是最终 readiness。
 
 ## 运行准备
 
 完整 artifact 位于调用者自己的 K 盘 release root，例如：
 
 ```text
-K:\pure_integer_ai_work\model_releases\public-dialogue-v0.1-publish-20260825-r2
+K:\pure_integer_ai_work\model_releases\public-dialogue-independent-v19-text-organization-20260828
 ```
 
 release root 已包含广域 QA SQLite 索引、训练状态、公开课程、整数 sidecar、来源清单和协议
@@ -20,7 +20,7 @@ release root 已包含广域 QA SQLite 索引、训练状态、公开课程、�
 
 ```powershell
 python -m pure_integer_ai.experiments.run_trained_dialogue_terminal `
-    --release-root "K:\your_project\model_releases\public-dialogue-independent-v10-shard2-stage1-20260826" `
+    --release-root "K:\your_project\model_releases\public-dialogue-independent-v19-text-organization-20260828" `
   --session-root "K:\your_project\sessions\dialogue-v0.1"
 ```
 
@@ -32,7 +32,18 @@ python -m pure_integer_ai.experiments.run_trained_dialogue_terminal `
 {"id":"q1","op":"turn","text":"什么使得河水上涨？"}
 ```
 
-响应对象至少包含 `id`、`type`、`ordinal`、`status`、`answer`、`display_answer`、`retrieval_question`、`citations` 和 `turn_key`。`status` 只有 `ANSWER`、`UNKNOWN`、`CLARIFY` 或 `REPAIR` 等既有对话状态；非 `ANSWER` 不携带事实答案或 citation。结束会话：
+返回值的核心字段形如：
+
+```json
+{"id":"q1","ordinal":0,"text":"暴雨导致河水上涨。","type":"response","citations":[],"turn_key":[...]}
+```
+
+正式响应对象包含 `id`、`type`、`ordinal`、`text`、`citations` 和 `turn_key`。
+其中 `text` 是唯一的回答内容，始终是面向人的自然语言；来源存在时，`citations`
+提供可核验的来源信息。内部理解/评测状态、原始答案槽和检索问式不属于正式用户协议，
+不会出现在响应对象中。协议错误和会话结束同样通过自然语言 `text` 返回；`type`、`id`
+和 `ordinal` 仅用于协议编排，不能被解释为回答状态。
+结束会话：
 
 ```json
 {"id":"q2","op":"quit"}
@@ -42,14 +53,14 @@ python -m pure_integer_ai.experiments.run_trained_dialogue_terminal `
 
 ```powershell
 python -m pure_integer_ai.experiments.run_dialogue_protocol `
-    --release-root "K:\your_project\model_releases\public-dialogue-independent-v10-shard2-stage1-20260826" `
+    --release-root "K:\your_project\model_releases\public-dialogue-independent-v19-text-organization-20260828" `
   --session-root "K:\your_project\sessions\dialogue-v0.1"
 ```
 
-`session-root` 可选但必须是 K 盘已存在目录；启用后会话 checkpoint 使用项目的整数格式，关闭进程再启动可以恢复最近有限热历史。协议错误返回 `type=error` 和 `status=INVALID_REQUEST`，不会把错误请求当作问题消费。
+`session-root` 可选但必须是 K 盘已存在目录；启用后会话 checkpoint 使用项目的整数格式，关闭进程再启动可以恢复最近有限热历史。协议错误返回 `type=error` 与自然语言 `text`，不会把错误请求当作问题消费；正式协议不含 `status=INVALID_REQUEST` 或其他内部状态字段。
 
 release root 中的 `model/dialogue_protocol.json` 声明 JSONL、UTF-8、操作集合和 checkpoint
-格式；启动器会在读取 release manifest 时校验该配置。
+格式，并将响应字段固定为 `text`；启动器会在读取 release manifest 时校验该配置。
 
 ## 运行时资料导入
 
@@ -67,7 +78,7 @@ python -m pure_integer_ai.experiments.run_runtime_material_ingest `
   --qualification-state SUPPORTED --reason-id manual-authority
 
 python -m pure_integer_ai.experiments.run_trained_dialogue_terminal `
-  --release-root "K:\your_project\model_releases\public-dialogue-independent-v10-shard2-stage1-20260826" `
+  --release-root "K:\your_project\model_releases\public-dialogue-independent-v19-text-organization-20260828" `
   --runtime-material-ledger-root "K:\your_project\sessions\manual-runtime" `
   --runtime-material-sqlite "K:\your_project\sessions\manual-runtime\runtime.sqlite3"
 ```
@@ -90,4 +101,8 @@ python -m pure_integer_ai.experiments.run_trained_dialogue_terminal `
 
 ## 已验证边界
 
-真实独立进程已完成单问 ANSWER、未知问题 UNKNOWN、跨进程焦点追问 ANSWER，以及独立 Runtime ledger 多来源 citation ANSWER；会话 checkpoint 可以跨进程回读。候选 metrics 记录每轮 SQLite 读取数（25 条）和宿主峰值工作集（约 273 MiB），但尚未完成 held-out/negative/冲突全套正式 readiness 评测。热 SQLite 页缓存下协议 p95 与终端基线同量级；冷启动另行记录，不把冷页加载时间归因于协议编码。
+真实独立进程已完成单问、边界问题的自然语言回复、跨进程焦点追问，以及独立 Runtime ledger 多来源 citation 回复；会话 checkpoint 可以跨进程回读。内部评测仍记录状态，但不会进入正式用户接口。候选 metrics 记录每轮 SQLite 读取数（25 条）和宿主峰值工作集（约 273 MiB），但尚未完成 held-out/negative/冲突全套正式 readiness 评测。热 SQLite 页缓存下协议 p95 与终端基线同量级；冷启动另行记录，不把冷页加载时间归因于协议编码。
+
+## 对话域隔离
+
+领域课程不会直接并入通用对话模型。发布包中的领域 artifact 由整数路由模型按已学习的区分特征延迟加载；每轮先查询通用模型，只有当前用户输入提供足够领域证据时才查询对应专家。助手上一轮生成的表面不参与领域激活，避免模型输出反过来污染后续路由。领域专家仍受相同的相似度、来源和未知边界约束，未满足证据门槛时保持通用回答或自然语言未知边界。

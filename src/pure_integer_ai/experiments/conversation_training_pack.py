@@ -19,9 +19,11 @@ from pure_integer_ai.cognition.shared.types import (
 )
 from pure_integer_ai.cognition.shared.identity import (
     GLOBAL_OWNER_SCOPE,
+    ObjectIdentity,
     SourceRef,
     VersionBundle,
 )
+from pure_integer_ai.cognition.shared.semantic_object import role_identity
 from pure_integer_ai.crosscut.determinism.hasher import Hasher
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     CanonicalJsonObject,
@@ -30,6 +32,8 @@ from pure_integer_ai.experiments.ph2_dataset_contract import (
 from pure_integer_ai.experiments.collection import (
     COLLECT_PRECEDES,
     CollectedItem,
+    DialogueContentSpan,
+    SpeakerSpan,
     SOURCE_BARE_TEXT,
 )
 from pure_integer_ai.experiments.integer_token_index import (
@@ -41,6 +45,24 @@ from pure_integer_ai.experiments.integer_token_index import (
 
 
 CONVERSATION_TRAINING_PACK_PROTOCOL_V1 = 2
+OASST1_DIALOGUE_COURSE_FORMAT_V2 = "PURE_INTEGER_AI_OASST1_DIALOGUE_COURSE_V2"
+OPENASSISTANT_DIALOGUE_COURSE_FORMAT_V2 = (
+    "PURE_INTEGER_AI_OPENASSISTANT_DIALOGUE_COURSE_V2")
+KDCONV_DIALOGUE_COURSE_FORMAT_V1 = (
+    "PURE_INTEGER_AI_KDCONV_DIALOGUE_COURSE_V1")
+LLM_ASSISTED_DIALOGUE_COURSE_FORMAT_V1 = (
+    "PURE_INTEGER_AI_LLM_ASSISTED_DIALOGUE_COURSE_V1")
+_DIALOGUE_COURSE_FORMATS = frozenset({
+    OASST1_DIALOGUE_COURSE_FORMAT_V2,
+    OPENASSISTANT_DIALOGUE_COURSE_FORMAT_V2,
+    KDCONV_DIALOGUE_COURSE_FORMAT_V1,
+    LLM_ASSISTED_DIALOGUE_COURSE_FORMAT_V1,
+})
+DIALOGUE_SPEAKER_USER = 1
+DIALOGUE_SPEAKER_ASSISTANT = 2
+_DIALOGUE_SPEAKERS = frozenset({
+    DIALOGUE_SPEAKER_USER, DIALOGUE_SPEAKER_ASSISTANT,
+})
 _GENERALIZATION_SOURCE_HASHER = Hasher(
     "conversation.typed.generalization.source.v1")
 _SPLITS = frozenset({"train", "heldout", "negative"})
@@ -66,6 +88,48 @@ _SURFACE_KEY_SET = frozenset(_SURFACE_KEYS)
 
 class ConversationTrainingPackError(ValueError):
     """公开对话课程无法形成确定、隔离的训练 pack。"""
+
+
+# object-model: value; representation=struct; interop=stable-integer-key
+@dataclass(frozen=True, slots=True)
+class DialogueTurnRecord:
+    """公开对话路径中的一个显式 turn。"""
+
+    turn_ordinal: int
+    speaker_role: int
+    message_id: str
+    surface: str
+
+    def __post_init__(self) -> None:
+        if (type(self.turn_ordinal) is not int or self.turn_ordinal <= 0
+                or type(self.speaker_role) is not int
+                or self.speaker_role not in _DIALOGUE_SPEAKERS
+                or not isinstance(self.message_id, str) or not self.message_id
+                or not isinstance(self.surface, str)
+                or len(self.surface.strip()) < 2
+                or self.surface != self.surface.strip()):
+            raise ConversationTrainingPackError("dialogue turn 字段非法")
+
+    @property
+    def rendered_surface(self) -> str:
+        prefix = ("用户" if self.speaker_role == DIALOGUE_SPEAKER_USER
+                  else "助手")
+        return f"{prefix}：{self.surface}"
+
+    def canonical_record(self) -> tuple[int, ...]:
+        message = tuple(map(ord, self.message_id))
+        surface = tuple(map(ord, self.surface))
+        return (
+            self.turn_ordinal, self.speaker_role,
+            len(message), *message, len(surface), *surface,
+        )
+
+
+def _speaker_identity(role: int) -> ObjectIdentity:
+    """把公开 speaker role 映射为稳定纯整数图身份。"""
+    if role not in _DIALOGUE_SPEAKERS:
+        raise ConversationTrainingPackError("speaker role 未注册")
+    return role_identity((21402, 60, role))
 
 
 def _sha256(payload: bytes) -> str:
@@ -196,6 +260,7 @@ class DialogueTrainingCase:
     token_index_ordinal: int | None = None
     aggregate_index: IntegerAggregateIndex | None = None
     aggregate_index_ordinal: int | None = None
+    dialogue_turns: tuple[DialogueTurnRecord, ...] = ()
 
     def __post_init__(self) -> None:
         if (not self.case_id or self.split not in _SPLITS
@@ -240,6 +305,25 @@ class DialogueTrainingCase:
                 or self.aggregate_index_ordinal < 0):
             raise ConversationTrainingPackError(
                 "aggregate_index 必须配套 token_index 与 ordinal")
+        if (not isinstance(self.dialogue_turns, tuple)
+                or any(not isinstance(turn, DialogueTurnRecord)
+                       for turn in self.dialogue_turns)):
+            raise ConversationTrainingPackError(
+                "dialogue_turns 必须是 DialogueTurnRecord tuple")
+        if self.dialogue_turns:
+            ordinals = tuple(turn.turn_ordinal for turn in self.dialogue_turns)
+            roles = tuple(turn.speaker_role for turn in self.dialogue_turns)
+            if (ordinals != tuple(range(1, len(ordinals) + 1))
+                    or len(self.dialogue_turns) < 2
+                    or roles[-1] != DIALOGUE_SPEAKER_ASSISTANT
+                    or any(role != (DIALOGUE_SPEAKER_USER
+                                     if ordinal % 2 else
+                                     DIALOGUE_SPEAKER_ASSISTANT)
+                           for ordinal, role in zip(ordinals, roles))
+                    or self.surfaces != tuple(
+                        turn.rendered_surface for turn in self.dialogue_turns)):
+                raise ConversationTrainingPackError(
+                    "dialogue turns 顺序、角色或表层绑定非法")
 
     @property
     def raw_text(self) -> str:
@@ -272,6 +356,17 @@ class DialogueTrainingPack:
     def split_counts(self) -> tuple[tuple[str, int], ...]:
         return tuple((split, sum(item.split == split for item in self.cases))
                      for split in ("train", "heldout", "negative"))
+
+    @property
+    def dialogue_structure_counts(self) -> tuple[tuple[str, int], ...]:
+        structured = tuple(case for case in self.cases if case.dialogue_turns)
+        return (
+            ("structured_cases", len(structured)),
+            ("turns", sum(len(case.dialogue_turns) for case in structured)),
+            ("prompt_response_pairs", len(structured)),
+            ("multiturn_cases", sum(
+                len(case.dialogue_turns) > 2 for case in structured)),
+        )
 
     def training_items(self, *, split: str = "train",
                        causal_only: bool = False,
@@ -313,6 +408,33 @@ class DialogueTrainingPack:
                 # round runtime switches WorkMemory sessions at version
                 # boundaries, so this source must remain intact.
                 source = source_ref.source_kind
+            speaker_spans: tuple[SpeakerSpan, ...] = ()
+            content_spans: tuple[DialogueContentSpan, ...] = ()
+            if case.dialogue_turns:
+                spans = []
+                contents = []
+                cursor = 0
+                for ordinal, turn in enumerate(case.dialogue_turns):
+                    rendered = turn.rendered_surface
+                    content_start = cursor + len(rendered) - len(turn.surface)
+                    content_end = cursor + len(rendered)
+                    end = content_end
+                    if ordinal + 1 < len(case.dialogue_turns):
+                        end += 1  # raw_text 中相邻 turn 的单个换行归前一 turn。
+                    spans.append(SpeakerSpan(
+                        cursor,
+                        end,
+                        turn.turn_ordinal,
+                        _speaker_identity(turn.speaker_role),
+                    ))
+                    contents.append(DialogueContentSpan(
+                        content_start, content_end, turn.turn_ordinal))
+                    cursor = end
+                if cursor != len(text):
+                    raise ConversationTrainingPackError(
+                        "dialogue speaker spans 与 raw_text 不一致")
+                speaker_spans = tuple(spans)
+                content_spans = tuple(contents)
             result.append(CollectedItem(
                 tokens=tokens,
                 raw_text=text,
@@ -331,6 +453,8 @@ class DialogueTrainingPack:
                 token_index_ordinal=case.token_index_ordinal,
                 aggregate_index=case.aggregate_index,
                 aggregate_index_ordinal=case.aggregate_index_ordinal,
+                speaker_spans=speaker_spans,
+                dialogue_content_spans=content_spans,
             ))
         return result
 
@@ -349,6 +473,7 @@ def _canonical_case_record(case_id: str, split: str, family: str,
                            token_index_ordinal: int | None,
                            aggregate_index: IntegerAggregateIndex | None,
                            aggregate_index_ordinal: int | None,
+                           dialogue_turns: tuple[DialogueTurnRecord, ...],
                            ) -> tuple[int, ...]:
     values: list[int] = [CONVERSATION_TRAINING_PACK_PROTOCOL_V1, len(case_id)]
     values.extend(ord(item) for item in case_id)
@@ -390,7 +515,75 @@ def _canonical_case_record(case_id: str, split: str, family: str,
         values.extend((1, len(encoded), *encoded,
                        aggregate_index_ordinal
                        if aggregate_index_ordinal is not None else 0))
+    if dialogue_turns:
+        values.extend((2, len(dialogue_turns)))
+        for turn in dialogue_turns:
+            record = turn.canonical_record()
+            values.extend((len(record), *record))
     return tuple(values)
+
+
+def _public_source_ref(record: dict[str, Any], path: Path,
+                       line_number: int) -> SourceRef | None:
+    """接纳普通公开课程的完整 SourceRef，非法声明必须 fail closed。"""
+    raw = record.get("source_ref_key")
+    if raw is None:
+        return None
+    if (not isinstance(raw, list) or len(raw) != 11
+            or any(type(item) is not int for item in raw)):
+        raise ConversationTrainingPackError(
+            f"source_ref_key 非法: {path.name}:{line_number}")
+    try:
+        source = SourceRef.from_stable_key(tuple(raw))
+    except (TypeError, ValueError) as error:
+        raise ConversationTrainingPackError(
+            f"source_ref_key 不可恢复: {path.name}:{line_number}") from error
+    declared = (
+        record.get("source_kind"), record.get("source_id"),
+        record.get("source_record_id"),
+    )
+    expected = (source.source_kind, source.source_id, source.document_id)
+    for value, target in zip(declared, expected):
+        if value is not None and value != target:
+            raise ConversationTrainingPackError(
+                f"source_ref_key 与来源字段冲突: {path.name}:{line_number}")
+    return source
+
+
+def _dialogue_projection(record: dict[str, Any], path: Path,
+                         line_number: int) -> tuple[DialogueTurnRecord, ...]:
+    """解析正式公开 turn schema；非该格式保持普通表层课程行为。"""
+    if record.get("format") not in _DIALOGUE_COURSE_FORMATS:
+        return ()
+    raw_turns = record.get("dialogue_turns")
+    if not isinstance(raw_turns, list) or len(raw_turns) < 2:
+        raise ConversationTrainingPackError(
+            f"dialogue_turns 非法: {path.name}:{line_number}")
+    turns = []
+    for raw in raw_turns:
+        if not isinstance(raw, dict) or set(raw) != {
+                "message_id", "speaker_role", "surface", "turn_ordinal"}:
+            raise ConversationTrainingPackError(
+                f"dialogue turn schema 非法: {path.name}:{line_number}")
+        turns.append(DialogueTurnRecord(
+            raw["turn_ordinal"], raw["speaker_role"],
+            raw["message_id"], raw["surface"],
+        ))
+    result = tuple(turns)
+    path_ids = record.get("path_message_ids")
+    if path_ids != [turn.message_id for turn in result]:
+        raise ConversationTrainingPackError(
+            f"dialogue path identity 漂移: {path.name}:{line_number}")
+    if (record.get("path_turn_count") != len(result)
+            or record.get("context_turn_count") != len(result) - 1
+            or record.get("prompt_turn_ordinal") != len(result) - 1
+            or record.get("response_turn_ordinal") != len(result)
+            or record.get("input_surface") != "\n".join(
+                turn.rendered_surface for turn in result[:-1])
+            or record.get("response_surface") != result[-1].surface):
+        raise ConversationTrainingPackError(
+            f"dialogue prompt/response 绑定漂移: {path.name}:{line_number}")
+    return result
 
 
 def _typed_projection(
@@ -585,8 +778,11 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
                 continue
             compact_reference = _compact_surface_for_record(
                 record, path, token_sidecars, aggregate_sidecars)
+            dialogue_turns = _dialogue_projection(record, path, line_number)
             if compact_reference is None:
-                surfaces = _surface_for_record(record)
+                surfaces = (
+                    tuple(turn.rendered_surface for turn in dialogue_turns)
+                    if dialogue_turns else _surface_for_record(record))
                 token_index = None
                 token_index_ordinal = None
                 aggregate_index = None
@@ -617,8 +813,14 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
                                 spans.append(start)
                     if len(spans) == 2 and spans[0] != spans[1]:
                         causal_pairs = ((spans[0], spans[1]),)
-            typed_payload, payload_kind, source_ref = _typed_projection(
+            typed_payload, payload_kind, typed_source_ref = _typed_projection(
                 record, path, line_number, source_identity)
+            public_source_ref = _public_source_ref(record, path, line_number)
+            if (typed_source_ref is not None and public_source_ref is not None
+                    and typed_source_ref != public_source_ref):
+                raise ConversationTrainingPackError(
+                    f"typed/public SourceRef 冲突: {path.name}:{line_number}")
+            source_ref = typed_source_ref or public_source_ref
             expected_state = record.get("expected_state")
             if expected_state is not None and not isinstance(expected_state, str):
                 raise ConversationTrainingPackError(
@@ -641,7 +843,8 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
                     surfaces, causal_pairs, typed_payload, payload_kind,
                     source_ref, expected_state, expected_payload,
                     indexed_surface, token_index, token_index_ordinal,
-                    aggregate_index, aggregate_index_ordinal),
+                    aggregate_index, aggregate_index_ordinal,
+                    dialogue_turns),
                 typed_payload=typed_payload,
                 payload_kind=payload_kind,
                 source_ref=source_ref,
@@ -652,6 +855,7 @@ def load_dialogue_training_pack(paths: Iterable[str | Path], *,
                 token_index_ordinal=token_index_ordinal,
                 aggregate_index=aggregate_index,
                 aggregate_index_ordinal=aggregate_index_ordinal,
+                dialogue_turns=dialogue_turns,
             ))
             count += 1
             if max_cases is not None and len(cases) >= max_cases:

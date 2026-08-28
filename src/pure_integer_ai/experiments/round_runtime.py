@@ -339,6 +339,12 @@ class DefaultRoundRunner:
         _run_item_sense_candidates(ctx, item, obs)
         semantic_course_run = _run_item_semantic_course(
             ctx, item, raw, obs)
+        if ctx.dialogue_successor_runtime is not None:
+            dialogue_successor_run = ctx.dialogue_successor_runtime.process(
+                ctx, item, raw, obs)
+            if dialogue_successor_run is not None:
+                ctx.dialogue_successor_reports.append(
+                    dialogue_successor_run)
         if ctx.event_time_relation_runtime is not None:
             if raw.occurrence_scope_identity is None:
                 raise ValueError("R-06B runtime 缺少来源 occurrence scope")

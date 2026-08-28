@@ -8,6 +8,15 @@ from pure_integer_ai.cognition.shared.hypothesis import (
     HypothesisLedger,
     LIFECYCLE_ACTIVE,
 )
+from pure_integer_ai.cognition.shared.training_hypothesis import (
+    TrainingHypothesisEventSink,
+    TrainingHypothesisHistoryProtocol,
+)
+from pure_integer_ai.cognition.shared.identity import (
+    GLOBAL_OWNER_SCOPE,
+    SourceRef,
+    VersionBundle,
+)
 from pure_integer_ai.cognition.shared.generation_plan import (
     AnswerGenerationGoal,
     GenerationCandidate,
@@ -15,6 +24,7 @@ from pure_integer_ai.cognition.shared.generation_plan import (
 )
 from pure_integer_ai.cognition.shared.logic_executor import LogicEvidenceState
 from pure_integer_ai.cognition.shared.scope_identity import query_scope
+from pure_integer_ai.cognition.shared.scope_identity import document_scope
 from pure_integer_ai.cognition.shared.semantic_graph import SemanticGraph
 from pure_integer_ai.cognition.shared.semantic_template_scope import (
     SemanticTemplateScopeDefinition,
@@ -147,7 +157,26 @@ class LanguageSemanticCourseRuntime:
         self.graph = SemanticCandidateGraphAdapter(semantic_graph, trace)
         self.template_scopes = SemanticTemplateScopeGraph(
             ctx.graph_ontology, template_scope)
-        self.ledger = ledger or HypothesisLedger()
+        if ledger is None:
+            # S-02 semantic candidates use the source/scope of each course item,
+            # so they cannot be written to an aggregate-only history protocol.
+            # The explicit variant flag keeps the physical append-only log
+            # shared while retaining the complete per-candidate identities.
+            history = ctx.training_candidate_history
+            if history is None:
+                raise RuntimeError("semantic course runtime 缺少 Core training history")
+            aggregate_source = SourceRef(
+                21402, 99001, 0, GLOBAL_OWNER_SCOPE, VersionBundle())
+            history_protocol = TrainingHypothesisHistoryProtocol(
+                namespace=(21402, 99000, 1),
+                hypothesis_kind=protocol.builder.semantic_hypothesis_kind,
+                aggregate_source=aggregate_source,
+                aggregate_scope=document_scope(aggregate_source),
+                allow_source_variants=True,
+            )
+            sink = TrainingHypothesisEventSink(history, history_protocol)
+            ledger = sink.load_ledger(attach_sink=True)
+        self.ledger = ledger
         self.substituter = PropositionSubstituter(protocol.substitution)
         self.query_protocol = query_protocol
         self.query_runtime = (

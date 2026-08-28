@@ -17,6 +17,7 @@ from pure_integer_ai.cognition.shared.identity import (
 )
 from pure_integer_ai.cognition.shared.scope_identity import ScopeIdentity
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
+from pure_integer_ai.crosscut.integer.unicode_codec import decode
 
 
 def _strict_integer_key(values: tuple[int, ...], *,
@@ -38,6 +39,48 @@ def validate_unicode_scalars(codepoints: tuple[int, ...]) -> tuple[int, ...]:
                 or 0xD800 <= codepoint <= 0xDFFF):
             raise ValueError("序列包含非 Unicode scalar value")
     return codepoints
+
+
+def representation_codepoints(
+        identity: ObjectIdentity,
+        *,
+        family_key: tuple[int, ...],
+        ) -> tuple[int, ...] | None:
+    """从 Representation 身份恢复指定表示族的 Unicode 码点序列。
+
+    身份中的族键和序列长度均是显式边界；族不匹配返回 ``None``，损坏的
+    Representation 则直接失败，避免查询层把其他对象或截断键当作语言表面。
+    """
+    if not isinstance(identity, ObjectIdentity):
+        raise TypeError("representation identity 必须是 ObjectIdentity")
+    if identity.object_kind != OBJECT_REPRESENTATION:
+        return None
+    family = _strict_integer_key(family_key, where="representation family_key")
+    values = identity.components
+    if not values:
+        raise ValueError("Representation 身份缺少组成键")
+    family_size = values[0]
+    family_end = 1 + family_size
+    if family_size <= 0 or family_end >= len(values):
+        raise ValueError("Representation 表示族键损坏")
+    if tuple(values[1:family_end]) != family:
+        return None
+    representation_size = values[family_end]
+    representation = values[family_end + 1:]
+    if (representation_size <= 0
+            or len(representation) != representation_size):
+        raise ValueError("Representation 内容键损坏")
+    return validate_unicode_scalars(tuple(representation))
+
+
+def representation_surface(
+        identity: ObjectIdentity,
+        *,
+        family_key: tuple[int, ...],
+        ) -> str | None:
+    """返回指定 Representation 的 Unicode 表面，族不匹配时返回 ``None``。"""
+    codepoints = representation_codepoints(identity, family_key=family_key)
+    return None if codepoints is None else decode(codepoints)
 
 
 @dataclass(frozen=True, order=True)
@@ -207,5 +250,7 @@ __all__ = [
     "UnicodePropertyEvidence",
     "UnicodePropertyLink",
     "UnicodeSequenceMaterializer",
+    "representation_codepoints",
+    "representation_surface",
     "validate_unicode_scalars",
 ]

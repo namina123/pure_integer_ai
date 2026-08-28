@@ -30,7 +30,9 @@ def _turn(ordinal: int) -> DialogueTurn:
         (DialogueCitation(
             "证据" + str(ordinal),
             "来源" + str(ordinal),
-            "https://example.invalid/" + str(ordinal)),),
+            "https://example.invalid/" + str(ordinal),
+            "CC-BY-4.0", "作者" + str(ordinal),
+            (1, 2, ordinal + 3, 0, 0, 0, 1, 0, 0, 0, 0)),),
     )
 
 
@@ -58,6 +60,9 @@ def test_broad_dialogue_checkpoint_recovers_hot_history_without_text_files(tmp_p
     assert restarted.checkpoint.previous_identity == recovered.checkpoint_identity
     assert restarted.checkpoint.state == second
     assert restarted.query_turn(1) == (_turn(1), 1)
+    assert restarted.query_relevant_turns("问题0", limit=1) == (_turn(0),)
+    extended = restarted.with_turn(_turn(2))
+    assert extended.query_relevant_turns("问题2", limit=1) == (_turn(2),)
     item = memory.events[1].memory_item_key
     event, reads = restarted.query_runtime_memory_item(item)
     assert event == memory.events[1]

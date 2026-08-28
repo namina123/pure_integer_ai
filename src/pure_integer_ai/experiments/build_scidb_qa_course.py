@@ -154,7 +154,11 @@ def build_scidb_qa_course(
             "source_kind": SOURCE_KIND,
             "source_id": source_id,
             "source_record_id": line_number,
-            "source_ref_key": [SOURCE_KIND, source_id, line_number, 0, 0, 0, 0, 0],
+            "source_ref_key": [
+                SOURCE_KIND, source_id, line_number,
+                0, 0, 0, 1,
+                0, 0, 0, 0,
+            ],
             "source_dataset_doi": doi,
             "source_dataset_url": dataset_url,
             "source_url": upstream_url,

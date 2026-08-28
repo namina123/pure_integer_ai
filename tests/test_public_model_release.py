@@ -39,6 +39,11 @@ def _write_fixture(root: Path) -> None:
             "transport": "jsonl",
             "encoding": "utf-8",
             "operations": ["turn", "quit", "exit"],
+            "response": {
+                "type": "response",
+                "text_field": "text",
+                "internal_status_field": None,
+            },
         },
         "data/course.jsonl": b"{}\n",
         "data/evidence.jsonl": b"{}\n",
@@ -111,6 +116,70 @@ def _refresh_manifest(root: Path) -> None:
         hashlib.sha256(path.read_bytes()).hexdigest() + "\n", encoding="ascii")
 
 
+def _add_embedded_artifacts(root: Path) -> None:
+    """Add minimal closed artifact directories to the release fixture."""
+    artifact_files = {
+        "model/artifacts/dialogue_response/model.int": b"dialogue",
+        "model/artifacts/dialogue_response/learned_dialogue_response_manifest.json": {
+            "artifact_kind": "DIALOGUE",
+            "files": [{"name": "model.int"}],
+            "license_id": "Apache-2.0",
+        },
+        "model/artifacts/response_organization/model.int": b"organization",
+        "model/artifacts/response_organization/response_organization_manifest.json": {
+            "artifact_kind": "ORGANIZATION",
+            "files": [{"name": "model.int"}],
+            "license_id": "Apache-2.0",
+        },
+        "knowledge/artifacts/science_passage/index.sqlite3": b"science",
+        "knowledge/artifacts/science_passage/scidb_csq_passage_index_manifest.json": {
+            "artifact_kind": "SCIENCE",
+            "attribution": "source authors",
+            "database": {"path": "index.sqlite3"},
+            "license_id": "CC-BY-4.0",
+        },
+    }
+    for relative, value in artifact_files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(value if isinstance(value, bytes) else _canonical(value))
+    source_path = root / "source_manifest.json"
+    sources = json.loads(source_path.read_text(encoding="utf-8"))
+    sources["artifacts"] = {
+        "dialogue_response": {
+            "path": "model/artifacts/dialogue_response"},
+        "response_organization": {
+            "path": "model/artifacts/response_organization"},
+        "science_passage": {
+            "path": "knowledge/artifacts/science_passage"},
+    }
+    source_path.write_bytes(_canonical(sources))
+    manifest_path = root / "public_model_release.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["entry"].update({
+        "dialogue_response_artifact": "model/artifacts/dialogue_response",
+        "response_organization_artifact": (
+            "model/artifacts/response_organization"),
+        "science_passage_artifact": "knowledge/artifacts/science_passage",
+    })
+    known = {item["path"] for item in manifest["files"]}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        if relative in known or relative in {
+                "public_model_release.json", "public_model_release.sha256"}:
+            continue
+        manifest["files"].append({
+            "path": relative,
+            "role": "runtime_resource",
+            "size_bytes": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        })
+    manifest_path.write_bytes(_canonical(manifest))
+    _refresh_manifest(root)
+
+
 def test_release_manifest_is_closed_and_allows_forbidden_boundary(tmp_path: Path) -> None:
     _write_fixture(tmp_path)
     loaded = load_public_model_release(tmp_path, require_k_drive=False)
@@ -172,3 +241,34 @@ def test_release_hash_validation_flag_requires_strict_bool(tmp_path: Path) -> No
     with pytest.raises(TypeError, match="严格 bool"):
         load_public_model_release(
             tmp_path, require_k_drive=False, verify_payload_hashes=1)
+
+
+def test_release_projects_closed_embedded_artifact_roots(tmp_path: Path) -> None:
+    _write_fixture(tmp_path)
+    _add_embedded_artifacts(tmp_path)
+    loaded = load_public_model_release(tmp_path, require_k_drive=False)
+    assert loaded.dialogue_response_artifact == (
+        tmp_path / "model/artifacts/dialogue_response")
+    assert loaded.response_organization_artifact == (
+        tmp_path / "model/artifacts/response_organization")
+    assert loaded.science_passage_artifact == (
+        tmp_path / "knowledge/artifacts/science_passage")
+
+
+def test_release_rejects_extra_embedded_artifact_payload(tmp_path: Path) -> None:
+    _write_fixture(tmp_path)
+    _add_embedded_artifacts(tmp_path)
+    extra = tmp_path / "model/artifacts/dialogue_response/undeclared.bin"
+    extra.write_bytes(b"extra")
+    manifest_path = tmp_path / "public_model_release.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"].append({
+        "path": extra.relative_to(tmp_path).as_posix(),
+        "role": "runtime_resource",
+        "size_bytes": extra.stat().st_size,
+        "sha256": hashlib.sha256(extra.read_bytes()).hexdigest(),
+    })
+    manifest_path.write_bytes(_canonical(manifest))
+    _refresh_manifest(tmp_path)
+    with pytest.raises(PublicModelReleaseError, match="文件集合不闭合"):
+        load_public_model_release(tmp_path, require_k_drive=False)

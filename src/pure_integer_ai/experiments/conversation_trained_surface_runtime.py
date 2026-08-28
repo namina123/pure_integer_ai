@@ -1,16 +1,16 @@
 """公开对话训练状态驱动的表层组织消费者。
 
 该模块把 DLG-RAW-16 的公开结构课程接到真实回答侧：先读取 K 盘
-``formal_train`` 运行摘要和 SQLite 计数，随后用两个独立 family 学得的
-typed slot 结构重建可读完整句。它只对已能解析为因果命题的 ANSWER 生效；
-无法安全分解的答案原样保留，绝不猜测事实或把模板回放冒充通用生成。
+``formal_train`` 运行摘要和 SQLite 计数，随后用独立 family 学得的
+typed slot 结构重建可读完整句。运行时只消费调用方提供的 typed semantic
+和结构槽位，不从某一语言的表面词形猜测关系；无法安全分解的答案原样保留，
+绝不猜测事实或把模板回放冒充通用生成。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
 import json
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
 
@@ -39,16 +39,14 @@ from pure_integer_ai.experiments.conversation_raw_t1_surface_order import (
     learn_surface_order_model,
     realize_surface_order,
 )
+from pure_integer_ai.experiments.conversation_response_organization import (
+    ResponseOrganizationModel,
+    organize_response_surface,
+)
 if TYPE_CHECKING:
     from pure_integer_ai.experiments.conversation_dialogue_scale_showcase import (
         TrainingObservation,
     )
-
-
-_CAUSAL_SURFACE_RE = re.compile(
-    r"^(?P<subject>.+?)(?P<predicate>导致|使得|造成|引起|令到?|促使)"
-    r"(?P<object>.+?)[。！？!?]?$"
-)
 
 
 class TrainedSurfaceRuntimeError(ValueError):
@@ -124,6 +122,10 @@ class TrainedSurfaceRuntime:
         default_factory=dict)
     order_models: Mapping[tuple[str, str], SurfaceOrderModel] = field(
         default_factory=dict)
+    organization_model: ResponseOrganizationModel | None = None
+    # 由公开 slot evidence 学得的角色词位提示；不是代码内置词表。
+    slot_value_hints: Mapping[tuple[str, str, str], tuple[str, ...]] = field(
+        default_factory=dict)
 
     def __post_init__(self) -> None:
         if not hasattr(self.observation, "run_id"):
@@ -136,6 +138,20 @@ class TrainedSurfaceRuntime:
             raise TypeError("surface runtime variant_models 类型错误")
         if not isinstance(self.order_models, Mapping):
             raise TypeError("surface runtime order_models 类型错误")
+        if (self.organization_model is not None
+                and not isinstance(
+                    self.organization_model, ResponseOrganizationModel)):
+            raise TypeError("surface runtime organization_model 类型错误")
+        if not isinstance(self.slot_value_hints, Mapping):
+            raise TypeError("surface runtime slot_value_hints 类型错误")
+        for key, values in self.slot_value_hints.items():
+            if (not isinstance(key, tuple) or len(key) != 3
+                    or any(not isinstance(item, str) or not item for item in key)
+                    or not isinstance(values, tuple)
+                    or any(not isinstance(item, str) or not item for item in values)
+                    or values != tuple(sorted(set(values)))):
+                raise TrainedSurfaceRuntimeError(
+                    "surface runtime slot_value_hints 非规范")
 
     def render(self, answer: str, *, response_act: str = "ANSWER",
                source_title: str | None = None,
@@ -148,27 +164,37 @@ class TrainedSurfaceRuntime:
             return SurfaceRenderResult(
                 original, False, 0, "non_answer", self.observation.run_id,
                 self.observation.graph_size)
-        if response_act == "ANSWER":
-            match = _CAUSAL_SURFACE_RE.fullmatch(original)
-            if match is not None:
-                subject = match.group("subject").strip()
-                predicate = match.group("predicate")
-                object_value = match.group("object").strip()
-                if subject and object_value:
-                    result = self.render_typed(
-                        SurfaceSemantic(
-                            "runtime-causal-proposition", "causal", subject,
-                            predicate, object_value,
-                        ),
-                        response_act="ANSWER", register="neutral",
-                        ordered_roles=("cause", "relation", "effect"),
-                        source_id=source_title or "runtime-source",
-                        context_id="runtime-context",
-                        family_id="runtime-causal-family",
-                        ordinal=ordinal,
-                    )
-                    if result.used:
-                        return result
+        # 从学习到的角色词位中恢复可唯一分段的输入。这里不假定任何语言
+        # 的关系词；词位必须来自公开课程 evidence，且重建后须逐字符相等。
+        for (act, register), model in sorted(self.models.items()):
+            if act != response_act:
+                continue
+            for pattern in model.patterns:
+                role_hints = {
+                    role: self.slot_value_hints.get((act, register, role), ())
+                    for role in pattern.roles
+                }
+                if any(not values for values in role_hints.values()):
+                    continue
+                values = _match_learned_pattern(
+                    original, pattern.roles, pattern.gaps, role_hints)
+                if values is None:
+                    continue
+                semantic = _semantic_from_slots(
+                    response_act, pattern.roles, values)
+                result = self.render_typed(
+                    semantic,
+                    response_act=response_act,
+                    register=register,
+                    ordered_roles=pattern.roles,
+                    slot_values=values,
+                    source_id=source_title or "runtime-source",
+                    context_id="runtime-context",
+                    family_id="runtime-surface-family",
+                    ordinal=ordinal,
+                )
+                if result.used:
+                    return result
         for (act, register), model in sorted(self.variant_models.items()):
             if act != response_act:
                 continue
@@ -263,6 +289,14 @@ class TrainedSurfaceRuntime:
                     continue
                 if result.used and result.surface == original:
                     return result
+        if self.organization_model is not None:
+            organized = organize_response_surface(
+                self.organization_model, original)
+            if organized.used:
+                return SurfaceRenderResult(
+                    organized.surface, True, organized.pattern_id,
+                    organized.reason, self.observation.run_id,
+                    self.observation.graph_size, organized.trace)
         return SurfaceRenderResult(
             original, False, 0, "no_learned_surface_shape",
             self.observation.run_id, self.observation.graph_size)
@@ -343,6 +377,7 @@ def load_trained_surface_runtime(*, project_root: str | Path,
                                  extra_variant_evidence_paths: tuple[str | Path, ...] = (),
                                  extra_order_course_paths: tuple[str | Path, ...] = (),
                                  extra_order_evidence_paths: tuple[str | Path, ...] = (),
+                                 response_organization_artifact_root: str | Path | None = None,
                                  ) -> TrainedSurfaceRuntime:
     """从公开课程和 K 盘训练 run 建立只读表层消费者。"""
     root = Path(project_root).resolve()
@@ -372,6 +407,23 @@ def load_trained_surface_runtime(*, project_root: str | Path,
         "dlg-raw16-combined-v1", "CC0-1.0",
         tuple(item for pack in evidence_packs for item in pack.entries),
     )
+    slot_hints: dict[tuple[str, str, str], set[str]] = {}
+    records_by_id = {item.sample_id: item for item in records}
+    for entry in evidence.entries:
+        record = records_by_id.get(entry.record_id)
+        if record is None:
+            continue
+        variant = next(
+            (item for item in record.accepted
+             if item.variant_id == entry.variant_id), None)
+        if variant is None or entry.end > len(variant.surface):
+            continue
+        value = (entry.surface_text
+                 or variant.surface[entry.start:entry.end]).strip()
+        if value:
+            slot_hints.setdefault(
+                (record.dialogue_act, record.register, entry.role),
+                set()).add(value)
     variant_models: dict[tuple[str, str], SurfaceVariantModel] = {}
     variant_course_paths = tuple(Path(item).resolve()
                                  for item in extra_variant_course_paths)
@@ -435,7 +487,25 @@ def load_trained_surface_runtime(*, project_root: str | Path,
     )
     if observation.graph_size <= 0 or observation.concept_node_count <= 0:
         raise TrainedSurfaceRuntimeError("训练 SQLite 图为空")
-    return TrainedSurfaceRuntime(observation, models, variant_models, order_models)
+    organization_model = None
+    if response_organization_artifact_root is not None:
+        from pure_integer_ai.experiments.build_response_organization_artifact import (
+            load_response_organization_artifact,
+        )
+        artifact = load_response_organization_artifact(
+            response_organization_artifact_root,
+            expected_run_id=observation.run_id,
+            expected_pack_sha256=observation.pack_sha256,
+        )
+        organization_model = artifact.model
+    frozen_slot_hints = {
+        key: tuple(sorted(values))
+        for key, values in slot_hints.items()
+    }
+    return TrainedSurfaceRuntime(
+        observation, models, variant_models, order_models, organization_model,
+        frozen_slot_hints,
+    )
 
 
 __all__ = [
@@ -489,6 +559,45 @@ def _match_pattern(surface: str, roles: tuple[str, ...],
     if any(not value for value in values):
         return None
     return tuple(values)
+
+
+def _match_learned_pattern(
+        surface: str,
+        roles: tuple[str, ...],
+        gaps: tuple[str, ...],
+        hints: Mapping[str, tuple[str, ...]],
+        ) -> tuple[str, ...] | None:
+    """按 evidence 学到的 slot hints 解析一条完整结构。
+
+    ``gaps`` 是课程投影的 literal；slot 值只能来自独立 evidence 中的
+    词位，因而这里不需要也不允许任何语言特定 cue 表。
+    """
+    if len(gaps) != len(roles) + 1:
+        return None
+
+    matches: list[tuple[str, ...]] = []
+
+    def visit(index: int, cursor: int, values: tuple[str, ...]) -> None:
+        gap = gaps[index]
+        if not surface.startswith(gap, cursor):
+            return
+        cursor += len(gap)
+        if index == len(roles):
+            if cursor == len(surface):
+                matches.append(values)
+            return
+        for value in hints.get(roles[index], ()):
+            if surface.startswith(value, cursor):
+                visit(
+                    index + 1,
+                    cursor + len(value),
+                    (*values, value),
+                )
+                if len(matches) > 1:
+                    return
+
+    visit(0, 0, ())
+    return matches[0] if len(matches) == 1 else None
 
 
 def _semantic_from_slots(response_act: str, roles: tuple[str, ...],

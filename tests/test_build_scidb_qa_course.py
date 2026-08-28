@@ -62,6 +62,7 @@ def test_conversion_is_deterministic_and_records_fallbacks(tmp_path):
     assert rows[0]["source_title_fallback"] is True
     assert rows[0]["source_url"] == "https://example.org/dataset"
     assert rows[0]["source_url_fallback"] is True
+    assert all(len(row["source_ref_key"]) == 11 for row in rows)
 
     source2, payload2 = _write_source(tmp_path / "second", [_row(title=False, url=False), _row(), _row(title=False, url=True)])
     second = _build(tmp_path / "second", source2, payload2)

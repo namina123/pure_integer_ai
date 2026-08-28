@@ -86,6 +86,10 @@ class TrainingHypothesisHistoryProtocol:
     hypothesis_kind: tuple[int, ...]
     aggregate_source: SourceRef
     aggregate_scope: ScopeIdentity
+    # 某些 Core 课程（例如按每条来源建立语义候选的语言课程）
+    # 需要在同一物理日志协议下保存多个 observation/scope。该能力必须
+    # 由协议显式声明；默认 False 保持既有 aggregate 历史的严格边界。
+    allow_source_variants: bool = False
 
     def __post_init__(self) -> None:
         """核验协议边界完整且 aggregate scope 指向同一来源。"""
@@ -100,23 +104,34 @@ class TrainingHypothesisHistoryProtocol:
             raise TypeError("training history aggregate_scope 类型错误")
         if self.aggregate_scope.source != self.aggregate_source:
             raise ValueError("training history scope 必须指向 aggregate source")
+        if type(self.allow_source_variants) is not bool:
+            raise TypeError("training history allow_source_variants 必须是严格 bool")
 
     def stable_key(self) -> tuple[int, ...]:
         """返回不依赖物理 backend 或运行时 space_id 的完整协议键。"""
-        return (
+        base = (
             _ENVELOPE_VERSION,
             *_packed(self.namespace),
             *_packed(self.hypothesis_kind),
             *_packed(self.aggregate_source.stable_key()),
             *_packed(self.aggregate_scope.stable_key()),
         )
+        # 保持旧协议 stable key 不变；新多来源协议通过显式尾标参与 hash，
+        # 从而不会与既有 aggregate 日志发生协议碰撞。
+        return base if not self.allow_source_variants else (*base, 1)
 
     def accepts(self, hypothesis: HypothesisKey) -> bool:
         """判断候选是否严格属于本协议，不进行 owner 或 scope 降级。"""
-        return (
+        base = (
             isinstance(hypothesis, HypothesisKey)
             and hypothesis.hypothesis_kind == self.hypothesis_kind
-            and hypothesis.observation == self.aggregate_source
+        )
+        if not base:
+            return False
+        if self.allow_source_variants:
+            return True
+        return (
+            hypothesis.observation == self.aggregate_source
             and hypothesis.scope == self.aggregate_scope
         )
 

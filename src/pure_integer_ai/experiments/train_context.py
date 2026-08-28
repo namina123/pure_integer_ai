@@ -141,6 +141,8 @@ class TrainContext:
     logic_closure_reports: list[Any] = field(default_factory=list)
     language_semantic_course_runtime: Any = None
     language_semantic_course_reports: list[Any] = field(default_factory=list)
+    dialogue_successor_runtime: Any = None
+    dialogue_successor_reports: list[Any] = field(default_factory=list)
     alias_relation_course_report: Any = None
     language_generation_course_report: Any = None
     language_generation_postcheck_course_report: Any = None

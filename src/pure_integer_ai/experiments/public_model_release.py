@@ -26,6 +26,16 @@ PUBLIC_MODEL_RELEASE_SCHEMA_VERSION = 1
 PUBLIC_MODEL_RELEASE_MANIFEST = "public_model_release.json"
 PUBLIC_MODEL_RELEASE_DIGEST = "public_model_release.sha256"
 PUBLIC_DIALOGUE_PROTOCOL_CONFIG = "model/dialogue_protocol.json"
+PUBLIC_DIALOGUE_RESPONSE_ARTIFACT = "model/artifacts/dialogue_response"
+PUBLIC_DIALOGUE_DOMAIN_EXPERT_ROOT = "model/artifacts/dialogue_domain_experts"
+PUBLIC_DIALOGUE_EXPERT_ROUTING_FILE = "model/dialogue_expert_router.int"
+PUBLIC_DIALOGUE_SOURCE_MANIFEST_ROOT = "model/dialogue_source_manifests"
+PUBLIC_RESPONSE_ORGANIZATION_ARTIFACT = "model/artifacts/response_organization"
+PUBLIC_SCIENCE_PASSAGE_ARTIFACT = "knowledge/artifacts/science_passage"
+
+_DIALOGUE_RESPONSE_MANIFEST = "learned_dialogue_response_manifest.json"
+_RESPONSE_ORGANIZATION_MANIFEST = "response_organization_manifest.json"
+_SCIENCE_PASSAGE_MANIFEST = "scidb_csq_passage_index_manifest.json"
 
 
 class PublicModelReleaseError(ValueError):
@@ -37,11 +47,14 @@ class PublicModelReleaseError(ValueError):
 _MANIFEST_PATH_KEYS = frozenset({
     "path", "source_manifest", "qa_database", "training_root",
     "sparse_snapshot", "protocol_config", "pack_manifest", "database",
+    "dialogue_expert_routing_artifact",
     "training_cursor", "snapshot", "token_index_file", "aggregate_index_file",
 })
 _MANIFEST_PATH_LIST_KEYS = frozenset({
     "course_files", "course_sidecars", "surface_courses", "source_files",
     "extra_course_paths", "surface_evidence_files", "source_artifacts",
+    "dialogue_domain_expert_artifacts",
+    "dialogue_source_manifests",
 })
 _PRIVATE_ARTIFACT_RE = re.compile(
     r"(?:^|[_-])(private(?:[_-](?:evaluator|eval|label|payload|formal))|"
@@ -113,6 +126,9 @@ def _validate_nested_manifest_paths(value: object, *, label: str,
             if child_key in _MANIFEST_PATH_KEYS:
                 if isinstance(child, str):
                     _relative_path(child, label=f"{label}.{child_key}")
+                elif child_key == "database" and isinstance(child, dict):
+                    _validate_nested_manifest_paths(
+                        child, label=f"{label}.{child_key}", key=child_key)
                 elif child is not None:
                     raise PublicModelReleaseError(
                         f"{label}.{child_key} 必须是相对路径")
@@ -206,7 +222,92 @@ class PublicModelRelease:
     sparse_snapshot: Path
     source_manifest: Path
     protocol_config: Path
+    dialogue_response_artifact: Path | None
+    dialogue_domain_expert_artifacts: tuple[Path, ...]
+    dialogue_expert_routing_artifact: Path | None
+    response_organization_artifact: Path | None
+    science_passage_artifact: Path | None
     manifest: dict[str, object]
+
+
+def _optional_entry_directory(
+        root: Path, entry: dict[str, object], *, field: str,
+        label: str,
+        ) -> Path | None:
+    """解析可选 release 目录入口，存在声明时必须指向闭合目录。"""
+    value = entry.get(field)
+    if value is None:
+        return None
+    path = _resolve(root, value, label=f"entry.{field}")
+    if not path.is_dir():
+        raise PublicModelReleaseError(f"release entry 缺失: {label}")
+    return path
+
+
+def _entry_directories(
+        root: Path, entry: dict[str, object], *, field: str, label: str,
+        ) -> tuple[Path, ...]:
+    """Resolve one ordered, unique list of embedded artifact directories."""
+    value = entry.get(field, [])
+    if not isinstance(value, list) or any(not isinstance(item, str)
+                                          for item in value):
+        raise PublicModelReleaseError(f"entry.{field} 必须是路径列表")
+    paths = tuple(_resolve(root, item, label=f"entry.{field}")
+                  for item in value)
+    if len(set(paths)) != len(paths) or any(not path.is_dir() for path in paths):
+        raise PublicModelReleaseError(f"release entry 缺失或重复: {label}")
+    return paths
+
+
+def _embedded_artifact_manifest(
+        artifact_root: Path | None, *, manifest_name: str, label: str,
+        ) -> dict[str, object] | None:
+    """核验内置 artifact 的平面文件集合并回读其规范 manifest。"""
+    if artifact_root is None:
+        return None
+    manifest_path = artifact_root / manifest_name
+    if not manifest_path.is_file():
+        raise PublicModelReleaseError(f"{label} 缺少 {manifest_name}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PublicModelReleaseError(f"{label} manifest 不可回读") from error
+    if not isinstance(manifest, dict):
+        raise PublicModelReleaseError(f"{label} manifest 必须是对象")
+    declared: set[str] = {manifest_name}
+    files = manifest.get("files")
+    if files is not None:
+        if not isinstance(files, list) or not files:
+            raise PublicModelReleaseError(f"{label} files 非法")
+        for ordinal, item in enumerate(files):
+            if not isinstance(item, dict):
+                raise PublicModelReleaseError(
+                    f"{label}.files[{ordinal}] 非法")
+            relative = _relative_path(
+                item.get("name"), label=f"{label}.files[{ordinal}].name")
+            if len(relative.parts) != 1:
+                raise PublicModelReleaseError(f"{label} 只允许平面 payload")
+            declared.add(relative.as_posix())
+    else:
+        database = manifest.get("database")
+        if not isinstance(database, dict):
+            raise PublicModelReleaseError(f"{label} 缺少 payload inventory")
+        relative = _relative_path(
+            database.get("path"), label=f"{label}.database.path")
+        if len(relative.parts) != 1:
+            raise PublicModelReleaseError(f"{label} 只允许平面 payload")
+        declared.add(relative.as_posix())
+    actual = {
+        path.relative_to(artifact_root).as_posix()
+        for path in artifact_root.iterdir() if path.is_file()
+    }
+    if any(path.is_dir() or path.is_symlink()
+           for path in artifact_root.iterdir()) or actual != declared:
+        raise PublicModelReleaseError(
+            f"{label} 文件集合不闭合: expected={sorted(declared)}, "
+            f"actual={sorted(actual)}")
+    _validate_nested_manifest_paths(manifest, label=label)
+    return manifest
 
 
 def load_public_model_release(
@@ -297,6 +398,35 @@ def load_public_model_release(
     source_manifest = _resolve(target, value.get("source_manifest"), label="source_manifest")
     protocol_config = _resolve(
         target, entry.get("protocol_config"), label="entry.protocol_config")
+    dialogue_response_artifact = _optional_entry_directory(
+        target, entry, field="dialogue_response_artifact",
+        label="dialogue response artifact")
+    dialogue_domain_expert_artifacts = _entry_directories(
+        target, entry, field="dialogue_domain_expert_artifacts",
+        label="dialogue domain expert artifacts")
+    routing_value = entry.get("dialogue_expert_routing_artifact")
+    dialogue_expert_routing_artifact = (
+        _resolve(target, routing_value, label="entry.dialogue_expert_routing_artifact")
+        if routing_value is not None else None)
+    if dialogue_expert_routing_artifact is not None:
+        if not dialogue_expert_routing_artifact.is_file():
+            raise PublicModelReleaseError("release entry 缺失: dialogue expert router")
+        if not dialogue_domain_expert_artifacts:
+            raise PublicModelReleaseError("expert router 不得没有领域专家")
+        from pure_integer_ai.experiments.dialogue_expert_routing_artifact import (
+            load_dialogue_expert_routing_model,
+        )
+        routing_model = load_dialogue_expert_routing_model(
+            dialogue_expert_routing_artifact)
+        if len(routing_model.domain_activation_features) != len(
+                dialogue_domain_expert_artifacts):
+            raise PublicModelReleaseError("expert router 与领域目录数量不一致")
+    response_organization_artifact = _optional_entry_directory(
+        target, entry, field="response_organization_artifact",
+        label="response organization artifact")
+    science_passage_artifact = _optional_entry_directory(
+        target, entry, field="science_passage_artifact",
+        label="science passage artifact")
     for path in (qa_database, sparse_snapshot, source_manifest, protocol_config):
         if not path.is_file():
             raise PublicModelReleaseError(f"release entry 缺失: {path.name}")
@@ -333,15 +463,45 @@ def load_public_model_release(
             or protocol.get("schema_version") != 1
             or protocol.get("transport") != "jsonl"
             or protocol.get("encoding") != "utf-8"
-            or protocol.get("operations") != ["turn", "quit", "exit"]):
+            or protocol.get("operations") != ["turn", "quit", "exit"]
+            or protocol.get("response") != {
+                "type": "response",
+                "text_field": "text",
+                "internal_status_field": None,
+            }):
         raise PublicModelReleaseError("dialogue protocol config 格式不兼容")
     _validate_nested_manifest_paths(protocol, label="dialogue_protocol")
+    artifact_manifests = tuple(item for item in (
+        _embedded_artifact_manifest(
+            dialogue_response_artifact,
+            manifest_name=_DIALOGUE_RESPONSE_MANIFEST,
+            label="dialogue_response_artifact"),
+        _embedded_artifact_manifest(
+            response_organization_artifact,
+            manifest_name=_RESPONSE_ORGANIZATION_MANIFEST,
+            label="response_organization_artifact"),
+        _embedded_artifact_manifest(
+            science_passage_artifact,
+            manifest_name=_SCIENCE_PASSAGE_MANIFEST,
+            label="science_passage_artifact"),
+        *(
+            _embedded_artifact_manifest(
+                path, manifest_name=_DIALOGUE_RESPONSE_MANIFEST,
+                label=f"dialogue_domain_expert_artifact[{ordinal}]")
+            for ordinal, path in enumerate(
+                dialogue_domain_expert_artifacts)
+        ),
+    ) if item is not None)
     _validate_no_private_artifacts(
         target, manifest_values=(value, sources, training_manifest,
-                                 training_summary, protocol))
+                                 training_summary, protocol,
+                                 *artifact_manifests))
     return PublicModelRelease(
         target, release_id, qa_database, training_root, sparse_snapshot,
-        source_manifest, protocol_config, value,
+        source_manifest, protocol_config, dialogue_response_artifact,
+        dialogue_domain_expert_artifacts,
+        dialogue_expert_routing_artifact,
+        response_organization_artifact, science_passage_artifact, value,
     )
 
 
@@ -366,6 +526,20 @@ def _copy_file(source: Path, target: Path) -> None:
     if target.exists():
         raise PublicModelReleaseError(f"拒绝覆盖发布文件: {target}")
     shutil.copyfile(source, target)
+
+
+def _copy_closed_artifact(
+        source_root: Path, target_root: Path, *, manifest_name: str,
+        label: str,
+        ) -> dict[str, object]:
+    """复制已经验证过的平面 artifact，禁止额外文件随包进入 release。"""
+    manifest = _embedded_artifact_manifest(
+        source_root, manifest_name=manifest_name, label=label)
+    assert manifest is not None
+    target_root.mkdir(parents=True, exist_ok=False)
+    for source in sorted(source_root.iterdir(), key=lambda item: item.name):
+        _copy_file(source, target_root / source.name)
+    return manifest
 
 
 def _course_sidecars(source: Path) -> tuple[Path, ...]:
@@ -425,10 +599,33 @@ def _qa_metadata(path: Path) -> dict[str, str]:
     return {str(key): str(value) for key, value in rows}
 
 
+def _dialogue_source_manifest(path: Path) -> dict[str, object]:
+    """Validate one compact public source/license ledger before release copy."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PublicModelReleaseError("dialogue source manifest 不可回读") from error
+    source = value.get("source") if isinstance(value, dict) else None
+    if (not isinstance(value, dict) or not isinstance(source, dict)
+            or not isinstance(source.get("license_id"), str)
+            or not source["license_id"].strip()
+            or not isinstance(value.get("course"), dict)
+            or not isinstance(value["course"].get("sha256"), str)):
+        raise PublicModelReleaseError("dialogue source manifest 身份非法")
+    _validate_nested_manifest_paths(value, label="dialogue_source_manifest")
+    return value
+
+
 def build_public_model_release(
         *, project_root: str | Path, qa_database: str | Path,
         training_run_root: str | Path, release_root: str | Path,
         release_id: str,
+        dialogue_response_artifact_root: str | Path | None = None,
+        dialogue_domain_expert_artifact_roots: tuple[str | Path, ...] = (),
+        dialogue_expert_routing_artifact_root: str | Path | None = None,
+        dialogue_source_manifest_paths: tuple[str | Path, ...] = (),
+        response_organization_artifact_root: str | Path | None = None,
+        science_passage_artifact_root: str | Path | None = None,
         require_k_drive: bool = True,
         ) -> PublicModelRelease:
     """从现有训练 run 和广域索引构造一次性公开 release root。"""
@@ -437,6 +634,15 @@ def build_public_model_release(
     project = Path(project_root).resolve()
     qa = Path(qa_database).resolve()
     training = _require_root(training_run_root, require_k_drive=require_k_drive)
+    source_release = None
+    if (project / PUBLIC_MODEL_RELEASE_MANIFEST).is_file():
+        source_release = load_public_model_release(
+            project, require_k_drive=require_k_drive,
+            verify_payload_hashes=False)
+        if (training != source_release.training_root
+                or qa != source_release.qa_database):
+            raise PublicModelReleaseError(
+                "release 派生构建必须使用其自身 training/QA 入口")
     target = Path(release_root).resolve()
     if require_k_drive and target.drive.upper() != "K:":
         raise PublicModelReleaseError("release root 必须位于 K 盘")
@@ -444,6 +650,96 @@ def build_public_model_release(
         raise PublicModelReleaseError("release root 已存在，拒绝覆盖")
     if not qa.is_file() or (require_k_drive and qa.drive.upper() != "K:"):
         raise PublicModelReleaseError("qa_database 必须是 K 盘已存在文件")
+    optional_artifact_roots: dict[str, Path] = {}
+    for name, value in (
+            ("dialogue_response", dialogue_response_artifact_root),
+            ("response_organization", response_organization_artifact_root),
+            ("science_passage", science_passage_artifact_root)):
+        if value is None:
+            continue
+        optional_artifact_roots[name] = _require_root(
+            value, require_k_drive=require_k_drive)
+    domain_artifact_roots = tuple(
+        _require_root(value, require_k_drive=require_k_drive)
+        for value in dialogue_domain_expert_artifact_roots)
+    if len(set(domain_artifact_roots)) != len(domain_artifact_roots):
+        raise PublicModelReleaseError("领域对话专家 root 重复")
+    if domain_artifact_roots and "dialogue_response" not in optional_artifact_roots:
+        raise PublicModelReleaseError("领域对话专家必须绑定通用对话专家")
+    routing_source = None
+    if dialogue_expert_routing_artifact_root is not None:
+        routing_source = Path(dialogue_expert_routing_artifact_root).resolve()
+        if not routing_source.is_file():
+            raise PublicModelReleaseError("dialogue expert router 必须是已存在文件")
+        if require_k_drive and routing_source.drive.upper() != "K:":
+            raise PublicModelReleaseError("dialogue expert router 必须位于 K 盘")
+    if domain_artifact_roots and routing_source is None:
+        raise PublicModelReleaseError("领域专家必须绑定 dialogue expert router")
+    routing_model = None
+    if routing_source is not None:
+        from pure_integer_ai.experiments.dialogue_expert_routing_artifact import (
+            load_dialogue_expert_routing_model,
+        )
+        routing_model = load_dialogue_expert_routing_model(routing_source)
+        if len(routing_model.domain_activation_features) != len(
+                domain_artifact_roots):
+            raise PublicModelReleaseError("expert router 与领域 root 数量不一致")
+    dialogue_source_manifests = tuple(
+        Path(value).resolve() for value in dialogue_source_manifest_paths)
+    has_dialogue_artifacts = "dialogue_response" in optional_artifact_roots
+    if has_dialogue_artifacts and not dialogue_source_manifests:
+        raise PublicModelReleaseError(
+            "含对话 artifact 的 release 必须提供来源 manifest")
+    if (dialogue_source_manifests
+            and len(set(dialogue_source_manifests))
+            != len(dialogue_source_manifests)):
+        raise PublicModelReleaseError(
+            "dialogue source manifest 集合必须唯一")
+    dialogue_source_values = []
+    for source in dialogue_source_manifests:
+        if (not source.is_file()
+                or require_k_drive and source.drive.upper() != "K:"):
+            raise PublicModelReleaseError(
+                "dialogue source manifest 必须位于 K 盘")
+        dialogue_source_values.append(_dialogue_source_manifest(source))
+    if "dialogue_response" in optional_artifact_roots:
+        from pure_integer_ai.experiments.build_learned_dialogue_response_artifact import (
+            load_learned_dialogue_response_artifact,
+        )
+        general_dialogue_artifact = load_learned_dialogue_response_artifact(
+            optional_artifact_roots["dialogue_response"],
+            require_k_drive=require_k_drive)
+        domain_dialogue_artifacts = []
+        for domain_root in domain_artifact_roots:
+            domain_dialogue_artifacts.append(
+                load_learned_dialogue_response_artifact(
+                    domain_root, require_k_drive=require_k_drive))
+        if routing_model is not None:
+            if (routing_model.general_course_sha256
+                    != general_dialogue_artifact.model.course_sha256):
+                raise PublicModelReleaseError(
+                    "expert router 与通用模型 course SHA 不一致")
+            domain_course_shas = tuple(
+                artifact.model.course_sha256
+                for artifact in domain_dialogue_artifacts)
+            if routing_model.domain_course_sha256s != domain_course_shas:
+                raise PublicModelReleaseError(
+                    "expert router 与领域模型 course SHA 不一致")
+    if "response_organization" in optional_artifact_roots:
+        from pure_integer_ai.experiments.build_response_organization_artifact import (
+            load_response_organization_artifact,
+        )
+        load_response_organization_artifact(
+            optional_artifact_roots["response_organization"],
+            require_k_drive=require_k_drive)
+    if "science_passage" in optional_artifact_roots:
+        from pure_integer_ai.experiments.scidb_csq_passage_index import (
+            ScidbCsqPassageRuntime,
+        )
+        with ScidbCsqPassageRuntime(
+                optional_artifact_roots["science_passage"],
+                require_k_drive=require_k_drive):
+            pass
     manifest_path = training / "dialogue_pack_manifest.json"
     summary_path = training / "training_summary.json"
     cursor_path = training / "training_cursor.int"
@@ -485,7 +781,12 @@ def build_public_model_release(
     # resumed run may itself resume another run (for example v13 -> portable
     # CAUSES -> Wikipedia shard); stopping after one hop produces a release
     # that validates structurally but cannot rebuild the training pack.
-    resume_from = summary.get("resume_from") if isinstance(summary, dict) else None
+    # A validated release has already flattened every ancestor course into its
+    # closed data inventory.  Its historical resume_from is provenance, not a
+    # live host path and must never be followed outside that release root.
+    resume_from = (None if source_release is not None else
+                   summary.get("resume_from")
+                   if isinstance(summary, dict) else None)
     visited_runs: set[Path] = {training}
     while isinstance(resume_from, str) and resume_from.strip():
         base_dir = (training.parent / resume_from).resolve()
@@ -621,6 +922,15 @@ def build_public_model_release(
         if source.name not in seen_names:
             _copy_file(source, target / relative)
             seen_names.add(source.name)
+    if routing_source is not None:
+        _copy_file(routing_source, target / PUBLIC_DIALOGUE_EXPERT_ROUTING_FILE)
+        seen_names.add(PUBLIC_DIALOGUE_EXPERT_ROUTING_FILE)
+    copied_dialogue_source_manifests = []
+    for ordinal, source in enumerate(dialogue_source_manifests):
+        relative = (
+            f"{PUBLIC_DIALOGUE_SOURCE_MANIFEST_ROOT}/{ordinal:04d}.json")
+        _copy_file(source, target / relative)
+        copied_dialogue_source_manifests.append(relative)
     rewritten_manifest = dict(training_manifest)
     rewritten_manifest["source_files"] = rewritten_rows
     rewritten_manifest["source_identities"] = rewritten_identities
@@ -634,6 +944,67 @@ def build_public_model_release(
     ]
     (target / "model/dialogue_pack_manifest.json").write_bytes(
         _canonical_json(rewritten_manifest))
+    embedded_artifacts: dict[str, dict[str, object]] = {}
+    if "dialogue_response" in optional_artifact_roots:
+        manifest = _copy_closed_artifact(
+            optional_artifact_roots["dialogue_response"],
+            target / PUBLIC_DIALOGUE_RESPONSE_ARTIFACT,
+            manifest_name=_DIALOGUE_RESPONSE_MANIFEST,
+            label="dialogue response artifact")
+        embedded_artifacts["dialogue_response"] = {
+            "artifact_kind": manifest.get("artifact_kind"),
+            "license_id": manifest.get("license_id"),
+            "manifest_sha256": _sha256(
+                target / PUBLIC_DIALOGUE_RESPONSE_ARTIFACT
+                / _DIALOGUE_RESPONSE_MANIFEST),
+            "path": PUBLIC_DIALOGUE_RESPONSE_ARTIFACT,
+        }
+        if domain_artifact_roots:
+            domain_entries = []
+            for ordinal, domain_root in enumerate(domain_artifact_roots):
+                relative = (
+                    f"{PUBLIC_DIALOGUE_DOMAIN_EXPERT_ROOT}/{ordinal:04d}")
+                manifest = _copy_closed_artifact(
+                    domain_root, target / relative,
+                    manifest_name=_DIALOGUE_RESPONSE_MANIFEST,
+                    label=f"dialogue domain expert artifact {ordinal}")
+                domain_entries.append({
+                    "artifact_kind": manifest.get("artifact_kind"),
+                    "license_id": manifest.get("license_id"),
+                    "manifest_sha256": _sha256(
+                        target / relative / _DIALOGUE_RESPONSE_MANIFEST),
+                    "path": relative,
+                })
+            embedded_artifacts["dialogue_domain_experts"] = domain_entries
+    if "response_organization" in optional_artifact_roots:
+        manifest = _copy_closed_artifact(
+            optional_artifact_roots["response_organization"],
+            target / PUBLIC_RESPONSE_ORGANIZATION_ARTIFACT,
+            manifest_name=_RESPONSE_ORGANIZATION_MANIFEST,
+            label="response organization artifact")
+        embedded_artifacts["response_organization"] = {
+            "artifact_kind": manifest.get("artifact_kind"),
+            "license_id": manifest.get("license_id"),
+            "manifest_sha256": _sha256(
+                target / PUBLIC_RESPONSE_ORGANIZATION_ARTIFACT
+                / _RESPONSE_ORGANIZATION_MANIFEST),
+            "path": PUBLIC_RESPONSE_ORGANIZATION_ARTIFACT,
+        }
+    if "science_passage" in optional_artifact_roots:
+        manifest = _copy_closed_artifact(
+            optional_artifact_roots["science_passage"],
+            target / PUBLIC_SCIENCE_PASSAGE_ARTIFACT,
+            manifest_name=_SCIENCE_PASSAGE_MANIFEST,
+            label="science passage artifact")
+        embedded_artifacts["science_passage"] = {
+            "artifact_kind": manifest.get("artifact_kind"),
+            "attribution": manifest.get("attribution"),
+            "license_id": manifest.get("license_id"),
+            "manifest_sha256": _sha256(
+                target / PUBLIC_SCIENCE_PASSAGE_ARTIFACT
+                / _SCIENCE_PASSAGE_MANIFEST),
+            "path": PUBLIC_SCIENCE_PASSAGE_ARTIFACT,
+        }
     source_manifest = {
         "format": "PUBLIC_SOURCE_MANIFEST_V1",
         "schema_version": 1,
@@ -663,6 +1034,12 @@ def build_public_model_release(
             "license_id": "CC0-1.0",
             "source_files": list(PUBLIC_SPARSE_QA_SOURCE_ARTIFACTS),
         },
+        "artifacts": embedded_artifacts,
+        "dialogue_source_manifests": copied_dialogue_source_manifests,
+        **({"dialogue_expert_routing": {
+            "path": PUBLIC_DIALOGUE_EXPERT_ROUTING_FILE,
+            "sha256": _sha256(target / PUBLIC_DIALOGUE_EXPERT_ROUTING_FILE),
+        }} if routing_source is not None else {}),
     }
     (target / "source_manifest.json").write_bytes(_canonical_json(source_manifest))
     protocol_config = {
@@ -673,7 +1050,14 @@ def build_public_model_release(
         "byte_order": "big",
         "operations": ["turn", "quit", "exit"],
         "request": {"required": ["op", "text"], "id_optional": True},
-        "response": {"type": "response", "status_field": "status"},
+        # Internal ANSWER/UNKNOWN/CLARIFY/REPAIR state is deliberately absent
+        # from the public wire contract.  It remains available in the
+        # in-process DialogueTurn used by evaluation and checkpointing.
+        "response": {
+            "type": "response",
+            "text_field": "text",
+            "internal_status_field": None,
+        },
         "checkpoint": {"optional": True, "integer_only": True},
     }
     (target / PUBLIC_DIALOGUE_PROTOCOL_CONFIG).write_bytes(
@@ -706,6 +1090,22 @@ def build_public_model_release(
             "sparse_snapshot": "data/ph2/sparse_qa_runtime_snapshot_v1.json",
             "protocol_config": PUBLIC_DIALOGUE_PROTOCOL_CONFIG,
             "protocol": "jsonl",
+            **({"dialogue_response_artifact":
+                PUBLIC_DIALOGUE_RESPONSE_ARTIFACT}
+               if "dialogue_response" in optional_artifact_roots else {}),
+            **({"dialogue_domain_expert_artifacts": [
+                    f"{PUBLIC_DIALOGUE_DOMAIN_EXPERT_ROOT}/{ordinal:04d}"
+                    for ordinal in range(len(domain_artifact_roots))]}
+               if domain_artifact_roots else {}),
+            **({"dialogue_expert_routing_artifact":
+                PUBLIC_DIALOGUE_EXPERT_ROUTING_FILE}
+               if routing_source is not None else {}),
+            **({"response_organization_artifact":
+                PUBLIC_RESPONSE_ORGANIZATION_ARTIFACT}
+               if "response_organization" in optional_artifact_roots else {}),
+            **({"science_passage_artifact":
+                PUBLIC_SCIENCE_PASSAGE_ARTIFACT}
+               if "science_passage" in optional_artifact_roots else {}),
         },
         "files": entries,
     }
@@ -725,6 +1125,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--training-run-root", required=True)
     parser.add_argument("--release-root", required=True)
     parser.add_argument("--release-id", required=True)
+    parser.add_argument("--dialogue-response-artifact-root", default=None)
+    parser.add_argument(
+        "--dialogue-domain-expert-artifact-root", action="append", default=[])
+    parser.add_argument("--dialogue-expert-routing-artifact-root", default=None)
+    parser.add_argument(
+        "--dialogue-source-manifest", action="append", default=[])
+    parser.add_argument("--response-organization-artifact-root", default=None)
+    parser.add_argument("--science-passage-artifact-root", default=None)
     args = parser.parse_args(argv)
     release = build_public_model_release(
         project_root=args.project_root,
@@ -732,6 +1140,15 @@ def main(argv: list[str] | None = None) -> int:
         training_run_root=args.training_run_root,
         release_root=args.release_root,
         release_id=args.release_id,
+        dialogue_response_artifact_root=args.dialogue_response_artifact_root,
+        dialogue_domain_expert_artifact_roots=tuple(
+            args.dialogue_domain_expert_artifact_root),
+        dialogue_expert_routing_artifact_root=(
+            args.dialogue_expert_routing_artifact_root),
+        dialogue_source_manifest_paths=tuple(args.dialogue_source_manifest),
+        response_organization_artifact_root=(
+            args.response_organization_artifact_root),
+        science_passage_artifact_root=args.science_passage_artifact_root,
     )
     print(json.dumps({
         "release_id": release.release_id,
@@ -739,6 +1156,22 @@ def main(argv: list[str] | None = None) -> int:
         "qa_database": release.qa_database.relative_to(release.root).as_posix(),
         "training_root": release.training_root.relative_to(release.root).as_posix(),
         "sparse_snapshot": release.sparse_snapshot.relative_to(release.root).as_posix(),
+        "dialogue_response_artifact": (
+            release.dialogue_response_artifact.relative_to(release.root).as_posix()
+            if release.dialogue_response_artifact is not None else None),
+        "dialogue_domain_expert_artifacts": [
+            path.relative_to(release.root).as_posix()
+            for path in release.dialogue_domain_expert_artifacts
+        ],
+        "dialogue_expert_routing_artifact": (
+            release.dialogue_expert_routing_artifact.relative_to(release.root).as_posix()
+            if release.dialogue_expert_routing_artifact is not None else None),
+        "response_organization_artifact": (
+            release.response_organization_artifact.relative_to(release.root).as_posix()
+            if release.response_organization_artifact is not None else None),
+        "science_passage_artifact": (
+            release.science_passage_artifact.relative_to(release.root).as_posix()
+            if release.science_passage_artifact is not None else None),
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     return 0
 
@@ -746,7 +1179,9 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "PUBLIC_MODEL_RELEASE_DIGEST", "PUBLIC_MODEL_RELEASE_FORMAT",
     "PUBLIC_MODEL_RELEASE_MANIFEST", "PUBLIC_MODEL_RELEASE_SCHEMA_VERSION",
-    "PUBLIC_DIALOGUE_PROTOCOL_CONFIG",
+    "PUBLIC_DIALOGUE_PROTOCOL_CONFIG", "PUBLIC_DIALOGUE_RESPONSE_ARTIFACT",
+    "PUBLIC_RESPONSE_ORGANIZATION_ARTIFACT",
+    "PUBLIC_SCIENCE_PASSAGE_ARTIFACT",
     "PublicModelRelease", "PublicModelReleaseError",
     "build_public_model_release", "load_public_model_release", "main",
 ]

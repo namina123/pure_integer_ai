@@ -156,6 +156,35 @@ def test_broad_answer_keeps_full_evidence_but_projects_readable_primary_surface(
         module.query_broad_qa = original
 
 
+def test_surface_variant_provider_is_forwarded_to_broad_query() -> None:
+    import pure_integer_ai.experiments.conversation_broad_qa_runtime as module
+
+    class _Result:
+        status = "UNKNOWN"
+        answer = None
+        title = None
+        source_url = None
+        evidence_chain = ()
+
+    calls = []
+    original = module.query_broad_qa
+
+    def _query(_connection, question, **kwargs):
+        calls.append((question, kwargs.get("surface_variant_provider")))
+        return _Result()
+
+    provider = lambda value: ("变体",) if value == "何时" else ()
+    module.query_broad_qa = _query
+    try:
+        _, turn = answer_broad_dialogue_turn(
+            BroadDialogueState((15, 16, 17)), "对象何时发生？", object(),
+            surface_variant_provider=provider)
+        assert turn.status == "UNKNOWN"
+        assert calls == [("对象何时发生？", provider)]
+    finally:
+        module.query_broad_qa = original
+
+
 def test_display_projection_removes_empty_labeled_parentheses_only() -> None:
     import pure_integer_ai.experiments.conversation_broad_qa_runtime as module
 
@@ -228,7 +257,10 @@ def test_source_title_is_injected_for_immediate_reference_followup() -> None:
     try:
         state = BroadDialogueState((4, 5, 6))
         state, _ = answer_broad_dialogue_turn(state, "首轮问题", object())
-        state, turn = answer_broad_dialogue_turn(state, "它位于哪里？", object())
+        state, turn = answer_broad_dialogue_turn(
+            state, "它位于哪里？", object(),
+            source_followup_resolver=lambda question, _turn:
+                question.startswith("它"))
         assert turn.status == "ANSWER"
         assert calls == ["首轮问题", "矮寨大桥，它位于哪里？"]
     finally:
@@ -261,7 +293,10 @@ def test_source_focus_does_not_cross_unknown_turn() -> None:
         state = BroadDialogueState((7, 8, 9))
         state, _ = answer_broad_dialogue_turn(state, "首轮问题", object())
         state, _ = answer_broad_dialogue_turn(state, "新话题", object())
-        state, _ = answer_broad_dialogue_turn(state, "它是什么？", object())
+        state, _ = answer_broad_dialogue_turn(
+            state, "它是什么？", object(),
+            source_followup_resolver=lambda question, _turn:
+                question.startswith("它"))
         assert calls == ["首轮问题", "新话题", "它是什么？"]
     finally:
         module.query_broad_qa = original
@@ -285,7 +320,9 @@ def test_source_focus_does_not_match_pronoun_substring_in_direct_question() -> N
         state = BroadDialogueState((8, 8, 8))
         state, _ = answer_broad_dialogue_turn(state, "首轮问题", object())
         state, _ = answer_broad_dialogue_turn(
-            state, "徐陵和庾信齐名，他们的文体合称为什么？", object())
+            state, "徐陵和庾信齐名，他们的文体合称为什么？", object(),
+            source_followup_resolver=lambda question, _turn:
+                question.startswith("它"))
         assert calls == [
             "首轮问题", "徐陵和庾信齐名，他们的文体合称为什么？"
         ]

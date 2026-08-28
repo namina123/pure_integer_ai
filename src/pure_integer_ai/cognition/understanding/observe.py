@@ -379,7 +379,9 @@ class ObservePipeline:
                         segment_index=seg.seg_id,
                         local_index=ti,
                         document_index=seg.document_token_indices[ti],
-                        speaker=raw.speaker_identity,
+                        speaker=(seg.speaker_identity
+                                 if seg.speaker_identity is not None
+                                 else raw.speaker_identity),
                         typed_candidates=tuple(typed_candidates),
                         legacy_candidates=tuple(legacy_candidates),
                     )

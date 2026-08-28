@@ -18,6 +18,9 @@ from typing import Any
 from pure_integer_ai.experiments.conversation_runtime_material_cli import (
     build_runtime_material_run,
 )
+from pure_integer_ai.experiments.public_model_release import (
+    load_public_model_release,
+)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -68,11 +71,16 @@ def _run_protocol(
         runtime_root: Path | None = None,
         runtime_database: Path | None = None,
         metrics_output: Path | None = None,
+        performance_tier: str = "deferred-narrow-fast",
         ) -> tuple[dict[str, object], ...]:
+    if performance_tier not in {
+            "strict", "deferred-narrow", "deferred-narrow-fast"}:
+        raise ValueError("performance_tier 非法")
     command = [
         sys.executable, "-m",
         "pure_integer_ai.experiments.run_dialogue_protocol",
         "--release-root", str(release_root),
+        "--performance-tier", performance_tier,
     ]
     if session_root is not None:
         command.extend(("--session-root", str(session_root)))
@@ -145,6 +153,7 @@ def _metric_summary(path: Path) -> dict[str, object]:
     required = {
         "turn_count", "p50_us", "p95_us", "sqlite_statement_count_total",
         "sqlite_statement_count_per_turn", "peak_working_set_bytes",
+        "performance_tier",
     }
     if not isinstance(value, dict) or not required.issubset(value):
         raise ValueError(f"性能摘要字段不完整: {path}")
@@ -158,6 +167,9 @@ def evaluate(
         runtime_ledger: str | Path = DEFAULT_RUNTIME_LEDGER,
         ) -> dict[str, object]:
     release = _require_k_directory(release_root, label="release_root")
+    # 发布闭合、逐文件 SHA、嵌套 manifest 和 private 边界只严格验证一次；
+    # 后续独立子进程仍检查闭合集合与文件大小，但不重复扫描全部大文件。
+    load_public_model_release(release)
     output = Path(output_root).resolve()
     if output.drive.upper() != "K:":
         raise ValueError("output_root 必须位于 K 盘")
@@ -221,18 +233,23 @@ def evaluate(
         release, ({"id": "cold", "op": "turn",
                    "text": f"{questions[0]}是什么？"},
                   {"id": "cold-quit", "op": "quit"}),
-        metrics_output=cold_metrics)
+        metrics_output=cold_metrics, performance_tier="strict")
     warm_metrics = output / "performance-warm.json"
     _run_protocol(
         release,
         tuple({"id": f"warm-{i}", "op": "turn",
                "text": f"{questions[i % len(questions)]}是什么？"}
               for i in range(10)) + ({"id": "warm-quit", "op": "quit"},),
-        metrics_output=warm_metrics)
+        metrics_output=warm_metrics,
+        performance_tier="deferred-narrow-fast")
 
     checks = {
         "heldout": len(heldout_turns) == len(questions)
-        and all(item.get("status") == "ANSWER" for item in heldout_turns),
+        and all(
+            item.get("status") == "ANSWER"
+            and item.get("source_title") == expected_title
+            for item, expected_title in zip(heldout_turns, questions)
+        ),
         "unknown": len(unknown_turns) == len(unknown_questions)
         and all(item.get("status") == "UNKNOWN" for item in unknown_turns),
         "negative": len(negative_turns) == len(negative_questions)
@@ -260,9 +277,11 @@ def evaluate(
         "schema_version": 1,
         "release_root": release.name,
         "heldout": [{"question": item.get("question"),
+                      "expected_source_title": expected_title,
                       "status": item.get("status"),
                       "source_title": item.get("source_title")}
-                     for item in heldout_turns],
+                     for item, expected_title in zip(
+                         heldout_turns, questions)],
         "unknown": [{"question": item.get("question"),
                      "status": item.get("status")} for item in unknown_turns],
         "negative": [{"question": item.get("question"),

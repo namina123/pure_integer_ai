@@ -82,6 +82,56 @@ COLLECT_TYPE_TIER_PRIMARY: frozenset[int] = frozenset(
 )
 
 
+# object-model: value; representation=struct; interop=stable-integer-key
+@dataclass(frozen=True, slots=True)
+class SpeakerSpan:
+    """原文中的一个连续 speaker turn；范围使用 Unicode 码点半开区间。"""
+
+    start: int
+    end: int
+    turn_ordinal: int
+    speaker: ObjectIdentity
+
+    def __post_init__(self) -> None:
+        assert_int(self.start, self.end, self.turn_ordinal,
+                   _where="SpeakerSpan")
+        if (type(self.start) is not int or type(self.end) is not int
+                or type(self.turn_ordinal) is not int
+                or self.start < 0 or self.end <= self.start
+                or self.turn_ordinal <= 0):
+            raise ValueError("SpeakerSpan 范围或 turn ordinal 非法")
+        if not isinstance(self.speaker, ObjectIdentity):
+            raise TypeError("SpeakerSpan.speaker 必须是 ObjectIdentity")
+
+    def canonical_record(self) -> tuple[int, ...]:
+        """返回可由任意整数实现恢复的规范记录。"""
+        key = self.speaker.stable_key()
+        return (self.start, self.end, self.turn_ordinal, len(key), *key)
+
+
+# object-model: value; representation=struct; interop=ordered-integer-record
+@dataclass(frozen=True, slots=True)
+class DialogueContentSpan:
+    """一个 speaker turn 中排除角色标记和分隔符后的正文范围。"""
+
+    start: int
+    end: int
+    turn_ordinal: int
+
+    def __post_init__(self) -> None:
+        assert_int(self.start, self.end, self.turn_ordinal,
+                   _where="DialogueContentSpan")
+        if (type(self.start) is not int or type(self.end) is not int
+                or type(self.turn_ordinal) is not int
+                or self.start < 0 or self.end <= self.start
+                or self.turn_ordinal <= 0):
+            raise ValueError("DialogueContentSpan 范围或 turn ordinal 非法")
+
+    def canonical_record(self) -> tuple[int, int, int]:
+        """返回跨语言可恢复的有序整数记录。"""
+        return self.start, self.end, self.turn_ordinal
+
+
 @dataclass
 class CollectedItem:
     """单条收集项（预处理产出·formal_train 喂 observe 建图）。
@@ -138,6 +188,14 @@ class CollectedItem:
     source_ref: SourceRef | None = field(default=None, compare=False)   # 稳定来源记录；生产 source 应显式填，旧 fixture 可由 corpus_identity 补匿名来源
     document_scope_hash: int = field(default=0, compare=False, repr=False)   # identity registry 索引缓存；完整身份仍在 SourceRef/ScopeIdentity
     speaker_identity: ObjectIdentity | None = field(default=None, compare=False)
+    # 对话语料可在同一来源文档内携带多个 speaker turn；分词后按码点范围
+    # 投影到 Segment/Occurrence，不复用句法 role_seq，也不进入答案回放路径。
+    speaker_spans: tuple[SpeakerSpan, ...] = field(
+        default=(), compare=False, repr=False)
+    # 普通对话学习必须能从 SourceRecord 精确恢复消息正文，而不是在回答侧
+    # 猜测或删除“用户/助手”等表层角色标记。
+    dialogue_content_spans: tuple[DialogueContentSpan, ...] = field(
+        default=(), compare=False, repr=False)
     # typed course observation 是课程输入附件，不是 Core 状态。它只能由显式
     # adapter 注入，formal round 不从这些字段猜测语义。
     typed_payload: Any = field(default=None, compare=False, repr=False)
@@ -165,6 +223,43 @@ class CollectedItem:
         if (self.speaker_identity is not None
                 and not isinstance(self.speaker_identity, ObjectIdentity)):
             raise TypeError("CollectedItem.speaker_identity 必须是 ObjectIdentity 或 None")
+        if (not isinstance(self.speaker_spans, tuple)
+                or any(not isinstance(span, SpeakerSpan)
+                       for span in self.speaker_spans)):
+            raise TypeError("CollectedItem.speaker_spans 必须是 SpeakerSpan tuple")
+        if (not isinstance(self.dialogue_content_spans, tuple)
+                or any(not isinstance(span, DialogueContentSpan)
+                       for span in self.dialogue_content_spans)):
+            raise TypeError(
+                "CollectedItem.dialogue_content_spans 必须是 DialogueContentSpan tuple")
+        if self.speaker_spans:
+            if self.raw_text is None:
+                raise ValueError("speaker spans 必须绑定可回读 raw_text")
+            if self.speaker_identity is not None:
+                raise ValueError("全局 speaker 与 speaker spans 不得同时设置")
+            previous_end = 0
+            previous_turn = 0
+            for span in self.speaker_spans:
+                if (span.start != previous_end
+                        or span.turn_ordinal != previous_turn + 1
+                        or span.end > len(self.raw_text)):
+                    raise ValueError("speaker spans 必须连续、递增且不越界")
+                previous_end = span.end
+                previous_turn = span.turn_ordinal
+            if previous_end != len(self.raw_text):
+                raise ValueError("speaker spans 必须完整覆盖 raw_text")
+        if self.dialogue_content_spans:
+            if (not self.speaker_spans
+                    or len(self.dialogue_content_spans)
+                    != len(self.speaker_spans)):
+                raise ValueError("dialogue content spans 必须逐 turn 绑定 speaker spans")
+            for content, speaker in zip(
+                    self.dialogue_content_spans, self.speaker_spans):
+                if (content.turn_ordinal != speaker.turn_ordinal
+                        or content.start < speaker.start
+                        or content.end > speaker.end):
+                    raise ValueError(
+                        "dialogue content span 必须位于对应 speaker turn 内")
         if self.payload_kind is not None:
             if (not isinstance(self.payload_kind, str)
                     or not self.payload_kind

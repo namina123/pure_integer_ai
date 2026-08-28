@@ -6,9 +6,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 import re
 import sqlite3
-from typing import Iterable
-
-from opencc import OpenCC
+from typing import Callable, Iterable
 
 from pure_integer_ai.experiments.ph2_broad_qa_contract import (
     BroadQaEvidenceCitation,
@@ -27,8 +25,15 @@ from pure_integer_ai.experiments.ph2_broad_qa_relation_evidence_learning import 
 )
 
 
+# 语言变体不是查询算法的内置知识。调用方可注入图读取器，返回同一
+# 表面的其他已证实表示；没有读取器时只使用原始表面，保持 fail-closed。
+SurfaceVariantProvider = Callable[[str], Iterable[str]]
+_MAX_SURFACE_VARIANTS = 64
+
+
 _SENTENCE_RE = re.compile(r"[^。！？!?\n]+[。！？!?]?|[^。！？!?\n]+$")
 _CJK_SEQUENCE_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]+")
+_WORD_RE = re.compile(r"[A-Za-z0-9]+")
 _NUMBER_RE = re.compile(r"[0-9]+(?:[.,][0-9]+)?")
 _NON_REAL_ENTITY_RE = re.compile(
     r"(?:不存在|虚构|假想|杜撰|幻想|架空)(?:的|之)?")
@@ -45,9 +50,39 @@ _EVENT_REFERENCE_RE = re.compile(
     r"^(?:此(?:舉|举|事|行為|行为)|"
     r"(?:這|这)(?:一(?:舉|举|事|行為|行为|做法)|"
     r"導致|导致|使得|令到?))")
-_TO_SIMPLIFIED = OpenCC("t2s")
-_TO_TRADITIONAL = OpenCC("s2t")
 _MAX_EVIDENCE_CITATIONS = 4
+
+
+def _surface_variants(
+        text: str,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
+        ) -> tuple[str, ...]:
+    """返回原始表面与调用方从图中提供的候选表示。"""
+    if not isinstance(text, str):
+        raise TypeError("surface 必须是字符串")
+    values = [text]
+    if surface_variant_provider is None:
+        return (text,)
+    if not callable(surface_variant_provider):
+        raise TypeError("surface_variant_provider 必须是可调用对象")
+    variants = surface_variant_provider(text)
+    if isinstance(variants, str):
+        raise TypeError("surface_variant_provider 不得直接返回字符串")
+    try:
+        for variant in variants:
+            if not isinstance(variant, str) or not variant:
+                raise TypeError("surface variant 必须是非空字符串")
+            if variant not in values:
+                values.append(variant)
+            if len(values) > _MAX_SURFACE_VARIANTS:
+                raise ValueError("surface variant 数量超过预算")
+    except TypeError:
+        raise
+    except ValueError:
+        raise
+    except Exception as error:
+        raise TypeError("surface_variant_provider 返回值不可迭代") from error
+    return tuple(values)
 
 # 长问句常在真正问题前增加“根据资料……回答”或“从时间线看”这类
 # 回答侧指令。它们是 discourse framing，不是页面实体或答案属性；只在
@@ -157,17 +192,22 @@ def _strip_query_instruction_prefix(surface: str) -> str:
     return current
 
 
-def _query_surface(question: str, slots) -> str:
+def _query_surface(
+        question: str, slots,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
+        ) -> str:
     """统一生成检索、标题锚定和回答门使用的 discourse-free surface。"""
-    return _strip_query_instruction_prefix(slots.strip_slots(question))
+    return _strip_query_instruction_prefix(
+        slots.strip_slots(question, surface_variant_provider))
 
 
 def _answer_kinds(
         question: str, slots,
         learned_typed_obligation: LearnedTypedObligation | None,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
         ) -> tuple[str, ...]:
     """合并静态问式与公开课程 learned obligation；冲突时保持静态结果。"""
-    static = slots.answer_kinds(question)
+    static = slots.answer_kinds(question, surface_variant_provider)
     if learned_typed_obligation is None:
         return static
     if not isinstance(learned_typed_obligation, LearnedTypedObligation):
@@ -293,12 +333,71 @@ def _restore_postings(payload: bytes) -> tuple[int, ...]:
 
 
 @lru_cache(maxsize=16384)
-def _script_terms(text: str) -> frozenset[str]:
-    """生成原文、简体和繁体三种离散特征并集。"""
-    values = set(broad_qa_terms(text))
-    values.update(broad_qa_terms(_TO_SIMPLIFIED.convert(text)))
-    values.update(broad_qa_terms(_TO_TRADITIONAL.convert(text)))
+def _raw_terms(text: str) -> frozenset[str]:
+    """缓存单一原始表面的离散特征。"""
+    return frozenset(broad_qa_terms(text))
+
+
+def _script_terms(
+        text: str,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
+        ) -> frozenset[str]:
+    """生成原始表面及图解析器提供的候选表示的离散特征并集。"""
+    if surface_variant_provider is None:
+        return _raw_terms(text)
+    values = set()
+    for surface in _surface_variants(text, surface_variant_provider):
+        values.update(broad_qa_terms(surface))
     return frozenset(values)
+
+
+@lru_cache(maxsize=65536)
+def _cached_script_term_overlap(
+        question_terms: frozenset[str], surfaces: tuple[str, ...]
+        ) -> frozenset[str]:
+    """缓存一次问题词项集合与候选句的交集扫描。"""
+    matched: set[str] = set()
+
+    def scan(surface: str) -> None:
+        for sequence_match in _CJK_SEQUENCE_RE.finditer(surface):
+            sequence = sequence_match.group(0)
+            if len(sequence) == 1:
+                term = "c:" + sequence
+                if term in question_terms:
+                    matched.add(term)
+            for width in (2, 3):
+                for index in range(max(0, len(sequence) - width + 1)):
+                    term = "c:" + sequence[index:index + width]
+                    if term in question_terms:
+                        matched.add(term)
+        for word_match in _WORD_RE.finditer(surface):
+            term = "w:" + word_match.group(0).casefold()
+            if term in question_terms:
+                matched.add(term)
+
+    for surface in surfaces:
+        scan(surface)
+    return frozenset(matched)
+
+
+def _script_term_overlap(
+        question_terms: set[str] | frozenset[str], text: str,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
+        ) -> int:
+    """只扫描与问题相关的词项，返回与规范脚本并集的交集大小。
+
+    ``_script_terms`` 需要为整段候选文本构造全部二/三元组集合；回答侧
+    实际只需要它与当前问题的交集。这里复用同一 CJK/ASCII 窗口规则，
+    但直接把命中的词项写入小集合，避免候选句上的大集合分配。
+    """
+    if not isinstance(question_terms, (set, frozenset)) \
+            or not isinstance(text, str):
+        raise TypeError("script term overlap 输入类型错误")
+    surfaces = _surface_variants(text, surface_variant_provider)
+    if surface_variant_provider is None:
+        surfaces = (text,)
+    return len(_cached_script_term_overlap(
+        frozenset(question_terms), surfaces))
 
 
 def _sentence_shape_bonus(answer_kinds: tuple[str, ...], text: str) -> int:
@@ -393,6 +492,7 @@ def _best_sentence(
         question_terms: set[str],
         text: str,
         answer_kinds: tuple[str, ...] = (),
+        surface_variant_provider: SurfaceVariantProvider | None = None,
         ) -> str:
     """从已选证据段中选取覆盖问题特征最多的完整短句。"""
     candidates = tuple(
@@ -405,24 +505,30 @@ def _best_sentence(
     ranked = sorted(
         candidates,
         key=lambda item: (
-            -len(question_terms.intersection(_script_terms(item[1]))),
+            -_script_term_overlap(
+                question_terms, item[1], surface_variant_provider),
             -_sentence_shape_bonus(answer_kinds, item[1]),
             item[0],
             len(item[1]),
             item,
         ),
     )
-    if not question_terms.intersection(_script_terms(ranked[0][1])):
+    if _script_term_overlap(
+            question_terms, ranked[0][1], surface_variant_provider) == 0:
         adjacent = "".join(item[1] for item in candidates[:2])
         return adjacent if len(adjacent) <= 360 else adjacent[:360].rstrip()
     answer = ranked[0][1]
     return answer if len(answer) <= 360 else answer[:360].rstrip()
 
 
-def _best_sentence_overlap(question_terms: set[str], text: str) -> int:
+def _best_sentence_overlap(
+        question_terms: set[str], text: str,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
+        ) -> int:
     """返回段内单句对关系/属性问题特征的最大覆盖数。"""
     return max((
-        len(question_terms.intersection(_script_terms(item.group(0))))
+        _script_term_overlap(
+            question_terms, item.group(0), surface_variant_provider)
         for item in _SENTENCE_RE.finditer(text)
         if item.group(0).strip()
     ), default=0)
@@ -434,12 +540,14 @@ def _best_evidence_window(
         term_weights: dict[str, int],
         relation_evidence_model: LearnedRelationEvidenceModel | None = None,
         relation_question: str | None = None,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
         ) -> tuple[int, str]:
     """在一个 passage 内选择最多三句的整数加权证据窗口。"""
     ranked = _rank_evidence_windows(
         question_terms, text, answer_kinds, term_weights,
         relation_evidence_model=relation_evidence_model,
-        relation_question=relation_question)
+        relation_question=relation_question,
+        surface_variant_provider=surface_variant_provider)
     if not ranked:
         return 0, text[:360].strip()
     return ranked[0][0][0], ranked[0][1]
@@ -452,6 +560,7 @@ def _rank_evidence_windows(
         *,
         relation_evidence_model: LearnedRelationEvidenceModel | None = None,
         relation_question: str | None = None,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
         ) -> tuple[tuple[tuple[int, int, int, int, int], str], ...]:
     """对 passage 内全部 1 至 3 句精确窗口做确定性整数排序。"""
     sentences = tuple(
@@ -473,9 +582,15 @@ def _rank_evidence_windows(
             window = text[
                 sentences[start].start():sentences[start + width - 1].end()
             ].strip()
-            overlap = question_terms.intersection(_script_terms(window))
-            rare_score = sum(term_weights.get(term, 1) for term in overlap)
-            rare_score += _sentence_priority_bonus(answer_kinds, window)
+            overlap_terms = _cached_script_term_overlap(
+                frozenset(question_terms), _surface_variants(
+                    window, surface_variant_provider))
+            rare_score = sum(
+                term_weights.get(term, 1) for term in overlap_terms)
+            # 形态优先级只能放大已经覆盖问题特征的窗口；否则一个
+            # “公里/年份”邻句不能凭自身单位把无关证据抬到首位。
+            if overlap_terms:
+                rare_score += _sentence_priority_bonus(answer_kinds, window)
             if relation_evidence_model is not None:
                 rare_score += relation_evidence_model.evidence_bonus(
                     relation_question, window)
@@ -485,7 +600,7 @@ def _rank_evidence_windows(
             # query terms.
             rare_score -= _structural_residue_penalty(window)
             ranked.append(((
-                rare_score, len(overlap),
+                rare_score, len(overlap_terms),
                 _sentence_shape_bonus(answer_kinds, window),
                 -width, -start), window))
     return tuple(sorted(ranked, reverse=True))
@@ -696,14 +811,14 @@ def _remove_redundant_evidence_candidates(
            for item in candidates):
         raise BroadQaQueryError("broad QA evidence compression 输入非法")
     retained = []
-    for candidate in candidates:
+    for ordinal, candidate in enumerate(candidates):
         text = candidate.selected_text or candidate.text
         redundant = any(
             candidate.page_id == other.page_id
             and candidate.revision_id == other.revision_id
-            and (text == other_text
+            and (text == other_text and other_ordinal < ordinal
                  or (len(other_text) > len(text) and text in other_text))
-            for other in retained
+            for other_ordinal, other in enumerate(candidates)
             for other_text in (other.selected_text or other.text,)
         )
         if not redundant:
@@ -732,45 +847,47 @@ def _structural_residue_penalty(text: str) -> int:
     return 0
 
 
-@lru_cache(maxsize=32768)
-def _title_span(question: str, title: str) -> tuple[int, int] | None:
-    """在原文或简繁标准化问题中定位完整页面标题。"""
-    candidates = (
-        (question, title),
-        (_TO_SIMPLIFIED.convert(question), _TO_SIMPLIFIED.convert(title)),
-        (_TO_TRADITIONAL.convert(question), _TO_TRADITIONAL.convert(title)),
-    )
-    for surface, expected in candidates:
-        start = surface.find(expected)
+def _title_span(
+        question: str, title: str,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
+        ) -> tuple[int, int] | None:
+    """在原文中定位页面标题及其图证实的表面变体。
+
+    只让 provider 变换 ``title``，因此返回的 span 始终属于调用方的
+    原始问题坐标；这使得后续移除标题、保留限定时不依赖变体长度相等。
+    """
+    for expected in _surface_variants(title, surface_variant_provider):
+        start = question.find(expected)
         if start >= 0:
             return start, start + len(expected)
     return None
 
 
-def _title_spans(question: str, title: str) -> tuple[tuple[int, int, int], ...]:
-    """枚举标题在原文及简繁标准化问题中的全部确定性位置。"""
-    candidates = (
-        (question, title),
-        (_TO_SIMPLIFIED.convert(question), _TO_SIMPLIFIED.convert(title)),
-        (_TO_TRADITIONAL.convert(question), _TO_TRADITIONAL.convert(title)),
-    )
+def _title_spans(
+        question: str, title: str,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
+        ) -> tuple[tuple[int, int, int], ...]:
+    """枚举标题变体在原始问题中的全部确定性位置。"""
     spans = set()
-    for variant, (surface, expected) in enumerate(candidates):
+    for variant, expected in enumerate(
+            _surface_variants(title, surface_variant_provider)):
         if not expected:
             continue
-        start = surface.find(expected)
+        start = question.find(expected)
         while start >= 0:
             spans.add((variant, start, start + len(expected)))
-            start = surface.find(expected, start + 1)
+            start = question.find(expected, start + 1)
     return tuple(sorted(spans))
 
 
 def _dominated_title_surfaces(
         question: str, surfaces: frozenset[str],
+        surface_variant_provider: SurfaceVariantProvider | None = None,
         ) -> frozenset[str]:
     """找出仅作为更长候选标题子串出现的短标题 surface。"""
     spans_by_surface = {
-        surface: _title_spans(question, surface)
+        surface: _title_spans(
+            question, surface, surface_variant_provider)
         for surface in surfaces
     }
     dominated = set()
@@ -820,9 +937,11 @@ def _missing_strong_constraint(
         candidate_terms: set[str],
         slot_free_question: str,
         candidate_text: str,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
         ) -> bool:
     """审计标题前实体限定和显式数字，允许关系问式自由改写。"""
-    span = _title_span(slot_free_question, title)
+    span = _title_span(
+        slot_free_question, title, surface_variant_provider)
     if span is None:
         return False
     prefix = slot_free_question[:span[0]]
@@ -833,7 +952,7 @@ def _missing_strong_constraint(
         sequence = match.group(0)
         if len(sequence) < 2:
             continue
-        terms = _script_terms(sequence)
+        terms = _script_terms(sequence, surface_variant_provider)
         if not terms.intersection(candidate_terms):
             return True
     candidate_numbers = set(_NUMBER_RE.findall(candidate_text))
@@ -851,9 +970,12 @@ def _is_ambiguous_list(text: str) -> bool:
 def _has_explicit_non_real_entity(
         question: str, *, slot_free_question: str,
         candidate_title: str,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
         ) -> bool:
     """显式虚构/不存在限定未被页面标题锚定时，保持 UNKNOWN。"""
-    if _title_span(slot_free_question, candidate_title) is not None:
+    if _title_span(
+            slot_free_question, candidate_title,
+            surface_variant_provider) is not None:
         return False
     return _NON_REAL_ENTITY_RE.search(slot_free_question) is not None
 
@@ -861,6 +983,7 @@ def _has_explicit_non_real_entity(
 def _exact_document_title_matches(
         connection: sqlite3.Connection,
         slot_free_question: str,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
         ) -> dict[int, str]:
     """从通用定义问式解析标题，并查询实际 document 索引。"""
     title_hint = None
@@ -872,11 +995,7 @@ def _exact_document_title_matches(
                 break
     if title_hint is None:
         return {}
-    variants = tuple(dict.fromkeys((
-        title_hint,
-        _TO_SIMPLIFIED.convert(title_hint),
-        _TO_TRADITIONAL.convert(title_hint),
-    )))
+    variants = _surface_variants(title_hint, surface_variant_provider)
     placeholders = ",".join("?" for _ in variants)
     rows = connection.execute(
         "SELECT doc_id,title FROM document "
@@ -886,12 +1005,31 @@ def _exact_document_title_matches(
     return {int(doc_id): str(title) for doc_id, title in rows}
 
 
+def has_exact_broad_qa_title(
+        connection: sqlite3.Connection,
+        question: str,
+        *,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
+        ) -> bool:
+    """判断定义问式是否精确锚定 broad index 中的真实页面标题。"""
+    if not isinstance(connection, sqlite3.Connection):
+        raise TypeError("broad QA connection 类型错误")
+    if not isinstance(question, str) or not question.strip():
+        raise BroadQaQueryError("broad QA question 不能为空")
+    slots = load_broad_qa_question_slots()
+    return bool(_exact_document_title_matches(
+        connection,
+        _query_surface(question, slots, surface_variant_provider),
+        surface_variant_provider))
+
+
 def _anchor_matches(
         connection: sqlite3.Connection,
         raw_terms: tuple[str, ...],
         slot_free_question: str,
         max_candidate_passages: int,
         schema_tables: frozenset[str] | None = None,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
         ) -> tuple[bool, bool, dict[int, str]]:
     """读取标题/别名锚点，供快速路径和常规路径共享。"""
     if not raw_terms:
@@ -916,7 +1054,9 @@ def _anchor_matches(
             (*raw_terms, max_candidate_passages * 32),
         ))
         for surface, doc_id, _ in alias_rows:
-            if _title_span(slot_free_question, surface) is None:
+            if _title_span(
+                    slot_free_question, surface,
+                    surface_variant_provider) is None:
                 continue
             prior = matches.get(int(doc_id))
             if prior is None or (-len(surface), surface) < (-len(prior), prior):
@@ -925,19 +1065,38 @@ def _anchor_matches(
     # ``X 是什么`` 问式先做语义标题查询，不把标题或回答写死在代码中。
     if not matches:
         matches = _exact_document_title_matches(
-            connection, slot_free_question)
+            connection, slot_free_question, surface_variant_provider)
     return alias_table_exists, alias_term_exists, matches
 
 
-def select_broad_qa_evidence_sentence(question: str, context: str) -> str:
+def select_broad_qa_evidence_sentence(
+        question: str, context: str,
+        *,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
+        ) -> str:
     """从调用方给定的来源上下文中确定性选择一条完整证据句。"""
     if (not isinstance(question, str) or not question.strip()
             or not isinstance(context, str) or not context.strip()):
         raise BroadQaQueryError("broad QA question/context 不能为空")
     slots = load_broad_qa_question_slots()
-    surface = _query_surface(question, slots)
+    surface = _query_surface(question, slots, surface_variant_provider)
     return _best_sentence(
-        set(_script_terms(surface)), context, slots.answer_kinds(question))
+        set(_script_terms(surface, surface_variant_provider)), context,
+        slots.answer_kinds(question, surface_variant_provider),
+        surface_variant_provider)
+
+
+def broad_qa_answer_shape_bonus(question: str, evidence_text: str) -> int:
+    """公开投影问式槽与证据形态的既有纯整数相容分。
+
+    该函数不查询知识库、不创建答案，只复用冻结 CC0 问式课程和既有证据
+    形态合同，供其他来源 passage 检索器保持同一回答侧排序语义。
+    """
+    if (not isinstance(question, str) or not question.strip()
+            or not isinstance(evidence_text, str) or not evidence_text.strip()):
+        raise BroadQaQueryError("broad QA answer shape 输入不能为空")
+    slots = load_broad_qa_question_slots()
+    return _sentence_shape_bonus(slots.answer_kinds(question), evidence_text)
 
 
 def retrieve_broad_qa_candidates(
@@ -950,6 +1109,7 @@ def retrieve_broad_qa_candidates(
         learned_evidence_term_weights: Iterable[tuple[str, int]] | None = None,
         learned_typed_obligation: LearnedTypedObligation | None = None,
         learned_relation_evidence_model: LearnedRelationEvidenceModel | None = None,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
         fast_path: bool = False,
         _metadata_values: dict[str, str] | None = None,
         _schema_tables: frozenset[str] | None = None,
@@ -980,10 +1140,13 @@ def retrieve_broad_qa_candidates(
         learned_evidence_term_weights)
     question_slots = load_broad_qa_question_slots()
     answer_kinds = _answer_kinds(
-        question, question_slots, learned_typed_obligation)
-    slot_free_question = _query_surface(question, question_slots)
+        question, question_slots, learned_typed_obligation,
+        surface_variant_provider)
+    slot_free_question = _query_surface(
+        question, question_slots, surface_variant_provider)
     fast_exact_matches = (
-        _exact_document_title_matches(connection, slot_free_question)
+        _exact_document_title_matches(
+            connection, slot_free_question, surface_variant_provider)
         if fast_path else {})
     if (fast_path and not fast_exact_matches
             and has_explicit_non_real_constraint(slot_free_question)):
@@ -994,7 +1157,8 @@ def retrieve_broad_qa_candidates(
             int(metadata["passage_count"]))
     raw_terms = (
         () if fast_exact_matches
-        else tuple(sorted(_script_terms(slot_free_question))))
+        else tuple(sorted(_script_terms(
+            slot_free_question, surface_variant_provider))))
     if len(raw_terms) > 512:
         raise BroadQaQueryError("broad QA 原始 query term 超预算")
     if not raw_terms and not fast_exact_matches:
@@ -1014,7 +1178,7 @@ def retrieve_broad_qa_candidates(
     elif fast_path:
         alias_table_exists, alias_term_exists, anchor_matches = _anchor_matches(
             connection, raw_terms, slot_free_question, max_candidate_passages,
-            _schema_tables)
+            _schema_tables, surface_variant_provider)
     if anchor_matches:
         # 精确标题/别名已经确定页面，无需解码全部 posting；后续仍对来源
         # passage 排序并执行回答门，这里只在显式快速档去除无关全局候选。
@@ -1051,7 +1215,7 @@ def retrieve_broad_qa_candidates(
     if not fast_path:
         alias_table_exists, alias_term_exists, anchor_matches = _anchor_matches(
             connection, raw_terms, slot_free_question, max_candidate_passages,
-            _schema_tables)
+            _schema_tables, surface_variant_provider)
     anchor_passage_ids = []
     anchor_passages_by_doc: dict[int, tuple[int, ...]] = {}
     if anchor_matches:
@@ -1137,7 +1301,9 @@ def retrieve_broad_qa_candidates(
         else:
             matching_titles = tuple(
                 title for title in title_surfaces
-                if _title_span(slot_free_question, title) is not None)
+                if _title_span(
+                        slot_free_question, title,
+                        surface_variant_provider) is not None)
         candidate_inputs.append((row, title_surfaces, matching_titles))
     dominated_titles = (
         frozenset() if fast_path and len(candidate_inputs) <= 1 else
@@ -1147,6 +1313,7 @@ def retrieve_broad_qa_candidates(
                 title
                 for _, _, matching_titles in candidate_inputs
                 for title in matching_titles),
+            surface_variant_provider,
         )
     )
     candidate_rows = []
@@ -1167,24 +1334,31 @@ def retrieve_broad_qa_candidates(
                 row[4], row[5], row[6], query_anchor_title, row[7], row[8],
                 row[9], row[10]))
             continue
-        passage_terms = _script_terms(row[4])
         title_terms = frozenset().union(*(
-            _script_terms(title) for title in title_surfaces))
-        overlap = len(set(raw_terms).intersection(passage_terms))
-        title_overlap = len(set(raw_terms).intersection(title_terms))
+            _script_terms(title, surface_variant_provider)
+            for title in title_surfaces))
+        raw_term_set = set(raw_terms)
+        overlap = _script_term_overlap(
+            raw_term_set, row[4], surface_variant_provider)
+        title_overlap = len(raw_term_set.intersection(title_terms))
         exact_title_score = (
             1_000_000_000 + len(query_anchor_title) * 1_000_000
             if scoring_titles else 0)
         sentence_surface = slot_free_question
-        title_span = _title_span(sentence_surface, query_anchor_title)
+        title_span = _title_span(
+            sentence_surface, query_anchor_title,
+            surface_variant_provider)
         if title_span is not None:
             sentence_surface = (
                 sentence_surface[:title_span[0]] + "\n"
                 + sentence_surface[title_span[1]:])
-        sentence_terms = _script_terms(sentence_surface)
-        sentence_overlap = _best_sentence_overlap(sentence_terms, row[4])
+        sentence_terms = _script_terms(
+            sentence_surface, surface_variant_provider)
+        sentence_overlap = _best_sentence_overlap(
+            sentence_terms, row[4], surface_variant_provider)
         best_sentence = _best_sentence(
-            sentence_terms, row[4], answer_kinds)
+            sentence_terms, row[4], answer_kinds,
+            surface_variant_provider)
         score = (scores[passage_id] + exact_title_score
                  + title_overlap * 2_000_000 + overlap * 10_000
                  + sentence_overlap * 2_000_000
@@ -1213,9 +1387,11 @@ def retrieve_broad_qa_candidates(
                 FROM passage AS p JOIN document AS d ON d.doc_id=p.doc_id
                 WHERE d.doc_id=? ORDER BY p.passage_id
             """, (page_candidate.doc_id,)))
-        page_terms = _script_terms(slot_free_question)
-        anchor_span = _title_span(slot_free_question,
-                                  page_candidate.query_anchor_title)
+        page_terms = _script_terms(
+            slot_free_question, surface_variant_provider)
+        anchor_span = _title_span(
+            slot_free_question, page_candidate.query_anchor_title,
+            surface_variant_provider)
         scoped_quantity_focus = False
         if anchor_span is not None:
             scoped_quantity_focus = _uses_scoped_quantity_focus(
@@ -1223,17 +1399,19 @@ def retrieve_broad_qa_candidates(
                 slot_free_question[anchor_span[1]:], answer_kinds)
             surface = _page_evidence_surface(
                 slot_free_question, anchor_span, answer_kinds)
-            page_terms = _script_terms(surface)
+            page_terms = _script_terms(surface, surface_variant_provider)
         ranked_windows = []
         for page_row in page_rows:
             for window_score, selected_text in _rank_evidence_windows(
-                    set(page_terms), page_row[4], answer_kinds, term_weights,
-                    relation_evidence_model=learned_relation_evidence_model,
-                    relation_question=slot_free_question):
+                set(page_terms), page_row[4], answer_kinds, term_weights,
+                relation_evidence_model=learned_relation_evidence_model,
+                relation_question=slot_free_question,
+                surface_variant_provider=surface_variant_provider):
                 if (scoped_quantity_focus
                         and _title_span(
                             selected_text,
-                            page_candidate.query_anchor_title) is not None):
+                            page_candidate.query_anchor_title,
+                            surface_variant_provider) is not None):
                     window_score = (
                         window_score[0], window_score[1],
                         window_score[2] + 1, window_score[3], window_score[4])
@@ -1275,6 +1453,7 @@ def answer_broad_qa_candidates(
         trace: BroadQaRetrievalTrace,
         *,
         learned_typed_obligation: LearnedTypedObligation | None = None,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
         ) -> BroadQaResult:
     """对一次已完成的候选检索执行回答、澄清和拒答门。"""
     if (not isinstance(question, str) or not question.strip()
@@ -1284,7 +1463,8 @@ def answer_broad_qa_candidates(
             or not isinstance(trace, BroadQaRetrievalTrace)):
         raise BroadQaQueryError("broad QA candidate resolution 输入非法")
     question_slots = load_broad_qa_question_slots()
-    slot_free_question = _query_surface(question, question_slots)
+    slot_free_question = _query_surface(
+        question, question_slots, surface_variant_provider)
     if not candidates:
         return BroadQaResult(
             "UNKNOWN", question, None, None, None, None, None, None, None,
@@ -1293,7 +1473,9 @@ def answer_broad_qa_candidates(
         )
     best = candidates[0]
     exact_title_anchor = (
-        _title_span(slot_free_question, best.query_anchor_title) is not None)
+        _title_span(
+            slot_free_question, best.query_anchor_title,
+            surface_variant_provider) is not None)
     if ((best.matched_term_count < 2 and not exact_title_anchor)
             or best.score <= max(1, 1_000_000 // trace.total_passage_count)):
         return BroadQaResult(
@@ -1304,22 +1486,27 @@ def answer_broad_qa_candidates(
     evidence_candidates = trace.evidence_candidates or (best,)
     candidate_text = "\n".join(
         item.selected_text or item.text for item in evidence_candidates)
-    candidate_terms = set(_script_terms(candidate_text))
-    candidate_terms.update(_script_terms(best.title))
-    candidate_terms.update(_script_terms(best.query_anchor_title))
+    candidate_terms = set(_script_terms(
+        candidate_text, surface_variant_provider))
+    candidate_terms.update(_script_terms(
+        best.title, surface_variant_provider))
+    candidate_terms.update(_script_terms(
+        best.query_anchor_title, surface_variant_provider))
     if _missing_strong_constraint(
             question, title=best.query_anchor_title,
             candidate_terms=candidate_terms,
             slot_free_question=slot_free_question,
-            candidate_text=candidate_text):
+            candidate_text=candidate_text,
+            surface_variant_provider=surface_variant_provider):
         return BroadQaResult(
             "UNKNOWN", question, None, None, None, None, None, None, None,
             None, None, trace.snapshot_id, trace.license_id,
             trace.matched_query_term_count, trace.candidate_document_count,
         )
     if _has_explicit_non_real_entity(
-            question, slot_free_question=slot_free_question,
-            candidate_title=best.query_anchor_title):
+        question, slot_free_question=slot_free_question,
+            candidate_title=best.query_anchor_title,
+            surface_variant_provider=surface_variant_provider):
         return BroadQaResult(
             "UNKNOWN", question, None, None, None, None, None, None, None,
             None, None, trace.snapshot_id, trace.license_id,
@@ -1331,7 +1518,9 @@ def answer_broad_qa_candidates(
             None, None, trace.snapshot_id, trace.license_id,
             trace.matched_query_term_count, trace.candidate_document_count,
         )
-    if (_title_span(slot_free_question, best.query_anchor_title) is None
+    if (_title_span(
+            slot_free_question, best.query_anchor_title,
+            surface_variant_provider) is None
             and len(candidates) > 1
             and candidates[1].doc_id != best.doc_id
             and candidates[1].score * 100 >= best.score * 95):
@@ -1341,20 +1530,25 @@ def answer_broad_qa_candidates(
             trace.matched_query_term_count, trace.candidate_document_count,
         )
     # 没有页面标题锚点时，关系词共现不足以证明回答对象，必须拒答。
-    if _title_span(slot_free_question, best.query_anchor_title) is None:
+    if _title_span(
+            slot_free_question, best.query_anchor_title,
+            surface_variant_provider) is None:
         return BroadQaResult(
             "UNKNOWN", question, None, None, None, None, None, None, None,
             None, None, trace.snapshot_id, trace.license_id,
             trace.matched_query_term_count, trace.candidate_document_count,
         )
     sentence_question = slot_free_question
-    span = _title_span(sentence_question, best.query_anchor_title)
+    span = _title_span(
+        sentence_question, best.query_anchor_title, surface_variant_provider)
     if span is not None:
         sentence_question = (
             sentence_question[:span[0]] + "\n" + sentence_question[span[1]:])
-    question_terms = _script_terms(sentence_question)
+    question_terms = _script_terms(
+        sentence_question, surface_variant_provider)
     answer_kinds = _answer_kinds(
-        question, question_slots, learned_typed_obligation)
+        question, question_slots, learned_typed_obligation,
+        surface_variant_provider)
     evidence_candidates = _remove_redundant_evidence_candidates(
         evidence_candidates)
     primary_evidence = evidence_candidates[0]
@@ -1364,7 +1558,8 @@ def answer_broad_qa_candidates(
         window = evidence.selected_text
         if not window:
             _, window = _best_evidence_window(
-                question_terms, evidence.text, answer_kinds, {})
+                question_terms, evidence.text, answer_kinds, {},
+                surface_variant_provider=surface_variant_provider)
         answer_parts.append(window)
         source_url = (
             "https://zh.wikipedia.org/w/index.php?curid="
@@ -1404,6 +1599,7 @@ def query_broad_qa(
         learned_typed_obligation: LearnedTypedObligation | None = None,
         learned_relation_evidence_model: LearnedRelationEvidenceModel | None = None,
         query_cache: BroadQaQueryCache | None = None,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
         fast_path: bool = False,
         ) -> BroadQaResult:
     """以稀有 term postings 缩小候选，并从 top-K 页面投影可引用回答。"""
@@ -1416,6 +1612,7 @@ def query_broad_qa(
         raise TypeError("broad QA fast_path 必须是严格 bool")
     cacheable = (
         query_cache is not None
+        and surface_variant_provider is None
         and learned_evidence_term_weights is None
         and learned_typed_obligation is None
         and learned_relation_evidence_model is None
@@ -1439,12 +1636,14 @@ def query_broad_qa(
         learned_evidence_term_weights=learned_evidence_term_weights,
         learned_typed_obligation=learned_typed_obligation,
         learned_relation_evidence_model=learned_relation_evidence_model,
+        surface_variant_provider=surface_variant_provider,
         fast_path=fast_path,
         _metadata_values=metadata_values,
         _schema_tables=schema_tables)
     result = answer_broad_qa_candidates(
         question, candidates, trace,
-        learned_typed_obligation=learned_typed_obligation)
+        learned_typed_obligation=learned_typed_obligation,
+        surface_variant_provider=surface_variant_provider)
     if cacheable:
         query_cache.put(cache_key, result)
     return result
@@ -1452,10 +1651,12 @@ def query_broad_qa(
 
 __all__ = [
     "answer_broad_qa_candidates",
+    "broad_qa_answer_shape_bonus",
     "BroadQaRetrievalCandidate",
     "BroadQaRetrievalTrace",
     "BroadQaQueryCache",
     "BroadQaQueryError",
+    "has_exact_broad_qa_title",
     "query_broad_qa",
     "has_explicit_non_real_constraint",
     "retrieve_broad_qa_candidates",

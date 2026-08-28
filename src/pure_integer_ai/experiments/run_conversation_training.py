@@ -11,6 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 from pathlib import PurePosixPath
+import shutil
 import sys
 
 from pure_integer_ai.config import gates
@@ -24,6 +25,9 @@ from pure_integer_ai.cognition.shared.typed_binding import (
 )
 from pure_integer_ai.cognition.understanding.occurrence_index import (
     OccurrenceProtocol,
+)
+from pure_integer_ai.cognition.understanding.occurrence_order import (
+    OccurrenceOrderProtocol,
 )
 from pure_integer_ai.cognition.understanding.segmentation_span import (
     SegmentationSpanProtocol,
@@ -45,6 +49,9 @@ from pure_integer_ai.experiments.conversation_training_cursor import (
 )
 from pure_integer_ai.experiments.dialogue_training_typed_adapter import (
     TypedDialogueCourseAdapter,
+)
+from pure_integer_ai.experiments.dialogue_successor_graph import (
+    DialogueSuccessorProtocol,
 )
 from pure_integer_ai.experiments.corpus_identity import assign_corpus_source_refs
 from pure_integer_ai.experiments.evaluation_protocol import (
@@ -79,6 +86,10 @@ from pure_integer_ai.experiments.ph2_w09_weaning import (
 from pure_integer_ai.experiments.ph2_w05_contract import digest_value
 from pure_integer_ai.storage.edge_store import EPI_STRUCTURED
 from pure_integer_ai.storage.backend import SQLiteBackend
+from pure_integer_ai.storage.dialogue_successor import (
+    DIALOGUE_SUCCESSOR_FEATURE_TABLE,
+    DIALOGUE_SUCCESSOR_TABLE,
+)
 from pure_integer_ai.storage.k_run_boundary import open_existing_run_root
 
 
@@ -147,6 +158,59 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _typed_floor_summary(report) -> dict[str, object] | None:
+    """将 typed floor 的可审计失败原因压缩进 K 盘运行摘要。
+
+    训练摘要此前只保存阶段完成列表，floor 未通过时无法区分能力失败、
+    评测无样本和协议/运行失败。这里仅保存整数计数、稳定协议键和失败原因，
+    不写入 surface、label 或 private evaluator 内容。
+    """
+    if report is None:
+        return None
+    dimensions = []
+    for item in getattr(report, "dimensions", ()):
+        requirement = item.requirement
+        dimensions.append({
+            "dimension": list(requirement.dimension.stable_key()),
+            "verifier": list(requirement.verifier.stable_key()),
+            "minimum_match_permille": requirement.minimum_match_permille,
+            "total": item.total,
+            "matched": item.matched,
+            "missing": item.missing,
+            "operational_failure": item.operational_failure,
+            "match_permille": item.match_permille,
+            "complete": item.complete,
+        })
+    cases = []
+    for item in getattr(report, "cases", ()):
+        episode = item.episode
+        cases.append({
+            "identity_sha256": item.identity.content.sha256,
+            "failure": item.failure,
+            "episode_present": episode is not None,
+            "signal_count": 0 if episode is None else len(episode.signals),
+            "signal_keys": (() if episode is None else [
+                {
+                    "dimension": list(signal.dimension.stable_key()),
+                    "verifier": list(signal.verifier.stable_key()),
+                    "applicability": signal.applicability,
+                    "verdict": signal.verdict,
+                    "operational_failure": signal.operational_failure,
+                }
+                for signal in episode.signals
+            ]),
+        })
+    return {
+        "protocol_version": report.protocol_version,
+        "split": list(report.split.stable_key()),
+        "measured": report.measured,
+        "complete": report.complete,
+        "unexpected_dimensions": getattr(report, "unexpected_dimensions", 0),
+        "dimensions": dimensions,
+        "cases": cases,
+    }
+
+
 def _dialogue_semantic_protocol():
     """建立公开对话 typed 课程使用的最小 S-02/S-03 整数协议。"""
     namespace = (21402, 1)
@@ -195,6 +259,11 @@ def _dialogue_semantic_query_protocol():
     """建立只读评测使用的 typed candidate recovery mapper。"""
     return build_typed_dialogue_semantic_query_protocol(
         TypedDialogueSemanticQueryMapper((21402, 30)))
+
+
+def _dialogue_successor_protocol() -> DialogueSuccessorProtocol:
+    """建立普通结构化对话共享的后继图与 H-00 整数协议。"""
+    return DialogueSuccessorProtocol((21402, 60), EPI_STRUCTURED)
 
 
 def dialogue_semantic_query_protocol():
@@ -272,6 +341,8 @@ def run_conversation_training(*, project_root: str | Path,
                               include_default_courses: bool = True,
                               replay_completed_stages: bool = False,
                               storage_performance_mode: str = "durable",
+                              sqlite_page_resume: bool = False,
+                              typed_language_diagnostic_only: bool = False,
                               ) -> dict[str, object]:
     """消费公开 train split，并产出真实 SQLite graph/checkpoint 摘要。"""
     if max_cases is not None and (type(max_cases) is not int or max_cases <= 0):
@@ -332,10 +403,13 @@ def run_conversation_training(*, project_root: str | Path,
     contrast = build_dialogue_training_contrast(pack)
     semantic_protocol = occurrence_protocol = span_protocol = None
     semantic_query_protocol = None
+    dialogue_successor_protocol = None
     if typed_semantic:
         (semantic_protocol, occurrence_protocol,
          span_protocol) = _dialogue_semantic_protocol()
         semantic_query_protocol = _dialogue_semantic_query_protocol()
+        if any(case.dialogue_turns for case in pack.cases):
+            dialogue_successor_protocol = _dialogue_successor_protocol()
     run_dir = root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     project_root_path = Path(project_root).resolve()
@@ -359,6 +433,40 @@ def run_conversation_training(*, project_root: str | Path,
             return "data/ph2/" + resolved.name
         return "data/ph2/" + resolved.name
 
+    if portable_source_identity:
+        # A portable manifest is only useful when its recorded source files
+        # travel with the run.  Copy the immutable public inputs once, then
+        # let resume resolve the relative identities from run_dir.  This is
+        # intentionally a byte-for-byte stdlib copy; the manifest still
+        # carries the source SHA and pack SHA as the semantic identity.
+        portable_root = run_dir / "data" / "ph2"
+        portable_root.mkdir(parents=True, exist_ok=True)
+        portable_sources = tuple(paths) + (surface_evidence_path,)
+        copied: dict[Path, Path] = {}
+        for source in portable_sources:
+            resolved = Path(source).resolve()
+            if not resolved.is_file():
+                raise ValueError(f"portable training source 缺失: {resolved}")
+            destination_identity = manifest_identity(resolved)
+            relative = PurePosixPath(destination_identity)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("portable training source identity 非法")
+            destination = (run_dir / Path(*relative.parts)).resolve()
+            try:
+                destination.relative_to(run_dir)
+            except ValueError as error:
+                raise ValueError("portable training source 越出 run root") from error
+            previous = copied.get(destination)
+            if previous is not None:
+                if previous != resolved:
+                    raise ValueError("portable training source basename 冲突")
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(resolved, destination)
+            if _sha256_file(destination) != _sha256_file(resolved):
+                raise ValueError("portable training source copy SHA 漂移")
+            copied[destination] = resolved
+
     manifest_source_files = [
         [manifest_identity(row[0]), row[1], row[2]]
         for row in pack.source_files
@@ -370,6 +478,7 @@ def run_conversation_training(*, project_root: str | Path,
         "case_count": len(pack.cases),
         "max_cases": max_cases,
         "split_counts": pack.split_counts,
+        "dialogue_structure": pack.dialogue_structure_counts,
         "train_surface_count": len(train_items),
         "heldout_surface_count": len(heldout_items),
         "typed_course": typed_report.to_dict(),
@@ -383,6 +492,16 @@ def run_conversation_training(*, project_root: str | Path,
     })
     _write_json(run_dir / "contrast_report.json", contrast.to_dict())
     database_path = run_dir / "training.sqlite3"
+    sqlite_resume_binding_sha256 = None
+    if sqlite_page_resume:
+        if resume_from is None:
+            raise ValueError("sqlite_page_resume 必须指定 resume_from")
+        from pure_integer_ai.experiments.sqlite_training_resume import (
+            prepare_sqlite_page_resume,
+        )
+        sqlite_binding = prepare_sqlite_page_resume(
+            root / resume_from, database_path)
+        sqlite_resume_binding_sha256 = sqlite_binding.manifest_sha256
     backend = SQLiteBackend(
         str(database_path), performance_mode=storage_performance_mode)
     corpus = (
@@ -403,6 +522,7 @@ def run_conversation_training(*, project_root: str | Path,
         if typed_semantic and 4 in active_stages else None
     )
     previous = gates.TRAINING_MODE
+    dialogue_successor_counts = (0, 0)
     try:
         gates.TRAINING_MODE = True
         result = formal_train(
@@ -414,6 +534,10 @@ def run_conversation_training(*, project_root: str | Path,
                 replay_completed_stages=replay_completed_stages,
                 resume=resume_from is not None,
                 base_run_id=resume_from,
+                sqlite_resume_binding_sha256=(
+                    sqlite_resume_binding_sha256),
+                typed_language_diagnostic_only=(
+                    typed_language_diagnostic_only),
                 probe_holdout=(
                     0 if strict_bundle is not None
                     else len(heldout_items) if with_heldout_probe else 0),
@@ -431,9 +555,14 @@ def run_conversation_training(*, project_root: str | Path,
                     None if strict_bundle is None
                     else strict_bundle.floor_protocol),
                 language_occurrence_protocol=occurrence_protocol,
+                language_occurrence_order_protocol=(
+                    None if occurrence_protocol is None
+                    else OccurrenceOrderProtocol((21402, 1, 50, 3))),
                 language_span_protocol=span_protocol,
                 language_semantic_course_protocol=semantic_protocol,
                 language_semantic_query_protocol=semantic_query_protocol,
+                language_dialogue_successor_protocol=(
+                    dialogue_successor_protocol),
                 language_generation_runtime_factory=generation_factory,
                 w09_weaning_builder=w09_builder,
                 w09_execute_zero_call_windows=w09_builder is not None,
@@ -441,10 +570,42 @@ def run_conversation_training(*, project_root: str | Path,
             corpus,
             backend=backend,
         )
+        if dialogue_successor_protocol is not None:
+            dialogue_successor_counts = (
+                backend.count(DIALOGUE_SUCCESSOR_TABLE),
+                backend.count(DIALOGUE_SUCCESSOR_FEATURE_TABLE),
+            )
     finally:
         gates.TRAINING_MODE = previous
         backend.commit()
         backend.close()
+    if typed_language_diagnostic_only:
+        summary = {
+            "run_id": run_id,
+            "pack_sha256": pack.pack_sha256,
+            "case_count": len(pack.cases),
+            "max_cases": max_cases,
+            "split_counts": pack.split_counts,
+            "training_item_count": len(train_items),
+            "heldout_probe_count": len(heldout_items),
+            "typed_course": typed_report.to_dict(),
+            "typed_language_h2": _typed_floor_summary(
+                result.typed_language_h2_report),
+            "typed_language_floor": _typed_floor_summary(
+                result.typed_language_floor_report),
+            "active_stages": active_stages,
+            "resume_from": resume_from,
+            "diagnostic_only": True,
+            "storage_performance_mode": storage_performance_mode,
+            "sqlite_page_resume": bool(sqlite_page_resume),
+            "sqlite_resume_source_manifest_sha256": (
+                sqlite_resume_binding_sha256),
+            "peak_working_set_bytes": _peak_working_set_bytes(),
+            "database": str(database_path),
+            "execution": result.execution.to_json(),
+        }
+        _write_json(run_dir / "training_summary.json", summary)
+        return summary
     cursor = DialogueTrainingCursor(
         tuple(bytes.fromhex(pack.pack_sha256)),
         tuple(run_id.encode("utf-8")),
@@ -465,9 +626,12 @@ def run_conversation_training(*, project_root: str | Path,
         "case_count": len(pack.cases),
         "max_cases": max_cases,
         "split_counts": pack.split_counts,
+        "dialogue_structure": pack.dialogue_structure_counts,
         "training_item_count": len(train_items),
         "heldout_probe_count": len(heldout_items) if with_heldout_probe else 0,
         "typed_course": typed_report.to_dict(),
+        "typed_language_floor": _typed_floor_summary(
+            result.typed_language_floor_report),
         "causal_only": causal_only,
         "typed_semantic": typed_semantic,
         "lang_generalization": None if result.lang_generalization is None else {
@@ -482,14 +646,27 @@ def run_conversation_training(*, project_root: str | Path,
         "weaning_ready": bool(result.weaning_ready),
         "weaning_blockers": tuple(result.weaning_blockers),
         "storage_performance_mode": storage_performance_mode,
+        "sqlite_page_resume": bool(sqlite_page_resume),
+        "sqlite_resume_source_manifest_sha256": (
+            sqlite_resume_binding_sha256),
         "storage_write_calls": getattr(backend, "storage_write_calls", 0),
         "storage_write_rows": getattr(backend, "storage_write_rows", 0),
+        "occurrence_count": int(result.occurrence_count),
+        "source_record_count": int(result.source_record_count),
+        "occurrence_order_fact_count": int(
+            result.occurrence_order_fact_count),
+        "dialogue_successor_count": dialogue_successor_counts[0],
+        "dialogue_successor_feature_count": dialogue_successor_counts[1],
         "peak_working_set_bytes": _peak_working_set_bytes(),
         "database": str(database_path),
         "training_cursor": str(cursor_path),
         "training_cursor_identity": list(cursor.identity()),
     }
     _write_json(run_dir / "training_summary.json", summary)
+    from pure_integer_ai.experiments.sqlite_training_resume import (
+        publish_sqlite_training_resume,
+    )
+    publish_sqlite_training_resume(run_dir)
     return summary
 
 
@@ -521,6 +698,12 @@ def main(argv: list[str] | None = None) -> int:
         help=("SQLite 训练存储档位；durable 默认保崩溃恢复，bulk 仅用于可重建 "
               "训练 run 并降低同步写开销"),
     )
+    parser.add_argument(
+        "--sqlite-page-resume", action="store_true",
+        help="从已发布 SQLite checkpoint 做 page-copy 快速续训")
+    parser.add_argument(
+        "--typed-language-diagnostic-only", action="store_true",
+        help="只读执行 typed H2/floor，跳过 boot/discovery/训练/dump")
     args = parser.parse_args(argv)
     summary = run_conversation_training(
         project_root=args.project_root,
@@ -537,6 +720,8 @@ def main(argv: list[str] | None = None) -> int:
         include_default_courses=not args.no_default_courses,
         replay_completed_stages=args.replay_completed_stages,
         storage_performance_mode=args.storage_performance_mode,
+        sqlite_page_resume=args.sqlite_page_resume,
+        typed_language_diagnostic_only=args.typed_language_diagnostic_only,
     )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True,
                      separators=(",", ":")))

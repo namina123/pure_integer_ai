@@ -175,6 +175,10 @@ class Segment:
     # 预处理产物（parse_segment 填·observe 读）——语言首版字段：
     tokens: list[str] = field(default_factory=list)
     role_seq: list[int] = field(default_factory=list)   # 每 token 的 role·对齐 tokens
+    # 对话 speaker 是 occurrence 来源维度，不得塞入句法 role_seq。它只由
+    # CollectedItem 的显式码点 span 投影，不从表层“用户/助手”字样猜测。
+    speaker_identity: ObjectIdentity | None = None
+    dialogue_turn_ordinal: int = 0
     # 因果对（token index 对·预处理/指向词提取填）
     structured_causal_pairs: list[tuple[int, int]] = field(default_factory=list)
     cue_based_causal_pairs: list[tuple[int, int]] = field(default_factory=list)

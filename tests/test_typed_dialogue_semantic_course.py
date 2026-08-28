@@ -35,6 +35,11 @@ def test_typed_payload_forms_real_semantic_lesson_and_keeps_ordinary_surface_out
         assert run.decision.lesson is not None
         assert len(run.build.propositions) == 2
         assert len({item.evidence_id for item in run.evidence}) == 2
+        # Semantic H-00/H-04 history must survive runtime reconstruction;
+        # a resumed Stage 3 must not depend on the original Python ledger.
+        restored_runtime = LanguageSemanticCourseRuntime(
+            ctx, _protocol(TypedDialogueSemanticMapper((21401, 99), 1)))
+        assert restored_runtime.ledger.state_key() == typed_runtime.ledger.state_key()
         ordinary = typed_runtime.process(ctx, item, payload, observed)
         assert ordinary.decision.lesson is None
         assert ordinary.request is None

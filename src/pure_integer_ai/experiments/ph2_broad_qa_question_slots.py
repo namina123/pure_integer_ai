@@ -8,8 +8,6 @@ import json
 from pathlib import Path
 import sysconfig
 
-from opencc import OpenCC
-
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_bytes
 
 
@@ -21,34 +19,21 @@ QUESTION_SLOT_SHA256 = (
     "f3783c7c38bf05f9e099edb80e9e0e1ff90aa5d1b7dd868ac4285e3e2c65c7ca")
 _ANSWER_KINDS = (
     "CAUSE", "ENTITY", "LOCATION", "MANNER", "QUANTITY", "TIME", "TYPE")
-_TO_SIMPLIFIED = OpenCC("t2s")
-
-
 def _aligned_simplified_surface(value: str) -> str:
-    """构造与原文等长的简体视图，使问式 span 保持原坐标。"""
-    converted = []
-    for character in value:
-        simplified = _TO_SIMPLIFIED.convert(character)
-        converted.append(simplified if len(simplified) == 1 else character)
-    return "".join(converted)
+    """兼容旧公开问式 artifact 的外部坐标适配。"""
+    from pure_integer_ai.experiments.ph2_broad_qa_question_slots_compat import (
+        aligned_surface,
+    )
+    return aligned_surface(value)
 
 
 def _is_contextual_slot(
         question: str, start: int, kind: str, surface: str) -> bool:
-    """拒绝侵入关系谓词的歧义槽，同时保留独立因果问式。"""
-    if kind != "CAUSE" or surface != "为什么":
-        return True
-    prefix = question[:start]
-    # “称之为什么/称作为什么”与“最常见的 X 为什么”询问名称或实体，
-    # 不是因果解释；让更短的“什么”槽接管，避免把答案页排序到因果桶。
-    return not (
-        prefix.endswith(("称", "稱", "称之", "稱之"))
-        or
-        prefix.endswith(("称之为", "稱之為", "称为", "稱為", "称作", "稱作",
-                         "叫做", "叫作"))
-        or "最常见的" in prefix
-        or "最常見的" in prefix
+    """兼容旧公开问式 artifact 的外部上下文适配。"""
+    from pure_integer_ai.experiments.ph2_broad_qa_question_slots_compat import (
+        contextual_slot_allowed,
     )
+    return contextual_slot_allowed(question, start, kind, surface)
 
 
 # object-model: exception
@@ -85,20 +70,41 @@ class BroadQaQuestionSlots:
         ))
 
     def _selected_slots(
-            self, question: str,
+            self, question: str, surface_variant_provider=None,
             ) -> tuple[tuple[int, int, str], ...]:
         """按上下文选择最长且互不重叠的问式槽 span。"""
-        aligned_question = _aligned_simplified_surface(question)
+        if not isinstance(question, str):
+            raise TypeError("question 必须是字符串")
+        # 注入 provider 是运行时语言关系的权威来源。它可能表达长度变化或
+        # 多对多表面，不能再把问题投影到固定长度外部脚本视图后复用坐标。
+        # provider 缺省时才使用旧问式 artifact 的外部坐标适配。
+        search_question = (
+            question if surface_variant_provider is not None
+            else _aligned_simplified_surface(question))
         candidates = []
         for kind, surfaces in self.entries:
             for surface in surfaces:
-                start = aligned_question.find(surface)
-                while start >= 0:
-                    end = start + len(surface)
-                    if _is_contextual_slot(
-                            aligned_question, start, kind, surface):
-                        candidates.append((start, end, kind))
-                    start = aligned_question.find(surface, start + 1)
+                variants = (surface,)
+                if surface_variant_provider is not None:
+                    if not callable(surface_variant_provider):
+                        raise TypeError(
+                            "surface_variant_provider 必须是可调用对象")
+                    variants = tuple(dict.fromkeys((
+                        surface, *surface_variant_provider(surface))))
+                for candidate_surface in variants:
+                    if (not isinstance(candidate_surface, str)
+                            or not candidate_surface):
+                        raise ValueError(
+                            "surface_variant_provider 返回非法问式表面")
+                    start = search_question.find(candidate_surface)
+                    while start >= 0:
+                        end = start + len(candidate_surface)
+                        if _is_contextual_slot(
+                                search_question, start, kind,
+                                candidate_surface):
+                            candidates.append((start, end, kind))
+                        start = search_question.find(
+                            candidate_surface, start + 1)
         candidates.sort(key=lambda item: (-(item[1] - item[0]), item))
         selected = []
         for item in candidates:
@@ -108,19 +114,23 @@ class BroadQaQuestionSlots:
             selected.append(item)
         return tuple(sorted(selected))
 
-    def strip_slots(self, question: str) -> str:
+    def strip_slots(self, question: str, surface_variant_provider=None) -> str:
         """移除显式问式变量但保留实体、属性和其他限定。"""
         parts = []
         cursor = 0
-        for start, end, _ in self._selected_slots(question):
+        for start, end, _ in self._selected_slots(
+                question, surface_variant_provider):
             parts.extend((question[cursor:start], "\n"))
             cursor = end
         parts.append(question[cursor:])
         return "".join(parts)
 
-    def answer_kinds(self, question: str) -> tuple[str, ...]:
+    def answer_kinds(
+            self, question: str, surface_variant_provider=None,
+            ) -> tuple[str, ...]:
         """返回问题实际命中的答案槽类型，不依赖任何知识页。"""
-        observed = {item[2] for item in self._selected_slots(question)}
+        observed = {item[2] for item in self._selected_slots(
+            question, surface_variant_provider)}
         return tuple(kind for kind, _ in self.entries if kind in observed)
 
 

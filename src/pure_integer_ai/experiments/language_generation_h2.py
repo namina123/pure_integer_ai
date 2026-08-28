@@ -21,6 +21,7 @@ from pure_integer_ai.experiments.round_runtime import (
     _run_runner_episodes,
 )
 from pure_integer_ai.experiments.train_context import TrainContext
+from pure_integer_ai.storage.backend import SQLiteBackend
 from pure_integer_ai.experiments.verification_orchestration import (
     APPLICABILITY_APPLICABLE,
     APPLICABILITY_NOT_APPLICABLE,
@@ -236,6 +237,7 @@ def run_typed_language_split(
     """逐项隔离运行指定 V-00 split，并核验唯一 typed episode。"""
     from pure_integer_ai.experiments.evaluation_isolation import (
         isolated_evaluation,
+        isolated_evaluation_batch,
     )
     from pure_integer_ai.experiments.evaluation_runtime import (
         _evaluation_item_for,
@@ -255,11 +257,10 @@ def run_typed_language_split(
 
     case_by_identity = {item.identity: item for item in cases}
 
-    results = []
-    for case_index, assignment in enumerate(assignments):
+    def run_case(case_index, assignment, case, evaluation_context):
         case = case_by_identity[assignment.identity]
         label = f"{label_prefix}-{version}-{case_index}"
-        with isolated_evaluation(ctx, label=label) as eval_ctx:
+        with evaluation_context(label) as eval_ctx:
             item = copy.deepcopy(_evaluation_item_for(eval_ctx, assignment))
             episodes = _run_runner_episodes(
                 eval_ctx,
@@ -294,6 +295,11 @@ def run_typed_language_split(
                         failure += "; semantic_sources=" + repr(tuple(
                             item.materialized.atomic.definition.source.stable_key()
                             for item in candidates))
+                        failure += "; semantic_shapes=" + repr(tuple((
+                            item.materialized.atomic.definition.predicate.stable_key(),
+                            item.materialized.structure.stable_key(),
+                            item.materialized.atomic.definition.source_anchor.stable_key(),
+                        ) for item in candidates))
                 else:
                     failure += "; semantic_recovery=none"
         elif not typed[0].signals:
@@ -313,12 +319,36 @@ def run_typed_language_split(
                         failure += "; semantic_sources=" + repr(tuple(
                             item.materialized.atomic.definition.source.stable_key()
                             for item in recovery.input_value.candidates))
+                        failure += "; semantic_shapes=" + repr(tuple((
+                            item.materialized.atomic.definition.predicate.stable_key(),
+                            item.materialized.structure.stable_key(),
+                            item.materialized.atomic.definition.source_anchor.stable_key(),
+                        ) for item in recovery.input_value.candidates))
         episode = typed[0] if len(typed) == 1 else None
-        results.append(_compare_h2_case(
+        return _compare_h2_case(
             case,
             episode,
             failure=failure,
-        ))
+        )
+
+    results = []
+    # A typed H2 case is evaluated in a fresh TrainContext.  SQLite writes are
+    # wrapped in a savepoint and rolled back between cases, so the expensive
+    # 1.5GB page copy happens once per H2 batch instead of once per sample.
+    # DictBackend and custom backends retain the original per-case isolation.
+    if isinstance(ctx.backend, SQLiteBackend):
+        with isolated_evaluation_batch(
+                ctx, label=f"{label_prefix}-{version}-batch") as begin_case:
+            for case_index, assignment in enumerate(assignments):
+                case = case_by_identity[assignment.identity]
+                results.append(run_case(
+                    case_index, assignment, case, begin_case))
+    else:
+        for case_index, assignment in enumerate(assignments):
+            case = case_by_identity[assignment.identity]
+            results.append(run_case(
+                case_index, assignment, case,
+                lambda label: isolated_evaluation(ctx, label=label)))
     return tuple(results)
 
 

@@ -270,6 +270,43 @@ def _item_sentence_bounds(item: CollectedItem) -> list[tuple[int, int]]:
     )
 
 
+def _item_observation_bounds(
+        item: CollectedItem,
+        token_spans: tuple[tuple[int, int, int], ...] | None,
+        ) -> list[tuple[int, int, object | None, int]]:
+    """把句界进一步按显式 speaker turn 切分，不从文字猜测角色。"""
+    sentence_ranges = _item_sentence_bounds(item)
+    if not item.speaker_spans:
+        return [(start, end, item.speaker_identity, 0)
+                for start, end in sentence_ranges]
+    if token_spans is None:
+        raise ValueError("speaker spans 缺少来源化 token spans")
+    token_speakers: list[tuple[object, int]] = []
+    span_index = 0
+    for token_start, token_end, _ordinal in token_spans:
+        while (span_index < len(item.speaker_spans)
+               and token_start >= item.speaker_spans[span_index].end):
+            span_index += 1
+        if span_index >= len(item.speaker_spans):
+            raise ValueError("token span 超出 speaker spans")
+        span = item.speaker_spans[span_index]
+        if token_start < span.start or token_end > span.end:
+            raise ValueError("token 跨越 speaker turn 边界")
+        token_speakers.append((span.speaker, span.turn_ordinal))
+    result = []
+    for sentence_start, sentence_end in sentence_ranges:
+        cursor = sentence_start
+        while cursor < sentence_end:
+            speaker, turn_ordinal = token_speakers[cursor]
+            end = cursor + 1
+            while (end < sentence_end
+                   and token_speakers[end] == (speaker, turn_ordinal)):
+                end += 1
+            result.append((cursor, end, speaker, turn_ordinal))
+            cursor = end
+    return result
+
+
 def _split_item_to_segments(item: CollectedItem, *,
                             backend=None, edge_store=None,
                             space_id: int | None = None,
@@ -333,7 +370,8 @@ def _split_item_to_segments(item: CollectedItem, *,
         raise ValueError("token span 数量与 CollectedItem.tokens 不一致")
     # 句界：observe、discovery 和 floor 统一消费同一来源化 active 决定。
     segs: list[Segment] = []
-    for start, end in _item_sentence_bounds(item):
+    for start, end, speaker_identity, turn_ordinal in _item_observation_bounds(
+            item, source_spans):
         rseq = list(item.role_seq[start:end]) if item.role_seq else []
         cpairs = [(a - start, b - start) for (a, b) in item.causal_pairs
                   if start <= a < end and start <= b < end]
@@ -425,6 +463,8 @@ def _split_item_to_segments(item: CollectedItem, *,
             seg_id=len(segs),
             modality=item.modality, lang=item.lang, domain=item.domain,
             tokens=seg_tokens, role_seq=rseq,
+            speaker_identity=speaker_identity,
+            dialogue_turn_ordinal=turn_ordinal,
             structured_causal_pairs=cpairs,
             cue_based_causal_pairs=cue_pairs,
             is_a_pairs=is_a_seg_pairs,

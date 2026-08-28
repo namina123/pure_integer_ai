@@ -43,6 +43,7 @@ from pure_integer_ai.storage.k_run_boundary import (
 
 BROAD_DIALOGUE_PERSISTENCE_V1 = 1
 BROAD_DIALOGUE_PERSISTENCE_V2 = 2
+BROAD_DIALOGUE_PERSISTENCE_V3 = 3
 BROAD_DIALOGUE_CHECKPOINT_V1 = 1
 BROAD_DIALOGUE_CHECKPOINT_V2 = 2
 BROAD_DIALOGUE_DEFAULT_DIR = "broad_dialogue_checkpoints"
@@ -122,19 +123,47 @@ def _encode_citation(citation: DialogueCitation) -> tuple[int, ...]:
                         label="citation source title")
     _pack_optional_text(result, citation.source_url,
                         label="citation source url")
+    _pack_optional_text(result, citation.license_id,
+                        label="citation license id", ascii_only=True)
+    _pack_optional_text(result, citation.attribution,
+                        label="citation attribution")
+    if citation.source_ref is None:
+        result.append(0)
+    else:
+        result.append(1)
+        _pack(result, citation.source_ref, label="citation source ref")
     return tuple(result)
 
 
-def _decode_citation(record: tuple[int, ...]) -> DialogueCitation:
+def _decode_citation(record: tuple[int, ...], *, version: int) -> DialogueCitation:
     reader = IntegerStreamReader(record)
     surface = _decode_text(
         _read_key(reader, label="citation surface", empty=False),
         label="citation surface")
     title = _read_optional_text(reader, label="citation source title")
     url = _read_optional_text(reader, label="citation source url")
+    license_id = None
+    attribution = None
+    source_ref = None
+    if version >= BROAD_DIALOGUE_PERSISTENCE_V3:
+        license_id = _read_optional_text(
+            reader, label="citation license id", ascii_only=True)
+        attribution = _read_optional_text(reader, label="citation attribution")
+        try:
+            source_ref_present = reader.read(
+                label="citation source ref.present")
+        except IntegerCodecError as error:
+            raise BroadDialoguePersistenceError(
+                "citation source ref 标记缺失") from error
+        if source_ref_present == 1:
+            source_ref = _read_key(
+                reader, label="citation source ref", empty=False)
+        elif source_ref_present != 0:
+            raise BroadDialoguePersistenceError("citation source ref 标记非法")
     try:
         reader.finish()
-        return DialogueCitation(surface, title, url)
+        return DialogueCitation(
+            surface, title, url, license_id, attribution, source_ref)
     except (IntegerCodecError, TypeError, ValueError) as error:
         raise BroadDialoguePersistenceError("citation 无法恢复") from error
 
@@ -150,7 +179,7 @@ def _encode_turn(turn: DialogueTurn) -> tuple[int, ...]:
             or any(not isinstance(item, DialogueCitation)
                    for item in turn.citations)):
         raise BroadDialoguePersistenceError("turn citations 非法")
-    result = [BROAD_DIALOGUE_PERSISTENCE_V2, turn.ordinal]
+    result = [BROAD_DIALOGUE_PERSISTENCE_V3, turn.ordinal]
     _pack(result, _text(turn.status, label="turn status", ascii_only=True),
           label="turn status")
     _pack(result, _text(turn.question, label="turn question"),
@@ -177,7 +206,8 @@ def _decode_turn(record: tuple[int, ...]) -> DialogueTurn:
     except (IntegerCodecError, ValueError) as error:
         raise BroadDialoguePersistenceError("turn header 损坏") from error
     if version not in (BROAD_DIALOGUE_PERSISTENCE_V1,
-                       BROAD_DIALOGUE_PERSISTENCE_V2):
+                       BROAD_DIALOGUE_PERSISTENCE_V2,
+                       BROAD_DIALOGUE_PERSISTENCE_V3):
         raise BroadDialoguePersistenceError("turn codec version 未注册")
     status = _decode_text(_read_key(reader, label="turn status"),
                           label="turn status", ascii_only=True)
@@ -192,13 +222,14 @@ def _decode_turn(record: tuple[int, ...]) -> DialogueTurn:
     turn_key = _read_key(reader, label="turn key", empty=False)
     retrieval = _read_optional_text(reader, label="turn retrieval question")
     citations = ()
-    if version == BROAD_DIALOGUE_PERSISTENCE_V2:
+    if version >= BROAD_DIALOGUE_PERSISTENCE_V2:
         try:
             citation_count = reader.read_nonnegative(label="turn citation count")
         except IntegerCodecError as error:
             raise BroadDialoguePersistenceError("turn citation count 损坏") from error
         citations = tuple(_decode_citation(
-            _read_key(reader, label=f"turn citation[{index}]", empty=False))
+            _read_key(reader, label=f"turn citation[{index}]", empty=False),
+            version=version)
             for index in range(citation_count))
     try:
         reader.finish()
@@ -320,6 +351,11 @@ class PersistentBroadDialogueRecovery:
     checkpoint_identity: tuple[int, ...]
     turn_index: tuple[tuple[int, int], ...]
     runtime_event_index: tuple[tuple[tuple[int, ...], int], ...] = ()
+    # 一次恢复期间建立的冷轮次索引。索引是派生缓存，不参与 checkpoint
+    # 身份；每个 ordinal 只保留最新可回读的完整轮次。
+    cold_turns: tuple[DialogueTurn, ...] = ()
+    cold_feature_index: tuple[tuple[tuple[int, ...], tuple[int, ...]], ...] = ()
+    cold_turn_ordinals: tuple[int, ...] = ()
 
     @property
     def indexed_turn_count(self) -> int:
@@ -350,6 +386,103 @@ class PersistentBroadDialogueRecovery:
             ordinal = self.runtime_event_index[position][1]
             return runtime_state.events[ordinal], 1
         return None, 1
+
+    @staticmethod
+    def _recall_features(value: str) -> frozenset[tuple[int, ...]]:
+        """形成与具体语言无关的有界码点 n-gram 特征。"""
+        if type(value) is not str or not value.strip():
+            raise ValueError("memory recall query 必须是非空文本")
+        normalized = " ".join(value.split())
+        codepoints = tuple(ord(item) for item in normalized)
+        features: set[tuple[int, ...]] = set()
+        for width in (1, 2, 3):
+            features.update(
+                codepoints[index:index + width]
+                for index in range(max(0, len(codepoints) - width + 1))
+                if codepoints[index:index + width]
+            )
+        # 空白和标点只在组合中有意义；限制特征数避免长输入放大召回。
+        return frozenset(item for item in features if any(
+            codepoint not in {9, 10, 13, 32} for codepoint in item))
+
+    def query_relevant_turns(
+            self, question: str, *, limit: int = 4,
+            minimum_similarity_permille: int = 500,
+            ) -> tuple[DialogueTurn, ...]:
+        """按整数特征相似度返回有界冷记忆轮次，不读取 checkpoint 文件。"""
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("memory recall limit 必须为正整数")
+        if (type(minimum_similarity_permille) is not int
+                or not 0 <= minimum_similarity_permille <= 1000):
+            raise ValueError("memory recall similarity 必须是 0..1000 整数")
+        query = self._recall_features(question)
+        if not query:
+            return ()
+        feature_keys = tuple(item[0] for item in self.cold_feature_index)
+        candidates: set[int] = set()
+        for feature in query:
+            position = bisect_left(feature_keys, feature)
+            if (position < len(feature_keys)
+                    and feature_keys[position] == feature):
+                candidates.update(self.cold_feature_index[position][1])
+        ranked: list[tuple[int, int, int, DialogueTurn]] = []
+        for ordinal in candidates:
+            position = bisect_left(self.cold_turn_ordinals, ordinal)
+            if (position >= len(self.cold_turn_ordinals)
+                    or self.cold_turn_ordinals[position] != ordinal):
+                continue
+            turn = self.cold_turns[position]
+            candidate = self._recall_features(turn.question)
+            overlap = len(query.intersection(candidate))
+            if overlap <= 0:
+                continue
+            # Dice 型整数分数，时间较近者只作为确定性次级排序。
+            score = (2000 * overlap) // (len(query) + len(candidate))
+            if score < minimum_similarity_permille:
+                continue
+            ranked.append((score, overlap, turn.ordinal, turn))
+        ranked.sort(key=lambda item: (-item[0], -item[1], -item[2]))
+        return tuple(item[3] for item in ranked[:limit])
+
+    def with_turn(self, turn: DialogueTurn) -> "PersistentBroadDialogueRecovery":
+        """把新完成的一轮加入 run-local 冷索引，不重读 checkpoint 链。"""
+        if not isinstance(turn, DialogueTurn):
+            raise TypeError("memory recall turn 类型错误")
+        if self.cold_turn_ordinals and turn.ordinal < self.cold_turn_ordinals[-1]:
+            # This path is only for a repaired/replayed checkpoint; normal
+            # dialogue appends are monotonic and remain O(features of turn).
+            by_ordinal = {item.ordinal: item for item in self.cold_turns}
+            by_ordinal[turn.ordinal] = turn
+            cold_turns = tuple(by_ordinal[key] for key in sorted(by_ordinal))
+            feature_ordinals: dict[tuple[int, ...], set[int]] = {}
+            for item in cold_turns:
+                for feature in self._recall_features(item.question):
+                    feature_ordinals.setdefault(feature, set()).add(item.ordinal)
+            cold_feature_index = tuple(
+                (feature, tuple(sorted(ordinals)))
+                for feature, ordinals in sorted(feature_ordinals.items())
+            )
+        else:
+            if self.cold_turns and turn.ordinal == self.cold_turns[-1].ordinal:
+                if turn.turn_key == self.cold_turns[-1].turn_key:
+                    return self
+                raise ValueError("memory recall ordinal identity 漂移")
+            cold_turns = (*self.cold_turns, turn)
+            feature_map = {
+                feature: ordinals
+                for feature, ordinals in self.cold_feature_index
+            }
+            for feature in self._recall_features(turn.question):
+                feature_map[feature] = (*feature_map.get(feature, ()), turn.ordinal)
+            cold_feature_index = tuple(
+                (feature, tuple(ordinals))
+                for feature, ordinals in sorted(feature_map.items())
+            )
+        return PersistentBroadDialogueRecovery(
+            self.checkpoint, self.checkpoint_identity, self.turn_index,
+            self.runtime_event_index, cold_turns, cold_feature_index,
+            tuple(item.ordinal for item in cold_turns),
+        )
 
 
 def _checkpoint_candidates(root: KRunRoot, directory: KRunRoot,
@@ -425,6 +558,7 @@ def recover_broad_dialogue_checkpoint(
     previous: tuple[int, ...] = ()
     latest: PersistentBroadDialogueCheckpoint | None = None
     latest_identity: tuple[int, ...] = ()
+    turns_by_ordinal: dict[int, DialogueTurn] = {}
     expected = 1
     for ordinal, path in candidates:
         if ordinal != expected:
@@ -470,6 +604,10 @@ def recover_broad_dialogue_checkpoint(
         identity = checkpoint.identity()
         previous = identity
         latest, latest_identity = checkpoint, identity
+        for turn in state.turns:
+            prior = turns_by_ordinal.get(turn.ordinal)
+            if prior is None or turn.turn_key != prior.turn_key:
+                turns_by_ordinal[turn.ordinal] = turn
         expected += 1
     if latest is None:
         raise BroadDialoguePersistenceError("checkpoint 恢复为空")
@@ -488,8 +626,21 @@ def recover_broad_dialogue_checkpoint(
                     "Runtime memory-item 索引存在竞争 revision")
         runtime_index = tuple(sorted(
             (key, index) for key, (index, _event) in by_item.items()))
+    cold_turns = tuple(turns_by_ordinal[key] for key in sorted(turns_by_ordinal))
+    feature_ordinals: dict[tuple[int, ...], set[int]] = {}
+    for turn in cold_turns:
+        for feature in PersistentBroadDialogueRecovery._recall_features(
+                turn.question):
+            feature_ordinals.setdefault(feature, set()).add(turn.ordinal)
+    cold_feature_index = tuple(
+        (feature, tuple(sorted(ordinals)))
+        for feature, ordinals in sorted(feature_ordinals.items())
+    )
     return PersistentBroadDialogueRecovery(
-        latest, latest_identity, index, runtime_index)
+        latest, latest_identity, index, runtime_index,
+        cold_turns, cold_feature_index,
+        tuple(item.ordinal for item in cold_turns),
+    )
 
 
 __all__ = [

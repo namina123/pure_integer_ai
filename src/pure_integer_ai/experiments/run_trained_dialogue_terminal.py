@@ -19,11 +19,15 @@ from typing import Any
 
 from pure_integer_ai.experiments.conversation_broad_qa_runtime import (
     BroadDialogueState,
+    DialogueCitation,
+    DialogueTurn,
     answer_broad_dialogue_turn,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_query import BroadQaQueryCache
+from pure_integer_ai.experiments.ph2_broad_qa_query import SurfaceVariantProvider
 from pure_integer_ai.experiments.conversation_broad_dialogue_persistence import (
     BroadDialoguePersistenceError,
+    PersistentBroadDialogueRecovery,
     recover_broad_dialogue_checkpoint,
     write_broad_dialogue_checkpoint,
 )
@@ -56,6 +60,28 @@ from pure_integer_ai.experiments.conversation_runtime_material_persistence impor
 from pure_integer_ai.experiments.conversation_trained_surface_runtime import (
     TrainedSurfaceRuntime,
     load_trained_surface_runtime,
+)
+from pure_integer_ai.experiments.build_learned_dialogue_response_artifact import (
+    load_learned_dialogue_response_artifact,
+)
+from pure_integer_ai.experiments.conversation_learned_dialogue_response import (
+    LearnedDialogueResponseRuntime,
+    PRODUCTION_MIN_SIMILARITY_PERMILLE,
+)
+from pure_integer_ai.experiments.conversation_dialogue_experts import (
+    LearnedDialogueExpertRouter,
+)
+from pure_integer_ai.experiments.scidb_csq_passage_index import (
+    ScidbCsqPassageRuntime,
+)
+from pure_integer_ai.experiments.sqlite_learned_dialogue_intent import (
+    SqliteLearnedDialogueIntentRuntime,
+)
+from pure_integer_ai.experiments.dialogue_expert_routing_artifact import (
+    load_dialogue_expert_routing_model,
+)
+from pure_integer_ai.experiments.dialogue_successor_graph import (
+    SqliteDialogueSuccessorRuntime,
 )
 from pure_integer_ai.experiments.ph2_w03_w04_w05_sparse_qa_snapshot import (
     load_or_rebuild_public_sparse_qa_runtime,
@@ -93,6 +119,51 @@ def _require_k_file(value: str | Path, *, label: str) -> Path:
     return path
 
 
+def _release_bound_artifact_root(
+        release: object | None, explicit_root: str | Path | None, *,
+        attribute: str, label: str,
+        ) -> Path | str | None:
+    """选择 release 内 artifact；显式外部路径不得替换已发布身份。"""
+    embedded = getattr(release, attribute, None) if release is not None else None
+    if embedded is None:
+        return explicit_root
+    embedded_path = Path(embedded).resolve()
+    if (explicit_root is not None
+            and Path(explicit_root).resolve() != embedded_path):
+        raise ValueError(f"release_root 与 {label} 不得冲突")
+    return embedded_path
+
+
+def _release_bound_artifact_roots(
+        release: object | None, explicit_roots: tuple[str | Path, ...], *,
+        attribute: str, label: str,
+        ) -> tuple[Path | str, ...]:
+    """Select one ordered embedded expert family without external replacement."""
+    embedded = (tuple(getattr(release, attribute, ()))
+                if release is not None else ())
+    explicit = tuple(explicit_roots)
+    if not embedded:
+        return explicit
+    embedded_paths = tuple(Path(item).resolve() for item in embedded)
+    if (explicit and tuple(Path(item).resolve() for item in explicit)
+            != embedded_paths):
+        raise ValueError(f"release_root 与 {label} 不得冲突")
+    return embedded_paths
+
+
+def _release_bound_artifact_file(
+        release: object | None, explicit: str | Path | None, *,
+        attribute: str, label: str,
+        ) -> Path | str | None:
+    embedded = getattr(release, attribute, None) if release is not None else None
+    if embedded is None:
+        return explicit
+    embedded_path = Path(embedded).resolve()
+    if explicit is not None and Path(explicit).resolve() != embedded_path:
+        raise ValueError(f"release_root 与 {label} 不得冲突")
+    return embedded_path
+
+
 def _course_paths_for_training_run(
         project_root: Path,
         training_run_root: Path,
@@ -122,12 +193,28 @@ def _course_paths_for_training_run(
             raise ValueError("training run source_files 记录非法")
         candidate = Path(str(row[0]))
         if not candidate.is_absolute():
-            candidate = project_root / candidate
-        candidate = candidate.resolve()
-        try:
-            candidate.relative_to(project_root)
-        except ValueError as error:
-            raise ValueError("training run source_files 越出 project_root") from error
+            project_candidate = (project_root / candidate).resolve()
+            if project_candidate.is_file():
+                try:
+                    project_candidate.relative_to(project_root)
+                except ValueError as error:
+                    raise ValueError(
+                        "training run source_files 越出 project_root") from error
+                candidate = project_candidate
+            else:
+                # Portable training runs may retain their public source copy
+                # under the K: run root.  This keeps D: free of expanded
+                # training data while allowing an independent terminal to
+                # rebuild exactly the recorded pack.
+                run_candidate = (training_run_root / candidate).resolve()
+                try:
+                    run_candidate.relative_to(training_run_root)
+                except ValueError as error:
+                    raise ValueError(
+                        "training run source_files 越出 training_run_root") from error
+                candidate = run_candidate
+        else:
+            candidate = candidate.resolve()
         if not candidate.is_file():
             raise ValueError(f"training run source_files 缺失: {candidate}")
         resolved.append(candidate)
@@ -152,8 +239,40 @@ def _course_paths_for_training_run(
                 raise ValueError("training run source identity 记录非法")
             source_identity_map[resolved[ordinal]] = item[1]
     else:
-        source_identity_map = None
+        # 早期 portable run 将 identity 直接写在 source_files[0]，但未
+        # 单独写 source_identities；优先从该冻结字段恢复，避免把当前宿主
+        # 的绝对路径重新带入 pack SHA。
+        portable_rows = all(
+            isinstance(row, list) and len(row) == 3
+            and isinstance(row[0], str)
+            and not Path(row[0]).is_absolute()
+            and not Path(row[0]).drive
+            for row in rows)
+        source_identity_map = (
+            {resolved[ordinal]: str(row[0])
+             for ordinal, row in enumerate(rows)}
+            if portable_rows else None)
     return tuple(resolved), max_cases, source_identity_map
+
+
+def _frozen_pack_sha256(training_run_root: Path) -> str:
+    """读取训练 run 已冻结的 pack identity，不重新解析 JSONL 课程。
+
+    发布运行的课程文件已经由 ``public_model_release`` manifest 绑定并在
+    strict 档校验 SHA；pack manifest 同时记录了由训练时 canonical 投影
+    得到的 pack SHA。因此 deferred 档可以复用这个整数身份，把启动时
+    数百万次字符/整数编码留给训练入口，而不是每次对话进程重复执行。
+    """
+    manifest_path = training_run_root / "dialogue_pack_manifest.json"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("training run pack manifest 不可回读") from error
+    value = payload.get("pack_sha256") if isinstance(payload, dict) else None
+    if (not isinstance(value, str) or len(value) != 64
+            or any(char not in "0123456789abcdef" for char in value)):
+        raise ValueError("training run pack_sha256 非法")
+    return value
 
 
 def _narrow_answer(runtime, catalog, trained_surface: TrainedSurfaceRuntime | None):
@@ -201,6 +320,20 @@ def _display(turn) -> str:
     return answer
 
 
+def _public_turn_text(turn) -> str:
+    """返回正式用户接口唯一可见的自然语言文本。
+
+    ``DialogueTurn.status`` 是理解/评测侧的状态，不属于公开语言协议。
+    这里复用终端已有的人类可读投影；来源引用仍由协议的 ``citations``
+    字段独立传递。这样 JSONL 与终端共享同一语言表面，不会把内部状态
+    枚举泄漏给调用者。
+    """
+    value = _display(turn)
+    if type(value) is not str or not value.strip():
+        raise ValueError("公开对话文本不能为空")
+    return value
+
+
 def _protocol_turn_payload(turn) -> dict[str, object]:
     """把 DialogueTurn 投影为稳定的机器可读响应，不改变语义。"""
     return {
@@ -218,11 +351,51 @@ def _protocol_turn_payload(turn) -> dict[str, object]:
                 "surface": citation.surface,
                 "source_title": citation.source_title,
                 "source_url": citation.source_url,
+                "license_id": citation.license_id,
+                "attribution": citation.attribution,
+                "source_ref": (
+                    list(citation.source_ref)
+                    if citation.source_ref is not None else None),
             }
             for citation in turn.citations
         ],
         "turn_key": list(turn.turn_key),
     }
+
+
+def _public_protocol_turn_payload(turn) -> dict[str, object]:
+    """把内部 turn 投影为正式 JSONL 用户响应。
+
+    公开协议只提供自然语言 ``text``、来源引用和稳定轮次身份；内部
+    ``status``、原始答案槽和检索问式留在评测/审计投影中，不对用户暴露。
+    """
+    if not hasattr(turn, "ordinal"):
+        raise TypeError("公开协议 turn 类型错误")
+    payload: dict[str, object] = {
+        "type": "response",
+        "ordinal": turn.ordinal,
+        "text": _public_turn_text(turn),
+        "citations": [
+            {
+                "surface": citation.surface,
+                "source_title": citation.source_title,
+                "source_url": citation.source_url,
+                "license_id": citation.license_id,
+                "attribution": citation.attribution,
+                "source_ref": (
+                    list(citation.source_ref)
+                    if citation.source_ref is not None else None),
+            }
+            for citation in turn.citations
+        ],
+        "turn_key": list(turn.turn_key),
+    }
+    if turn.source_title is not None or turn.source_url is not None:
+        payload["source"] = {
+            "title": turn.source_title,
+            "url": turn.source_url,
+        }
+    return payload
 
 
 def _write_protocol_payload(stream_out: BinaryIO,
@@ -295,6 +468,11 @@ def run_trained_dialogue_terminal(
         qa_database: str | Path | None = None,
         release_root: str | Path | None = None,
         training_run_root: str | Path | None = None,
+        response_organization_artifact_root: str | Path | None = None,
+        dialogue_response_artifact_root: str | Path | None = None,
+        dialogue_domain_expert_artifact_roots: tuple[str | Path, ...] = (),
+        dialogue_expert_routing_artifact_root: str | Path | None = None,
+        science_passage_artifact_root: str | Path | None = None,
         session_root: str | Path | None = None,
         extra_course_paths: tuple[str | Path, ...] = (),
         extra_variant_course_paths: tuple[str | Path, ...] = (),
@@ -307,6 +485,9 @@ def run_trained_dialogue_terminal(
         runtime_material_binding_root: str | Path | None = None,
         runtime_material_source_records: SourceRecordRepository | None = None,
         runtime_material_observations: tuple[object, ...] = (),
+        surface_variant_provider: SurfaceVariantProvider | None = None,
+        source_followup_resolver: Callable[[str, DialogueTurn], bool]
+        | None = None,
         runtime_material_runtime_root: str | Path | None = None,
         runtime_material_runtime_database: str | Path | None = None,
         runtime_material_binding_relative_path: str | Path = (
@@ -434,7 +615,35 @@ def run_trained_dialogue_terminal(
         root = Path(project_root).resolve()
         resolved_training_run_root = None
         sparse_snapshot = None
+    dialogue_response_artifact_root = _release_bound_artifact_root(
+        release, dialogue_response_artifact_root,
+        attribute="dialogue_response_artifact",
+        label="dialogue_response_artifact_root")
+    dialogue_domain_expert_artifact_roots = _release_bound_artifact_roots(
+        release, dialogue_domain_expert_artifact_roots,
+        attribute="dialogue_domain_expert_artifacts",
+        label="dialogue_domain_expert_artifact_roots")
+    dialogue_expert_routing_artifact_root = _release_bound_artifact_file(
+        release, dialogue_expert_routing_artifact_root,
+        attribute="dialogue_expert_routing_artifact",
+        label="dialogue_expert_routing_artifact_root")
+    response_organization_artifact_root = _release_bound_artifact_root(
+        release, response_organization_artifact_root,
+        attribute="response_organization_artifact",
+        label="response_organization_artifact_root")
+    science_passage_artifact_root = _release_bound_artifact_root(
+        release, science_passage_artifact_root,
+        attribute="science_passage_artifact",
+        label="science_passage_artifact_root")
     trained_surface = None
+    learned_dialogue_answer = None
+    learned_dialogue_clarify_answer = None
+    core_dialogue_runtime = None
+    # session checkpoint 恢复后注入的冷记忆索引；未启用 session 时保持空。
+    dialogue_recovery = None
+    dialogue_response_runtime = None
+    science_passage_runtime = None
+    source_passage_response = None
     if release is not None and training_run_root is not None:
         if Path(training_run_root).resolve() != resolved_training_run_root:
             raise ValueError("release_root 与 training_run_root 不得冲突")
@@ -450,20 +659,229 @@ def run_trained_dialogue_terminal(
             source_identities = {
                 path: f"data/ph2/{path.name}" for path in course_paths
             }
-        pack = load_dialogue_training_pack(
-            course_paths, max_cases=max_cases,
-            source_path_identities=(source_identity_map or source_identities))
+        # A published release already freezes both source-file identities and
+        # the canonical pack SHA. Rebuilding 3k+ JSONL records here was the
+        # dominant cold-start cost (~17 s) and contributes nothing to a
+        # read-only response once the trained model is loaded. Keep the full
+        # parser for strict/non-release callers and use only the frozen
+        # identity in deferred release tiers.
+        if (release is not None
+                and performance_tier in {"deferred-narrow", "deferred-narrow-fast"}
+                and not extra_course_paths):
+            expected_pack_sha256 = _frozen_pack_sha256(run_root)
+        else:
+            pack = load_dialogue_training_pack(
+                course_paths, max_cases=max_cases,
+                source_path_identities=(source_identity_map or source_identities))
+            expected_pack_sha256 = pack.pack_sha256
         load_training_observation(
-            run_root, expected_pack_sha256=pack.pack_sha256)
+            run_root, expected_pack_sha256=expected_pack_sha256)
         trained_surface = load_trained_surface_runtime(
             project_root=root,
             training_run_root=run_root,
-            expected_pack_sha256=pack.pack_sha256,
+            expected_pack_sha256=expected_pack_sha256,
+            response_organization_artifact_root=(
+                response_organization_artifact_root),
             extra_variant_course_paths=tuple(
                 Path(item).resolve() for item in extra_variant_course_paths),
             extra_variant_evidence_paths=tuple(
                 Path(item).resolve() for item in extra_variant_evidence_paths),
         )
+        model_database = run_root / "training.sqlite3"
+        if model_database.is_file():
+            try:
+                candidate_runtime = SqliteDialogueSuccessorRuntime(
+                    model_database)
+                if candidate_runtime.count() > 0:
+                    core_dialogue_runtime = candidate_runtime
+                else:
+                    candidate_runtime.close()
+            except ValueError:
+                # 旧 release 没有后继表时保持原兼容路径；新 release validator
+                # 会单独要求该生产能力非零。
+                core_dialogue_runtime = None
+    if (dialogue_domain_expert_artifact_roots
+            and dialogue_response_artifact_root is None):
+        raise ValueError("领域对话专家必须绑定通用对话专家")
+    if dialogue_response_artifact_root is not None:
+        def _load_dialogue_response_runtime(
+                artifact_root: str | Path,
+                ) -> LearnedDialogueResponseRuntime:
+            artifact = load_learned_dialogue_response_artifact(
+                artifact_root,
+                verify_payload_hashes=(
+                    performance_tier != "deferred-narrow-fast"))
+            sqlite_intent = (
+                SqliteLearnedDialogueIntentRuntime(
+                    artifact.intent_index_path, artifact.model.fragments)
+                if artifact.intent_index_path is not None else None)
+            return LearnedDialogueResponseRuntime(
+                artifact.model, artifact.intent_model,
+                intent_runtime=sqlite_intent)
+
+        general_runtime = _load_dialogue_response_runtime(
+            dialogue_response_artifact_root)
+        if dialogue_expert_routing_artifact_root is not None:
+            routing = load_dialogue_expert_routing_model(
+                dialogue_expert_routing_artifact_root)
+            if (routing.general_course_sha256
+                    != general_runtime.model.course_sha256):
+                raise ValueError("expert router 与通用模型 course SHA 不一致")
+            if len(routing.domain_activation_features) != len(
+                    dialogue_domain_expert_artifact_roots):
+                raise ValueError("expert router 与领域 artifact 数量不一致")
+            def _bound_domain_loader(
+                    item: str | Path, expected_sha: tuple[int, ...],
+                    ) -> LearnedDialogueResponseRuntime:
+                runtime = _load_dialogue_response_runtime(item)
+                if runtime.model.course_sha256 != expected_sha:
+                    runtime.close()
+                    raise ValueError(
+                        "expert router 与领域模型 course SHA 不一致")
+                return runtime
+
+            lazy_domains = tuple(
+                (frozenset(features),
+                 lambda item=item, expected_sha=expected_sha:
+                     _bound_domain_loader(item, expected_sha))
+                for features, item, expected_sha in zip(
+                    routing.domain_activation_features,
+                    dialogue_domain_expert_artifact_roots,
+                    routing.domain_course_sha256s))
+            dialogue_response_runtime = LearnedDialogueExpertRouter(
+                general_runtime, (), lazy_domains=lazy_domains)
+        else:
+            domain_runtimes = tuple(
+                _load_dialogue_response_runtime(item)
+                for item in dialogue_domain_expert_artifact_roots)
+            dialogue_response_runtime = LearnedDialogueExpertRouter(
+                general_runtime, domain_runtimes)
+
+        def _dialogue_history(value: str) -> tuple[tuple[int, str], ...]:
+            history: list[tuple[int, str]] = []
+            hot_ordinals = set()
+            for prior_turn in state.turns:
+                hot_ordinals.add(prior_turn.ordinal)
+                history.append((1, prior_turn.question))
+                if prior_turn.answer:
+                    history.append((2, prior_turn.answer))
+            if dialogue_recovery is not None:
+                for prior_turn in dialogue_recovery.query_relevant_turns(
+                        value, limit=4, minimum_similarity_permille=600):
+                    if prior_turn.ordinal in hot_ordinals:
+                        continue
+                    history.append((1, prior_turn.question))
+                    if prior_turn.answer:
+                        history.append((2, prior_turn.answer))
+            return tuple(history)
+
+        def _learned_dialogue_answer(value: str) -> str | None:
+            result = dialogue_response_runtime.respond(
+                value,
+                history=_dialogue_history(value),
+                minimum_similarity_permille=(
+                    PRODUCTION_MIN_SIMILARITY_PERMILLE),
+            )
+            return result.surface if result.used else None
+
+        learned_dialogue_answer = _learned_dialogue_answer
+
+        def _learned_dialogue_clarify_answer(value: str) -> str | None:
+            result = dialogue_response_runtime.respond(
+                value,
+                history=_dialogue_history(value),
+                minimum_fragment_occurrences=1,
+                minimum_similarity_permille=900,
+            )
+            return result.surface if result.used else None
+
+        learned_dialogue_clarify_answer = (
+            _learned_dialogue_clarify_answer)
+    if core_dialogue_runtime is not None:
+        legacy_dialogue_answer = learned_dialogue_answer
+        legacy_dialogue_clarify = learned_dialogue_clarify_answer
+
+        def _core_dialogue_history(value: str) -> tuple[tuple[int, str], ...]:
+            """把既有有界会话状态投影为核心后继查询的分层热区。"""
+            history: list[tuple[int, str]] = []
+            hot_ordinals = set()
+            for prior_turn in state.turns:
+                hot_ordinals.add(prior_turn.ordinal)
+                history.append((1, prior_turn.question))
+                if prior_turn.answer:
+                    history.append((2, prior_turn.answer))
+            if dialogue_recovery is not None:
+                for prior_turn in dialogue_recovery.query_relevant_turns(
+                        value, limit=4, minimum_similarity_permille=600):
+                    if prior_turn.ordinal in hot_ordinals:
+                        continue
+                    history.append((1, prior_turn.question))
+                    if prior_turn.answer:
+                        history.append((2, prior_turn.answer))
+            return tuple(history)
+
+        def _core_dialogue_answer(value: str) -> str | None:
+            result = core_dialogue_runtime.respond(
+                value,
+                history=_core_dialogue_history(value),
+                minimum_similarity_permille=(
+                    PRODUCTION_MIN_SIMILARITY_PERMILLE),
+            )
+            if result is not None:
+                return result.surface
+            return (None if legacy_dialogue_answer is None
+                    else legacy_dialogue_answer(value))
+
+        def _core_dialogue_clarify(value: str) -> str | None:
+            result = core_dialogue_runtime.respond(
+                value,
+                history=_core_dialogue_history(value),
+                minimum_similarity_permille=900,
+                minimum_margin_permille=100,
+            )
+            if result is not None:
+                return result.surface
+            return (None if legacy_dialogue_clarify is None
+                    else legacy_dialogue_clarify(value))
+
+        learned_dialogue_answer = _core_dialogue_answer
+        learned_dialogue_clarify_answer = _core_dialogue_clarify
+    if science_passage_artifact_root is not None:
+        science_passage_runtime = ScidbCsqPassageRuntime(
+            science_passage_artifact_root,
+            verify_database_sha256=(
+                performance_tier != "deferred-narrow-fast"),
+        )
+
+        def _source_passage_response(value: str) -> tuple[object, ...] | None:
+            result = science_passage_runtime.query(
+                value, surface_variant_provider=surface_variant_provider)
+            if result.status != "ANSWER" or result.surface is None:
+                return None
+            citation = DialogueCitation(
+                result.surface,
+                result.source_title,
+                result.source_url,
+                result.license_id,
+                result.attribution,
+                result.source_ref,
+            )
+            return (
+                "ANSWER", result.surface, result.source_title,
+                result.source_url, (citation,),
+            )
+
+        source_passage_response = _source_passage_response
+    surface_consumer = None
+    if trained_surface is not None:
+        def _trained_surface_consumer(
+                value: str, status: str, source_title: str | None,
+                ) -> str | None:
+            result = trained_surface.render(
+                value, response_act=status, source_title=source_title)
+            return result.surface if result.used else None
+
+        surface_consumer = _trained_surface_consumer
     session_capability = None
     if session_root is not None:
         session_path = Path(session_root).resolve()
@@ -525,6 +943,7 @@ def run_trained_dialogue_terminal(
                     session_capability.path,
                     require_k_drive=not session_capability.test_transport,
                 )
+                dialogue_recovery = recovery
                 state = recovery.checkpoint.state
                 runtime_memory_state = recovery.checkpoint.runtime_memory_state
                 if runtime_memory_state is None:
@@ -532,6 +951,13 @@ def run_trained_dialogue_terminal(
             except (BroadDialoguePersistenceError,
                     BroadDialogueRuntimeMemoryError) as error:
                 raise ValueError(f"会话检查点无法恢复: {error}") from error
+        if dialogue_recovery is None:
+            # 新会话没有 checkpoint 时也建立 run-local 冷索引；该空壳只
+            # 承载派生查询状态，不参与 checkpoint identity。
+            dialogue_recovery = PersistentBroadDialogueRecovery(
+                (), (), (), (), (), (), ())
+            for prior_turn in state.turns:
+                dialogue_recovery = dialogue_recovery.with_turn(prior_turn)
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     # release/index 连接在整个会话中只读；有界缓存让重复问题直接复用
     # 不可变结果，不再重复执行 SQLite 与排序路径。
@@ -566,7 +992,8 @@ def run_trained_dialogue_terminal(
                     operation = request.get("op", "turn")
                     if operation in {"quit", "exit"}:
                         _write_protocol_payload(stream_out, {
-                            "id": request_id, "type": "bye", "status": "OK",
+                            "id": request_id, "type": "bye",
+                            "text": "会话已结束。",
                         })
                         break
                     if operation != "turn":
@@ -579,8 +1006,7 @@ def run_trained_dialogue_terminal(
                         "id": request.get("id") if 'request' in locals()
                         and isinstance(request, dict) else None,
                         "type": "error",
-                        "status": "INVALID_REQUEST",
-                        "error": str(error),
+                        "text": f"请求无法处理：{error}",
                     })
                     continue
             else:
@@ -641,7 +1067,20 @@ def run_trained_dialogue_terminal(
                     learned_relation_marker_evidence_model),
                 learned_relation_answer_frame_model=(
                     learned_relation_answer_frame_model),
+                learned_dialogue_answer=learned_dialogue_answer,
+                learned_dialogue_clarify_answer=(
+                    learned_dialogue_clarify_answer),
+                source_passage_response=source_passage_response,
+                prefer_source_passage=(
+                    source_passage_response is not None
+                    and performance_tier == "deferred-narrow-fast"),
+                prefer_learned_dialogue=(
+                    learned_dialogue_answer is not None
+                    and performance_tier == "deferred-narrow-fast"),
+                surface_consumer=surface_consumer,
                 query_cache=query_cache,
+                surface_variant_provider=surface_variant_provider,
+                source_followup_resolver=source_followup_resolver,
                 fast_path=(performance_tier == "deferred-narrow-fast"))
             latency_us.append(max(0, (time.perf_counter_ns() - started_ns) // 1000))
             turn_statuses.append(turn.status)
@@ -661,11 +1100,13 @@ def run_trained_dialogue_terminal(
                         session_capability, state,
                         runtime_memory_state=runtime_memory_state,
                     )
+                    if dialogue_recovery is not None:
+                        dialogue_recovery = dialogue_recovery.with_turn(turn)
                 except (BroadDialoguePersistenceError,
                         BroadDialogueRuntimeMemoryError) as error:
                     raise ValueError(f"会话记忆写入失败: {error}") from error
             if protocol_stream:
-                response = _protocol_turn_payload(turn)
+                response = _public_protocol_turn_payload(turn)
                 response["id"] = request_id
                 _write_protocol_payload(stream_out, response)
             else:
@@ -675,6 +1116,12 @@ def run_trained_dialogue_terminal(
         connection.close()
         if runtime_sqlite_runtime is not None:
             runtime_sqlite_runtime.close()
+        if dialogue_response_runtime is not None:
+            dialogue_response_runtime.close()
+        if core_dialogue_runtime is not None:
+            core_dialogue_runtime.close()
+        if science_passage_runtime is not None:
+            science_passage_runtime.close()
         if metrics_output is not None:
             metrics_path = Path(metrics_output).resolve()
             if metrics_path.drive.upper() != "K:":
@@ -687,8 +1134,9 @@ def run_trained_dialogue_terminal(
             metrics_path.parent.mkdir(parents=True, exist_ok=True)
             metrics_path.write_text(
                 json.dumps({
-                    "protocol": "jsonl" if protocol_stream else "terminal",
-                    "turn_count": len(latency_us),
+                "protocol": "jsonl" if protocol_stream else "terminal",
+                "performance_tier": performance_tier,
+                "turn_count": len(latency_us),
                     "latency_us": latency_us,
                     "p50_us": p50,
                     "p95_us": p95,
@@ -717,6 +1165,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-root", default=None,
                         help="K 盘自包含公开模型 release root")
     parser.add_argument("--training-run-root", default=None)
+    parser.add_argument(
+        "--response-organization-artifact-root", default=None,
+        help="可选 K 盘回答结构后继 artifact root")
+    parser.add_argument(
+        "--dialogue-response-artifact-root", default=None,
+        help="可选 K 盘人工对话聚合片段模型 artifact root")
+    parser.add_argument(
+        "--dialogue-domain-expert-artifact-root", action="append", default=[],
+        help="可重复的 K 盘后置领域对话专家 artifact root")
+    parser.add_argument(
+        "--dialogue-expert-routing-artifact-root", default=None,
+        help="K 盘纯整数领域激活路由文件")
+    parser.add_argument(
+        "--science-passage-artifact-root", default=None,
+        help="可选 K 盘 CSQ train-only 来源知识段 artifact root")
     parser.add_argument("--session-root", default=None,
                         help="可选 K 盘会话根；启用后跨进程恢复最近 8 轮")
     parser.add_argument("--protocol", choices=("terminal", "jsonl"),
@@ -759,6 +1222,16 @@ def main(argv: list[str] | None = None) -> int:
         qa_database=args.qa_database,
         release_root=args.release_root,
         training_run_root=args.training_run_root,
+        response_organization_artifact_root=(
+            args.response_organization_artifact_root),
+        dialogue_response_artifact_root=(
+            args.dialogue_response_artifact_root),
+        dialogue_domain_expert_artifact_roots=tuple(
+            args.dialogue_domain_expert_artifact_root),
+        dialogue_expert_routing_artifact_root=(
+            args.dialogue_expert_routing_artifact_root),
+        science_passage_artifact_root=(
+            args.science_passage_artifact_root),
         session_root=args.session_root,
         extra_course_paths=tuple(args.extra_course),
         extra_variant_course_paths=tuple(args.variant_course),

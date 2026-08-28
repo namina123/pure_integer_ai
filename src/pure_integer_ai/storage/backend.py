@@ -883,6 +883,8 @@ class SQLiteBackend(_BaseBackend):
         if performance_mode not in {"durable", "bulk"}:
             raise ValueError("performance_mode 必须是 durable 或 bulk")
         self._performance_mode = performance_mode
+        # 仅由 SQLite 评测 clone 设置；普通持久库永不进入自动删除路径。
+        self._delete_on_close_path: str | None = None
         if capability_profile is not None and device_budget is not None:
             raise ValueError("不能同时注入 capability_profile 和 device_budget")
         if capability_profile is not None and not isinstance(
@@ -1025,7 +1027,94 @@ class SQLiteBackend(_BaseBackend):
         self._conn.commit()
 
     def close(self) -> None:
-        self._conn.close()
+        delete_path = self._delete_on_close_path
+        self._delete_on_close_path = None
+        try:
+            self._conn.close()
+        finally:
+            if delete_path is not None:
+                from pathlib import Path
+                Path(delete_path).unlink(missing_ok=True)
+
+    def isolation_state_token(self) -> tuple[int, int, int, int]:
+        """返回隔离核验令牌，不把全库物化为 Python 行对象。
+
+        ``total_changes`` 捕获当前连接的全部行写，schema version 捕获 DDL，
+        data version 捕获其他连接的提交，事务位捕获评测期间意外提交或回滚。
+        令牌只用于检测宿主是否变化，不替代发布 artifact 的规范内容摘要。
+        """
+        schema_version = int(
+            self._conn.execute("PRAGMA schema_version").fetchone()[0])
+        data_version = int(
+            self._conn.execute("PRAGMA data_version").fetchone()[0])
+        return (
+            int(self._conn.total_changes),
+            schema_version,
+            data_version,
+            int(bool(self._conn.in_transaction)),
+        )
+
+    def clone_for_evaluation(self) -> "SQLiteBackend":
+        """建立独立 SQLite 评测库，避免全表 Python 对象放大。
+
+        已提交的持久库通过 SQLite page backup 复制到源库同目录的精确临时文件，
+        因而 K 盘训练不会回退到系统盘。若调用方仍持有未提交事务，则用 SQLite
+        自身 serialize/deserialize 保留该事务可见状态；该退路的峰值约为数据库
+        bytes，而不是逐行 ``dict`` 的多倍对象图。
+        """
+        import copy
+        import os
+        from pathlib import Path
+        import tempfile
+
+        database_rows = self._conn.execute("PRAGMA database_list").fetchall()
+        main_path = next(
+            (str(row[2]) for row in database_rows if str(row[1]) == "main"),
+            "",
+        )
+        delete_path: str | None = None
+        if main_path and not self._conn.in_transaction:
+            source_path = Path(main_path).resolve()
+            descriptor, delete_path = tempfile.mkstemp(
+                prefix=source_path.stem + ".evaluation-",
+                suffix=".sqlite3",
+                dir=str(source_path.parent),
+            )
+            os.close(descriptor)
+            target = SQLiteBackend(
+                delete_path,
+                capability_profile=self.storage_capabilities(),
+                performance_mode=self.performance_mode,
+            )
+            target._delete_on_close_path = delete_path
+            try:
+                self._conn.backup(target._conn)
+            except BaseException:
+                target.close()
+                raise
+        else:
+            target = SQLiteBackend(
+                capability_profile=self.storage_capabilities(),
+                performance_mode=self.performance_mode,
+            )
+            if self._conn.in_transaction:
+                payload = self._conn.serialize()
+                target._conn.deserialize(payload)
+                del payload
+                target._conn.execute("PRAGMA foreign_keys=ON")
+            else:
+                self._conn.backup(target._conn)
+
+        target._tables = copy.deepcopy(self._tables)
+        target._id_pool = dict(self._id_pool)
+        target._isa_edge_gen = dict(self._isa_edge_gen)
+        target._protected_owner_space_ids = set(
+            self._protected_owner_space_ids)
+        target._table_write_epochs = dict(self._table_write_epochs)
+        if hasattr(self, "_legacy_observe_timestamp_seq"):
+            target._legacy_observe_timestamp_seq = (
+                self._legacy_observe_timestamp_seq)
+        return target
 
     # 持久化/恢复（pre_flight snapshot/rollback·对称 DictBackend.snapshot/load_snapshot）
 
