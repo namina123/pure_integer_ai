@@ -69,6 +69,29 @@ def test_broad_dialogue_checkpoint_recovers_hot_history_without_text_files(tmp_p
     assert reads == 1
 
 
+def test_cold_recall_uses_shared_statement_features_without_language_table(
+        tmp_path: Path) -> None:
+    root_path = tmp_path / "memory-recall"
+    root = create_new_run_root(root_path, require_k_drive=False)
+    statement = DialogueTurn(
+        0,
+        "请记住：我的兴趣是研究整数图和长期记忆。",
+        None,
+        None,
+        "UNKNOWN",
+        None,
+        None,
+        (7,) * 32,
+    )
+    state = BroadDialogueState((1, 2, 3), 1, (statement,))
+    write_broad_dialogue_checkpoint(root, state)
+    restarted = recover_broad_dialogue_checkpoint(
+        root.path, require_k_drive=False)
+    assert restarted.query_relevant_turns(
+        "你还记得我刚才说的兴趣吗？", limit=1,
+        minimum_similarity_permille=120) == (statement,)
+
+
 def test_runtime_only_operation_can_persist_without_fake_dialogue_turn(tmp_path: Path) -> None:
     root_path = tmp_path / "runtime-only-session"
     root = create_new_run_root(root_path, require_k_drive=False)

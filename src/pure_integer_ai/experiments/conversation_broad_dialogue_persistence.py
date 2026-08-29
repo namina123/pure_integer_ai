@@ -551,15 +551,69 @@ def write_broad_dialogue_checkpoint(
         previous = recovery.checkpoint_identity
     elif ordinal != 1:
         raise BroadDialoguePersistenceError("非首个 checkpoint 缺少前驱")
+    path, _identity = append_broad_dialogue_checkpoint(
+        root,
+        state,
+        previous_ordinal=ordinal - 1,
+        previous_identity=previous,
+        runtime_memory_state=runtime_memory_state,
+        relative_dir=relative_dir,
+    )
+    return path
+
+
+def append_broad_dialogue_checkpoint(
+        root: KRunRoot,
+        state: BroadDialogueState,
+        *,
+        previous_ordinal: int,
+        previous_identity: tuple[int, ...],
+        runtime_memory_state: RuntimeMemoryState | None = None,
+        relative_dir: str | Path = BROAD_DIALOGUE_DEFAULT_DIR,
+        ) -> tuple[Path, tuple[int, ...]]:
+    """以已验证前驱做 O(1) 排他追加，避免每轮重放完整检查点链。
+
+    完整链仍在进程启动的 ``recover_broad_dialogue_checkpoint`` 中验证。
+    长会话进程随后持有最新 ordinal/identity；本入口只要求前驱文件存在并
+    排他创建紧邻后继，因此并发、跳号或覆盖均会失败关闭。
+    """
+    if not isinstance(root, KRunRoot):
+        raise TypeError("root 必须是 KRunRoot")
+    if not isinstance(state, BroadDialogueState):
+        raise TypeError("state 必须是 BroadDialogueState")
+    if type(previous_ordinal) is not int or previous_ordinal < 0:
+        raise BroadDialoguePersistenceError("previous ordinal 非法")
+    if (not isinstance(previous_identity, tuple)
+            or any(type(item) is not int or item < 0
+                   for item in previous_identity)):
+        raise BroadDialoguePersistenceError("previous identity 非法")
+    if (previous_ordinal == 0) != (previous_identity == ()):
+        raise BroadDialoguePersistenceError("首轮前驱 identity 不闭合")
+    ensure_normal_relative_directory(
+        root, relative_dir, label="broad dialogue checkpoint directory")
+    if previous_ordinal > 0:
+        previous_relative = Path(relative_dir) / (
+            f"checkpoint-{previous_ordinal:020d}.int")
+        require_plain_file(
+            root, previous_relative, label="broad dialogue previous checkpoint")
+    ordinal = previous_ordinal + 1
+    runtime_only_initial = (
+        previous_ordinal == 0 and ordinal == 1
+        and state.next_ordinal == 0 and not state.turns
+    )
+    if state.next_ordinal != ordinal and not runtime_only_initial:
+        raise BroadDialoguePersistenceError(
+            "state next ordinal 与 checkpoint ordinal 不一致")
     checkpoint = PersistentBroadDialogueCheckpoint(
-        ordinal, state, previous, runtime_memory_state)
+        ordinal, state, previous_identity, runtime_memory_state)
     relative = Path(relative_dir) / f"checkpoint-{ordinal:020d}.int"
     try:
-        return write_exclusive_bytes(root, relative,
-                                    encode_integer_tuple(checkpoint.canonical_record()),
-                                    label="broad dialogue checkpoint")
+        path = write_exclusive_bytes(
+            root, relative, encode_integer_tuple(checkpoint.canonical_record()),
+            label="broad dialogue checkpoint")
     except (TypeError, ValueError, OSError) as error:
         raise BroadDialoguePersistenceError("broad dialogue checkpoint 写入失败") from error
+    return path, checkpoint.identity()
 
 
 def recover_broad_dialogue_checkpoint(
@@ -677,6 +731,7 @@ __all__ = [
     "BroadDialoguePersistenceError",
     "PersistentBroadDialogueCheckpoint",
     "PersistentBroadDialogueRecovery",
+    "append_broad_dialogue_checkpoint",
     "recover_broad_dialogue_checkpoint",
     "write_broad_dialogue_checkpoint",
 ]

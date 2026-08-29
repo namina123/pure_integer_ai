@@ -269,6 +269,7 @@ def answer_broad_dialogue_turn(
         learned_dialogue_answer: Callable[[str], str | None] | None = None,
         learned_dialogue_clarify_answer: Callable[[str], str | None]
         | None = None,
+        memory_recall_response: Callable[[str], str | None] | None = None,
         source_passage_response: Callable[
             [str], tuple[object, ...] | None] | None = None,
         surface_variant_provider: SurfaceVariantProvider | None = None,
@@ -483,7 +484,7 @@ def answer_broad_dialogue_turn(
     # 训练侧来源 passage 是广域检索的证据补充，而不是固定 QA fallback。
     # 仅在既有检索未回答时查询；它必须返回完整来源引用，且只能把结果提升为
     # ANSWER，不能用低置信候选覆盖 UNKNOWN/CLARIFY 门。
-    if (answer is None and status in {"UNKNOWN", "CLARIFY"}
+    if (answer is None and status == "UNKNOWN"
             and not runtime_material_decided
             and source_passage_response is not None
             and not source_passage_queried):
@@ -492,6 +493,23 @@ def answer_broad_dialogue_turn(
         if source_response is not None:
             status, answer, source_title, source_url, citations = source_response
             display_answer = answer
+            retrieval_question = question
+    # Runtime/Core memory is a read-only fallback after factual and source
+    # routes have declined.  The callback owns language-independent recall
+    # ranking and may return only text derived from an already persisted turn
+    # or from a learned dialogue model; this layer does not inspect words,
+    # scripts, or internal status labels.
+    if (answer is None and status == "UNKNOWN"
+            and not runtime_material_decided
+            and memory_recall_response is not None):
+        recalled = memory_recall_response(question)
+        if recalled is not None:
+            if type(recalled) is not str or not recalled.strip():
+                raise TypeError(
+                    "memory recall response 必须是非空文本或 None")
+            answer = recalled.strip()
+            display_answer = answer
+            status = "ANSWER"
             retrieval_question = question
     # Fast/deferred mode queries the broad index first.  The narrow runtime is
     # initialized lazily only when broad retrieval cannot answer; this removes
