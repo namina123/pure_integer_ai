@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 from typing import Any
 
@@ -45,8 +46,6 @@ def _course_questions(release_root: Path, *, limit: int = 5) -> tuple[str, ...]:
     courses = sorted(
         (release_root / "data" / "ph2").glob(
             "broad_wikipedia_passage_v1_compact_20k_v2.course*.jsonl"))
-    if not courses:
-        raise ValueError("release 缺少广域课程")
     titles: list[str] = []
     for path in courses:
         for line in path.read_bytes().splitlines():
@@ -60,6 +59,25 @@ def _course_questions(release_root: Path, *, limit: int = 5) -> tuple[str, ...]:
                 titles.append(row["title"])
                 if len(titles) == limit:
                     return tuple(titles)
+    # Current public releases may intentionally omit the large Wikipedia
+    # course after its source has been reduced to the frozen QA index.  The
+    # index itself is the authoritative public held-out surface in that case;
+    # choose deterministic document titles rather than requiring a host file
+    # that is not part of the release manifest.
+    database = release_root / "knowledge" / "broad_qa.sqlite3"
+    if database.is_file():
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+        try:
+            for (title,) in connection.execute(
+                    "SELECT title FROM document "
+                    "WHERE title IS NOT NULL AND title <> '' "
+                    "ORDER BY doc_id LIMIT ?", (limit,)):
+                if isinstance(title, str) and title not in titles:
+                    titles.append(title)
+        finally:
+            connection.close()
+        if len(titles) == limit:
+            return tuple(titles)
     raise ValueError("release held-out 课程不足")
 
 

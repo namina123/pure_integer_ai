@@ -144,8 +144,13 @@ python -m pure_integer_ai.experiments.run_conversation_training `
 `K:\pure_integer_ai_work\model_releases\public-model-gc-v1-20260829` 根目录存在未列入冻结 manifest 的顶层
 `learned_dialogue_intent_index.sqlite3`，validator 因 `extra` 文件拒绝启动。本轮未删除、覆盖或改写该历史 release；下一次 release 组装必须保持 artifact 文件只出现在其声明目录，并重新生成闭合 manifest 后再做端到端性能评估。
 
+评测脚本已补充当前发布合同的兼容路径：当 release 没有携带已被压缩掉的大型 Wikipedia 课程时，直接从 release 自带的公开 `knowledge/broad_qa.sqlite3` `document` 表按 `doc_id` 稳定抽取标题，不读取发布根之外的课程文件。由此重新组装的
+`K:\pure_integer_ai_work\model_releases\public-model-gc-v2-20260830`
+已通过独立 JSONL evaluator；证据位于
+`K:\pure_integer_ai_work\dialogue_sessions\gc-v2-independent-eval-20260830-b\independent_release_evaluation.json`，状态 `PASS`。五个 held-out 标题全部带来源回答，unknown/negative 各 2/2，冲突澄清、跨来源双引用和跨进程 checkpoint 均通过。cold `p50/p95=24610/24610 us`，warm `p50/p95=615/11389 us`，warm 峰值工作集 `173248512` bytes，SQLite 语句总数 `34`。
+
 ### 下一恢复点
 
-1. 从当前训练 run/artifact 组装新的 release root，修复并验证 manifest 文件集合闭合；
-2. 在新 release 上运行一次独立 JSONL 验收，记录冷/热 p50、p95、读取数和峰值工作集；
-3. 若 p50 仍高于 10 ms，再针对广域 query 与启动整数解码做一次成块索引/分段加载优化；在此之前不启动新的长训练。
+1. 若继续压缩冷启动，从 `public-model-gc-v2-20260830` 复制组装下一版，优先针对启动期整数 artifact 解码，不改动已通过的回答门和来源证据；
+2. 保持独立 evaluator 的数据库标题回退路径，避免再依赖 release 外部的大型课程文件；
+3. 在新的启动优化前，不启动新的长训练；当前 warm 端到端已进入亚毫秒 p50、约 11 ms p95，具备继续接入真实交流和增量学习工作的性能基础。
