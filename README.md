@@ -77,6 +77,7 @@ python -m pure_integer_ai.experiments.run_conversation_training `
   --run-id "public-dialogue-stage4-v1" `
   --stages 1,2,3,4 `
   --extra-course data\ph2\dialogue_relation_causes_scale_v1.course.jsonl.sample `
+  --extra-course data\ph2\dialogue_relation_causes_scale_v2.course.jsonl.sample `
   --extra-course data\ph2\dialogue_postcheck_bridge_train_v1.course.jsonl.sample
 
 python -m pure_integer_ai.experiments.run_runtime_material_ingest `
