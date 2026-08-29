@@ -418,12 +418,17 @@ class PersistentBroadDialogueRecovery:
         query = self._recall_features(question)
         if not query:
             return ()
-        feature_keys = tuple(item[0] for item in self.cold_feature_index)
         candidates: set[int] = set()
         for feature in query:
-            position = bisect_left(feature_keys, feature)
-            if (position < len(feature_keys)
-                    and feature_keys[position] == feature):
+            # ``cold_feature_index`` is already sorted by its first tuple
+            # element.  Bisect it directly instead of rebuilding a separate
+            # feature-key tuple on every turn; this keeps long-session recall
+            # proportional to the query feature count rather than the entire
+            # cold index size.
+            position = bisect_left(
+                self.cold_feature_index, (feature, ()))
+            if (position < len(self.cold_feature_index)
+                    and self.cold_feature_index[position][0] == feature):
                 candidates.update(self.cold_feature_index[position][1])
         ranked: list[tuple[int, int, int, DialogueTurn]] = []
         for ordinal in candidates:

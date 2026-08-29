@@ -930,6 +930,17 @@ def run_trained_dialogue_terminal(
             build_public_sentence_demo_catalog(sparse_runtime),
             trained_surface,
         )
+    if (release is not None
+            and performance_tier == "deferred-narrow-fast"):
+        # Public release processes pay the sparse snapshot construction once at
+        # startup instead of charging it to the first user turn.  This keeps
+        # the measured response path stable for long-lived sessions while the
+        # persisted snapshot still bounds memory and work.
+        narrow_runtime = load_or_rebuild_public_sparse_qa_runtime(
+            sparse_snapshot, repository=root)
+        narrow_catalog = build_public_sentence_demo_catalog(narrow_runtime)
+        narrow_answer = _narrow_answer(
+            narrow_runtime, narrow_catalog, trained_surface)
     stream_in = sys.stdin.buffer if input_stream is None else input_stream
     stream_out = sys.stdout.buffer if output_stream is None else output_stream
     state = BroadDialogueState((1, 1, 8))

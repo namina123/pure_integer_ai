@@ -7,8 +7,9 @@ assistant 表层切成短片段，再累计稀疏提示特征到首片段的关�
 """
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
+from functools import lru_cache
 import re
 from typing import Iterable
 
@@ -31,6 +32,13 @@ MIN_INTENT_SHARED_FEATURES = 3
 MAX_FRAGMENTS_PER_RESPONSE = 4
 MAX_FRAGMENT_CHARS = 160
 MAX_GENERATED_CHARS = 240
+
+# These caches are disposable runtime derivations.  They never enter the
+# integer artifact, and their finite bounds keep a long-lived process from
+# turning repeated language surfaces into unbounded memory growth.
+_FEATURE_CACHE_SIZE = 8192
+_INTENT_SURFACE_CACHE_SIZE = 8192
+_RESPONSE_RESULT_CACHE_SIZE = 256
 
 # Mechanical sentence-terminal registry shared by the raw-text boundary
 # contract.  Values are Unicode scalar numbers, not language or vocabulary
@@ -65,6 +73,7 @@ def _surface(values: tuple[int, ...]) -> str:
     return "".join(chr(item) for item in values)
 
 
+@lru_cache(maxsize=_FEATURE_CACHE_SIZE)
 def dialogue_prompt_features(surface: str) -> tuple[tuple[int, ...], ...]:
     """复用广域词项并补充脚本无关 Unicode 词元特征。
 
@@ -135,6 +144,7 @@ def _lexical_scalar(value: str) -> bool:
         or "A" <= value <= "Z" or "a" <= value <= "z"
 
 
+@lru_cache(maxsize=_INTENT_SURFACE_CACHE_SIZE)
 def _intent_surface_features(surface: str) -> tuple[str, ...]:
     """形成 n-gram 与单码点两层开放词形证据，不内置意图词表。"""
     values = {"q:" + item for item in broad_qa_terms(surface)}
@@ -979,7 +989,8 @@ class LearnedDialogueResponseRuntime:
     """为规范模型建立不改变语义的 feature posting 与 transition 派生缓存。"""
 
     __slots__ = (
-        "model", "intent", "_feature_lookup", "_postings", "_transitions")
+        "model", "intent", "_feature_lookup", "_postings", "_transitions",
+        "_response_cache")
 
     def __init__(
             self, model: LearnedDialogueResponseModel,
@@ -1013,6 +1024,8 @@ class LearnedDialogueResponseRuntime:
             transitions.setdefault(source, []).append((target, count))
         self._transitions = {key: tuple(value)
                              for key, value in transitions.items()}
+        self._response_cache: OrderedDict[
+            tuple[object, ...], LearnedDialogueResponseResult] = OrderedDict()
 
     def close(self) -> None:
         """Close an optional persistent intent runtime."""
@@ -1036,6 +1049,49 @@ class LearnedDialogueResponseRuntime:
                 or type(minimum_similarity_permille) is not int
                 or not 0 <= minimum_similarity_permille <= 1000):
             raise ValueError("dialogue response runtime 门槛非法")
+        cache_key = self._response_cache_key(
+            prompt, history, minimum_fragment_occurrences,
+            minimum_similarity_permille)
+        if cache_key is not None:
+            cached = self._response_cache.get(cache_key)
+            if cached is not None:
+                self._response_cache.move_to_end(cache_key)
+                return cached
+        result = self._respond_uncached(
+            prompt, history=history,
+            minimum_fragment_occurrences=minimum_fragment_occurrences,
+            minimum_similarity_permille=minimum_similarity_permille)
+        if cache_key is not None:
+            self._response_cache[cache_key] = result
+            self._response_cache.move_to_end(cache_key)
+            while len(self._response_cache) > _RESPONSE_RESULT_CACHE_SIZE:
+                self._response_cache.popitem(last=False)
+        return result
+
+    @staticmethod
+    def _response_cache_key(
+            prompt: str, history: tuple[tuple[int, str], ...],
+            minimum_fragment_occurrences: int,
+            minimum_similarity_permille: int,
+            ) -> tuple[object, ...] | None:
+        """Return a hashable per-session key without changing bad-input errors."""
+        if type(prompt) is not str or not isinstance(history, tuple):
+            return None
+        if any(not isinstance(item, tuple) or len(item) != 2
+               or type(item[0]) is not int or type(item[1]) is not str
+               for item in history):
+            return None
+        return (
+            prompt, history, minimum_fragment_occurrences,
+            minimum_similarity_permille)
+
+    def _respond_uncached(
+            self, prompt: str, *,
+            history: tuple[tuple[int, str], ...],
+            minimum_fragment_occurrences: int,
+            minimum_similarity_permille: int,
+            ) -> LearnedDialogueResponseResult:
+        """Execute one uncached deterministic response decision."""
         query_features = dialogue_prompt_features(prompt)
         known_query_features = tuple(
             item for item in query_features if item in self._feature_lookup)

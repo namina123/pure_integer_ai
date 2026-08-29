@@ -122,3 +122,30 @@ python -m pure_integer_ai.experiments.run_conversation_training `
 `K:\pure_integer_ai_work\dialogue_sessions\gc-v1-runtime-import-20260829-c` 验收，首问和特征重合追问均返回来源引用。
 
 本轮发现并修复了 Runtime 追问调用已删除硬编码指代表导致的 `ImportError`：现在可注入对话层 resolver，未注入时仅基于同一绑定问题的确定性特征重合，缺少证据则保持澄清/未知。OASST1 回应组织 artifact 的 held-out 能力仍为 `NE`，因此没有把它放入首个 release，避免把未达标文件误当能力结果。下一阶段应在不改变当前发布根的前提下，优化冷启动与长会话性能，再补独立发布 validator 的公开运行证据。
+
+## 性能推进轮（2026-08-30）
+
+本轮只修改运行时派生缓存，不改变训练 SQLite、整数 artifact、回答阈值或来源证据链：
+
+- `dialogue_prompt_features` 与意图表面特征使用有界纯函数缓存，重复历史表面不再反复构造 n-gram；
+- `LearnedDialogueResponseRuntime` 按 prompt、最近历史投影和门槛缓存不可变结果，容量固定为 256；
+- `SqliteLearnedDialogueIntentRuntime` 缓存已读取的匹配特征，容量固定为 256；
+- `SqliteDialogueSuccessorRuntime` 按实际消费的最近六轮历史缓存答案或明确未命中，容量固定为 128；
+- 广域会话冷历史继续使用排序整数索引二分；窄域快档继续在进程启动预热，避免首轮承担 snapshot 构建。
+
+缓存均标记为 runtime derived cache，只保留在单个进程实例中，不写回 Core、训练库、Runtime ledger 或发布包；跨语言重建仍以 SQLite 和整数流为唯一依据。
+
+同一公开对话 artifact 的 10 个唯一问法局部基准已写入
+`K:\pure_integer_ai_work\dialogue_sessions\gc-v1-runtime-cache-benchmark-20260830.json`：learned response 首轮
+`p50=332 us / p95=9965 us`，重复轮 `p50=1 us / p95=4 us`；后继 runtime 首轮
+`p50=4505 us / p95=25778 us`，重复轮 `p50=1 us / p95=7 us`。这属于热路径局部基准，不冒充完整 JSONL 端到端指标。
+
+尝试运行独立 release evaluator 时发现历史 release
+`K:\pure_integer_ai_work\model_releases\public-model-gc-v1-20260829` 根目录存在未列入冻结 manifest 的顶层
+`learned_dialogue_intent_index.sqlite3`，validator 因 `extra` 文件拒绝启动。本轮未删除、覆盖或改写该历史 release；下一次 release 组装必须保持 artifact 文件只出现在其声明目录，并重新生成闭合 manifest 后再做端到端性能评估。
+
+### 下一恢复点
+
+1. 从当前训练 run/artifact 组装新的 release root，修复并验证 manifest 文件集合闭合；
+2. 在新 release 上运行一次独立 JSONL 验收，记录冷/热 p50、p95、读取数和峰值工作集；
+3. 若 p50 仍高于 10 ms，再针对广域 query 与启动整数解码做一次成块索引/分段加载优化；在此之前不启动新的长训练。

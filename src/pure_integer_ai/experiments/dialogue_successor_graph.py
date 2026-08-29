@@ -6,7 +6,7 @@ Occurrence 端点恢复表层。它不是外置 QA 库，也不在代码中保�
 """
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
@@ -62,6 +62,7 @@ from pure_integer_ai.storage.dialogue_successor import (
 _GRAPH_DIGEST = Hasher("dialogue.successor.graph.assertions.v1")
 _EVIDENCE_ID = Hasher("dialogue.successor.evidence.v1")
 _FEATURE_HASH = Hasher("pure_integer_ai.concept.v1")
+_SUCCESSOR_RESPONSE_CACHE_SIZE = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,6 +396,11 @@ class SqliteDialogueSuccessorRuntime:
             tuple[int, int], tuple[tuple[int, int, str], ...]] = {}
         self._feature_cache_order: list[tuple[int, int]] = []
         self._feature_cache_limit = 128
+        # Per-process decision cache.  The key retains only the six history
+        # surfaces that the scoring algorithm actually consumes; values are
+        # immutable answers or an explicit miss.  SQLite remains authoritative.
+        self._response_cache: OrderedDict[
+            tuple[object, ...], DialogueSuccessorAnswer | None] = OrderedDict()
         tables = {row[0] for row in self.connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         required = {
@@ -471,11 +477,19 @@ class SqliteDialogueSuccessorRuntime:
         for value in (minimum_similarity_permille, minimum_margin_permille):
             if type(value) is not int or not 0 <= value <= 1000:
                 raise ValueError("similarity/margin 必须是 0..1000 整数")
+        cache_key = (
+            current, history[-6:], minimum_similarity_permille,
+            minimum_margin_permille)
+        if cache_key in self._response_cache:
+            cached = self._response_cache[cache_key]
+            self._response_cache.move_to_end(cache_key)
+            return cached
         current_values = tuple(current.strip())
         current_hash_counter = Counter(
             _FEATURE_HASH.h63(value) or 1 for value in current_values)
         shortlist_rows = self._shortlist_candidates(current_hash_counter)
         if not shortlist_rows:
+            self._remember_response(cache_key, None)
             return None
         keys = tuple((int(row[0]), int(row[1])) for row in shortlist_rows)
         history_values = tuple(
@@ -511,6 +525,7 @@ class SqliteDialogueSuccessorRuntime:
         ranked.sort(key=lambda row: (-row[0], -row[1], -row[2], row[3]))
         best = ranked[0]
         if best[1] < minimum_similarity_permille:
+            self._remember_response(cache_key, None)
             return None
         verify_keys = tuple(row[3] for row in ranked[:2])
         verified, posting_rows = self._candidate_features(verify_keys)
@@ -567,10 +582,11 @@ class SqliteDialogueSuccessorRuntime:
         if len(ranked) > 1:
             margin = (best[0] - ranked[1][0]) // 5
             if not exact_current and margin < minimum_margin_permille:
+                self._remember_response(cache_key, None)
                 return None
         best_key = best[4] if len(best) == 5 else best[3]
         surface, source_hash = self._response_surface(best_key)
-        return DialogueSuccessorAnswer(
+        answer = DialogueSuccessorAnswer(
             surface,
             source_hash,
             best_key,
@@ -579,6 +595,18 @@ class SqliteDialogueSuccessorRuntime:
             len(keys),
             posting_rows,
         )
+        self._remember_response(cache_key, answer)
+        return answer
+
+    def _remember_response(
+            self, key: tuple[object, ...],
+            value: DialogueSuccessorAnswer | None,
+            ) -> None:
+        """Store one bounded decision without changing persistent state."""
+        self._response_cache[key] = value
+        self._response_cache.move_to_end(key)
+        while len(self._response_cache) > _SUCCESSOR_RESPONSE_CACHE_SIZE:
+            self._response_cache.popitem(last=False)
 
     def _shortlist_candidates(
             self,

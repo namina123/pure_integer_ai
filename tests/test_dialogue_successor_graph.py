@@ -105,6 +105,7 @@ def test_dialogue_successor_is_learned_in_core_and_recovered_from_occurrences(
         assert learned.surface == "当然可以，你想聊些什么？"
         assert learned.similarity_permille == 1000
         assert learned.source_hash > 0
+        assert query.respond("你好，请问可以聊天吗？") is learned
         assert query.respond("火星轨道参数是什么？") is None
     finally:
         query.close()

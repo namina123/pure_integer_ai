@@ -118,6 +118,7 @@ def test_artifact_roundtrip_aggregates_features_without_prompt_mapping(
     result = runtime.respond("你好，很高兴认识你")
     assert result.used
     assert result.surface is not None
+    assert runtime.respond("你好，很高兴认识你") is result
     assert "Open Assistant" not in result.surface
     short = runtime.respond("你好", minimum_similarity_permille=500)
     assert short.used

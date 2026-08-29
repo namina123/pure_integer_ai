@@ -8,6 +8,7 @@ another language can consume the same rows without Python object semantics.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 import sqlite3
 
@@ -29,6 +30,7 @@ MAX_CURRENT_QUERY_FEATURES = 128
 MAX_HISTORY_QUERY_FEATURES = 64
 MAX_SEED_FEATURES = 8
 MAX_PROTOTYPE_CANDIDATES = 4096
+MATCHED_FEATURE_CACHE_SIZE = 256
 _META_SCHEMA = 1
 _META_TRAIN_COUNT = 2
 _META_FRAGMENT_COUNT = 3
@@ -187,7 +189,7 @@ class SqliteLearnedDialogueIntentRuntime:
 
     __slots__ = (
         "path", "fragment_surfaces", "connection", "train_count",
-        "fragment_count")
+        "fragment_count", "_matched_cache")
 
     def __init__(
             self, path: str | Path,
@@ -206,6 +208,12 @@ class SqliteLearnedDialogueIntentRuntime:
             "SELECT key,value FROM intent_meta ORDER BY key"))
         self.train_count = int(meta[_META_TRAIN_COUNT])
         self.fragment_count = int(meta[_META_FRAGMENT_COUNT])
+        # This is a disposable runtime projection.  It stores only integer
+        # feature matches and is bounded so long sessions cannot grow it
+        # without limit; SQLite remains the portable source of truth.
+        self._matched_cache: OrderedDict[
+            tuple[object, ...], tuple[tuple[int, int, int, int], ...]] = (
+                OrderedDict())
 
     @staticmethod
     def _read_meta(path: Path, key: int) -> int:
@@ -228,6 +236,16 @@ class SqliteLearnedDialogueIntentRuntime:
     def _matched_features(
             self, prompt: str, history: tuple[tuple[int, str], ...],
             ) -> tuple[tuple[int, int, int, int], ...]:
+        cache_key: tuple[object, ...] | None = None
+        if (type(prompt) is str and isinstance(history, tuple)
+                and all(isinstance(item, tuple) and len(item) == 2
+                        and type(item[0]) is int and type(item[1]) is str
+                        for item in history)):
+            cache_key = (prompt, history)
+            cached = self._matched_cache.get(cache_key)
+            if cached is not None:
+                self._matched_cache.move_to_end(cache_key)
+                return cached
         query = dialogue_intent_features(prompt, history=history)
         current = frozenset(dialogue_intent_features(prompt))
         current_keys = frozenset(_feature_key(item) for item in current)
@@ -254,7 +272,13 @@ class SqliteLearnedDialogueIntentRuntime:
             (item for item in rows if not item[2]),
             key=lambda item: (-item[3], item[1], item[0]))[
                 :MAX_HISTORY_QUERY_FEATURES]
-        return tuple(current_rows + history_rows)
+        result = tuple(current_rows + history_rows)
+        if cache_key is not None:
+            self._matched_cache[cache_key] = result
+            self._matched_cache.move_to_end(cache_key)
+            while len(self._matched_cache) > MATCHED_FEATURE_CACHE_SIZE:
+                self._matched_cache.popitem(last=False)
+        return result
 
     def rank(
             self, prompt: str, *, history: tuple[tuple[int, str], ...] = (),
