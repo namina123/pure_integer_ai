@@ -119,6 +119,48 @@ def _turns(responses: tuple[dict[str, object], ...]) -> tuple[dict[str, object],
     return tuple(item for item in responses if item.get("type") == "response")
 
 
+def _wire_source_title(item: dict[str, object]) -> str | None:
+    """读取正式 JSONL 的可见来源标题，不依赖内部 DialogueTurn 字段。"""
+    source = item.get("source")
+    if not isinstance(source, dict):
+        return None
+    title = source.get("title")
+    return title if isinstance(title, str) and title else None
+
+
+def _wire_text(item: dict[str, object]) -> str:
+    value = item.get("text")
+    return value if isinstance(value, str) else ""
+
+
+def _wire_status(item: dict[str, object]) -> str:
+    """把自然语言协议投影成 evaluator 自用标签，绝不写入用户接口。"""
+    if _wire_source_title(item) is not None:
+        return "ANSWER"
+    text = _wire_text(item)
+    if "请补充问题的范围或限定条件" in text:
+        return "CLARIFY"
+    if "当前公开资料无法确认这个问题" in text:
+        return "UNKNOWN"
+    return "OTHER"
+
+
+def _wire_answer(item: dict[str, object], expected_title: str) -> bool:
+    return (
+        item.get("type") == "response"
+        and _wire_source_title(item) == expected_title
+        and bool(_wire_text(item).strip())
+    )
+
+
+def _wire_unknown(item: dict[str, object]) -> bool:
+    return item.get("type") == "response" and _wire_status(item) == "UNKNOWN"
+
+
+def _wire_clarify(item: dict[str, object]) -> bool:
+    return item.get("type") == "response" and _wire_status(item) == "CLARIFY"
+
+
 def _build_conflict_runtime(root: Path) -> tuple[Path, Path]:
     prefix = root.name
     material = root.parent / f"{prefix}-conflict-material.txt"
@@ -246,22 +288,21 @@ def evaluate(
     checks = {
         "heldout": len(heldout_turns) == len(questions)
         and all(
-            item.get("status") == "ANSWER"
-            and item.get("source_title") == expected_title
+            _wire_answer(item, expected_title)
             for item, expected_title in zip(heldout_turns, questions)
         ),
         "unknown": len(unknown_turns) == len(unknown_questions)
-        and all(item.get("status") == "UNKNOWN" for item in unknown_turns),
+        and all(_wire_unknown(item) for item in unknown_turns),
         "negative": len(negative_turns) == len(negative_questions)
-        and all(item.get("status") == "UNKNOWN" for item in negative_turns),
+        and all(_wire_unknown(item) for item in negative_turns),
         "conflict_clarify": len(conflict_turns) == 1
-        and conflict_turns[0].get("status") == "CLARIFY",
+        and _wire_clarify(conflict_turns[0]) if conflict_turns else False,
         "cross_source_citations": len(cross_turns) == 1
-        and cross_turns[0].get("status") == "ANSWER"
+        and _wire_status(cross_turns[0]) == "ANSWER"
         and len(cross_turns[0].get("citations", ())) >= 2,
         "checkpoint": len(first) == 1 and len(second) == 1
-        and first[0].get("status") == "ANSWER"
-        and second[0].get("status") == "ANSWER"
+        and _wire_status(first[0]) == "ANSWER"
+        and _wire_status(second[0]) == "ANSWER"
         and second[0].get("ordinal") == first[0].get("ordinal", -1) + 1,
     }
     metrics = {"cold": _metric_summary(cold_metrics),
@@ -276,27 +317,27 @@ def evaluate(
         "format": EVALUATION_FORMAT,
         "schema_version": 1,
         "release_root": release.name,
-        "heldout": [{"question": item.get("question"),
-                      "expected_source_title": expected_title,
-                      "status": item.get("status"),
-                      "source_title": item.get("source_title")}
+        "heldout": [{"expected_source_title": expected_title,
+                      "wire_status": _wire_status(item),
+                      "text": _wire_text(item),
+                      "source_title": _wire_source_title(item)}
                      for item, expected_title in zip(
                          heldout_turns, questions)],
-        "unknown": [{"question": item.get("question"),
-                     "status": item.get("status")} for item in unknown_turns],
-        "negative": [{"question": item.get("question"),
-                      "status": item.get("status")} for item in negative_turns],
-        "conflict": [{"question": item.get("question"),
-                      "status": item.get("status")} for item in conflict_turns],
-        "cross_source": [{"question": item.get("question"),
-                          "status": item.get("status"),
+        "unknown": [{"wire_status": _wire_status(item),
+                     "text": _wire_text(item)} for item in unknown_turns],
+        "negative": [{"wire_status": _wire_status(item),
+                      "text": _wire_text(item)} for item in negative_turns],
+        "conflict": [{"wire_status": _wire_status(item),
+                      "text": _wire_text(item)} for item in conflict_turns],
+        "cross_source": [{"wire_status": _wire_status(item),
                           "citation_count": len(item.get("citations", ())),
-                          "source_title": item.get("source_title")}
+                          "source_title": _wire_source_title(item),
+                          "text": _wire_text(item)}
                          for item in cross_turns],
         "checkpoint": {"first_ordinal": first[0].get("ordinal") if first else None,
                        "second_ordinal": second[0].get("ordinal") if second else None,
-                       "first_status": first[0].get("status") if first else None,
-                       "second_status": second[0].get("status") if second else None},
+                       "first_wire_status": _wire_status(first[0]) if first else None,
+                       "second_wire_status": _wire_status(second[0]) if second else None},
         "performance": metrics,
         "checks": checks,
         "status": "PASS" if all(checks.values()) else "NE",
