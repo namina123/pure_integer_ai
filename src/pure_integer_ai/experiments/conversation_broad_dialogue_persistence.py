@@ -356,6 +356,9 @@ class PersistentBroadDialogueRecovery:
     cold_turns: tuple[DialogueTurn, ...] = ()
     cold_feature_index: tuple[tuple[tuple[int, ...], tuple[int, ...]], ...] = ()
     cold_turn_ordinals: tuple[int, ...] = ()
+    # 与 ``cold_turns`` 同序的一次性特征缓存。它是进程内派生数据，不参与
+    # checkpoint identity；查询长会话时直接复用，避免逐候选轮次重建 n-gram。
+    cold_turn_features: tuple[frozenset[tuple[int, ...]], ...] = ()
 
     @property
     def indexed_turn_count(self) -> int:
@@ -437,7 +440,11 @@ class PersistentBroadDialogueRecovery:
                     or self.cold_turn_ordinals[position] != ordinal):
                 continue
             turn = self.cold_turns[position]
-            candidate = self._recall_features(turn.question)
+            if len(self.cold_turn_features) == len(self.cold_turns):
+                candidate = self.cold_turn_features[position]
+            else:
+                # 兼容外部按旧字段构造的 recovery；正常恢复路径总会填充缓存。
+                candidate = self._recall_features(turn.question)
             overlap = len(query.intersection(candidate))
             if overlap <= 0:
                 continue
@@ -460,8 +467,10 @@ class PersistentBroadDialogueRecovery:
             by_ordinal[turn.ordinal] = turn
             cold_turns = tuple(by_ordinal[key] for key in sorted(by_ordinal))
             feature_ordinals: dict[tuple[int, ...], set[int]] = {}
-            for item in cold_turns:
-                for feature in self._recall_features(item.question):
+            cold_turn_features = tuple(
+                self._recall_features(item.question) for item in cold_turns)
+            for features, item in zip(cold_turn_features, cold_turns):
+                for feature in features:
                     feature_ordinals.setdefault(feature, set()).add(item.ordinal)
             cold_feature_index = tuple(
                 (feature, tuple(sorted(ordinals)))
@@ -473,20 +482,27 @@ class PersistentBroadDialogueRecovery:
                     return self
                 raise ValueError("memory recall ordinal identity 漂移")
             cold_turns = (*self.cold_turns, turn)
+            turn_features = self._recall_features(turn.question)
             feature_map = {
                 feature: ordinals
                 for feature, ordinals in self.cold_feature_index
             }
-            for feature in self._recall_features(turn.question):
+            for feature in turn_features:
                 feature_map[feature] = (*feature_map.get(feature, ()), turn.ordinal)
             cold_feature_index = tuple(
                 (feature, tuple(ordinals))
                 for feature, ordinals in sorted(feature_map.items())
             )
+            if len(self.cold_turn_features) == len(self.cold_turns):
+                cold_turn_features = (*self.cold_turn_features, turn_features)
+            else:
+                cold_turn_features = tuple(
+                    self._recall_features(item.question) for item in cold_turns)
         return PersistentBroadDialogueRecovery(
             self.checkpoint, self.checkpoint_identity, self.turn_index,
             self.runtime_event_index, cold_turns, cold_feature_index,
             tuple(item.ordinal for item in cold_turns),
+            cold_turn_features,
         )
 
 
@@ -632,10 +648,12 @@ def recover_broad_dialogue_checkpoint(
         runtime_index = tuple(sorted(
             (key, index) for key, (index, _event) in by_item.items()))
     cold_turns = tuple(turns_by_ordinal[key] for key in sorted(turns_by_ordinal))
+    cold_turn_features = tuple(
+        PersistentBroadDialogueRecovery._recall_features(turn.question)
+        for turn in cold_turns)
     feature_ordinals: dict[tuple[int, ...], set[int]] = {}
-    for turn in cold_turns:
-        for feature in PersistentBroadDialogueRecovery._recall_features(
-                turn.question):
+    for features, turn in zip(cold_turn_features, cold_turns):
+        for feature in features:
             feature_ordinals.setdefault(feature, set()).add(turn.ordinal)
     cold_feature_index = tuple(
         (feature, tuple(sorted(ordinals)))
@@ -645,6 +663,7 @@ def recover_broad_dialogue_checkpoint(
         latest, latest_identity, index, runtime_index,
         cold_turns, cold_feature_index,
         tuple(item.ordinal for item in cold_turns),
+        cold_turn_features,
     )
 
 
