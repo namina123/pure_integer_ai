@@ -158,6 +158,74 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+_CAMPAIGN_REQUIRED_STAGES = (1, 2, 3, 4)
+
+
+def _resume_completed_stages(
+        run_root: Path, resume_from: str | None, *, expected_pack_sha256: str,
+        ) -> tuple[int, ...]:
+    """回读同一 pack 的恢复谱系，取得已真实完成的阶段集合。
+
+    ``FormalTrainResult`` 只描述当前进程请求的阶段。若把一个只跑 stage 4
+    的恢复切片直接写成全局 ``weaning_ready``，此前未通过的 stage 2 会被
+    遮蔽。因此发布级判断必须显式回读每一代已封存摘要，而不是从当前调用的
+    ``active_stages`` 推断历史完成度。
+    """
+    if resume_from is None:
+        return ()
+    completed: set[int] = set()
+    seen: set[Path] = set()
+    current = resume_from
+    while current is not None:
+        if (not isinstance(current, str) or not current
+                or Path(current).name != current):
+            raise ValueError("resume_from 必须是当前 run root 内的单个 run identity")
+        candidate = (run_root / current).resolve()
+        try:
+            candidate.relative_to(run_root)
+        except ValueError as error:
+            raise ValueError("resume_from 越出 run root") from error
+        if candidate in seen:
+            raise ValueError("resume_from 谱系出现循环")
+        seen.add(candidate)
+        summary_path = candidate / "training_summary.json"
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("resume_from 缺少可回读训练摘要") from error
+        if (not isinstance(summary, dict)
+                or summary.get("run_id") != current
+                or summary.get("pack_sha256") != expected_pack_sha256):
+            raise ValueError("resume_from 训练身份或 pack SHA 漂移")
+        stages = summary.get("stages_completed")
+        if (not isinstance(stages, list)
+                or any(type(item) is not int or item < 1 for item in stages)):
+            raise ValueError("resume_from stages_completed 非法")
+        completed.update(stages)
+        parent = summary.get("resume_from")
+        if parent is not None and not isinstance(parent, str):
+            raise ValueError("resume_from 谱系父节点非法")
+        current = parent
+    return tuple(sorted(completed))
+
+
+def _campaign_completion(
+        *, prior_completed_stages: tuple[int, ...],
+        local_completed_stages: tuple[int, ...],
+        stage_weaning_ready: bool,
+        stage_blockers: tuple[str, ...],
+        ) -> tuple[tuple[int, ...], bool, tuple[str, ...]]:
+    """把局部 Stage 结果投影为可发布训练 campaign 的就绪结论。"""
+    cumulative = tuple(sorted(set(prior_completed_stages)
+                              | set(local_completed_stages)))
+    missing = tuple(
+        stage for stage in _CAMPAIGN_REQUIRED_STAGES if stage not in cumulative)
+    blockers = list(stage_blockers)
+    blockers.extend(
+        f"CAMPAIGN_STAGE_{stage}_INCOMPLETE" for stage in missing)
+    return cumulative, bool(stage_weaning_ready and not missing), tuple(blockers)
+
+
 def _typed_floor_summary(report) -> dict[str, object] | None:
     """将 typed floor 的可审计失败原因压缩进 K 盘运行摘要。
 
@@ -363,6 +431,8 @@ def run_conversation_training(*, project_root: str | Path,
         if portable_source_identity else None)
     pack = load_dialogue_training_pack(
         paths, max_cases=max_cases, source_path_identities=source_identities)
+    prior_completed_stages = _resume_completed_stages(
+        root, resume_from, expected_pack_sha256=pack.pack_sha256)
     typed_report = TypedDialogueCourseAdapter().report(pack.cases)
     strict_bundle = None
     if typed_semantic and any(stage >= 3 for stage in active_stages):
@@ -606,15 +676,25 @@ def run_conversation_training(*, project_root: str | Path,
         }
         _write_json(run_dir / "training_summary.json", summary)
         return summary
+    local_completed_stages = tuple(sorted(result.stages_completed))
+    stage_weaning_ready = bool(result.weaning_ready)
+    (cumulative_completed_stages,
+     campaign_weaning_ready,
+     campaign_blockers) = _campaign_completion(
+         prior_completed_stages=prior_completed_stages,
+         local_completed_stages=local_completed_stages,
+         stage_weaning_ready=stage_weaning_ready,
+         stage_blockers=tuple(result.weaning_blockers),
+     )
     cursor = DialogueTrainingCursor(
         tuple(bytes.fromhex(pack.pack_sha256)),
         tuple(run_id.encode("utf-8")),
         tuple(sorted(active_stages)),
-        tuple(sorted(result.stages_completed)),
+        local_completed_stages,
         len(train_items),
         len(heldout_items) if with_heldout_probe else 0,
         int(result.final_metrics.graph_size),
-        bool(result.weaning_ready),
+        campaign_weaning_ready,
     )
     cursor_path = write_training_cursor(
         open_existing_run_root(run_dir, require_k_drive=True),
@@ -642,9 +722,12 @@ def run_conversation_training(*, project_root: str | Path,
         },
         "active_stages": active_stages,
         "resume_from": resume_from,
-        "stages_completed": tuple(result.stages_completed),
-        "weaning_ready": bool(result.weaning_ready),
-        "weaning_blockers": tuple(result.weaning_blockers),
+        "stages_completed": local_completed_stages,
+        "cumulative_stages_completed": cumulative_completed_stages,
+        "campaign_required_stages": _CAMPAIGN_REQUIRED_STAGES,
+        "stage_weaning_ready": stage_weaning_ready,
+        "weaning_ready": campaign_weaning_ready,
+        "weaning_blockers": campaign_blockers,
         "storage_performance_mode": storage_performance_mode,
         "sqlite_page_resume": bool(sqlite_page_resume),
         "sqlite_resume_source_manifest_sha256": (
