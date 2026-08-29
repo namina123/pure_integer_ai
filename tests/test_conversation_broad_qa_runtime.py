@@ -2,6 +2,7 @@ import pytest
 
 from pure_integer_ai.experiments.conversation_broad_qa_runtime import (
     BroadDialogueState,
+    DialogueTurn,
     answer_broad_dialogue_turn,
 )
 from pathlib import Path
@@ -265,6 +266,43 @@ def test_source_title_is_injected_for_immediate_reference_followup() -> None:
         assert calls == ["首轮问题", "矮寨大桥，它位于哪里？"]
     finally:
         module.query_broad_qa = original
+
+
+def test_index_evidence_source_followup_resolver_requires_same_source() -> None:
+    import sqlite3
+    import pure_integer_ai.experiments.conversation_broad_qa_runtime as module
+
+    class _Result:
+        def __init__(self, status: str, title: str | None):
+            self.status = status
+            self.title = title
+
+    calls: list[str] = []
+    original = module.query_broad_qa
+    original_exact = module.has_exact_broad_qa_title
+    def _query(_connection, question, **_kwargs):
+        calls.append(question)
+        return (_Result("ANSWER", "公开来源")
+                if question.endswith("它在哪里？")
+                else _Result("ANSWER", "其他来源"))
+    module.query_broad_qa = _query
+    module.has_exact_broad_qa_title = (
+        lambda _connection, question: question == "明确对象")
+    connection = sqlite3.connect(":memory:")
+    try:
+        resolver = module.build_index_evidence_source_followup_resolver(
+            connection)
+        turn = DialogueTurn(
+            0, "首轮问题", "来源证据句。", "来源证据句。", "ANSWER",
+            "公开来源", "https://example.invalid/source", (1,))
+        assert resolver("它在哪里？", turn) is True
+        assert resolver("无关新问题", turn) is False
+        assert resolver("明确对象", turn) is False
+        assert calls == ["公开来源 它在哪里？", "公开来源 无关新问题"]
+    finally:
+        module.query_broad_qa = original
+        module.has_exact_broad_qa_title = original_exact
+        connection.close()
 
 
 def test_source_focus_does_not_cross_unknown_turn() -> None:

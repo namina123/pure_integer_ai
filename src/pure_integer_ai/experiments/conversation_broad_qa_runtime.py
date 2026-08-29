@@ -156,6 +156,61 @@ def _resolve_source_followup(state: BroadDialogueState,
     return question
 
 
+def build_index_evidence_source_followup_resolver(
+        database: sqlite3.Connection,
+        *,
+        query_cache: BroadQaQueryCache | None = None,
+        learned_evidence_term_weights: Iterable[tuple[str, int]] | None = None,
+        learned_typed_obligation: LearnedTypedObligation | None = None,
+        learned_relation_evidence_model: LearnedRelationEvidenceModel | None = None,
+        surface_variant_provider: SurfaceVariantProvider | None = None,
+        fast_path: bool = False,
+        ) -> Callable[[str, DialogueTurn], bool]:
+    """建立基于来源索引证据的紧邻焦点解析器。
+
+    解析器不包含语言、脚本或代词表。它只验证一个可复现的检索事实：把
+    上一轮已经确认的来源标题作为上下文前缀后，当前问题是否得到同一来源
+    的 ANSWER。若没有该证据，返回 ``False``，上层继续使用原问题并保持
+    UNKNOWN/CLARIFY 边界。前缀使用 ASCII 空格作为跨语言 transport 分隔符，
+    不改变任何来源正文或答案载荷。
+    """
+    if not isinstance(database, sqlite3.Connection):
+        raise TypeError("source followup database 类型错误")
+    if query_cache is not None and not isinstance(query_cache, BroadQaQueryCache):
+        raise TypeError("source followup query_cache 类型错误")
+    if type(fast_path) is not bool:
+        raise TypeError("source followup fast_path 必须是严格 bool")
+    if (surface_variant_provider is not None
+            and not callable(surface_variant_provider)):
+        raise TypeError("source followup surface_variant_provider 必须可调用")
+
+    def resolve(question: str, turn: DialogueTurn) -> bool:
+        if (type(question) is not str or not question.strip()
+                or not isinstance(turn, DialogueTurn)
+                or turn.status != "ANSWER"
+                or not turn.source_title
+                or turn.source_title in question
+                or has_exact_broad_qa_title(database, question)):
+            return False
+        candidate = f"{turn.source_title} {question.strip()}"
+        result = query_broad_qa(
+            database,
+            candidate,
+            learned_evidence_term_weights=learned_evidence_term_weights,
+            learned_typed_obligation=learned_typed_obligation,
+            learned_relation_evidence_model=learned_relation_evidence_model,
+            surface_variant_provider=surface_variant_provider,
+            fast_path=fast_path,
+            query_cache=query_cache,
+        )
+        return bool(
+            result.status == "ANSWER"
+            and result.title == turn.source_title
+        )
+
+    return resolve
+
+
 def _validated_source_passage_response(
         provider: Callable[[str], tuple[object, ...] | None],
         question: str,
@@ -502,4 +557,5 @@ def answer_broad_dialogue_turn(
 __all__ = [
     "BroadDialogueState", "DialogueCitation", "DialogueTurn",
     "answer_broad_dialogue_turn",
+    "build_index_evidence_source_followup_resolver",
 ]

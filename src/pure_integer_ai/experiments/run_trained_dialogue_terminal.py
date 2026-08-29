@@ -22,6 +22,7 @@ from pure_integer_ai.experiments.conversation_broad_qa_runtime import (
     DialogueCitation,
     DialogueTurn,
     answer_broad_dialogue_turn,
+    build_index_evidence_source_followup_resolver,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_query import BroadQaQueryCache
 from pure_integer_ai.experiments.ph2_broad_qa_query import SurfaceVariantProvider
@@ -963,6 +964,19 @@ def run_trained_dialogue_terminal(
     # 不可变结果，不再重复执行 SQLite 与排序路径。
     query_cache = BroadQaQueryCache(connection)
     query_cache.prepare()
+    if source_followup_resolver is None:
+        # Published runs get a data-driven resolver by default.  It only admits
+        # a focus rewrite when the broad index itself returns an ANSWER tied to
+        # the immediately preceding source; no language/代词 table lives here.
+        source_followup_resolver = (
+            build_index_evidence_source_followup_resolver(
+                connection,
+                query_cache=query_cache,
+                learned_relation_evidence_model=(
+                    learned_relation_evidence_model),
+                surface_variant_provider=surface_variant_provider,
+                fast_path=(performance_tier == "deferred-narrow-fast"),
+            ))
     # 在首个用户请求计时前完成一次性规范问式加载。
     load_broad_qa_question_slots()
     latency_us: list[int] = []
