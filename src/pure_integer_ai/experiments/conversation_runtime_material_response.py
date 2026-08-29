@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from pure_integer_ai.cognition.shared.learning_input_capsule import digest_bytes
 from pure_integer_ai.experiments.conversation_capsule_response_organization import (
@@ -33,14 +34,6 @@ from pure_integer_ai.experiments.conversation_broad_qa_runtime import (
 )
 from pure_integer_ai.storage.source_record import SourceRecordRepository
 from pure_integer_ai.storage.integer_codec import encode_integer_tuple
-
-
-def _has_followup_reference(surface: str) -> bool:
-    """复用对话层已冻结的指代边界，不把普通词内子串当作追问。"""
-    from pure_integer_ai.experiments.conversation_broad_qa_runtime import (
-        _has_followup_reference as broad_has_followup_reference,
-    )
-    return broad_has_followup_reference(surface)
 
 
 RUNTIME_MATERIAL_RESPONSE_PROTOCOL_V1 = 1
@@ -226,6 +219,7 @@ class RuntimeMaterialResponseProvider:
             self,
             question: str,
             source_title: str,
+            reference_resolver: Callable[[str], bool] | None = None,
             ) -> tuple[
                 str, str | None, str | None, str | None,
                 tuple[DialogueCitation, ...],
@@ -238,10 +232,28 @@ class RuntimeMaterialResponseProvider:
         if (type(question) is not str or not question.strip()
                 or type(source_title) is not str or not source_title.strip()):
             raise ValueError("followup question/source_title 必须是非空文本")
-        if not _has_followup_reference(question):
-            return None
         matches = tuple(item for item in self.candidates
                         if item.binding.source_title == source_title)
+        if reference_resolver is not None:
+            if not callable(reference_resolver):
+                raise TypeError("followup reference_resolver 必须可调用")
+            is_reference = bool(reference_resolver(question))
+        else:
+            # Direct provider consumers do not have a DialogueTurn resolver.
+            # Use only data already bound to this source: a follow-up must share
+            # at least three deterministic n-gram features with its question.
+            query_features = set(broad_qa_terms(question))
+            is_reference = (
+                bool(matches) and any(
+                    len(query_features & set(broad_qa_terms(item.question)))
+                    >= _RELATED_QUERY_MIN_TERMS
+                    for item in matches
+                )
+                or not matches and len(query_features)
+                >= _RELATED_QUERY_MIN_TERMS
+            )
+        if not is_reference:
+            return None
         if len(matches) != 1:
             return "CLARIFY", None, None, None, ()
         return self._respond_matches_with_citations(matches)
@@ -250,9 +262,11 @@ class RuntimeMaterialResponseProvider:
             self,
             question: str,
             source_title: str,
+            reference_resolver: Callable[[str], bool] | None = None,
             ) -> tuple[str, str | None, str | None, str | None] | None:
         """兼容旧四元接口的紧邻指代入口。"""
-        result = self.response_followup_with_citations(question, source_title)
+        result = self.response_followup_with_citations(
+            question, source_title, reference_resolver)
         if result is None:
             return None
         return result[:4]
