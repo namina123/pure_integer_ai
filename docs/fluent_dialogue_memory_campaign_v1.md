@@ -36,7 +36,11 @@
 
 ### 2026-08-30 长目标审计补充
 
-- `gc-dialogue-stage1234-20260830b` 已结束但未完成 Stage 2 门控：`stages_completed=[]`，CAUSES 覆盖率为 `34‰`，门槛为 `50‰`；Stage 3/4 未执行，`weaning_ready=false`。该 run 只能保留为失败证据，不能降低门槛、不能接入 release。2026-08-29 的四阶段 `PASS` 基线继续作为当前可用训练基线。
+- `gc-dialogue-stage1234-20260830c` 已自然结束。它实际消费 `15464` 个 case、`12751` 个训练项、`103520` 个 turn，写入 `2615856` 个 occurrence、`12387` 个 dialogue successor projection 和 `1791295` 个 successor feature。Stage 1 达标；Stage 2 的 CAUSES 覆盖率为 `44‰`，低于未修改的 `50‰` 门槛，因此 Stage 3/4 未执行，`weaning_ready=false`。这不是四阶段完成，也不是断奶证据；保留 run 作为真实训练结果和恢复基座。
+- 该 run 的训练图已组装为 `K:\pure_integer_ai_work\model_releases\public-model-gc-v7-dialogue-stage1-20260830`，并通过 `load_public_model_release(..., verify_payload_hashes=true)` 的逐文件 SHA 校验。它是“Stage 1 公开候选”，不是流畅交流发布版；v6 仍是当前能力基线，v7 不覆盖 v5/v6。
+- v7 的 60 轮独立 JSONL 交流记录位于 `K:\pure_integer_ai_work\dialogue_sessions\gc-v7-dialogue-stage1-independent-20260830`：`ANSWER=10`、`CLARIFY=14`、`UNKNOWN=36`，p50 `36126 us`、p95 `147905 us`、峰值工作集 `514383872` bytes。结果没有超过 v6 的 12/14/34 基线，不能宣称新增训练改善了对话能力；记忆回放成功的边界仍以既有 h/i 记录为准。
+- 本轮已经确认的真实承重边界：广域 fast route 会执行来源查询，`UNKNOWN/CLARIFY` 后的 Runtime Memory 可回放，但对未见过的组合式问题仍缺少稳定的结构化回答组织。继续堆 OASST/KdConv 近邻数据不能替代因果/意图/承接/改写等组合能力；不得通过降低相似度门槛制造答案。
+
 - `fluent-memory-60round-20260830-c` 提供了 60 轮、跨两次进程的真实记录：checkpoint 恢复、Runtime 资料导入、来源引用均实际运行。两段合计 `ANSWER=22`、`CLARIFY=15`、`UNKNOWN=23`；第一段 p50 `39,938 us`、p95 `160,868 us`，第二段 p50 `39,947 us`、p95 `93,965 us`。因此当前只能宣称“可恢复和可接线”，不能宣称流畅交流或 p95 目标达成。
 - 记录暴露的承重缺口是：Runtime Memory 已保存用户轮次并可按相似度召回，但召回轮次尚未稳定进入自然回答生成；“记住/回忆”类问题仍频繁落到 UNKNOWN。修复必须复用已有语言无关召回与对话组织模型，不能在代码写入特定语言词表、固定答案或内部状态文本。
 - 性能下一阶段聚焦首段冷启动、来源查询和长会话召回的算法缓存；目标为 warm p50 保持 10ms 级、p95 `<=100ms`，不牺牲未知、冲突和来源引用边界。
@@ -45,10 +49,10 @@
 
 - 已完成：长会话特征重复计算的代码切片。
 - 已完成（本轮）：`tests/test_conversation_broad_dialogue_persistence.py` `2 passed`；`git diff --check` 通过。checkpoint 身份和旧式 recovery 构造兼容性保持不变。
-- 进行中：`gc-dialogue-stage1234-20260830b` 续接 Stage 2--4 的全量公开课程训练（K:，PID 23916）；训练期间只被动等待，结束后读取 `training_summary.json`、pack manifest 和 SHA，再决定是否组装新 release。
-- 已确认：`fluent-memory-60round-20260830` 首行 BOM 导致 59 个有效请求，`-b` 版本虽有 60 行但全部为 UNKNOWN；这两份记录都不能作为流畅交流证据，待训练完成后用无 BOM 原始 UTF-8 重新生成真实多主题交流记录。
+- 已完成（本轮）：`gc-dialogue-stage1234-20260830c` 的四阶段请求和独立 v7 组包/校验；结果只到 Stage 1，60 轮交流未改善，不能晋升为能力基线。
+- 已确认：`fluent-memory-60round-20260830` 首行 BOM 导致 59 个有效请求，`-b` 版本虽有 60 行但全部为 UNKNOWN；这两份记录都不能作为流畅交流证据。训练后生成的 v7 记录同样未达到流畅门槛，详见上方统计。
 - 下一步：将 Runtime Memory 的结构命中作为生成侧上下文证据，交给已有 learned/core dialogue runtime 组织回答；digest 仍只作身份校验，原始可读文本只从 checkpoint 中的 `DialogueTurn` 或来源 provider 读取。
 - 本轮代码已接入 `memory_recall_response`：广域/来源路由明确未命中后，宿主用冷轮次整数特征的稀有多标量交集选择候选，并回放已有用户陈述；不读取 digest 作为表面、不新增语言词表或固定答句。独立集成回放确认“你还记得我刚才说的兴趣吗？”返回持久化陈述而非公开 UNKNOWN。
 - 本轮同时加入 `append_broad_dialogue_checkpoint`。长会话正常追加只验证已持有的前驱 ordinal/identity 并排他写入后继；进程启动仍完整重放并核验链，避免每轮 O(n) 磁盘重读。针对性回归 `18 passed`，`compileall` 与 `git diff --check` 通过。
-- 再下一步：基于当前训练 run 判断是否有可绑定的 response organization artifact；没有明确 PASS 证据时不启动新长训练。
+- 再下一步：补充能把 CAUSES 覆盖从 `44‰` 推过 `50‰` 的公开、可审计因果课程，并单独设计组合式对话行为课程（承接、澄清、改写、比较、建议、总结），先做一次完整训练切片再评估；不得把旧 response-organization `NE` artifact 接入 release。若新课程不可得，应记录授权/数据阻塞，不以降低门槛或重复近邻训练替代。
 - 完成条件：M1-M5 均有实际能力或明确失败证据，发布包可在 K: release root 独立启动，且新增差异不含密钥、绝对路径、私有评测或论文。

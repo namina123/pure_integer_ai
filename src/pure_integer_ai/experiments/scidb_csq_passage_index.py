@@ -826,14 +826,29 @@ class ScidbCsqPassageRuntime:
         effective_matches = (
             best_matches
             + min(question_matches.get(best_id, 0), best_matches))
-        confidence = min(1000, (effective_matches * 1000) // len(rows))
+        # Confidence must account for the complete stripped query, including
+        # terms absent from this source index.  Dividing only by ``rows`` made
+        # a few generic matched fragments look like complete coverage and let
+        # an unrelated passage answer a query whose actual topic was absent.
+        # ``terms`` is an artifact-compatible integer/string feature set; no
+        # vocabulary, language, topic name, or answer is added here.
+        confidence = min(
+            1000, (effective_matches * 1000) // len(terms))
         margin_ok = (
             len(ranked) == 1
             or best_score * 1000 >= ranked[1][0] * minimum_margin_permille)
         # 两个独立正文 n-gram 是候选准入下限；实际生产门还要求正文覆盖
         # confidence。把下限固定为 2 允许问法改写，安全性不依赖题干特征。
         minimum_matches = 2
-        if (confidence < minimum_confidence_permille
+        # Ambiguous source neighborhoods need proportionally more complete
+        # query coverage.  A unique candidate keeps the caller's floor;
+        # dozens of loosely related candidates cannot pass on generic terms.
+        required_confidence = min(
+            1000,
+            minimum_confidence_permille
+            + min(100, max(0, len(grouped) - 1) * 10),
+        )
+        if (confidence < required_confidence
                 or best_matches < minimum_matches or not margin_ok):
             return ScidbCsqPassageResult(
                 "UNKNOWN", None, None, None, None, None, None,

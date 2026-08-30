@@ -32,6 +32,9 @@ from pure_integer_ai.experiments.conversation_broad_dialogue_persistence import 
     append_broad_dialogue_checkpoint,
     recover_broad_dialogue_checkpoint,
 )
+from pure_integer_ai.experiments.conversation_broad_memory_recall import (
+    BroadDialogueMemoryRecallIndex,
+)
 from pure_integer_ai.experiments.conversation_broad_runtime_memory_bridge import (
     BroadDialogueRuntimeMemoryError,
     append_dialogue_turn_to_runtime_memory,
@@ -643,6 +646,7 @@ def run_trained_dialogue_terminal(
     core_dialogue_runtime = None
     # session checkpoint 恢复后注入的冷记忆索引；未启用 session 时保持空。
     dialogue_recovery = None
+    dialogue_memory_index = None
     dialogue_response_runtime = None
     science_passage_runtime = None
     source_passage_response = None
@@ -767,8 +771,8 @@ def run_trained_dialogue_terminal(
                 history.append((1, prior_turn.question))
                 if prior_turn.answer:
                     history.append((2, prior_turn.answer))
-            if dialogue_recovery is not None:
-                for prior_turn in dialogue_recovery.query_relevant_turns(
+            if dialogue_memory_index is not None:
+                for prior_turn in dialogue_memory_index.query_relevant_turns(
                         value, limit=4, minimum_similarity_permille=600):
                     if prior_turn.ordinal in hot_ordinals:
                         continue
@@ -812,8 +816,8 @@ def run_trained_dialogue_terminal(
                 history.append((1, prior_turn.question))
                 if prior_turn.answer:
                     history.append((2, prior_turn.answer))
-            if dialogue_recovery is not None:
-                for prior_turn in dialogue_recovery.query_relevant_turns(
+            if dialogue_memory_index is not None:
+                for prior_turn in dialogue_memory_index.query_relevant_turns(
                         value, limit=4, minimum_similarity_permille=600):
                     if prior_turn.ordinal in hot_ordinals:
                         continue
@@ -968,85 +972,15 @@ def run_trained_dialogue_terminal(
             except (BroadDialoguePersistenceError,
                     BroadDialogueRuntimeMemoryError) as error:
                 raise ValueError(f"会话检查点无法恢复: {error}") from error
-        if dialogue_recovery is None:
-            # 新会话没有 checkpoint 时也建立 run-local 冷索引；该空壳只
-            # 承载派生查询状态，不参与 checkpoint identity。
-            dialogue_recovery = PersistentBroadDialogueRecovery(
-                (), (), (), (), (), (), ())
-            for prior_turn in state.turns:
-                dialogue_recovery = dialogue_recovery.with_turn(prior_turn)
+        dialogue_memory_index = BroadDialogueMemoryRecallIndex(
+            () if dialogue_recovery is None else dialogue_recovery.cold_turns)
 
     # Keep memory policy at the host boundary.  The broad QA core remains
     # language-agnostic; this callback only returns a surface backed by a
     # high-similarity persisted turn or by the learned dialogue runtime.
-    if memory_recall_response is None and dialogue_recovery is not None:
-        cold_turn_by_ordinal = {
-            item.ordinal: (index, item)
-            for index, item in enumerate(dialogue_recovery.cold_turns)
-        }
-        rare_feature_index = {
-            feature: ordinals
-            for feature, ordinals in dialogue_recovery.cold_feature_index
-            if len(feature) >= 2 and len(ordinals) <= 2
-        }
-        rare_feature_counts = {
-            feature: len(ordinals)
-            for feature, ordinals in rare_feature_index.items()
-        }
-
+    if memory_recall_response is None and dialogue_memory_index is not None:
         def _memory_recall_response(value: str) -> str | None:
-            if type(value) is not str or not value.strip():
-                return None
-            candidates: list[DialogueTurn] = []
-            seen: set[tuple[int, ...]] = set()
-            query_features = PersistentBroadDialogueRecovery._recall_features(value)
-            # For memory-only recall, favour rare multi-scalar features.  This
-            # prevents generic conversational words from selecting a nearby
-            # question while still allowing a long paraphrase to reach the
-            # earlier user statement.  Feature document counts come from the
-            # already built cold index; no vocabulary or language table is
-            # introduced.
-            ranked: list[tuple[int, int, int, DialogueTurn]] = []
-            candidate_ordinals: set[int] = set()
-            for feature in query_features:
-                candidate_ordinals.update(rare_feature_index.get(feature, ()))
-            for ordinal in candidate_ordinals:
-                indexed = cold_turn_by_ordinal.get(ordinal)
-                if indexed is None:
-                    continue
-                index, item = indexed
-                features = (
-                    dialogue_recovery.cold_turn_features[index]
-                    if len(dialogue_recovery.cold_turn_features)
-                    == len(dialogue_recovery.cold_turns)
-                    else PersistentBroadDialogueRecovery._recall_features(
-                        item.question)
-                )
-                if item.question.strip() == value.strip():
-                    continue
-                overlap = query_features.intersection(features)
-                rare = tuple(
-                    feature for feature in overlap
-                    if feature in rare_feature_index
-                )
-                if not rare:
-                    continue
-                score = sum(1000 // rare_feature_counts[feature]
-                            for feature in rare)
-                ranked.append((score, len(rare), item.ordinal, item))
-            ranked.sort(key=lambda item: (-item[0], -item[1], -item[2]))
-            for _score, _width, _ordinal, item in ranked[:4]:
-                seen.add(item.turn_key)
-                candidates.append(item)
-            if not candidates:
-                return None
-            # Content-preserving fallback: return the remembered answer when
-            # it exists, otherwise the user's original statement.  No digest,
-            # status token, language table, or fixed answer is introduced.
-            first = candidates[0]
-            if first.answer and first.status == "ANSWER":
-                return first.answer
-            return first.question
+            return dialogue_memory_index.recall(value)
         memory_recall_response = _memory_recall_response
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     # release/index 连接在整个会话中只读；有界缓存让重复问题直接复用
@@ -1208,8 +1142,8 @@ def run_trained_dialogue_terminal(
                         runtime_memory_state=runtime_memory_state,
                     )
                     checkpoint_ordinal += 1
-                    if dialogue_recovery is not None:
-                        dialogue_recovery = dialogue_recovery.with_turn(turn)
+                    if dialogue_memory_index is not None:
+                        dialogue_memory_index.append(turn)
                 except (BroadDialoguePersistenceError,
                         BroadDialogueRuntimeMemoryError) as error:
                     raise ValueError(f"会话记忆写入失败: {error}") from error

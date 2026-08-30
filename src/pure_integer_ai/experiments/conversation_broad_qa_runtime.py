@@ -407,11 +407,11 @@ def answer_broad_dialogue_turn(
             status, answer, source_title, source_url, citations = source_response
             display_answer = answer
             retrieval_question = question
-    bounded_dialogue_miss = (
-        answer is None and not runtime_material_decided and fast_path
-        and learned_dialogue_eligible and learned_dialogue_queried
-        and source_passage_queried)
-    if answer is None and not runtime_material_decided and not bounded_dialogue_miss:
+    # Fast mode bounds the expensive narrow snapshot, not the broad source
+    # index.  A learned dialogue miss is not evidence that a factual question
+    # is unknown; broad retrieval must still get its normal chance with the
+    # same evidence and confidence gates as strict mode.
+    if answer is None and not runtime_material_decided:
         retrieval_question = _resolve_source_followup(
             state, question, source_followup_resolver)
         if (learned_evidence_term_weights is None
@@ -479,8 +479,6 @@ def answer_broad_dialogue_turn(
         if result.title is not None:
             source_title = result.title
             source_url = result.source_url
-    elif bounded_dialogue_miss:
-        retrieval_question = question
     # 训练侧来源 passage 是广域检索的证据补充，而不是固定 QA fallback。
     # 仅在既有检索未回答时查询；它必须返回完整来源引用，且只能把结果提升为
     # ANSWER，不能用低置信候选覆盖 UNKNOWN/CLARIFY 门。
@@ -499,7 +497,7 @@ def answer_broad_dialogue_turn(
     # ranking and may return only text derived from an already persisted turn
     # or from a learned dialogue model; this layer does not inspect words,
     # scripts, or internal status labels.
-    if (answer is None and status == "UNKNOWN"
+    if (answer is None and status in {"UNKNOWN", "CLARIFY"}
             and not runtime_material_decided
             and memory_recall_response is not None):
         recalled = memory_recall_response(question)
@@ -517,7 +515,6 @@ def answer_broad_dialogue_turn(
     # without changing the strict mode ordering above.
     if (defer_narrow and answer is None and status == "UNKNOWN"
             and not runtime_material_decided and narrow_answer is not None
-            and not bounded_dialogue_miss
             and not (fast_path
                      and has_explicit_non_real_constraint(question))):
         narrow = narrow_answer(question)

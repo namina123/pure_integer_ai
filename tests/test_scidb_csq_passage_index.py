@@ -133,6 +133,9 @@ def test_build_query_excludes_questions_answers_and_heldout(
             "澄明子为什么是蓝色的？", minimum_margin_permille=1000)
         heldout = runtime.query(
             "滑轮有什么作用？", minimum_margin_permille=1000)
+        unrelated = runtime.query(
+            "如何写一个最简单的 Python 程序？",
+            minimum_margin_permille=1000)
     assert result.status == "ANSWER", result
     assert result.surface is not None and "空气分子" in result.surface
     assert result.source_ref is not None and len(result.source_ref) == 11
@@ -144,6 +147,7 @@ def test_build_query_excludes_questions_answers_and_heldout(
     assert second_subject.surface is not None and "水对光" in second_subject.surface
     assert unsupported_subject.status == "UNKNOWN"
     assert heldout.status == "UNKNOWN"
+    assert unrelated.status == "UNKNOWN"
 
 
 def test_source_passage_only_promotes_unanswered_broad_result(monkeypatch) -> None:

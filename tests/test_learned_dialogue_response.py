@@ -248,13 +248,19 @@ def test_fast_learned_priority_skips_broad_only_for_dialogue_eligible(
     assert calls == ["broad"]
 
 
-def test_fast_bounded_dialogue_miss_avoids_heavy_retrieval(monkeypatch) -> None:
+def test_fast_dialogue_miss_still_queries_broad_before_narrow(monkeypatch) -> None:
     import pure_integer_ai.experiments.conversation_broad_qa_runtime as module
 
-    def unexpected_broad(*_args, **_kwargs):
-        raise AssertionError("bounded dialogue miss should not query broad QA")
+    calls = []
 
-    monkeypatch.setattr(module, "query_broad_qa", unexpected_broad)
+    def broad_unknown(*_args, **_kwargs):
+        calls.append("broad")
+        return type("Unknown", (), {
+            "status": "UNKNOWN", "answer": None, "title": None,
+            "source_url": None, "evidence_chain": (),
+        })()
+
+    monkeypatch.setattr(module, "query_broad_qa", broad_unknown)
     _, turn = answer_broad_dialogue_turn(
         BroadDialogueState((7, 8, 9)), "尚未覆盖的闲聊", object(),
         learned_dialogue_answer=lambda _value: None,
@@ -263,11 +269,11 @@ def test_fast_bounded_dialogue_miss_avoids_heavy_retrieval(monkeypatch) -> None:
         prefer_source_passage=True,
         fast_path=True,
         defer_narrow=True,
-        narrow_answer=lambda _value: (_ for _ in ()).throw(
-            AssertionError("bounded dialogue miss should not build narrow QA")),
+        narrow_answer=lambda _value: None,
     )
     assert turn.status == "UNKNOWN"
     assert turn.retrieval_question == "尚未覆盖的闲聊"
+    assert calls == ["broad"]
 
 
 def _response_model(

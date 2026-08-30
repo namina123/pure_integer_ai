@@ -240,6 +240,29 @@ def test_surface_consumer_only_changes_display_surface() -> None:
         module.query_broad_qa = original
 
 
+def test_memory_recall_can_resolve_after_broad_clarify() -> None:
+    import pure_integer_ai.experiments.conversation_broad_qa_runtime as module
+
+    class _Clarify:
+        status = "CLARIFY"
+        answer = None
+        title = None
+        source_url = None
+        evidence_chain = ()
+
+    original = module.query_broad_qa
+    module.query_broad_qa = lambda *_args, **_kwargs: _Clarify()
+    try:
+        _, turn = answer_broad_dialogue_turn(
+            BroadDialogueState((3, 4, 5)), "你还记得吗？", object(),
+            memory_recall_response=lambda _value: "之前保存的陈述。",
+        )
+        assert turn.status == "ANSWER"
+        assert turn.answer == "之前保存的陈述。"
+    finally:
+        module.query_broad_qa = original
+
+
 def test_source_title_is_injected_for_immediate_reference_followup() -> None:
     import pure_integer_ai.experiments.conversation_broad_qa_runtime as module
 
