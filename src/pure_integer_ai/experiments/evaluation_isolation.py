@@ -229,6 +229,12 @@ def _clone_generation_factory(factory: Any) -> Any:
 
 def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any:
     """在独立后端上重建训练上下文及其图、身份和 Memory 读写入口。"""
+    compact_reports = isinstance(backend, SQLiteBackend)
+
+    def clone_report_sequence(values: Any) -> Any:
+        """SQLite 评测只需当前样本报告，避免复制历史 occurrence 图。"""
+        return [] if compact_reports else copy.deepcopy(values)
+
     registry = SpaceRegistry(backend)
     core = AbstractSpace(registry, backend, ctx.core_space.space_id)
     original_companion = getattr(ctx.concept_index, "_companion", None)
@@ -521,27 +527,27 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
     if ctx.set_relation_runtime is not None:
         cloned.set_relation_runtime = (
             ctx.set_relation_runtime.clone_for_context(cloned))
-        cloned.set_relation_reports = copy.deepcopy(
+        cloned.set_relation_reports = clone_report_sequence(
             ctx.set_relation_reports)
     if ctx.property_relation_runtime is not None:
         cloned.property_relation_runtime = (
             ctx.property_relation_runtime.clone_for_context(cloned))
-        cloned.property_relation_reports = copy.deepcopy(
+        cloned.property_relation_reports = clone_report_sequence(
             ctx.property_relation_reports)
     if ctx.mereology_relation_runtime is not None:
         cloned.mereology_relation_runtime = (
             ctx.mereology_relation_runtime.clone_for_context(cloned))
-        cloned.mereology_relation_reports = copy.deepcopy(
+        cloned.mereology_relation_reports = clone_report_sequence(
             ctx.mereology_relation_reports)
     if ctx.semantic_pair_runtime is not None:
         cloned.semantic_pair_runtime = (
             ctx.semantic_pair_runtime.clone_for_context(cloned))
-        cloned.semantic_pair_reports = copy.deepcopy(
+        cloned.semantic_pair_reports = clone_report_sequence(
             ctx.semantic_pair_reports)
     if ctx.logic_closure_runtime is not None:
         cloned.logic_closure_runtime = (
             ctx.logic_closure_runtime.clone_for_context(cloned))
-        cloned.logic_closure_reports = copy.deepcopy(
+        cloned.logic_closure_reports = clone_report_sequence(
             ctx.logic_closure_reports)
     if ctx.span_index is not None:
         cloned.span_index = ctx.span_index.clone_for_context(
@@ -636,9 +642,10 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
                     StructureBoundaryEvidenceMapper):
                 raise EvaluationIsolationError(
                     "H-05 structure-boundary mapper 的评测 clone 类型非法")
-        cloned.structure_boundary_report = copy.deepcopy(
-            ctx.structure_boundary_report)
-        cloned.structure_candidate_reports = copy.deepcopy(
+        cloned.structure_boundary_report = (
+            None if compact_reports else copy.deepcopy(
+                ctx.structure_boundary_report))
+        cloned.structure_candidate_reports = clone_report_sequence(
             ctx.structure_candidate_reports)
         cloned.sense_candidate_consumer = ActiveSenseConsumer(
             cloned.candidate_projection_graph,
@@ -649,7 +656,7 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
                 "H-05 投影图缺少 Sense 课程 runtime")
         cloned.sense_candidate_course_runtime = (
             ctx.sense_candidate_course_runtime.clone_for_evaluation())
-        cloned.sense_candidate_reports = copy.deepcopy(
+        cloned.sense_candidate_reports = clone_report_sequence(
             ctx.sense_candidate_reports)
     if ctx.language_semantic_course_runtime is not None:
         if cloned.span_index is None or cloned.occurrence_index is None:
