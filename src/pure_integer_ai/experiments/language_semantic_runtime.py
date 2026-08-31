@@ -70,6 +70,7 @@ from pure_integer_ai.experiments.language_sense_candidate_runtime import (
     SenseCandidateRecognitionTrace,
 )
 from pure_integer_ai.experiments.train_context import TrainContext
+from pure_integer_ai.storage.backend import SQLiteBackend
 
 
 def _packed(key: tuple[int, ...]) -> tuple[int, ...]:
@@ -291,10 +292,20 @@ class LanguageSemanticCourseRuntime:
             if self.query_protocol is None
             else self.query_protocol.clone_for_evaluation()
         )
+        # SQLite held-out evaluation is read-only.  Rebuilding a multi-million
+        # entry H-00 ledger for every case multiplies the resident set; share
+        # the immutable ledger and let the host state token fail closed if a
+        # buggy evaluator attempts to mutate it.  DictBackend keeps the exact
+        # historical clone required by existing tests and semantics.
+        ledger = (
+            self.ledger
+            if isinstance(ctx.backend, SQLiteBackend)
+            else self.ledger.clone()
+        )
         return LanguageSemanticCourseRuntime(
             ctx,
             cloned_protocol,
-            ledger=self.ledger.clone(),
+            ledger=ledger,
             query_protocol=cloned_query,
         )
 

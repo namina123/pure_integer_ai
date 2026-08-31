@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import copy
+import gc
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -958,6 +959,43 @@ def _close_evaluation_session(eval_ctx: Any) -> None:
         work_memory.end_session()
 
 
+def _release_evaluation_caches(eval_ctx: Any) -> None:
+    """Drop per-case SQLite facade caches before the next held-out case.
+
+    Evaluation contexts are intentionally rebuilt for isolation, but their
+    graph/identity facades may cache millions of rows while resolving a typed
+    query.  Clearing those caches before the object becomes unreachable lets
+    Python reuse the memory instead of retaining one arena per case.
+    """
+    for attribute in (
+            "graph_ontology", "span_index", "segmentation_span_materializer",
+            "boundary_span_materializer", "occurrence_index",
+            "scoped_identity_store"):
+        value = getattr(eval_ctx, attribute, None)
+        clear = getattr(value, "clear_runtime_caches", None)
+        if callable(clear):
+            clear()
+    concept_index = getattr(eval_ctx, "concept_index", None)
+    if concept_index is not None:
+        index = getattr(concept_index, "_index", None)
+        if isinstance(index, dict):
+            index.clear()
+        loaded = getattr(concept_index, "_loaded_spaces", None)
+        if isinstance(loaded, set):
+            loaded.clear()
+    # A few runtime owners keep ordinary dictionaries rather than exposing a
+    # cache protocol.  Clear only names explicitly documented as ephemeral.
+    for owner_name in (
+            "language_prediction_runtime", "structure_candidate_runtime",
+            "sense_candidate_runtime", "language_semantic_course_runtime"):
+        owner = getattr(eval_ctx, owner_name, None)
+        for cache_name in ("_reports", "_source_cache", "_occurrence_cache"):
+            cache = getattr(owner, cache_name, None)
+            if isinstance(cache, (dict, set, list)):
+                cache.clear()
+    gc.collect()
+
+
 def _evaluation_runtime_versions(ctx: Any, eval_ctx: Any) -> Any:
     """选择评测 session 继承的课程版本，不触碰宿主状态。"""
     runtime_versions = None
@@ -1115,6 +1153,7 @@ def isolated_evaluation_batch(ctx: Any, *, label: str) -> Iterator[Any]:
                 try:
                     if eval_ctx is not None:
                         _close_evaluation_session(eval_ctx)
+                        _release_evaluation_caches(eval_ctx)
                 finally:
                     try:
                         connection.execute(
