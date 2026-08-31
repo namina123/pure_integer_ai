@@ -77,6 +77,12 @@
 
 `PersistentBroadDialogueRecovery` 新增进程内 `cold_turn_features` 派生缓存。恢复阶段为每个冷轮次只生成一次 n-gram 特征；`query_relevant_turns()` 在候选排序时直接读取缓存，`with_turn()` 增量维护缓存，旧式外部构造仍有回退路径。缓存不写入 checkpoint、训练库或发布包，因此不会改变既有身份和跨语言数据契约。该切片已提交为当前分支最新变更的一部分，训练进程不依赖未提交的运行时产物。
 
+### 2026-09-01 Runtime provider 降本
+
+`RuntimeMaterialResponseProvider` 现在在装配时一次建立进程内派生索引：精确问题、来源标题、问题特征到候选的倒排，以及每条绑定已经计算好的广域特征。精确命中、同源追问和自然改写都消费这些索引，不再在每轮遍历全部 Runtime binding 或重复生成问题特征。索引是 `runtime derived cache`，不进入 `bindings.int`、SQLite、manifest 或任何跨语言身份；重启后由相同的 binding/source ledger 确定性重建。资格、冲突、未知和 SourceRecord 回读顺序没有放宽。
+
+该切片的 Runtime 语言、CLI 和 binding 持久化回归为 `11 passed`；没有修改训练 payload、release root 或论文。长会话性能仍需用真实 60+ 轮记录确认，不能把这次局部索引优化直接等同于 `p95 <= 100ms` 达标。
+
 ### 2026-08-30 长目标审计补充
 
 - `gc-dialogue-stage1234-20260830c` 已自然结束。它实际消费 `15464` 个 case、`12751` 个训练项、`103520` 个 turn，写入 `2615856` 个 occurrence、`12387` 个 dialogue successor projection 和 `1791295` 个 successor feature。Stage 1 达标；Stage 2 的 CAUSES 覆盖率为 `44‰`，低于未修改的 `50‰` 门槛，因此 Stage 3/4 未执行，`weaning_ready=false`。这不是四阶段完成，也不是断奶证据；保留 run 作为真实训练结果和恢复基座。
@@ -91,10 +97,11 @@
 ## 恢复点
 
 - 已完成：长会话特征重复计算的代码切片。
+- 已完成（2026-09-01）：Runtime provider 的精确/来源/特征索引切片；受影响的 Runtime language、CLI、binding persistence 回归 `11 passed`。索引只存在进程内，不改变发布数据合同。
 - 已完成（本轮）：`tests/test_conversation_broad_dialogue_persistence.py` `2 passed`；`git diff --check` 通过。checkpoint 身份和旧式 recovery 构造兼容性保持不变。
 - 已完成（本轮）：`gc-dialogue-stage1234-20260830c` 的四阶段请求和独立 v7 组包/校验；结果只到 Stage 1，60 轮交流未改善，不能晋升为能力基线。
 - 已确认：`fluent-memory-60round-20260830` 首行 BOM 导致 59 个有效请求，`-b` 版本虽有 60 行但全部为 UNKNOWN；这两份记录都不能作为流畅交流证据。训练后生成的 v7 记录同样未达到流畅门槛，详见上方统计。
-- 下一步：将 Runtime Memory 的结构命中作为生成侧上下文证据，交给已有 learned/core dialogue runtime 组织回答；digest 仍只作身份校验，原始可读文本只从 checkpoint 中的 `DialogueTurn` 或来源 provider 读取。
+- 下一步：将 Runtime Memory 的结构命中作为生成侧上下文证据，交给已有 learned/core dialogue runtime 组织回答；digest 仍只作身份校验，原始可读文本只从 checkpoint 中的 `DialogueTurn` 或来源 provider 读取。优先复用现有 `RuntimeMaterialLanguageObservation`、`RuntimeMaterialResponseProvider` 和对话生成历史投影，不新增语言词表或固定回答。
 - 本轮代码已接入 `memory_recall_response`：广域/来源路由明确未命中后，宿主用冷轮次整数特征的稀有多标量交集选择候选，并回放已有用户陈述；不读取 digest 作为表面、不新增语言词表或固定答句。独立集成回放确认“你还记得我刚才说的兴趣吗？”返回持久化陈述而非公开 UNKNOWN。
 - 本轮同时加入 `append_broad_dialogue_checkpoint`。长会话正常追加只验证已持有的前驱 ordinal/identity 并排他写入后继；进程启动仍完整重放并核验链，避免每轮 O(n) 磁盘重读。针对性回归 `18 passed`，`compileall` 与 `git diff --check` 通过。
 - 再下一步：补充能把 CAUSES 覆盖从 `44‰` 推过 `50‰` 的公开、可审计因果课程，并单独设计组合式对话行为课程（承接、澄清、改写、比较、建议、总结），先做一次完整训练切片再评估；不得把旧 response-organization `NE` artifact 接入 release。若新课程不可得，应记录授权/数据阻塞，不以降低门槛或重复近邻训练替代。

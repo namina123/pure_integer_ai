@@ -1,7 +1,7 @@
 """Runtime 资料证据到既有多段回答组织协议的只读接线。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from pure_integer_ai.cognition.shared.learning_input_capsule import digest_bytes
@@ -113,6 +113,19 @@ class RuntimeMaterialResponseProvider:
 
     source_records: SourceRecordRepository
     candidates: tuple[_RuntimeMaterialResponseCandidate, ...]
+    # These are disposable process-local projections.  They are deliberately
+    # excluded from the value identity and persistence contract: the
+    # candidate bindings and SourceRecord ledger remain the only portable
+    # inputs.  Keeping the projection here avoids rescanning every binding
+    # and recomputing n-gram features on each long-session turn.
+    _candidate_features: tuple[frozenset[str], ...] = field(
+        init=False, repr=False, compare=False)
+    _exact_index: dict[str, tuple[int, ...]] = field(
+        init=False, repr=False, compare=False)
+    _source_index: dict[str, tuple[int, ...]] = field(
+        init=False, repr=False, compare=False)
+    _feature_index: dict[str, tuple[int, ...]] = field(
+        init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_records, SourceRecordRepository):
@@ -124,6 +137,42 @@ class RuntimeMaterialResponseProvider:
         if self.candidates != tuple(sorted(self.candidates,
                                            key=lambda item: item.sort_key())):
             raise RuntimeMaterialResponseError("response candidates 未规范排序")
+        exact: dict[str, list[int]] = {}
+        sources: dict[str, list[int]] = {}
+        features: dict[str, list[int]] = {}
+        candidate_features: list[frozenset[str]] = []
+        for index, candidate in enumerate(self.candidates):
+            exact.setdefault(candidate.question, []).append(index)
+            title = candidate.binding.source_title
+            if title is not None:
+                sources.setdefault(title, []).append(index)
+            candidate_terms = frozenset(broad_qa_terms(candidate.question))
+            candidate_features.append(candidate_terms)
+            for term in candidate_terms:
+                features.setdefault(term, []).append(index)
+        object.__setattr__(self, "_candidate_features",
+                           tuple(candidate_features))
+        object.__setattr__(self, "_exact_index",
+                           {key: tuple(value) for key, value in exact.items()})
+        object.__setattr__(self, "_source_index",
+                           {key: tuple(value) for key, value in sources.items()})
+        object.__setattr__(self, "_feature_index",
+                           {key: tuple(value) for key, value in features.items()})
+
+    def _candidates_at(
+            self, indices: tuple[int, ...] | list[int] | set[int],
+            ) -> tuple[_RuntimeMaterialResponseCandidate, ...]:
+        """Project an already indexed candidate set in canonical order."""
+        return tuple(self.candidates[index] for index in sorted(indices))
+
+    def _feature_candidate_indices(
+            self, query_features: set[str] | frozenset[str],
+            ) -> set[int]:
+        """Return only bindings sharing an observed query feature."""
+        indices: set[int] = set()
+        for feature in query_features:
+            indices.update(self._feature_index.get(feature, ()))
+        return indices
 
     def _respond_matches_with_citations(
             self,
@@ -191,8 +240,7 @@ class RuntimeMaterialResponseProvider:
         """返回答案及逐来源 evidence surface；旧 ``response`` 保持四元兼容。"""
         if type(question) is not str or not question.strip():
             raise ValueError("question 必须是非空文本")
-        matches = tuple(item for item in self.candidates
-                        if item.question == question)
+        matches = self._candidates_at(self._exact_index.get(question, ()))
         return self._respond_matches_with_citations(matches)
 
     def _respond_matches(
@@ -211,8 +259,7 @@ class RuntimeMaterialResponseProvider:
         """精确问题命中后聚合资料；命中 UNKNOWN/CONFLICT 时不回退广域 QA。"""
         if type(question) is not str or not question.strip():
             raise ValueError("question 必须是非空文本")
-        matches = tuple(item for item in self.candidates
-                        if item.question == question)
+        matches = self._candidates_at(self._exact_index.get(question, ()))
         return self._respond_matches(matches)
 
     def response_followup_with_citations(
@@ -232,8 +279,7 @@ class RuntimeMaterialResponseProvider:
         if (type(question) is not str or not question.strip()
                 or type(source_title) is not str or not source_title.strip()):
             raise ValueError("followup question/source_title 必须是非空文本")
-        matches = tuple(item for item in self.candidates
-                        if item.binding.source_title == source_title)
+        matches = self._candidates_at(self._source_index.get(source_title, ()))
         if reference_resolver is not None:
             if not callable(reference_resolver):
                 raise TypeError("followup reference_resolver 必须可调用")
@@ -245,9 +291,9 @@ class RuntimeMaterialResponseProvider:
             query_features = set(broad_qa_terms(question))
             is_reference = (
                 bool(matches) and any(
-                    len(query_features & set(broad_qa_terms(item.question)))
+                    len(query_features & self._candidate_features[index])
                     >= _RELATED_QUERY_MIN_TERMS
-                    for item in matches
+                    for index in self._source_index.get(source_title, ())
                 )
                 or not matches and len(query_features)
                 >= _RELATED_QUERY_MIN_TERMS
@@ -293,12 +339,14 @@ class RuntimeMaterialResponseProvider:
         query_features = set(broad_qa_terms(question))
         if len(query_features) < _RELATED_QUERY_MIN_TERMS:
             return None
-        candidates = tuple(
-            item for item in self.candidates
-            if source_title is None or item.binding.source_title == source_title)
+        candidate_indices = self._feature_candidate_indices(query_features)
+        if source_title is not None:
+            candidate_indices.intersection_update(
+                self._source_index.get(source_title, ()))
         ranked: list[tuple[int, int, int, _RuntimeMaterialResponseCandidate]] = []
-        for candidate in candidates:
-            binding_features = set(broad_qa_terms(candidate.question))
+        for index in sorted(candidate_indices):
+            candidate = self.candidates[index]
+            binding_features = self._candidate_features[index]
             overlap = len(query_features & binding_features)
             if overlap < _RELATED_QUERY_MIN_TERMS:
                 continue
