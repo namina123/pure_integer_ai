@@ -117,6 +117,63 @@ def test_runtime_material_uses_existing_language_observation_and_relation_surfac
     assert result.stable_key() == result.stable_key()
 
 
+def test_runtime_material_generation_context_carries_structure_and_proposition():
+    backend = DictBackend()
+    bootstrap(backend)
+    ctx = make_train_context(backend, companion=True)
+    repository = ctx.memory_read_intake.source_intake.repository
+    companion = ctx.memory_read_intake.source_intake.companion
+    source = SourceRef(91, 7310, 0, GLOBAL_OWNER_SCOPE, VersionBundle())
+    scope = session_scope(7310, source=source)
+    ingest = ingest_runtime_material(
+        RuntimeMemoryState(scope.stable_key()), source=source, scope=scope,
+        raw_text="模式会降低亮度。按键可打开设置。",
+        source_records=repository,
+        metadata=SourceRecordMetadata(
+            "CC0-1.0", 1, companion.identity.type_hash,
+            companion.identity.name_hash, 4),
+        source_intake=ctx.memory_read_intake.source_intake,
+        version_key=(1, 7310), authority_key=(7, 7310),
+    )
+    observed = observe_runtime_material_language(
+        ctx, ingest, observation_id="obs-language-7310",
+        context_id="ctx-manual", family_id="family-manual",
+        source_namespace="runtime-language-test",
+    )
+    relation = observed.relation_candidates[0]
+    qualification = RawPropositionQualification(
+        "qualification-runtime-7310",
+        relation.proposition.proposition_id,
+        observed.raw_observation.observation_id,
+        observed.raw_observation.source_id,
+        observed.raw_observation.context_id,
+        observed.raw_observation.family_id,
+        observed.raw_observation.source_namespace,
+        observed.raw_observation.split,
+        "SUPPORTED", "explicit-runtime-source-qualification",
+        tuple(item.evidence_id for item in relation.evidence),
+        "runtime-owner",
+    )
+    provider = build_runtime_material_response_provider(
+        (RuntimeMaterialResponseSpec(
+            observed, qualification, "模式与设置的先后关系是什么？",
+            source_title="Runtime 手册"),),
+        source_records=repository,
+    )
+    result = provider.response_with_generation_context(
+        "模式与设置的先后关系是什么？")
+    assert result is not None
+    status, answer, _title, _url, citations, generation = result
+    assert status == "ANSWER"
+    assert answer is not None and citations
+    assert generation.response_act == "ANSWER"
+    assert generation.evidence[0].structure_refs == tuple(
+        tuple(ref) for ref in observed.observation.struct_refs)
+    assert generation.evidence[0].proposition_keys == (
+        relation.proposition.canonical_record(),)
+    assert generation.identity_key == generation.identity_key
+
+
 def test_runtime_material_mechanical_boundaries_project_through_split_winners():
     """句界按来源 scalar 端点投影，不要求机械 unit 等于 token。"""
     from pure_integer_ai.experiments.conversation_runtime_material_language import (

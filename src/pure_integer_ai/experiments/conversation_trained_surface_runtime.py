@@ -39,6 +39,10 @@ from pure_integer_ai.experiments.conversation_raw_t1_surface_order import (
     learn_surface_order_model,
     realize_surface_order,
 )
+from pure_integer_ai.experiments.conversation_runtime_material_generation_context import (
+    RuntimeMaterialGenerationContext,
+    validate_runtime_material_generation_context,
+)
 from pure_integer_ai.experiments.conversation_response_organization import (
     ResponseOrganizationModel,
     organize_response_surface,
@@ -155,7 +159,9 @@ class TrainedSurfaceRuntime:
 
     def render(self, answer: str, *, response_act: str = "ANSWER",
                source_title: str | None = None,
-               ordinal: int = 0) -> SurfaceRenderResult:
+               ordinal: int = 0,
+               generation_context: RuntimeMaterialGenerationContext | None = None,
+               ) -> SurfaceRenderResult:
         """消费一条已确认回答；不匹配时返回原表层和显式未消费原因。"""
         if not isinstance(answer, str) or not answer.strip():
             raise TrainedSurfaceRuntimeError("surface answer 不能为空")
@@ -164,6 +170,20 @@ class TrainedSurfaceRuntime:
             return SurfaceRenderResult(
                 original, False, 0, "non_answer", self.observation.run_id,
                 self.observation.graph_size)
+        if generation_context is not None:
+            try:
+                validate_runtime_material_generation_context(
+                    generation_context, response_act=response_act)
+            except ValueError as error:
+                raise TrainedSurfaceRuntimeError(
+                    "generation context 与 surface response-act 不一致") from error
+            # Runtime 结构证据参与候选变体的确定性选择；消费完整上下文
+            # 身份的整数折叠值，不把 digest 或内部状态转成用户可见文本。
+            if ordinal == 0:
+                folded = 0
+                for value in generation_context.identity_key:
+                    folded = ((folded * 257) + value) & 0x7FFFFFFF
+                ordinal = folded or 1
         # 从学习到的角色词位中恢复可唯一分段的输入。这里不假定任何语言
         # 的关系词；词位必须来自公开课程 evidence，且重建后须逐字符相等。
         for (act, register), model in sorted(self.models.items()):

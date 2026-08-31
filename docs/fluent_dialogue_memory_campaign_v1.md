@@ -83,6 +83,26 @@
 
 该切片的 Runtime 语言、CLI 和 binding 持久化回归为 `11 passed`；没有修改训练 payload、release root 或论文。长会话性能仍需用真实 60+ 轮记录确认，不能把这次局部索引优化直接等同于 `p95 <= 100ms` 达标。
 
+### 2026-09-01 Runtime 结构上下文实际消费
+
+Runtime response provider 现在除了返回已资格化答案、来源和 citations，还会
+返回由 event、memory item、SourceRef、observation、结构引用、命题记录和
+evidence 身份组成的 `RuntimeMaterialGenerationContext`。该上下文只使用非负
+整数 tuple，可由同一 Runtime ledger 确定性重建；digest 仅作身份校验，不能
+投影为用户可见文字。
+
+`answer_broad_dialogue_turn` 在接受 Runtime `ANSWER` 前验证 response-act 与
+上下文闭合，并把上下文交给可选的 `generation_context_consumer`。发布终端已
+把该 consumer 接到现有 `TrainedSurfaceRuntime.render`：结构证据参与表层候选
+变体的确定性选择，未能安全组织时原样保留。普通 `surface_consumer` 在上下文
+已消费时不再二次改写，避免重复组织；`answer`、来源、citations、
+`DialogueTurn` 和 checkpoint 身份均不变。
+
+本切片通过 Runtime/广域对话 `23 passed`、表层/学习对话 `13 passed`、CLI
+集成 `7 passed` 和公开协议 `9 passed`，并通过 `compileall`、`git diff --check`。这证明结构上下文已经进入实际生成边界，仍
+不等于组合式广域回答能力已经完成；下一步仍需在不降低回答门的前提下，以公开
+因果和承接课程做一次完整训练对照。
+
 ### 2026-08-30 长目标审计补充
 
 - `gc-dialogue-stage1234-20260830c` 已自然结束。它实际消费 `15464` 个 case、`12751` 个训练项、`103520` 个 turn，写入 `2615856` 个 occurrence、`12387` 个 dialogue successor projection 和 `1791295` 个 successor feature。Stage 1 达标；Stage 2 的 CAUSES 覆盖率为 `44‰`，低于未修改的 `50‰` 门槛，因此 Stage 3/4 未执行，`weaning_ready=false`。这不是四阶段完成，也不是断奶证据；保留 run 作为真实训练结果和恢复基座。
@@ -96,12 +116,14 @@
 
 ## 恢复点
 
+- 2026-09-01 意外关机后恢复检查：未发现残留训练进程或半写入的当前 run；K: 盘剩余约 89 GiB，v8 release 与终次训练根均可回读。当前没有需要续接的训练进程，因此不做短间隔轮询，也不重跑历史评测。
 - 已完成：长会话特征重复计算的代码切片。
 - 已完成（2026-09-01）：Runtime provider 的精确/来源/特征索引切片；受影响的 Runtime language、CLI、binding persistence 回归 `11 passed`。索引只存在进程内，不改变发布数据合同。
+- 已完成（2026-09-01）：Runtime 结构上下文从 provider 经 `answer_broad_dialogue_turn` 接入发布终端的 `TrainedSurfaceRuntime`，并保持 citations/answer/checkpoint 身份守恒；专项回归 `23 + 13 + 7 + 9 passed`。上下文不写入 `DialogueTurn` 或 checkpoint，重启后由 Runtime ledger 重建。
 - 已完成（本轮）：`tests/test_conversation_broad_dialogue_persistence.py` `2 passed`；`git diff --check` 通过。checkpoint 身份和旧式 recovery 构造兼容性保持不变。
 - 已完成（本轮）：`gc-dialogue-stage1234-20260830c` 的四阶段请求和独立 v7 组包/校验；结果只到 Stage 1，60 轮交流未改善，不能晋升为能力基线。
 - 已确认：`fluent-memory-60round-20260830` 首行 BOM 导致 59 个有效请求，`-b` 版本虽有 60 行但全部为 UNKNOWN；这两份记录都不能作为流畅交流证据。训练后生成的 v7 记录同样未达到流畅门槛，详见上方统计。
-- 下一步：将 Runtime Memory 的结构命中作为生成侧上下文证据，交给已有 learned/core dialogue runtime 组织回答；digest 仍只作身份校验，原始可读文本只从 checkpoint 中的 `DialogueTurn` 或来源 provider 读取。优先复用现有 `RuntimeMaterialLanguageObservation`、`RuntimeMaterialResponseProvider` 和对话生成历史投影，不新增语言词表或固定回答。
+- 下一步：用公开因果和承接/澄清/改写/比较/建议/总结课程做一次完整训练对照，确认结构上下文消费是否带来组合式回答收益；不得把旧 response-organization `NE` artifact 接入 release，也不得降低相似度或证据门槛。
 - 本轮代码已接入 `memory_recall_response`：广域/来源路由明确未命中后，宿主用冷轮次整数特征的稀有多标量交集选择候选，并回放已有用户陈述；不读取 digest 作为表面、不新增语言词表或固定答句。独立集成回放确认“你还记得我刚才说的兴趣吗？”返回持久化陈述而非公开 UNKNOWN。
 - 本轮同时加入 `append_broad_dialogue_checkpoint`。长会话正常追加只验证已持有的前驱 ordinal/identity 并排他写入后继；进程启动仍完整重放并核验链，避免每轮 O(n) 磁盘重读。针对性回归 `18 passed`，`compileall` 与 `git diff --check` 通过。
 - 再下一步：补充能把 CAUSES 覆盖从 `44‰` 推过 `50‰` 的公开、可审计因果课程，并单独设计组合式对话行为课程（承接、澄清、改写、比较、建议、总结），先做一次完整训练切片再评估；不得把旧 response-organization `NE` artifact 接入 release。若新课程不可得，应记录授权/数据阻塞，不以降低门槛或重复近邻训练替代。

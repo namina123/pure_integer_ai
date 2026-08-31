@@ -2,8 +2,13 @@ import pytest
 
 from pure_integer_ai.experiments.conversation_broad_qa_runtime import (
     BroadDialogueState,
+    DialogueCitation,
     DialogueTurn,
     answer_broad_dialogue_turn,
+)
+from pure_integer_ai.experiments.conversation_runtime_material_generation_context import (
+    RuntimeMaterialGenerationContext,
+    RuntimeMaterialGenerationEvidence,
 )
 from pathlib import Path
 from pure_integer_ai.experiments.ph2_broad_qa_relation_evidence_learning import (
@@ -261,6 +266,73 @@ def test_memory_recall_can_resolve_after_broad_clarify() -> None:
         assert turn.answer == "之前保存的陈述。"
     finally:
         module.query_broad_qa = original
+
+
+def test_runtime_generation_context_is_verified_before_answer_is_accepted():
+    context = RuntimeMaterialGenerationContext(
+        "ANSWER",
+        (RuntimeMaterialGenerationEvidence(
+            (1,), (2,), (3,), (4,), ((5, 6),), ((7, 8),), ((9, 10),)),),
+    )
+    _, turn = answer_broad_dialogue_turn(
+        BroadDialogueState((3, 4, 5)), "资料问题", object(),
+        runtime_material_response=lambda _value: (
+            "ANSWER", "已核验资料。", "资料来源", "https://example.invalid/source",
+            (DialogueCitation("已核验资料。", "资料来源",
+                               "https://example.invalid/source"),), context),
+    )
+    assert turn.status == "ANSWER"
+    assert turn.answer == "已核验资料。"
+
+
+def test_runtime_generation_context_is_consumed_before_legacy_surface_consumer():
+    context = RuntimeMaterialGenerationContext(
+        "ANSWER",
+        (RuntimeMaterialGenerationEvidence(
+            (11,), (12,), (13,), (14,), ((15, 16),), ((17, 18),),
+            ((19, 20),)),),
+    )
+    consumed = []
+    legacy = []
+
+    def generation_consumer(surface, status, title, received):
+        consumed.append((surface, status, title, received.identity_key))
+        return "组织后的资料句。"
+
+    def legacy_consumer(surface, status, title):
+        legacy.append((surface, status, title))
+        return "不应二次组织。"
+
+    citation = DialogueCitation(
+        "已核验资料。", "资料来源", "https://example.invalid/source")
+    _, turn = answer_broad_dialogue_turn(
+        BroadDialogueState((3, 4, 5)), "资料问题", object(),
+        runtime_material_response=lambda _value: (
+            "ANSWER", "已核验资料。", "资料来源",
+            "https://example.invalid/source", (citation,), context),
+        generation_context_consumer=generation_consumer,
+        surface_consumer=legacy_consumer,
+    )
+    assert turn.answer == "已核验资料。"
+    assert turn.display_answer == "组织后的资料句。"
+    assert turn.citations == (citation,)
+    assert consumed == [(
+        "已核验资料。", "ANSWER", "资料来源", context.identity_key)]
+    assert legacy == []
+
+
+def test_runtime_generation_context_rejects_response_act_drift():
+    context = RuntimeMaterialGenerationContext(
+        "CLARIFY",
+        (RuntimeMaterialGenerationEvidence(
+            (1,), (2,), (3,), (4,), ((5, 6),), ((7, 8),), ((9, 10),)),),
+    )
+    with pytest.raises(ValueError, match="response_act 漂移"):
+        answer_broad_dialogue_turn(
+            BroadDialogueState((3, 4, 5)), "资料问题", object(),
+            runtime_material_response=lambda _value: (
+                "ANSWER", "已核验资料。", None, None, (), context),
+        )
 
 
 def test_source_title_is_injected_for_immediate_reference_followup() -> None:

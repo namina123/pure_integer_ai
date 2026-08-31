@@ -65,6 +65,9 @@ from pure_integer_ai.experiments.conversation_trained_surface_runtime import (
     TrainedSurfaceRuntime,
     load_trained_surface_runtime,
 )
+from pure_integer_ai.experiments.conversation_runtime_material_generation_context import (
+    RuntimeMaterialGenerationContext,
+)
 from pure_integer_ai.experiments.build_learned_dialogue_response_artifact import (
     load_learned_dialogue_response_artifact,
 )
@@ -304,6 +307,17 @@ def _narrow_answer(runtime, catalog, trained_surface: TrainedSurfaceRuntime | No
 def _display(turn) -> str:
     """将既有 turn 的答案载荷投影为人可读的一行，不改动 turn 语义。"""
     if turn.citations:
+        citation_surface = "\n".join(item.surface for item in turn.citations)
+        if (turn.display_answer and turn.display_answer != citation_surface):
+            sources = []
+            for citation in turn.citations:
+                if citation.source_title:
+                    source = f"来源：{citation.source_title}"
+                    if citation.source_url:
+                        source += f"（{citation.source_url}）"
+                    sources.append(source)
+            return (turn.display_answer if not sources else
+                    turn.display_answer + "\n\n" + "\n".join(sources))
         blocks = []
         for citation in turn.citations:
             block = citation.surface
@@ -891,6 +905,7 @@ def run_trained_dialogue_terminal(
 
         source_passage_response = _source_passage_response
     surface_consumer = None
+    generation_context_consumer = None
     if trained_surface is not None:
         def _trained_surface_consumer(
                 value: str, status: str, source_title: str | None,
@@ -900,6 +915,20 @@ def run_trained_dialogue_terminal(
             return result.surface if result.used else None
 
         surface_consumer = _trained_surface_consumer
+
+        def _trained_generation_context_consumer(
+                value: str, status: str, source_title: str | None,
+                context: RuntimeMaterialGenerationContext,
+                ) -> str | None:
+            result = trained_surface.render(
+                value,
+                response_act=status,
+                source_title=source_title,
+                generation_context=context,
+            )
+            return result.surface if result.used else None
+
+        generation_context_consumer = _trained_generation_context_consumer
     session_capability = None
     if session_root is not None:
         session_path = Path(session_root).resolve()
@@ -1081,22 +1110,22 @@ def run_trained_dialogue_terminal(
                         _provider=provider,
                         _prior_state=prior_state,
                         ):
-                    exact = _provider.response_with_citations(value)
+                    exact = _provider.response_with_generation_context(value)
                     if exact is not None:
                         return exact
                     if _prior_state.turns:
                         previous = _prior_state.turns[-1]
                         if (previous.status == "ANSWER"
                                 and previous.source_title):
-                            followup = _provider.response_followup_with_citations(
+                            followup = _provider.response_followup_with_generation_context(
                                 value, previous.source_title)
                             if followup is not None:
                                 return followup
-                            related = _provider.response_related_with_citations(
+                            related = _provider.response_related_with_generation_context(
                                 value, previous.source_title)
                             if related is not None:
                                 return related
-                    related = _provider.response_related_with_citations(value)
+                    related = _provider.response_related_with_generation_context(value)
                     if related is not None:
                         return related
                     return None
@@ -1128,6 +1157,7 @@ def run_trained_dialogue_terminal(
                     learned_dialogue_answer is not None
                     and performance_tier == "deferred-narrow-fast"),
                 surface_consumer=surface_consumer,
+                generation_context_consumer=generation_context_consumer,
                 query_cache=query_cache,
                 surface_variant_provider=surface_variant_provider,
                 source_followup_resolver=source_followup_resolver,

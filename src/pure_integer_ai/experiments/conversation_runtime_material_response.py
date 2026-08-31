@@ -25,6 +25,10 @@ from pure_integer_ai.experiments.conversation_runtime_material_ingest import (
     RUNTIME_MATERIAL_READ_HIT,
     RuntimeMaterialReadIndex,
 )
+from pure_integer_ai.experiments.conversation_runtime_material_generation_context import (
+    RuntimeMaterialGenerationContext,
+    RuntimeMaterialGenerationEvidence,
+)
 from pure_integer_ai.experiments.conversation_raw_proposition_consumer import (
     RawPropositionQualification,
 )
@@ -95,6 +99,10 @@ class _RuntimeMaterialResponseCandidate:
     index: RuntimeMaterialReadIndex
     binding: RuntimeMaterialAnswerBinding
     relation_index: int = 0
+    observation_key: tuple[int, ...] = ()
+    structure_refs: tuple[tuple[int, int], ...] = ()
+    proposition_keys: tuple[tuple[int, ...], ...] = ()
+    evidence_keys: tuple[tuple[int, ...], ...] = ()
 
     def sort_key(self) -> tuple[object, ...]:
         return (
@@ -230,6 +238,48 @@ class RuntimeMaterialResponseProvider:
         url = urls[0] if len(urls) == 1 else None
         return "ANSWER", "\n".join(answers), title, url, citations
 
+    def _generation_context_for_matches(
+            self,
+            matches: tuple[_RuntimeMaterialResponseCandidate, ...],
+            response_act: str,
+            ) -> RuntimeMaterialGenerationContext:
+        """从同一批已选 candidate 建立生成侧结构/命题上下文。"""
+        evidence: list[RuntimeMaterialGenerationEvidence] = []
+        for candidate in matches:
+            read = candidate.index.read(
+                candidate.binding.memory_item_key, self.source_records)
+            if (read.status != RUNTIME_MATERIAL_READ_HIT
+                    or read.event is None):
+                raise RuntimeMaterialResponseError(
+                    "generation context 缺少 Runtime event")
+            evidence.append(RuntimeMaterialGenerationEvidence(
+                read.event.event_key,
+                candidate.binding.memory_item_key,
+                read.event.capsule.source.stable_key(),
+                candidate.observation_key,
+                candidate.structure_refs,
+                candidate.proposition_keys,
+                candidate.evidence_keys,
+            ))
+        return RuntimeMaterialGenerationContext(response_act, tuple(sorted(
+            evidence,
+            key=lambda item: (item.event_key, item.observation_key,
+                              item.proposition_keys),
+        )))
+
+    def _response_with_generation_context(
+            self,
+            matches: tuple[_RuntimeMaterialResponseCandidate, ...],
+            ) -> tuple[
+                str, str | None, str | None, str | None,
+                tuple[DialogueCitation, ...], RuntimeMaterialGenerationContext,
+            ] | None:
+        result = self._respond_matches_with_citations(matches)
+        if result is None:
+            return None
+        context = self._generation_context_for_matches(matches, result[0])
+        return (*result, context)
+
     def response_with_citations(
             self,
             question: str,
@@ -242,6 +292,19 @@ class RuntimeMaterialResponseProvider:
             raise ValueError("question 必须是非空文本")
         matches = self._candidates_at(self._exact_index.get(question, ()))
         return self._respond_matches_with_citations(matches)
+
+    def response_with_generation_context(
+            self,
+            question: str,
+            ) -> tuple[
+                str, str | None, str | None, str | None,
+                tuple[DialogueCitation, ...], RuntimeMaterialGenerationContext,
+            ] | None:
+        """返回答案、来源和进入生成边界的结构证据上下文。"""
+        if type(question) is not str or not question.strip():
+            raise ValueError("question 必须是非空文本")
+        return self._response_with_generation_context(
+            self._candidates_at(self._exact_index.get(question, ())))
 
     def _respond_matches(
             self,
@@ -304,6 +367,38 @@ class RuntimeMaterialResponseProvider:
             return "CLARIFY", None, None, None, ()
         return self._respond_matches_with_citations(matches)
 
+    def response_followup_with_generation_context(
+            self,
+            question: str,
+            source_title: str,
+            reference_resolver: Callable[[str], bool] | None = None,
+            ) -> tuple[
+                str, str | None, str | None, str | None,
+                tuple[DialogueCitation, ...], RuntimeMaterialGenerationContext,
+            ] | None:
+        """返回紧邻来源追问及其结构证据上下文。"""
+        if (type(question) is not str or not question.strip()
+                or type(source_title) is not str or not source_title.strip()):
+            raise ValueError("followup question/source_title 必须是非空文本")
+        matches = self._candidates_at(self._source_index.get(source_title, ()))
+        if reference_resolver is not None:
+            if not callable(reference_resolver):
+                raise TypeError("followup reference_resolver 必须可调用")
+            is_reference = bool(reference_resolver(question))
+        else:
+            query_features = set(broad_qa_terms(question))
+            is_reference = (
+                bool(matches) and any(
+                    len(query_features & self._candidate_features[index])
+                    >= _RELATED_QUERY_MIN_TERMS
+                    for index in self._source_index.get(source_title, ()))
+                or not matches and len(query_features)
+                >= _RELATED_QUERY_MIN_TERMS
+            )
+        if not is_reference:
+            return None
+        return self._response_with_generation_context(matches)
+
     def response_followup(
             self,
             question: str,
@@ -362,6 +457,48 @@ class RuntimeMaterialResponseProvider:
         if len(ranked) > 1 and ranked[1][:3] == best[:3]:
             return "CLARIFY", None, None, None, ()
         return self._respond_matches_with_citations((best[3],))
+
+    def response_related_with_generation_context(
+            self,
+            question: str,
+            source_title: str | None = None,
+            ) -> tuple[
+                str, str | None, str | None, str | None,
+                tuple[DialogueCitation, ...], RuntimeMaterialGenerationContext,
+            ] | None:
+        """返回自然改写命中及其结构证据上下文。"""
+        if type(question) is not str or not question.strip():
+            raise ValueError("related question 必须是非空文本")
+        if source_title is not None and (
+                type(source_title) is not str or not source_title.strip()):
+            raise ValueError("related source_title 必须是非空文本")
+        query_features = set(broad_qa_terms(question))
+        if len(query_features) < _RELATED_QUERY_MIN_TERMS:
+            return None
+        candidate_indices = self._feature_candidate_indices(query_features)
+        if source_title is not None:
+            candidate_indices.intersection_update(
+                self._source_index.get(source_title, ()))
+        ranked: list[tuple[int, int, int, _RuntimeMaterialResponseCandidate]] = []
+        for index in sorted(candidate_indices):
+            candidate = self.candidates[index]
+            binding_features = self._candidate_features[index]
+            overlap = len(query_features & binding_features)
+            if overlap < _RELATED_QUERY_MIN_TERMS:
+                continue
+            coverage = (overlap * 100) // len(query_features)
+            if coverage < _RELATED_QUERY_MIN_COVERAGE:
+                continue
+            ranked.append((overlap, coverage, -len(binding_features), candidate))
+        ranked.sort(key=lambda item: (
+            -item[0], -item[1], -item[2], item[3].sort_key()))
+        if not ranked:
+            return None
+        best = ranked[0]
+        if len(ranked) > 1 and ranked[1][:3] == best[:3]:
+            return self._response_with_generation_context(
+                (best[3], ranked[1][3]))
+        return self._response_with_generation_context((best[3],))
 
     def response_related(
             self,
@@ -472,6 +609,11 @@ def build_runtime_material_response_provider(
             RuntimeMaterialReadIndex.build(spec.observation.ingest.memory_after),
             binding,
             spec.relation_index,
+            spec.observation.stable_key(),
+            tuple(tuple(ref) for ref in spec.observation.observation.struct_refs),
+            (relation.proposition.canonical_record(),),
+            tuple(tuple(ord(value) for value in argument.evidence_id)
+                  for argument in relation.proposition.arguments),
         ))
     ordered = tuple(sorted(candidates, key=lambda item: item.sort_key()))
     identities = tuple((item.question, item.binding.memory_item_key,
@@ -562,6 +704,8 @@ __all__ = [
     "build_runtime_material_response_provider",
     "RUNTIME_MATERIAL_RESPONSE_PROTOCOL_V1",
     "RuntimeMaterialResponseProvider",
+    "RuntimeMaterialGenerationContext",
+    "RuntimeMaterialGenerationEvidence",
     "RuntimeMaterialResponseError",
     "RuntimeMaterialResponseSpec",
     "organize_runtime_material_response",

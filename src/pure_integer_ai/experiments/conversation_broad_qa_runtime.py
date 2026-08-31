@@ -37,6 +37,10 @@ from pure_integer_ai.experiments.ph2_broad_qa_relation_answer_frame_learning imp
 from pure_integer_ai.experiments.ph2_broad_qa_question_slots import (
     load_broad_qa_question_slots,
 )
+from pure_integer_ai.experiments.conversation_runtime_material_generation_context import (
+    RuntimeMaterialGenerationContext,
+    validate_runtime_material_generation_context,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +272,9 @@ def answer_broad_dialogue_turn(
         prefer_learned_dialogue: bool = False,
         surface_consumer: Callable[[str, str, str | None], str | None]
         | None = None,
+        generation_context_consumer: Callable[
+            [str, str, str | None, RuntimeMaterialGenerationContext],
+            str | None] | None = None,
         runtime_material_answer: Callable[
             [str], tuple[str, str | None, str | None] | None] | None = None,
         runtime_material_response: Callable[
@@ -297,6 +304,11 @@ def answer_broad_dialogue_turn(
     ``surface_consumer`` 只接收已经产生的用户可见 ANSWER 表面、状态和来源
     标题；它不能改变完整证据链、来源身份或 UNKNOWN/CLARIFY 结果。返回空值
     表示保持原表面，适合把训练后的结构组织接到真实回答侧而不替代事实检索。
+    ``generation_context_consumer`` 只在 Runtime 资料携带完整结构证据时调用，
+    并在普通 ``surface_consumer`` 之前消费该上下文。它可以组织已核验的
+    ANSWER 表面，但不能改变 answer、来源或 citations；上下文被消费时不会
+    再次经过普通 ``surface_consumer``，未提供时上下文仍会被验证并保持运行期
+    闭包，不写入 DialogueTurn/checkpoint。
     ``source_followup_resolver`` 是可选的语言/图侧指代判定；核心不内置任何
     代词词表，未提供时不会擅自把上一来源标题注入当前问题。
     """
@@ -315,6 +327,9 @@ def answer_broad_dialogue_turn(
     if (surface_variant_provider is not None
             and not callable(surface_variant_provider)):
         raise TypeError("surface_variant_provider 必须是可调用对象")
+    if (generation_context_consumer is not None
+            and not callable(generation_context_consumer)):
+        raise TypeError("generation_context_consumer 必须是可调用对象")
     if (source_followup_resolver is not None
             and not callable(source_followup_resolver)):
         raise TypeError("source_followup_resolver 必须是可调用对象")
@@ -327,6 +342,8 @@ def answer_broad_dialogue_turn(
     display_answer = None
     retrieval_question = None
     citations: tuple[DialogueCitation, ...] = ()
+    runtime_material_generation_context: RuntimeMaterialGenerationContext | None = None
+    generation_context_consumed = False
     runtime_material_decided = False
     source_passage_queried = False
     learned_dialogue_queried = False
@@ -353,7 +370,7 @@ def answer_broad_dialogue_turn(
         material_response = runtime_material_response(question)
         if material_response is not None:
             if (not isinstance(material_response, tuple)
-                    or len(material_response) not in (4, 5)
+                    or len(material_response) not in (4, 5, 6)
                     or material_response[0] not in {"ANSWER", "UNKNOWN", "CLARIFY"}
                     or (material_response[1] is not None
                         and type(material_response[1]) is not str)
@@ -363,13 +380,17 @@ def answer_broad_dialogue_turn(
                         and type(material_response[3]) is not str)):
                 raise TypeError("runtime material response 返回值非法")
             status, answer, source_title, source_url = material_response[:4]
-            if len(material_response) == 5:
+            if len(material_response) in (5, 6):
                 raw_citations = material_response[4]
                 if (not isinstance(raw_citations, tuple)
                         or any(not isinstance(item, DialogueCitation)
                                for item in raw_citations)):
                     raise TypeError("runtime material citations 返回值非法")
                 citations = raw_citations
+            if len(material_response) == 6:
+                runtime_material_generation_context = (
+                    validate_runtime_material_generation_context(
+                        material_response[5], response_act=status))
             if status == "ANSWER" and (answer is None or not answer.strip()):
                 raise TypeError("runtime material ANSWER 必须携带 answer")
             if status != "ANSWER" and answer is not None:
@@ -569,7 +590,17 @@ def answer_broad_dialogue_turn(
             display_answer = answer
             status = "ANSWER"
             retrieval_question = question
-    if (surface_consumer is not None and status == "ANSWER"
+    if (generation_context_consumer is not None
+            and runtime_material_generation_context is not None
+            and status == "ANSWER" and display_answer):
+        consumed = generation_context_consumer(
+            display_answer, status, source_title,
+            runtime_material_generation_context)
+        if consumed is not None and consumed.strip():
+            display_answer = consumed
+            generation_context_consumed = True
+    if (surface_consumer is not None and not generation_context_consumed
+            and status == "ANSWER"
             and display_answer):
         consumed = surface_consumer(display_answer, status, source_title)
         if consumed is not None and consumed.strip():

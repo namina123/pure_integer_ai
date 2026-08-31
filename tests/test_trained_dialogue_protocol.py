@@ -87,6 +87,26 @@ def test_public_protocol_turn_payload_keeps_answer_language_and_source():
     assert "status" not in payload
 
 
+def test_public_protocol_turn_payload_prefers_organized_surface_but_keeps_citations():
+    citation = DialogueCitation(
+        "原始证据句。", "资料来源", "https://example.invalid/source")
+    turn = DialogueTurn(
+        ordinal=7,
+        question="问题",
+        answer="原始证据句。",
+        display_answer="组织后的资料句。",
+        status="ANSWER",
+        source_title="资料来源",
+        source_url="https://example.invalid/source",
+        turn_key=tuple(range(32)),
+        citations=(citation,),
+    )
+    payload = _public_protocol_turn_payload(turn)
+    assert payload["text"] == (
+        "组织后的资料句。\n\n来源：资料来源（https://example.invalid/source）")
+    assert payload["citations"][0]["surface"] == "原始证据句。"
+
+
 def test_public_protocol_turn_payload_projects_clarification_as_language():
     turn = DialogueTurn(
         ordinal=6,
