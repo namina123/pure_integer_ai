@@ -74,6 +74,35 @@ def _report_sequence_state(values: Any) -> tuple[int, tuple[int, ...]]:
     return len(values), tuple(id(item) for item in values)
 
 
+def _mapping_state_token(values: Any) -> tuple[int, int]:
+    """Return a bounded mutation token for integer-keyed runtime mappings.
+
+    SQLite evaluation snapshots must not deepcopy million-entry identity
+    caches.  A deterministic in-process rolling hash catches ordinary
+    insert/update/delete mutations while allocating only a constant amount of
+    memory; nested ConceptIndex space maps are folded recursively.
+    """
+    if not isinstance(values, dict):
+        raise EvaluationIsolationError("runtime mapping 类型错误")
+    mask = (1 << 64) - 1
+    acc = 0
+    for key, value in values.items():
+        try:
+            key_hash = hash(key)
+        except TypeError:
+            key_hash = id(key)
+        if isinstance(value, dict):
+            value_hash = hash(_mapping_state_token(value))
+        else:
+            try:
+                value_hash = hash(value)
+            except TypeError:
+                value_hash = id(value)
+        acc = (acc + ((key_hash & mask) * 0x9E3779B185EBCA87)
+               + (value_hash & mask)) & mask
+    return len(values), acc
+
+
 def _copy_backend_schema(source: StorageBackend, target: StorageBackend) -> None:
     """复制后端表定义，使沙箱不依赖正式后端的可变引用。"""
     tables = getattr(source, "_tables", None)
@@ -699,20 +728,32 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
 def _host_state(ctx: Any) -> tuple[Any, ...]:
     """保存正式上下文的可观察状态，防止评测偷偷回写正式对象。"""
     backend = ctx.backend
+    compact_reports = isinstance(backend, SQLiteBackend)
     attributes = {
         name: copy.deepcopy(getattr(backend, name))
         for name in _CHECKED_BACKEND_ATTRIBUTES
         if hasattr(backend, name)
     }
     concept_index = (
-        copy.deepcopy(ctx.concept_index._index),
-        copy.deepcopy(ctx.concept_index._loaded_spaces),
+        (_mapping_state_token(ctx.concept_index._index),
+         (len(ctx.concept_index._loaded_spaces),
+          sum(hash(item) for item in ctx.concept_index._loaded_spaces)))
+        if compact_reports else
+        (copy.deepcopy(ctx.concept_index._index),
+         copy.deepcopy(ctx.concept_index._loaded_spaces)),
     )
     scoped_store = (
-        copy.deepcopy(ctx.scoped_identity_store._scope_hashes),
-        copy.deepcopy(ctx.scoped_identity_store._clock_hashes),
-        copy.deepcopy(ctx.scoped_identity_store._timestamp_hashes),
-        copy.deepcopy(ctx.scoped_identity_store._assertion_hashes),
+        tuple(_mapping_state_token(item) for item in (
+            ctx.scoped_identity_store._scope_hashes,
+            ctx.scoped_identity_store._clock_hashes,
+            ctx.scoped_identity_store._timestamp_hashes,
+            ctx.scoped_identity_store._assertion_hashes,
+        )) if compact_reports else (
+            copy.deepcopy(ctx.scoped_identity_store._scope_hashes),
+            copy.deepcopy(ctx.scoped_identity_store._clock_hashes),
+            copy.deepcopy(ctx.scoped_identity_store._timestamp_hashes),
+            copy.deepcopy(ctx.scoped_identity_store._assertion_hashes),
+        )
     )
     word_form_state = (
         () if ctx.word_form_providers is None
@@ -761,7 +802,6 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         () if ctx.memory_isolation_runtime is None
         else ctx.memory_isolation_runtime.state_key()
     )
-    compact_reports = isinstance(backend, SQLiteBackend)
     prediction_reports = (
         _report_sequence_state(ctx.language_prediction_reports)
         if compact_reports else copy.deepcopy(ctx.language_prediction_reports))
