@@ -1024,6 +1024,13 @@ class SQLiteBackend(_BaseBackend):
         return cur.rowcount
 
     def commit(self) -> None:
+        # Evaluation sandboxes may run on a second connection to the same
+        # committed database while holding a savepoint.  A commit from a
+        # runtime owner would otherwise release that savepoint and make
+        # rollback-based isolation impossible.  The sandbox sets this
+        # ephemeral flag; normal training backends never do.
+        if getattr(self, "_suppress_commit", False):
+            return
         self._conn.commit()
 
     def close(self) -> None:

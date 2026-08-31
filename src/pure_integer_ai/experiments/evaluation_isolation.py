@@ -935,9 +935,33 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
     )
 
 
-def _assert_host_state(ctx: Any, baseline: tuple[Any, ...]) -> None:
-    """核验正式后端、索引、身份缓存和 WorkMemory 均未被评测修改。"""
+def _assert_host_state(
+        ctx: Any,
+        baseline: tuple[Any, ...],
+        *,
+        allow_sqlite_transaction_data_version: bool = False,
+        ) -> None:
+    """核验正式后端、索引、身份缓存和 WorkMemory 均未被评测修改。
+
+    SQLite increments ``PRAGMA data_version`` on a host connection whenever a
+    second connection has executed a write transaction, even when that
+    transaction is rolled back.  The transaction-backed evaluation sandbox
+    intentionally uses this second connection; in that one path only, ignore
+    this connection-local counter while retaining total changes, schema and
+    every runtime state check.
+    """
     current = _host_state(ctx)
+    if allow_sqlite_transaction_data_version:
+        backend = ctx.backend
+        if isinstance(backend, SQLiteBackend):
+            before = baseline[0]
+            after = current[0]
+            if (isinstance(before, tuple) and isinstance(after, tuple)
+                    and len(before) == 4 and len(after) == 4):
+                current = (
+                    (after[0], after[1], before[2], after[3]),
+                    *current[1:],
+                )
     if current != baseline:
         raise EvaluationIsolationError("评测改变了正式训练状态，拒绝继续")
 
@@ -1049,9 +1073,45 @@ def _batch_backend_state(backend: StorageBackend) -> dict[str, Any]:
 
 
 def _restore_batch_backend_state(backend: StorageBackend,
-                                 state: dict[str, Any]) -> None:
+                                state: dict[str, Any]) -> None:
     for name, value in state.items():
         setattr(backend, name, value)
+
+
+def _open_sqlite_transaction_backend(source: SQLiteBackend) -> SQLiteBackend:
+    """Open a disposable connection over the committed source database.
+
+    Copying a multi-gigabyte SQLite file for a one-case read-only evaluation
+    exceeds the memory and disk budget of the training host.  A second
+    connection gives the evaluator independent Python facades while a
+    savepoint keeps all writes local and rollback-able.  The connection is
+    opened in durable mode so construction never changes the source journal
+    policy; its ephemeral commit suppression protects the savepoint if a
+    runtime owner calls ``backend.commit()``.
+    """
+    rows = source._conn.execute("PRAGMA database_list").fetchall()
+    main_path = next(
+        (str(row[2]) for row in rows if str(row[1]) == "main"), "")
+    if not main_path or source._conn.in_transaction:
+        raise EvaluationIsolationError(
+            "SQLite 事务评测要求已提交的持久数据库")
+    target = SQLiteBackend(
+        main_path,
+        capability_profile=source.storage_capabilities(),
+        performance_mode="durable",
+    )
+    # These Python-side registries describe schema and allocation watermarks;
+    # they are small compared with the graph and must not be shared.
+    target._tables = copy.deepcopy(source._tables)
+    target._id_pool = dict(source._id_pool)
+    target._isa_edge_gen = dict(source._isa_edge_gen)
+    target._protected_owner_space_ids = set(source._protected_owner_space_ids)
+    target._table_write_epochs = dict(source._table_write_epochs)
+    if hasattr(source, "_legacy_observe_timestamp_seq"):
+        target._legacy_observe_timestamp_seq = (
+            source._legacy_observe_timestamp_seq)
+    target._suppress_commit = True
+    return target
 
 
 @contextmanager
@@ -1113,7 +1173,19 @@ def isolated_evaluation_batch(ctx: Any, *, label: str) -> Iterator[Any]:
             query=label,
             evaluation=True):
         baseline = _host_state(ctx)
-        backend = clone_backend(ctx.backend)
+        # For a committed SQLite host, avoid a full file-level backup.  The
+        # disposable connection below shares immutable pages with the host
+        # and all evaluator writes remain inside a rollback savepoint.
+        if isinstance(ctx.backend, SQLiteBackend):
+            try:
+                backend = _open_sqlite_transaction_backend(ctx.backend)
+            except EvaluationIsolationError:
+                # An open host transaction still needs the established byte
+                # snapshot path; callers receive the same fail-closed
+                # semantics as before.
+                backend = clone_backend(ctx.backend)
+        else:
+            backend = clone_backend(ctx.backend)
         if not isinstance(backend, SQLiteBackend):
             try:
                 yield None
@@ -1171,7 +1243,11 @@ def isolated_evaluation_batch(ctx: Any, *, label: str) -> Iterator[Any]:
             yield begin_case
         finally:
             try:
-                _assert_host_state(ctx, baseline)
+                _assert_host_state(
+                    ctx,
+                    baseline,
+                    allow_sqlite_transaction_data_version=True,
+                )
             finally:
                 close = getattr(backend, "close", None)
                 if callable(close):
