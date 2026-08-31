@@ -70,6 +70,7 @@ from pure_integer_ai.experiments.build_learned_dialogue_response_artifact import
 )
 from pure_integer_ai.experiments.conversation_learned_dialogue_response import (
     LearnedDialogueResponseRuntime,
+    PRODUCTION_MIN_FRAGMENT_OCCURRENCES,
     PRODUCTION_MIN_SIMILARITY_PERMILLE,
 )
 from pure_integer_ai.experiments.conversation_dialogue_experts import (
@@ -113,6 +114,11 @@ from pure_integer_ai.storage.k_run_boundary import (
     open_existing_run_root,
 )
 from pure_integer_ai.storage.source_record import SourceRecordRepository
+
+
+# 正式交互入口的来源段必须有足够完整的正文覆盖；通用 runtime 的较低
+# 默认门仅用于离线索引探针，不能让低置信候选进入用户可见回答。
+PRODUCTION_SOURCE_MIN_CONFIDENCE_PERMILLE = 500
 
 
 def _require_k_file(value: str | Path, *, label: str) -> Path:
@@ -785,6 +791,8 @@ def run_trained_dialogue_terminal(
             result = dialogue_response_runtime.respond(
                 value,
                 history=_dialogue_history(value),
+                minimum_fragment_occurrences=(
+                    PRODUCTION_MIN_FRAGMENT_OCCURRENCES),
                 minimum_similarity_permille=(
                     PRODUCTION_MIN_SIMILARITY_PERMILLE),
             )
@@ -796,7 +804,8 @@ def run_trained_dialogue_terminal(
             result = dialogue_response_runtime.respond(
                 value,
                 history=_dialogue_history(value),
-                minimum_fragment_occurrences=1,
+                minimum_fragment_occurrences=(
+                    PRODUCTION_MIN_FRAGMENT_OCCURRENCES),
                 minimum_similarity_permille=900,
             )
             return result.surface if result.used else None
@@ -861,7 +870,10 @@ def run_trained_dialogue_terminal(
 
         def _source_passage_response(value: str) -> tuple[object, ...] | None:
             result = science_passage_runtime.query(
-                value, surface_variant_provider=surface_variant_provider)
+                value,
+                minimum_confidence_permille=(
+                    PRODUCTION_SOURCE_MIN_CONFIDENCE_PERMILLE),
+                surface_variant_provider=surface_variant_provider)
             if result.status != "ANSWER" or result.surface is None:
                 return None
             citation = DialogueCitation(
@@ -1302,4 +1314,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["main", "run_trained_dialogue_terminal"]
+__all__ = [
+    "main", "run_trained_dialogue_terminal",
+    "PRODUCTION_SOURCE_MIN_CONFIDENCE_PERMILLE",
+]

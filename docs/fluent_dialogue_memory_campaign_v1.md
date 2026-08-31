@@ -10,17 +10,60 @@
 - 不写死语言、简繁、词表、答案或代词表。语言与结构来自整数图、索引和课程数据。
 - 数据能力以整数 tuple、SQLite 和可复现 digest 为边界，避免新增无必要第三方库，保持跨语言迁移路径。
 - D: 只放代码和紧凑文档；K: 是训练、release、SQLite 和长任务产物盘。训练副本可用完即删，但源连接、许可和 SHA manifest 必须保留。
-- 长训练启动后采用长间隔被动等待；只做主线回归，不反复运行全量 CI 或微型探针。
+- 长训练启动后只能采用被动等待，主动检查间隔至少 30 分钟、通常 60 分钟；禁止几分钟或
+  十几分钟查看一次。只做主线回归，不反复运行全量 CI 或微型探针。
 
-## 当前基线（2026-08-30）
+## 当前基线（2026-09-01）
 
 - 发布候选：`K:\pure_integer_ai_work\model_releases\public-model-gc-v2-20260830`，独立 evaluator `PASS`。
 - 评估证据：`K:\pure_integer_ai_work\dialogue_sessions\gc-v2-independent-eval-20260830-b\independent_release_evaluation.json`；held-out、unknown、negative、冲突澄清、跨来源引用、checkpoint 恢复均通过。
 - 性能基线：warm p50 `615 us`、p95 `11389 us`，SQLite 语句 `34`，峰值工作集 `173248512` bytes。该数据是端到端发布评估基线，不代表所有长会话规模。
 - 广域训练基线：`K:\pure_integer_ai_work\general_capability_campaign_20260829\gc-dialogue-stage1234-20260829e`；该 run 已封存，训练项 `2290`、occurrence `406545`、对话后继 `1813`。
-- 当前增量训练：`K:\pure_integer_ai_work\fluent_dialogue_memory_campaign_20260830\gc-dialogue-stage1234-20260830a` 已完成 Stage 1；Stage 2--4 正在以 `gc-dialogue-stage1234-20260830b` 续接，使用同一 pack SHA `3af7e5689b1537ebba95bbba272bfd1b55f9c0230cc487458b29eca4d508c1a6`、K 盘 page-resume 和 bulk 可重建存储。训练完成前不得将其写成四阶段完成或发布候选。
+- 当前终次训练：`K:\pure_integer_ai_work\fluent_dialogue_memory_campaign_20260830\gc-dialogue-stage34-tx-20260831d` 四阶段均完成，并已组装为 v8 独立发布根；后续运行时修正未修改训练 payload，未重新训练。
 - OASST1 回应组织 artifact 历史上仍为 `NE`，未接入当前 release；未确认与当前 run 绑定前不得直接使用。
 - 训练输入扩展判断：在保留 authored/结构课程的前提下，K: 的 OASST1、OASST2 与受控 KDConv 公开切片合计可形成约 `4116` 个 case；当前 run 仅消费约 `3000` 个。已决定启动一次新的四阶段完整 run，优先扩大对话覆盖，不改变回答门或引入外部依赖。
+
+### 2026-09-01 生成门修正
+
+- v8 的 60 轮真实交流显示，单次出现的人工回答片段会因稀疏表面相似度
+  跨主题抢答，出现代码、天气或闲聊片段与问题不相称的情况。生产端现要求
+  一个回答片段至少有 `2` 次训练支持；该门只作用于最低优先级 learned
+  response consumer，不改变 Core successor、广域来源、Runtime 资料、记忆
+  回放或 JSONL 协议。模型和课程整数格式保持不变。
+- 同一轮复测还发现 CSQ 来源段以默认 `220‰` 进入正式终端，低覆盖候选会被
+  错误投影为答案。生产交互入口现在显式使用 `500‰` 来源正文覆盖门；离线
+  `ScidbCsqPassageRuntime` 默认值保持不变，避免改变既有索引/专项合同。
+- 来源追问解析器不再允许“标题前缀命中同一标题”自证。问式图必须先识别
+  回答槽；极短省略问可继续核验同源，较长问题还须与上一问答共享至少两个
+  索引特征。实现不写入代词、语言或主题词表。
+- 最终复测位于 K 盘工作根下的
+  `dialogue_sessions/gc-v8-dialogue-stage34-routefix-d-20260901`，
+  两段合计 `ANSWER=13`、`CLARIFY=19`、`UNKNOWN=28`，p50 为
+  `21850/74483 us`，p95 为 `117092/112999 us`。CSQ 的 UBI/改写误答与
+  “互相矛盾”后四轮来源连锁均消失；跨进程“浙江卫视是什么？→它在哪里？”
+  仍以 ordinal `0→1` 返回同一来源。两份响应 SHA-256 分别为
+  `1f4a7022f25e6761e3f0a7a42326054c2f788fcb58545a5d27049c9d1274e77c`、
+  `73e911fa49facce57e56cd3aa9c45bdf25b2859876cac21c9b90b6f5c09cafe4`。
+- 记忆扩散修正后的生产 smoke 位于 K 盘工作根下的
+  `dialogue_sessions/gc-v8-memory-diffusion-smoke-20260901`：两条未知陈述之间
+  插入一条无关偏好后，第三轮和重启后的第四轮都返回原始兴趣陈述；checkpoint
+  ordinal 从 `0..2` 延续到 `3`。该路径仍只回放 checkpoint 中已保存的用户文本，
+  不读取 digest 生成表面，也不写入 Core 或训练库。
+- 修正后的完整 60 轮复测位于 K 盘工作根下的
+  `dialogue_sessions/gc-v8-dialogue-stage34-memoryfix-e-20260901`：内部状态统计为
+  `ANSWER=18`、`CLARIFY=16`、`UNKNOWN=26`；r42 已回放兴趣陈述，r57--r60
+  未再被旧来源连锁接管，来源命中只剩预期首问与冲突问题。两段 p50/p95 为
+  `22541/125397 us`、`74897/120346 us`。
+- 记忆修正后的独立发布 evaluator 仍为全项 `PASS`，证据位于
+  `dialogue_sessions/gc-v8-post-memoryfix-eval-20260901`，aggregate SHA-256 为
+  `67230fbafb2791cb515d6b090dc4caeac9f32f329cf213cbfd08e53d523a9fdf`；
+  warm p50/p95 为 `651/10077 us`。该 SHA 仅在 evaluator 输出回读后登记，若文件
+  被重新生成必须重新计算，不能手工复用。
+- 发布级回归仍为 `PASS`，证据位于 K 盘工作根下的
+  `dialogue_sessions/gc-v8-post-route-gate-eval-20260901`，
+  aggregate SHA-256 为
+  `263a1c2545b199dd58bfef9f63db1d704e6dfb51a6d4b4434a03368a96a05680`；
+  warm p50/p95 为 `606/9983 us`。
 
 ## 阶段索引
 

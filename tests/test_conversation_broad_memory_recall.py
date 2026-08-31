@@ -45,6 +45,37 @@ def test_incremental_memory_recall_learns_replay_shape_and_rejects_topic_only() 
 
 def test_clarify_statement_is_recalled_without_promoting_it_to_answer() -> None:
     statement = _turn(
-        0, "请记住：我偏好先给出结论，再说明证据。", None, "CLARIFY")
+        0, "请记住：我的回答偏好是先给出结论，再说明证据。", None, "CLARIFY")
     index = BroadDialogueMemoryRecallIndex((statement,))
     assert index.recall("你还记得我的回答偏好吗？") == statement.question
+
+
+def test_initial_bootstrap_rejects_single_weak_overlap() -> None:
+    prior = _turn(
+        0, "请比较一下oneplus ace2与realme gt neo5这两款手机。",
+        None, "UNKNOWN")
+    index = BroadDialogueMemoryRecallIndex((prior,))
+    assert index.recall("如何在mac机器上添加ssh密钥？") is None
+
+
+def test_bootstrap_diffuses_across_one_intervening_statement() -> None:
+    interest = _turn(
+        0, "请记住：我的兴趣是研究整数图和长期记忆。", None, "UNKNOWN")
+    preference = _turn(
+        1, "以后谈到项目时，优先提醒性能约束。", None, "UNKNOWN")
+    recall = "你还记得我刚才说的兴趣吗？"
+    index = BroadDialogueMemoryRecallIndex((interest, preference))
+    assert index.recall(recall) == interest.question
+
+    index.append(_turn(2, recall, interest.question, "ANSWER"))
+    recovered = BroadDialogueMemoryRecallIndex((
+        interest, preference, _turn(2, recall, interest.question, "ANSWER")))
+    assert recovered.recall(
+        "你还记得我的长期研究兴趣吗？") == interest.question
+
+
+def test_clarify_single_overlap_does_not_bootstrap_recall() -> None:
+    prior = _turn(
+        0, "如何写一个最简单的 Python 程序。", None, "CLARIFY")
+    index = BroadDialogueMemoryRecallIndex((prior,))
+    assert index.recall("那你如何看待 UBI?") is None

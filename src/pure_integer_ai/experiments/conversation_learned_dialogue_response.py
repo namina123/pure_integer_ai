@@ -23,6 +23,10 @@ DIALOGUE_INTENT_MAGIC = (21403, 260827, 73)
 MIN_SHARED_FEATURES = 2
 MIN_SIMILARITY_PERMILLE = 180
 PRODUCTION_MIN_SIMILARITY_PERMILLE = 500
+# A production surface must be observed in more than one training row. This
+# statistical anti-drift gate is limited to the lowest-priority learned
+# response consumer; higher-priority evidence and memory routes are unchanged.
+PRODUCTION_MIN_FRAGMENT_OCCURRENCES = 2
 MAX_FEATURES_PER_PROMPT = 512
 MAX_INTENT_FEATURES_PER_PROMPT = 1024
 MAX_INTENT_HISTORY_TURNS = 8
@@ -1237,4 +1241,5 @@ __all__ = [
     "LearnedDialogueResponseRuntime", "dialogue_prompt_features",
     "learn_dialogue_response_model", "provider_identity_markers",
     "response_fragments", "PRODUCTION_MIN_SIMILARITY_PERMILLE",
+    "PRODUCTION_MIN_FRAGMENT_OCCURRENCES",
 ]

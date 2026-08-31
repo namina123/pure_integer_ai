@@ -15,6 +15,7 @@ from pure_integer_ai.experiments.ph2_broad_qa_query import (
     query_broad_qa,
 )
 from pure_integer_ai.experiments.ph2_broad_qa_contract import BroadQaResult
+from pure_integer_ai.experiments.ph2_broad_qa_index import broad_qa_terms
 from pure_integer_ai.experiments.ph2_broad_qa_obligation_learning import (
     LearnedTypedObligation,
 )
@@ -168,11 +169,11 @@ def build_index_evidence_source_followup_resolver(
         ) -> Callable[[str, DialogueTurn], bool]:
     """建立基于来源索引证据的紧邻焦点解析器。
 
-    解析器不包含语言、脚本或代词表。它只验证一个可复现的检索事实：把
-    上一轮已经确认的来源标题作为上下文前缀后，当前问题是否得到同一来源
-    的 ANSWER。若没有该证据，返回 ``False``，上层继续使用原问题并保持
-    UNKNOWN/CLARIFY 边界。前缀使用 ASCII 空格作为跨语言 transport 分隔符，
-    不改变任何来源正文或答案载荷。
+    解析器不包含语言、脚本或代词表。它先要求冻结问式图识别出回答槽；
+    极短省略问可进入同源验证，较长问题还必须与上一轮来源问答共享至少
+    两个索引特征。最后把上一轮来源标题作为上下文前缀，核验结果仍绑定
+    同一来源。这样标题不能单独证明自身，也不会把普通新话题拖入旧来源。
+    若证据不足则返回 ``False``，上层保持 UNKNOWN/CLARIFY 边界。
     """
     if not isinstance(database, sqlite3.Connection):
         raise TypeError("source followup database 类型错误")
@@ -192,6 +193,21 @@ def build_index_evidence_source_followup_resolver(
                 or turn.source_title in question
                 or has_exact_broad_qa_title(database, question)):
             return False
+        slots = load_broad_qa_question_slots()
+        if not slots.answer_kinds(question, surface_variant_provider):
+            return False
+        question_terms = frozenset(broad_qa_terms(
+            slots.strip_slots(question, surface_variant_provider)))
+        if not question_terms:
+            return False
+        if len(question_terms) > 2:
+            context_terms = frozenset(broad_qa_terms("\n".join((
+                turn.question,
+                turn.answer or "",
+                turn.source_title,
+            ))))
+            if len(question_terms.intersection(context_terms)) < 2:
+                return False
         candidate = f"{turn.source_title} {question.strip()}"
         result = query_broad_qa(
             database,

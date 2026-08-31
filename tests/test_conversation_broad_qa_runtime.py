@@ -321,7 +321,40 @@ def test_index_evidence_source_followup_resolver_requires_same_source() -> None:
         assert resolver("它在哪里？", turn) is True
         assert resolver("无关新问题", turn) is False
         assert resolver("明确对象", turn) is False
-        assert calls == ["公开来源 它在哪里？", "公开来源 无关新问题"]
+        assert calls == ["公开来源 它在哪里？"]
+    finally:
+        module.query_broad_qa = original
+        module.has_exact_broad_qa_title = original_exact
+        connection.close()
+
+
+def test_index_followup_rejects_long_unrelated_slot_but_keeps_evidence_overlap(
+        ) -> None:
+    import sqlite3
+    import pure_integer_ai.experiments.conversation_broad_qa_runtime as module
+
+    class _Result:
+        status = "ANSWER"
+        title = "公开来源"
+
+    calls: list[str] = []
+    original = module.query_broad_qa
+    original_exact = module.has_exact_broad_qa_title
+    module.query_broad_qa = lambda _connection, question, **_kwargs: (
+        calls.append(question) or _Result())
+    module.has_exact_broad_qa_title = lambda _connection, _question: False
+    connection = sqlite3.connect(":memory:")
+    try:
+        resolver = module.build_index_evidence_source_followup_resolver(
+            connection)
+        turn = DialogueTurn(
+            0, "首轮问题", "来源证据句。", "来源证据句。", "ANSWER",
+            "公开来源", "https://example.invalid/source", (1,))
+        assert resolver(
+            "我关闭程序后重新打开，之前的会话应该从哪里恢复？",
+            turn) is False
+        assert resolver("它有哪些来源证据？", turn) is True
+        assert calls == ["公开来源 它有哪些来源证据？"]
     finally:
         module.query_broad_qa = original
         module.has_exact_broad_qa_title = original_exact

@@ -9,6 +9,7 @@ import pytest
 
 from pure_integer_ai.experiments.public_model_release import (
     PublicModelReleaseError,
+    _has_materialized_training_source_closure,
     load_public_model_release,
 )
 
@@ -272,3 +273,29 @@ def test_release_rejects_extra_embedded_artifact_payload(tmp_path: Path) -> None
     _refresh_manifest(tmp_path)
     with pytest.raises(PublicModelReleaseError, match="文件集合不闭合"):
         load_public_model_release(tmp_path, require_k_drive=False)
+
+
+def test_materialized_training_source_closure_does_not_need_ancestor(
+        tmp_path: Path) -> None:
+    course = tmp_path / "data/ph2/course.jsonl"
+    evidence = tmp_path / "data/ph2/evidence.jsonl"
+    course.parent.mkdir(parents=True)
+    course.write_bytes(b"{}\n")
+    evidence.write_bytes(b"{}\n")
+    manifest = {
+        "source_files": [["data/ph2/course.jsonl", "00", 3]],
+        "extra_course_paths": ["data/ph2/course.jsonl"],
+        "surface_evidence_files": [["data/ph2/evidence.jsonl", "11"]],
+        "train_surface_count": 3,
+    }
+    summary = {"source_record_count": 3, "resume_from": "archived-base"}
+    assert _has_materialized_training_source_closure(
+        tmp_path, manifest, summary)
+
+    course.unlink()
+    assert not _has_materialized_training_source_closure(
+        tmp_path, manifest, summary)
+    course.write_bytes(b"{}\n")
+    summary["source_record_count"] = 4
+    assert not _has_materialized_training_source_closure(
+        tmp_path, manifest, summary)

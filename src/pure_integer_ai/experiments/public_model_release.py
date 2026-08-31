@@ -521,6 +521,55 @@ def _source_path(project_root: Path, training_root: Path, value: object) -> Path
     return candidate
 
 
+def _has_materialized_training_source_closure(
+        training_root: Path, training_manifest: dict[str, object],
+        summary: dict[str, object],
+        ) -> bool:
+    """Return whether this run already carries every graph source.
+
+    Additive checkpoints usually need their ancestor manifests because their
+    current pack contains only the new shard.  A portable recovery may instead
+    replay the complete course pack while preserving the ancestor graph
+    namespace.  In that case every declared source is materialized below the
+    run root and the pack's train surface count equals the database source
+    record count; following archived ancestors would add no identity and would
+    make an otherwise closed run depend on deleted training backups.
+    """
+    source_count = summary.get("source_record_count")
+    train_count = training_manifest.get("train_surface_count")
+    if (type(source_count) is not int or source_count <= 0
+            or train_count != source_count):
+        return False
+    path_values: list[object] = []
+    for row in training_manifest.get("source_files", ()):
+        if not isinstance(row, list) or len(row) != 3:
+            return False
+        path_values.append(row[0])
+    path_values.extend(training_manifest.get("extra_course_paths", ()))
+    for row in training_manifest.get("surface_evidence_files", ()):
+        if not isinstance(row, list) or not row:
+            return False
+        path_values.append(row[0])
+    if not path_values:
+        return False
+    root = training_root.resolve()
+    for value in path_values:
+        if not isinstance(value, str) or not value:
+            return False
+        relative = PurePosixPath(value)
+        if (relative.is_absolute() or ".." in relative.parts
+                or any(":" in part for part in relative.parts)):
+            return False
+        candidate = (root / Path(*relative.parts)).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return False
+        if not candidate.is_file():
+            return False
+    return True
+
+
 def _copy_file(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
@@ -784,7 +833,10 @@ def build_public_model_release(
     # A validated release has already flattened every ancestor course into its
     # closed data inventory.  Its historical resume_from is provenance, not a
     # live host path and must never be followed outside that release root.
-    resume_from = (None if source_release is not None else
+    materialized_source_closure = _has_materialized_training_source_closure(
+        training, training_manifest, summary)
+    resume_from = (None if source_release is not None
+                   or materialized_source_closure else
                    summary.get("resume_from")
                    if isinstance(summary, dict) else None)
     visited_runs: set[Path] = {training}
