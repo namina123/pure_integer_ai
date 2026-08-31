@@ -79,3 +79,18 @@ def test_clarify_single_overlap_does_not_bootstrap_recall() -> None:
         0, "如何写一个最简单的 Python 程序。", None, "CLARIFY")
     index = BroadDialogueMemoryRecallIndex((prior,))
     assert index.recall("那你如何看待 UBI?") is None
+
+
+def test_local_question_suffix_cannot_poison_recall_shape() -> None:
+    prior = _turn(
+        0, "我刚才最开始问了什么？", None, "UNKNOWN")
+    unrelated = "不存在的独立对象_20260829是什么？"
+    index = BroadDialogueMemoryRecallIndex((prior,))
+    assert index.recall(unrelated) is None
+
+    # Even if a legacy run already contains the accidental replay, the pair
+    # lacks independent scalar evidence and must not become a recall shape.
+    poisoned = _turn(1, unrelated, prior.question, "ANSWER")
+    recovered = BroadDialogueMemoryRecallIndex((prior, poisoned))
+    assert recovered.recall("青石台的颜色是什么？") is None
+    assert recovered.recall("夜间模式与设置有什么关系？") is None

@@ -18,6 +18,8 @@ _MIN_CONTENT_FEATURE_WIDTH = 2
 _MIN_RECALL_SHAPE_SIMILARITY_PERMILLE = 200
 _MIN_RECALL_SHAPE_SHARED_FEATURES = 2
 _MIN_SKIPPED_BOOTSTRAP_SHARED_FEATURES = 3
+_MIN_DISTINCT_SHARED_SCALARS = 4
+_MIN_QUERY_SCALAR_COVERAGE_PERMILLE = 200
 _MAX_BOOTSTRAP_LOOKBACK = 4
 _MEMORY_CANDIDATE_STATUSES = frozenset({"UNKNOWN", "CLARIFY"})
 
@@ -29,7 +31,9 @@ class BroadDialogueMemoryRecallIndex:
     __slots__ = (
         "_turn_by_ordinal", "_features_by_ordinal", "_feature_ordinals",
         "_memory_ordinals", "_recall_query_ordinals",
-        "_operator_feature_counts", "_candidate_surface_ordinals",
+        "_blocked_memory_ordinals",
+        "_operator_features_by_query_ordinal", "_operator_feature_counts",
+        "_candidate_surface_ordinals",
         "_last_ordinal",
     )
 
@@ -43,6 +47,9 @@ class BroadDialogueMemoryRecallIndex:
         self._feature_ordinals: dict[tuple[int, ...], list[int]] = {}
         self._memory_ordinals: set[int] = set()
         self._recall_query_ordinals: set[int] = set()
+        self._blocked_memory_ordinals: set[int] = set()
+        self._operator_features_by_query_ordinal: dict[
+            int, frozenset[tuple[int, ...]]] = {}
         self._operator_feature_counts: dict[tuple[int, ...], int] = {}
         self._candidate_surface_ordinals: dict[str, list[int]] = {}
         self._last_ordinal = -1
@@ -53,7 +60,33 @@ class BroadDialogueMemoryRecallIndex:
     def _features(value: str) -> frozenset[tuple[int, ...]]:
         return PersistentBroadDialogueRecovery._recall_features(value)
 
-    def _learn_replay_pair(self, current: DialogueTurn) -> None:
+    @staticmethod
+    def _distinct_shared_scalars(
+            left: frozenset[tuple[int, ...]],
+            right: frozenset[tuple[int, ...]],
+            ) -> int:
+        """Count independent scalar evidence, not overlapping n-gram windows."""
+        left_scalars = {item[0] for item in left if len(item) == 1}
+        right_scalars = {item[0] for item in right if len(item) == 1}
+        return len(left_scalars.intersection(right_scalars))
+
+    @classmethod
+    def _has_independent_scalar_evidence(
+            cls, query: frozenset[tuple[int, ...]],
+            candidate: frozenset[tuple[int, ...]],
+            ) -> bool:
+        query_scalars = {item[0] for item in query if len(item) == 1}
+        shared = cls._distinct_shared_scalars(query, candidate)
+        return (
+            shared >= _MIN_DISTINCT_SHARED_SCALARS
+            and query_scalars
+            and (shared * 1000) // len(query_scalars)
+            >= _MIN_QUERY_SCALAR_COVERAGE_PERMILLE
+        )
+
+    def _learn_replay_pair(
+            self, current: DialogueTurn, expected_replay: str | None,
+            ) -> None:
         """Learn an exact replay even when one bounded statement intervened."""
         if current.status != "ANSWER" or current.answer is None:
             return
@@ -62,11 +95,18 @@ class BroadDialogueMemoryRecallIndex:
         if not ordinals:
             return
         previous = self._turn_by_ordinal[ordinals[-1]]
+        if expected_replay != current.answer.strip():
+            self._blocked_memory_ordinals.add(previous.ordinal)
+            return
+        current_features = self._features_by_ordinal[current.ordinal]
+        previous_features = self._features_by_ordinal[previous.ordinal]
         self._memory_ordinals.add(previous.ordinal)
         self._recall_query_ordinals.add(current.ordinal)
-        previous_features = self._features_by_ordinal[previous.ordinal]
-        current_features = self._features_by_ordinal[current.ordinal]
-        for feature in current_features.difference(previous_features):
+        operator_features = frozenset(
+            current_features.difference(previous_features))
+        self._operator_features_by_query_ordinal[current.ordinal] = (
+            operator_features)
+        for feature in operator_features:
             if len(feature) < _MIN_CONTENT_FEATURE_WIDTH:
                 continue
             self._operator_feature_counts[feature] = (
@@ -83,13 +123,17 @@ class BroadDialogueMemoryRecallIndex:
             raise ValueError("memory recall ordinal identity 漂移")
         if turn.ordinal <= self._last_ordinal:
             raise ValueError("memory recall turn 必须按 ordinal 递增")
+        expected_replay = (
+            self.recall(turn.question)
+            if turn.status == "ANSWER" and turn.answer is not None
+            else None)
         features = self._features(turn.question)
         self._turn_by_ordinal[turn.ordinal] = turn
         self._features_by_ordinal[turn.ordinal] = features
         for feature in features:
             self._feature_ordinals.setdefault(feature, []).append(turn.ordinal)
         self._last_ordinal = turn.ordinal
-        self._learn_replay_pair(turn)
+        self._learn_replay_pair(turn, expected_replay)
         if (turn.status in _MEMORY_CANDIDATE_STATUSES
                 and turn.answer is None):
             self._candidate_surface_ordinals.setdefault(
@@ -129,15 +173,25 @@ class BroadDialogueMemoryRecallIndex:
     def _has_learned_recall_shape(
             self, query: frozenset[tuple[int, ...]],
             ) -> bool:
+        repeated_operator_features = frozenset(
+            feature for feature, count in self._operator_feature_counts.items()
+            if count >= 2)
         for ordinal in self._recall_query_ordinals:
-            prototype = self._features_by_ordinal[ordinal]
+            observed = self._operator_features_by_query_ordinal.get(
+                ordinal, frozenset())
+            prototype = (
+                frozenset(feature for feature in observed
+                          if feature in repeated_operator_features)
+                if repeated_operator_features else observed)
+            if not prototype:
+                continue
             overlap = query.intersection(prototype)
             shared = sum(
                 len(feature) >= _MIN_CONTENT_FEATURE_WIDTH
                 for feature in overlap)
-            similarity = (2000 * len(overlap)) // (
-                len(query) + len(prototype))
-            if (shared >= _MIN_RECALL_SHAPE_SHARED_FEATURES
+            similarity = (1000 * len(overlap)) // len(prototype)
+            if (self._has_independent_scalar_evidence(query, observed)
+                    and shared >= _MIN_RECALL_SHAPE_SHARED_FEATURES
                     and similarity
                     >= _MIN_RECALL_SHAPE_SIMILARITY_PERMILLE):
                 return True
@@ -155,12 +209,16 @@ class BroadDialogueMemoryRecallIndex:
             if (previous is None
                     or previous.status not in _MEMORY_CANDIDATE_STATUSES
                     or previous.answer is not None
+                    or previous.ordinal in self._blocked_memory_ordinals
                     or (learned_shape
                         and previous.ordinal in self._memory_ordinals)
                     or previous.question.strip() == question.strip()):
                 continue
             overlap = query.intersection(
                 self._features_by_ordinal[previous.ordinal])
+            if not self._has_independent_scalar_evidence(
+                    query, self._features_by_ordinal[previous.ordinal]):
+                continue
             shared_content = sum(
                 len(feature) >= _MIN_CONTENT_FEATURE_WIDTH
                 for feature in overlap)
@@ -192,8 +250,7 @@ class BroadDialogueMemoryRecallIndex:
         bootstrap = (
             self._bootstrap_candidate(
                 query, question, learned_shape=learned_shape)
-            if not self._memory_ordinals or learned_shape else None
-        )
+            if not self._memory_ordinals or learned_shape else None)
         if bootstrap is not None:
             return bootstrap.question
         if not learned_shape:
