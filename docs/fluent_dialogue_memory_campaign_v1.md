@@ -15,9 +15,9 @@
 
 ## 当前基线（2026-09-01）
 
-- 发布候选：`K:\pure_integer_ai_work\model_releases\public-model-gc-v2-20260830`，独立 evaluator `PASS`。
-- 评估证据：`K:\pure_integer_ai_work\dialogue_sessions\gc-v2-independent-eval-20260830-b\independent_release_evaluation.json`；held-out、unknown、negative、冲突澄清、跨来源引用、checkpoint 恢复均通过。
-- 性能基线：warm p50 `615 us`、p95 `11389 us`，SQLite 语句 `34`，峰值工作集 `173248512` bytes。该数据是端到端发布评估基线，不代表所有长会话规模。
+- 发布候选：`K:\pure_integer_ai_work\model_releases\public-model-gc-v8-dialogue-stage34-20260901`，独立 evaluator `PASS`。
+- 评估证据：`K:\pure_integer_ai_work\dialogue_sessions\gc-v8-post-memoryfix-eval-20260901`；held-out、unknown、negative、冲突澄清、跨来源引用、checkpoint 恢复均通过。
+- 性能基线：warm p50 `651 us`、p95 `10077 us`；后续 route-gate 复测为 `606/9983 us`。该数据是端到端发布评估基线，不代表所有长会话规模。
 - 广域训练基线：`K:\pure_integer_ai_work\general_capability_campaign_20260829\gc-dialogue-stage1234-20260829e`；该 run 已封存，训练项 `2290`、occurrence `406545`、对话后继 `1813`。
 - 当前终次训练：`K:\pure_integer_ai_work\fluent_dialogue_memory_campaign_20260830\gc-dialogue-stage34-tx-20260831d` 四阶段均完成，并已组装为 v8 独立发布根；后续运行时修正未修改训练 payload，未重新训练。
 - OASST1 回应组织 artifact 历史上仍为 `NE`，未接入当前 release；未确认与当前 run 绑定前不得直接使用。
@@ -67,8 +67,8 @@
 
 ## 阶段索引
 
-1. **M1 长会话召回降本（进行中）**：恢复时一次建立 turn 特征缓存，查询直接消费缓存；保持 checkpoint 编码和身份不变。
-2. **M2 Runtime 结构记忆接线**：核对 Runtime event 在语义/结构召回中的边界；原始 digest 不得冒充文本，资料内容继续通过来源 provider 读取。
+1. **M1 长会话召回降本（已完成）**：恢复时一次建立 turn 特征缓存，查询直接消费缓存；保持 checkpoint 编码和身份不变。
+2. **M2 Runtime 结构记忆接线（进行中）**：核对 Runtime event 在语义/结构召回中的边界；原始 digest 不得冒充文本，资料内容继续通过来源 provider 读取。
 3. **M3 组织能力增量**：只在已有课程不足时，从 K: 公开对话课程构建与当前 run 绑定的新 artifact；失败保留证据，不接入 release。
 4. **M4 独立交流验收**：一次 60+ 轮真实交流，覆盖多域、追问、长句、重复回忆、重启、导入/修订/冲突和未知；只保留必要记录。
 5. **M5 发布候选**：重新组装独立 release root，运行一次公开 validator 和端到端 evaluator，记录逐文件 SHA、来源/许可 manifest、性能和恢复点。
