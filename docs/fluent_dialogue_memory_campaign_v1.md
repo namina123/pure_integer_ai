@@ -124,6 +124,15 @@ evidence 身份组成的 `RuntimeMaterialGenerationContext`。该上下文只使
 ordinal 证据的“最开始问了什么”均不再触发回放。专项回归为 `25 passed`，
 持久化/终端协议组合回归为 `18 passed`；未修改旧 checkpoint 或 K: 证据。
 
+独立发布回归位于
+`dialogue_sessions/gc-v8-post-recall-index-eval-20260901`，aggregate SHA-256 为
+`5a3740180648d7d63969bc8bf1c0d61bdc245b5aa8b86202bfdb6e2029c31a1c`。
+held-out `5/5`、unknown `2/2`、negative `2/2`、冲突澄清、跨来源双引用和
+checkpoint 恢复均为 `PASS`；warm p50/p95 为 `1565/9949 us`，读取 SQL
+statement 共 `34`，峰值工作集 `514154496` bytes。该回归直接调用 v8 release
+root 与当前仓库运行时，证明索引修复未退化发布承重边界；它不把 60 轮中的
+组合式未知或不相称回答误记成语义质量通过。
+
 ### 2026-08-30 长目标审计补充
 
 - `gc-dialogue-stage1234-20260830c` 已自然结束。它实际消费 `15464` 个 case、`12751` 个训练项、`103520` 个 turn，写入 `2615856` 个 occurrence、`12387` 个 dialogue successor projection 和 `1791295` 个 successor feature。Stage 1 达标；Stage 2 的 CAUSES 覆盖率为 `44‰`，低于未修改的 `50‰` 门槛，因此 Stage 3/4 未执行，`weaning_ready=false`。这不是四阶段完成，也不是断奶证据；保留 run 作为真实训练结果和恢复基座。
@@ -142,6 +151,7 @@ ordinal 证据的“最开始问了什么”均不再触发回放。专项回归
 - 已完成（2026-09-01）：Runtime provider 的精确/来源/特征索引切片；受影响的 Runtime language、CLI、binding persistence 回归 `11 passed`。索引只存在进程内，不改变发布数据合同。
 - 已完成（2026-09-01）：Runtime 结构上下文从 provider 经 `answer_broad_dialogue_turn` 接入发布终端的 `TrainedSurfaceRuntime`，并保持 citations/answer/checkpoint 身份守恒；专项回归 `23 + 13 + 7 + 9 passed`。上下文不写入 `DialogueTurn` 或 checkpoint，重启后由 Runtime ledger 重建。
 - 已完成（2026-09-01）：长会话记忆索引改为回答前授权 replay pair，并加入独立码点证据、错误回放阻断和操作符差集学习；旧 60 轮 checkpoint 只读重建后，合法兴趣回忆保持，五类错误回放均为 `None`。专项/协议回归 `25 + 18 passed`。
+- 已完成（2026-09-01）：修复后的独立 v8 release 回归全项 `PASS`，aggregate SHA-256 为 `5a3740180648d7d63969bc8bf1c0d61bdc245b5aa8b86202bfdb6e2029c31a1c`，warm p50/p95 为 `1565/9949 us`。
 - 已完成（本轮）：`tests/test_conversation_broad_dialogue_persistence.py` `2 passed`；`git diff --check` 通过。checkpoint 身份和旧式 recovery 构造兼容性保持不变。
 - 已完成（本轮）：`gc-dialogue-stage1234-20260830c` 的四阶段请求和独立 v7 组包/校验；结果只到 Stage 1，60 轮交流未改善，不能晋升为能力基线。
 - 已确认：`fluent-memory-60round-20260830` 首行 BOM 导致 59 个有效请求，`-b` 版本虽有 60 行但全部为 UNKNOWN；这两份记录都不能作为流畅交流证据。训练后生成的 v7 记录同样未达到流畅门槛，详见上方统计。
