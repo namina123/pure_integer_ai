@@ -60,6 +60,20 @@ _CHECKED_BACKEND_ATTRIBUTES = (
 )
 
 
+def _report_sequence_state(values: Any) -> tuple[int, tuple[int, ...]]:
+    """Return a bounded mutation token for append-only runtime report lists.
+
+    Reports can retain occurrence/span graphs and become very large after a
+    broad course. Evaluation isolation only needs to detect host list
+    replacement/append; copying every nested report would duplicate the graph
+    in memory. Report objects are immutable contracts in these lists, so
+    object identities plus length are sufficient for the host mutation check.
+    """
+    if not isinstance(values, (list, tuple)):
+        raise EvaluationIsolationError("runtime report collection 类型错误")
+    return len(values), tuple(id(item) for item in values)
+
+
 def _copy_backend_schema(source: StorageBackend, target: StorageBackend) -> None:
     """复制后端表定义，使沙箱不依赖正式后端的可变引用。"""
     tables = getattr(source, "_tables", None)
@@ -643,8 +657,10 @@ def clone_train_context(ctx: Any, backend: StorageBackend, *, label: str) -> Any
                 "语义课程 runtime 缺少可克隆的 occurrence/span 地基")
         cloned.language_semantic_course_runtime = (
             ctx.language_semantic_course_runtime.clone_for_context(cloned))
-        cloned.language_semantic_course_reports = copy.deepcopy(
-            ctx.language_semantic_course_reports)
+        # Prior reports are host-side diagnostics only. A fresh evaluation
+        # appends its own report; retaining the full history would duplicate
+        # every occurrence/span object for broad corpora.
+        cloned.language_semantic_course_reports = []
     if ctx.event_time_relation_runtime is not None:
         if cloned.language_semantic_course_runtime is None:
             raise EvaluationIsolationError(
@@ -738,7 +754,10 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         () if ctx.memory_isolation_runtime is None
         else ctx.memory_isolation_runtime.state_key()
     )
-    prediction_reports = copy.deepcopy(ctx.language_prediction_reports)
+    compact_reports = isinstance(backend, SQLiteBackend)
+    prediction_reports = (
+        _report_sequence_state(ctx.language_prediction_reports)
+        if compact_reports else copy.deepcopy(ctx.language_prediction_reports))
     structure_candidate_state = (
         () if ctx.structure_candidate_runtime is None
         else ctx.structure_candidate_runtime.state_key()
@@ -840,18 +859,31 @@ def _host_state(ctx: Any) -> tuple[Any, ...]:
         semantic_course_state,
         generation_factory_state,
         generation_stage4_state,
-        copy.deepcopy(ctx.structure_candidate_reports),
-        copy.deepcopy(ctx.structure_boundary_report),
-        copy.deepcopy(ctx.sense_candidate_reports),
-        copy.deepcopy(ctx.precedence_relation_reports),
-        copy.deepcopy(ctx.event_time_relation_reports),
-        copy.deepcopy(ctx.causal_relation_reports),
-        copy.deepcopy(ctx.set_relation_reports),
-        copy.deepcopy(ctx.property_relation_reports),
-        copy.deepcopy(ctx.mereology_relation_reports),
-        copy.deepcopy(ctx.semantic_pair_reports),
-        copy.deepcopy(ctx.language_semantic_course_reports),
-        copy.deepcopy(ctx.verification_reports),
+        (_report_sequence_state(ctx.structure_candidate_reports)
+         if compact_reports else copy.deepcopy(ctx.structure_candidate_reports)),
+        (None if compact_reports and ctx.structure_boundary_report is None
+         else id(ctx.structure_boundary_report)
+         if compact_reports else copy.deepcopy(ctx.structure_boundary_report)),
+        (_report_sequence_state(ctx.sense_candidate_reports)
+         if compact_reports else copy.deepcopy(ctx.sense_candidate_reports)),
+        (_report_sequence_state(ctx.precedence_relation_reports)
+         if compact_reports else copy.deepcopy(ctx.precedence_relation_reports)),
+        (_report_sequence_state(ctx.event_time_relation_reports)
+         if compact_reports else copy.deepcopy(ctx.event_time_relation_reports)),
+        (_report_sequence_state(ctx.causal_relation_reports)
+         if compact_reports else copy.deepcopy(ctx.causal_relation_reports)),
+        (_report_sequence_state(ctx.set_relation_reports)
+         if compact_reports else copy.deepcopy(ctx.set_relation_reports)),
+        (_report_sequence_state(ctx.property_relation_reports)
+         if compact_reports else copy.deepcopy(ctx.property_relation_reports)),
+        (_report_sequence_state(ctx.mereology_relation_reports)
+         if compact_reports else copy.deepcopy(ctx.mereology_relation_reports)),
+        (_report_sequence_state(ctx.semantic_pair_reports)
+         if compact_reports else copy.deepcopy(ctx.semantic_pair_reports)),
+        (_report_sequence_state(ctx.language_semantic_course_reports)
+         if compact_reports else copy.deepcopy(ctx.language_semantic_course_reports)),
+        (_report_sequence_state(ctx.verification_reports)
+         if compact_reports else copy.deepcopy(ctx.verification_reports)),
     )
 
 

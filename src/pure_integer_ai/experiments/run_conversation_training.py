@@ -163,6 +163,7 @@ _CAMPAIGN_REQUIRED_STAGES = (1, 2, 3, 4)
 
 def _resume_completed_stages(
         run_root: Path, resume_from: str | None, *, expected_pack_sha256: str,
+        allow_additive_pack: bool = False,
         ) -> tuple[int, ...]:
     """回读同一 pack 的恢复谱系，取得已真实完成的阶段集合。
 
@@ -194,8 +195,14 @@ def _resume_completed_stages(
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ValueError("resume_from 缺少可回读训练摘要") from error
         if (not isinstance(summary, dict)
-                or summary.get("run_id") != current
-                or summary.get("pack_sha256") != expected_pack_sha256):
+                or summary.get("run_id") != current):
+            raise ValueError("resume_from 训练身份或 pack SHA 漂移")
+        pack_matches = summary.get("pack_sha256") == expected_pack_sha256
+        # Additive shard runs may layer several public course packs over a
+        # lineage (for example: base dialogue -> CAUSES shard -> full stage
+        # pack).  The explicit opt-in permits those lineage SHA changes; all
+        # ordinary resumes retain the exact-pack identity requirement.
+        if not pack_matches and not allow_additive_pack:
             raise ValueError("resume_from 训练身份或 pack SHA 漂移")
         stages = summary.get("stages_completed")
         if (not isinstance(stages, list)
@@ -207,6 +214,46 @@ def _resume_completed_stages(
             raise ValueError("resume_from 谱系父节点非法")
         current = parent
     return tuple(sorted(completed))
+
+
+def _resume_lineage_pack_namespace(
+        run_root: Path, resume_from: str | None,
+        ) -> str | None:
+    """Return the oldest pack namespace in an explicit resume lineage."""
+    if resume_from is None:
+        return None
+    seen: set[Path] = set()
+    current = resume_from
+    oldest: str | None = None
+    while current is not None:
+        if (not isinstance(current, str) or not current
+                or Path(current).name != current):
+            raise ValueError("resume_from 必须是当前 run root 内的单个 run identity")
+        candidate = (run_root / current).resolve()
+        try:
+            candidate.relative_to(run_root)
+        except ValueError as error:
+            raise ValueError("resume_from 越出 run root") from error
+        if candidate in seen:
+            raise ValueError("resume_from 谱系出现循环")
+        seen.add(candidate)
+        try:
+            summary = json.loads(
+                (candidate / "training_summary.json").read_text(
+                    encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("resume_from 缺少可回读训练摘要") from error
+        if not isinstance(summary, dict) or summary.get("run_id") != current:
+            raise ValueError("resume_from 训练身份非法")
+        pack_sha = summary.get("pack_sha256")
+        if not isinstance(pack_sha, str) or len(pack_sha) != 64:
+            raise ValueError("resume_from pack SHA 非法")
+        oldest = pack_sha
+        parent = summary.get("resume_from")
+        if parent is not None and not isinstance(parent, str):
+            raise ValueError("resume_from 谱系父节点非法")
+        current = parent
+    return oldest
 
 
 def _campaign_completion(
@@ -407,6 +454,8 @@ def run_conversation_training(*, project_root: str | Path,
                               extra_course_paths: tuple[str | Path, ...] = (),
                               portable_source_identity: bool = False,
                               include_default_courses: bool = True,
+                              allow_additive_resume_pack: bool = False,
+                              typed_language_stage_items_only: bool = False,
                               replay_completed_stages: bool = False,
                               storage_performance_mode: str = "durable",
                               sqlite_page_resume: bool = False,
@@ -418,6 +467,11 @@ def run_conversation_training(*, project_root: str | Path,
     if storage_performance_mode not in {"durable", "bulk"}:
         raise ValueError(
             "storage_performance_mode 必须是 durable 或 bulk")
+    if allow_additive_resume_pack:
+        if resume_from is None:
+            raise ValueError("增量 pack 恢复必须指定 resume_from")
+        if not extra_course_paths:
+            raise ValueError("增量 pack 恢复必须提供新增公开课程")
     root = Path(run_root).resolve()
     if root.drive.upper() != "K:" or not root.is_dir():
         raise ValueError("run_root 必须是已存在的 K 盘目录")
@@ -431,13 +485,23 @@ def run_conversation_training(*, project_root: str | Path,
         if portable_source_identity else None)
     pack = load_dialogue_training_pack(
         paths, max_cases=max_cases, source_path_identities=source_identities)
+    source_namespace = pack.pack_sha256
+    if allow_additive_resume_pack:
+        lineage_namespace = _resume_lineage_pack_namespace(root, resume_from)
+        if lineage_namespace is None:
+            raise ValueError("增量 pack 恢复缺少基座命名空间")
+        # Reuse the oldest namespace so inherited typed items resolve to the
+        # graph already present in the checkpoint.  New shard items remain
+        # distinguished by their source/content identity and manifest SHA.
+        source_namespace = lineage_namespace
     prior_completed_stages = _resume_completed_stages(
-        root, resume_from, expected_pack_sha256=pack.pack_sha256)
+        root, resume_from, expected_pack_sha256=pack.pack_sha256,
+        allow_additive_pack=allow_additive_resume_pack)
     typed_report = TypedDialogueCourseAdapter().report(pack.cases)
     strict_bundle = None
     if typed_semantic and any(stage >= 3 for stage in active_stages):
         all_items = pack.items_for_split(split=None, causal_only=causal_only)
-        assign_corpus_source_refs(all_items, source_namespace=pack.pack_sha256)
+        assign_corpus_source_refs(all_items, source_namespace=source_namespace)
         by_case = {
             case.case_id: item for case, item in zip(pack.cases, all_items)
         }
@@ -480,6 +544,12 @@ def run_conversation_training(*, project_root: str | Path,
         semantic_query_protocol = _dialogue_semantic_query_protocol()
         if any(case.dialogue_turns for case in pack.cases):
             dialogue_successor_protocol = _dialogue_successor_protocol()
+    # A shard may contain only relation/structure items while its SQLite
+    # checkpoint base already carries the optional dialogue successor tables.
+    # Register the same schema before page-resume validation so an additive
+    # recovery does not fail merely because this shard has no dialogue turns.
+    if allow_additive_resume_pack and dialogue_successor_protocol is None:
+        dialogue_successor_protocol = _dialogue_successor_protocol()
     run_dir = root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     project_root_path = Path(project_root).resolve()
@@ -544,6 +614,7 @@ def run_conversation_training(*, project_root: str | Path,
     _write_json(run_dir / "dialogue_pack_manifest.json", {
         "protocol": 1,
         "pack_sha256": pack.pack_sha256,
+        "source_namespace": source_namespace,
         "source_files": manifest_source_files,
         "case_count": len(pack.cases),
         "max_cases": max_cases,
@@ -555,6 +626,10 @@ def run_conversation_training(*, project_root: str | Path,
         "causal_only": causal_only,
         "extra_course_paths": tuple(
             manifest_identity(item) for item in extra_course_paths),
+        "resume_pack_mode": (
+            "additive_shard" if allow_additive_resume_pack else "exact"),
+        "typed_language_stage_items_only": bool(
+            typed_language_stage_items_only),
         "surface_evidence_files": ((
             manifest_identity(surface_evidence_path),
             _sha256_file(surface_evidence_path),
@@ -582,7 +657,7 @@ def run_conversation_training(*, project_root: str | Path,
     if typed_semantic:
         # L-03 occurrence identity needs one corpus-wide ordinal pass; doing
         # this lazily per item would collapse repeated surfaces to one source.
-        assign_corpus_source_refs(corpus, source_namespace=pack.pack_sha256)
+        assign_corpus_source_refs(corpus, source_namespace=source_namespace)
     generation_factory = (
         TypedDialogueGenerationRuntimeFactory.from_project_root(project_root)
         if typed_semantic else None
@@ -636,6 +711,8 @@ def run_conversation_training(*, project_root: str | Path,
                 language_generation_runtime_factory=generation_factory,
                 w09_weaning_builder=w09_builder,
                 w09_execute_zero_call_windows=w09_builder is not None,
+                typed_language_stage_items_only=(
+                    typed_language_stage_items_only),
             ),
             corpus,
             backend=backend,
@@ -653,6 +730,7 @@ def run_conversation_training(*, project_root: str | Path,
         summary = {
             "run_id": run_id,
             "pack_sha256": pack.pack_sha256,
+            "source_namespace": source_namespace,
             "case_count": len(pack.cases),
             "max_cases": max_cases,
             "split_counts": pack.split_counts,
@@ -665,7 +743,11 @@ def run_conversation_training(*, project_root: str | Path,
                 result.typed_language_floor_report),
             "active_stages": active_stages,
             "resume_from": resume_from,
-            "diagnostic_only": True,
+        "resume_pack_mode": (
+            "additive_shard" if allow_additive_resume_pack else "exact"),
+        "typed_language_stage_items_only": bool(
+            typed_language_stage_items_only),
+        "diagnostic_only": True,
             "storage_performance_mode": storage_performance_mode,
             "sqlite_page_resume": bool(sqlite_page_resume),
             "sqlite_resume_source_manifest_sha256": (
@@ -703,6 +785,7 @@ def run_conversation_training(*, project_root: str | Path,
     summary = {
         "run_id": run_id,
         "pack_sha256": pack.pack_sha256,
+        "source_namespace": source_namespace,
         "case_count": len(pack.cases),
         "max_cases": max_cases,
         "split_counts": pack.split_counts,
@@ -722,6 +805,10 @@ def run_conversation_training(*, project_root: str | Path,
         },
         "active_stages": active_stages,
         "resume_from": resume_from,
+        "resume_pack_mode": (
+            "additive_shard" if allow_additive_resume_pack else "exact"),
+        "typed_language_stage_items_only": bool(
+            typed_language_stage_items_only),
         "stages_completed": local_completed_stages,
         "cumulative_stages_completed": cumulative_completed_stages,
         "campaign_required_stages": _CAMPAIGN_REQUIRED_STAGES,
@@ -773,6 +860,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="用 data/ph2 basename 绑定 pack，允许跨机器恢复")
     parser.add_argument("--no-default-courses", action="store_true",
                         help="增量 shard 只消费显式 extra course")
+    parser.add_argument(
+        "--allow-additive-resume-pack", action="store_true",
+        help=("允许基于旧 run 的 SQLite checkpoint 消费新增课程 shard；"
+              "必须同时使用 --resume-from 和 --extra-course"),
+    )
+    parser.add_argument(
+        "--typed-language-stage-items-only", action="store_true",
+        help="Stage 3/4 仅消费显式 typed 语言课程；Stage 1/2 仍保留全量观察",
+    )
     parser.add_argument("--replay-completed-stages", action="store_true",
                         help="E1 恢复后显式重放 active stage，供增量 shard 使用")
     parser.add_argument(
@@ -801,6 +897,8 @@ def main(argv: list[str] | None = None) -> int:
         extra_course_paths=tuple(args.extra_course),
         portable_source_identity=args.portable_source_identity,
         include_default_courses=not args.no_default_courses,
+        allow_additive_resume_pack=args.allow_additive_resume_pack,
+        typed_language_stage_items_only=args.typed_language_stage_items_only,
         replay_completed_stages=args.replay_completed_stages,
         storage_performance_mode=args.storage_performance_mode,
         sqlite_page_resume=args.sqlite_page_resume,

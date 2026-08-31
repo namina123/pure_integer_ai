@@ -8,6 +8,7 @@ H-00 和 G-00 请求链。
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Any
 
 from pure_integer_ai.cognition.shared.hypothesis import (
@@ -18,6 +19,7 @@ from pure_integer_ai.cognition.shared.hypothesis import (
 from pure_integer_ai.cognition.shared.identity import (
     OBJECT_ENTITY,
     OBJECT_PROPOSITION,
+    ObjectIdentity,
     TypedRef,
     concept_identity,
     language_branch_identity,
@@ -78,6 +80,29 @@ def _text_key(value: str, *, domain: str) -> tuple[int, ...]:
     return result or (1,)
 
 
+def _legacy_text_key(value: str, *, domain: str) -> tuple[int, ...]:
+    """恢复早期 fingerprint v1 的文本键，供已发布 checkpoint 只读兼容。
+
+    早期运行在同一版本号下把每个整数写成 ``size + bytes``；现役实现
+    使用小整数定长表以减少编码成本。两者都保持纯整数输入和 SHA-256
+    输出，不能混用，也不能把这个兼容键写回新课程。
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError("typed legacy identity 文本键不能为空")
+    domain_bytes = domain.encode("utf-8")
+    values = tuple(value.encode("utf-8"))
+    digest = hashlib.sha256()
+    digest.update(b"pure_integer_ai.integer_tuple_fingerprint.v1\x00")
+    digest.update(len(domain_bytes).to_bytes(8, "big"))
+    digest.update(domain_bytes)
+    digest.update(len(values).to_bytes(8, "big"))
+    for value in values:
+        size = max(1, (value.bit_length() + 8) // 8)
+        digest.update(size.to_bytes(8, "big"))
+        digest.update(value.to_bytes(size, "big", signed=True))
+    return (1, len(values), *digest.digest())
+
+
 def _value(payload: CanonicalJsonObject) -> dict[str, Any]:
     raw = payload.to_value()
     if not isinstance(raw, dict):
@@ -100,8 +125,8 @@ def _candidate_rows(kind: str, raw: dict[str, Any]) -> tuple[dict[str, Any], ...
     return tuple(result)
 
 
-def _structure_family_key(kind: str, raw: dict[str, Any]) -> tuple[int, ...]:
-    """返回不含来源、表面或答案的 typed 课程结构族键。"""
+def _structure_family_value(kind: str, raw: dict[str, Any]) -> str:
+    """返回不含来源、表面或答案的 typed 课程结构族值。"""
     # ADOPTION and POSTCHECK are deliberately separate contracts.  Adoption
     # selects a candidate; postcheck verifies a completed generation.  Sharing
     # their structure index makes a read-only held-out query recover multiple
@@ -117,8 +142,13 @@ def _structure_family_key(kind: str, raw: dict[str, Any]) -> tuple[int, ...]:
         family = "UNSPECIFIED"
     if not isinstance(family, str) or not family:
         raise ValueError("typed semantic payload 缺少结构族")
+    return f"{family_kind}:{family}"
+
+
+def _structure_family_key(kind: str, raw: dict[str, Any]) -> tuple[int, ...]:
+    """返回现役 typed 课程结构族整数键。"""
     return _text_key(
-        f"{family_kind}:{family}",
+        _structure_family_value(kind, raw),
         domain="typed.dialogue.semantic.structure.v1",
     )
 
@@ -443,7 +473,12 @@ class TypedDialogueSemanticQueryMapper:
         )
 
     def lookup_structures(self, current: LanguageSemanticCourseInput):
-        """返回当前 typed payload 声明的结构索引，不读取 surface 或答案。"""
+        """返回当前 typed payload 的现役及历史结构索引。
+
+        结构索引是候选族的来源无关身份。旧 checkpoint 在 fingerprint
+        编码修订前写入过 adoption 族，postcheck 也沿用该族读取已采用
+        候选，因此只读查询需要携带兼容别名；训练路径仍只写现役键。
+        """
         if not isinstance(current, LanguageSemanticCourseInput):
             raise TypeError("typed semantic structure lookup 输入类型错误")
         if current.payload_kind not in _SUPPORTED_KINDS:
@@ -455,13 +490,34 @@ class TypedDialogueSemanticQueryMapper:
         if (current.payload_kind == "GenerationGeneralizationCandidateV1"
                 and raw.get("sample_family") != "POSITIVE"):
             return ()
-        rows = _candidate_rows(current.payload_kind, raw)
-        structure_family = _structure_family_key(current.payload_kind, raw)
+        _candidate_rows(current.payload_kind, raw)
+        family_value = _structure_family_value(current.payload_kind, raw)
+        family_values = [family_value]
+        # POSTCHECK verifies a prior adoption.  Historical runs indexed it
+        # under the shared ADOPTION family; retain that explicit protocol
+        # alias without selecting a candidate or reading surface text.
+        if (current.payload_kind == "GenerationAdoptionPostcheckQuery"
+                and raw.get("postcheck", {}).get("enabled") == 1
+                and "GenerationAdoptionPostcheckQuery:ADOPTION"
+                not in family_values):
+            family_values.append("GenerationAdoptionPostcheckQuery:ADOPTION")
         owner = current.source.owner
         versions = current.source.versions
-        return (structure_concept_identity(
-            (*_NAMESPACE, 30, 1, *structure_family),
-            owner=owner, versions=versions),)
+        identities = []
+        for family in family_values:
+            for family_key in (
+                    _text_key(
+                        family,
+                        domain="typed.dialogue.semantic.structure.v1"),
+                    _legacy_text_key(
+                        family,
+                        domain="typed.dialogue.semantic.structure.v1"),
+            ):
+                identities.append(structure_concept_identity(
+                    (*_NAMESPACE, 30, 1, *family_key),
+                    owner=owner, versions=versions,
+                ))
+        return tuple(sorted(set(identities), key=ObjectIdentity.stable_key))
 
     def clone_for_evaluation(self) -> "TypedDialogueSemanticQueryMapper":
         return self

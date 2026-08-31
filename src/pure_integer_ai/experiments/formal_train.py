@@ -412,6 +412,10 @@ class FormalTrainConfig:
     curriculum_active_relations: frozenset[str] | None = None   # #1143 课程增量 boot：None=全 load（bit-identical·既有行为）·frozenset=只该集关系 boot（T-L0~L6 stage-by-stage 有序学习·镜像 arith S1-S8）
     curriculum_boot_relations: frozenset[str] | None = None   # None=沿用 active scope；显式集合=本调用只 boot 该 delta，backend 保留既有关系。
     active_training_stages: tuple[int, ...] | None = None   # None=完整五阶段；课程 runner 可显式只跑当前训练相位，避免每个关系阶段嵌套完整 formal_train。
+    # 公开 typed 课程的 Stage 3/4 只对显式携带 typed payload 的 item
+    # 进入 generation owner。Stage 1/2 仍消费完整 corpus，普通对话的
+    # occurrence/successor 图不会被裁掉；False 保留旧全量行为。
+    typed_language_stage_items_only: bool = False
     # 增量 shard 续训：E1 已恢复旧图后，显式重放指定 stage 消费新 corpus。
     # 默认 False 保持 stage-skip；只有外部 runner 已审计 shard identity 时才开启。
     replay_completed_stages: bool = False
@@ -1952,7 +1956,13 @@ def _formal_train_impl(config: FormalTrainConfig,
                         ctx, corpus, r, execution=result.execution)
 
             # per-round 执行（reward 未激活→observe-only·runner 返 None）
-            items = _stage_items(corpus, stage, config.rounds_per_stage)
+            items = _stage_items(
+                corpus,
+                stage,
+                config.rounds_per_stage,
+                typed_language_stage_items_only=(
+                    config.typed_language_stage_items_only),
+            )
             stage_candidate_count = (
                 0 if not config.telemetry_enabled
                 else sum(item_candidate_total(item) for item in items)
@@ -2060,6 +2070,12 @@ def _formal_train_impl(config: FormalTrainConfig,
                     and typed_stage4_report.complete is True)
             elif (stage == STAGE3_REWARD
                     and ctx.language_generation_runtime is not None):
+                # Stage 3 typed episodes have already completed their graph
+                # writes.  Commit before the read-only held-out floor so
+                # evaluation_isolation can use SQLite's file-level backup;
+                # serializing an open multi-GB transaction is unsupported on
+                # Windows and needlessly multiplies memory.
+                ctx.backend.commit()
                 result.typed_language_floor_report = run_typed_language_floor(
                     ctx,
                     r,
@@ -2531,8 +2547,23 @@ def _item_sig(item: CollectedItem) -> str:
 
 
 def _stage_items(corpus: list[CollectedItem], stage: int,
-                 rounds: int) -> list[CollectedItem]:
-    """该阶段喂的 items（首版全语料·按阶段门控防缺防超喂·真按阶段配比 §十二 defer）。"""
+                 rounds: int, *,
+                 typed_language_stage_items_only: bool = False,
+                 ) -> list[CollectedItem]:
+    """返回当前阶段 items，并可把 typed generation 限定到显式 typed 课程。
+
+    普通语言记录仍在 Stage 1/2 完整建 occurrence/successor 图；当公开
+    generation owner 已安装时，Stage 3/4 若继续把无 typed 附件的广域记录
+    送入 owner，只会重复创建 query/generation 生命周期并执行无请求路径。
+    该显式开关只过滤 Stage 3+，不改变默认全量行为，也不从表层文字猜测
+    typed 资格。
+    """
     if not corpus:
         return []
+    if typed_language_stage_items_only and stage >= STAGE3_REWARD:
+        return [item for item in corpus if (
+            item.modality == MODALITY_LANGUAGE
+            and item.typed_payload is not None
+            and item.payload_kind is not None
+        )]
     return list(corpus)
