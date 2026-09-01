@@ -185,6 +185,16 @@ def _direction_identity(directionality: int) -> ObjectIdentity:
     )
 
 
+def w06_directionality_binding_predicate() -> ObjectIdentity:
+    """返回训练候选中承载关系方向性的一等字段 predicate。"""
+    return _domain_predicate(3)
+
+
+def w06_directionality_value(directionality: int) -> ObjectIdentity:
+    """返回训练图中一个冻结方向枚举对应的一等字段值。"""
+    return _direction_identity(directionality)
+
+
 @dataclass(frozen=True)
 class W06SourceBinding:
     """连接 D-02 SourceRefRecord 与 payload 内一等语义 SourceRef。"""
@@ -985,5 +995,7 @@ __all__ = [
     "W06_NAMESPACE",
     "W06_REJECTION_TYPE_MISMATCH",
     "adapt_w06_training_payload",
+    "w06_directionality_binding_predicate",
+    "w06_directionality_value",
     "w06_relation_protocol",
 ]

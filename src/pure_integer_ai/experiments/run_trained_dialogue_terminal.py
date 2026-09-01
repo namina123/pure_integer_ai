@@ -490,6 +490,7 @@ def run_trained_dialogue_terminal(
         *,
         project_root: str | Path,
         qa_database: str | Path | None = None,
+        trained_relation_database: str | Path | None = None,
         release_root: str | Path | None = None,
         training_run_root: str | Path | None = None,
         response_organization_artifact_root: str | Path | None = None,
@@ -540,6 +541,13 @@ def run_trained_dialogue_terminal(
             "deferred-narrow-fast")
     runtime_sqlite_runtime = None
     runtime_material_response_provider = None
+    trained_relation_runtime = None
+    if trained_relation_database is not None:
+        from pure_integer_ai.experiments.trained_relation_graph_runtime import (
+            TrainedRelationGraphRuntime,
+        )
+        trained_relation_runtime = TrainedRelationGraphRuntime(
+            trained_relation_database)
     if runtime_material_runtime_database is not None:
         if runtime_material_runtime_root is None:
             raise ValueError("runtime material SQLite 必须同时指定 runtime ledger root")
@@ -1143,6 +1151,27 @@ def run_trained_dialogue_terminal(
                     return None
 
                 runtime_response = _runtime_response_with_focus
+            if trained_relation_runtime is not None:
+                prior_runtime_response = runtime_response
+                relation_runtime = trained_relation_runtime
+
+                def _runtime_response_with_relation_graph(
+                        value: str,
+                        *,
+                        _prior=prior_runtime_response,
+                        _relations=relation_runtime,
+                        ):
+                    """资料域优先；未决定时才允许 active Core 关系图作答。"""
+                    if _prior is not None:
+                        prior = _prior(value)
+                        if prior is not None:
+                            return prior
+                    answer = _relations.respond(value)
+                    if answer is None:
+                        return None
+                    return "ANSWER", answer.surface, None, None
+
+                runtime_response = _runtime_response_with_relation_graph
             started_ns = time.perf_counter_ns()
             state, turn = answer_broad_dialogue_turn(
                 state, question, connection, narrow_answer=narrow,
@@ -1212,6 +1241,8 @@ def run_trained_dialogue_terminal(
         connection.close()
         if runtime_sqlite_runtime is not None:
             runtime_sqlite_runtime.close()
+        if trained_relation_runtime is not None:
+            trained_relation_runtime.close()
         if dialogue_response_runtime is not None:
             dialogue_response_runtime.close()
         if core_dialogue_runtime is not None:
@@ -1258,6 +1289,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--qa-database", default=None,
                         help="兼容旧入口；独立发布请使用 --release-root")
+    parser.add_argument(
+        "--trained-relation-database", default=None,
+        help="训练后 Core typed relation SQLite；运行时不读取 relation 课程")
     parser.add_argument("--release-root", default=None,
                         help="K 盘自包含公开模型 release root")
     parser.add_argument("--training-run-root", default=None)
@@ -1316,6 +1350,7 @@ def main(argv: list[str] | None = None) -> int:
     return run_trained_dialogue_terminal(
         project_root=args.project_root,
         qa_database=args.qa_database,
+        trained_relation_database=args.trained_relation_database,
         release_root=args.release_root,
         training_run_root=args.training_run_root,
         response_organization_artifact_root=(

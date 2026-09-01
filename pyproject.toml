@@ -38,6 +38,7 @@ pure-integer-sense = "pure_integer_ai.experiments.run_ph2_w03_public_sense:main"
 pure-integer-broad-qa = "pure_integer_ai.experiments.run_ph2_broad_qa:main"
 pure-integer-broad-qa-joint = "pure_integer_ai.experiments.run_ph2_broad_qa_joint_eval:main"
 pure-integer-trained-dialogue = "pure_integer_ai.experiments.run_trained_dialogue_terminal:main"
+pure-integer-graph-dialogue = "pure_integer_ai.experiments.run_trained_relation_graph_terminal:main"
 pure-integer-runtime-material = "pure_integer_ai.experiments.run_runtime_material_ingest:main"
 
 [project.optional-dependencies]

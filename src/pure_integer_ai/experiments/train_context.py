@@ -215,53 +215,8 @@ def make_train_context(
         companion: bool = False,
         ) -> TrainContext:
     """注册训练所需表并装配核心、伴随和两层记忆空间。"""
-    bootstrap(backend)
-
-    from pure_integer_ai.cognition.understanding.emergent_role import (
-        register_position_hist,
-    )
-    from pure_integer_ai.cognition.understanding.modification_direction import (
-        register_modification_hist,
-    )
-    from pure_integer_ai.storage.abstract_mark import register_abstract_mark
-    from pure_integer_ai.storage.chapter_seq import register_chapter_seq
-    from pure_integer_ai.storage.composes_attr import register_composes_attr
-    from pure_integer_ai.storage.concept_correspondence import (
-        register_concept_correspondence,
-    )
-    from pure_integer_ai.storage.concept_identity import register_concept_identity
-    from pure_integer_ai.storage.experience_count import register_experience_count
-    from pure_integer_ai.storage.op_confidence import register_op_confidence
-    from pure_integer_ai.storage.pronoun_resolution_count import (
-        register_pronoun_resolution_count,
-    )
-    from pure_integer_ai.storage.selection_pref_count import (
-        register_selection_pref_count,
-    )
-    from pure_integer_ai.storage.sense_candidates import register_sense_candidates
+    register_train_context_tables(backend)
     from pure_integer_ai.storage.spaces.memory_space import MemorySpace
-    from pure_integer_ai.storage.structure_match_count import (
-        register_structure_match_count,
-    )
-    from pure_integer_ai.teacher.weaning_calibration import (
-        register_weaning_calibration,
-    )
-
-    register_position_hist(backend)
-    register_weaning_calibration(backend)
-    register_composes_attr(backend)
-    register_op_confidence(backend)
-    register_concept_identity(backend)
-    register_concept_correspondence(backend)
-    register_experience_count(backend)
-    register_structure_match_count(backend)
-    register_chapter_seq(backend)
-    register_selection_pref_count(backend)
-    register_sense_candidates(backend)
-    register_pronoun_resolution_count(backend)
-    register_modification_hist(backend)
-    register_abstract_mark(backend)
-    register_word_form_index(backend)
 
     registry = SpaceRegistry(backend)
     core = AbstractSpace.create(registry, "core")
@@ -345,6 +300,61 @@ def make_train_context(
     return ctx
 
 
+def register_train_context_tables(backend: StorageBackend) -> None:
+    """只注册训练上下文需要的表结构，不创建空间或写入任何图数据。
+
+    SQLite page-resume 必须在首次写入前核对已复制 checkpoint；把 schema
+    注册从上下文实例化拆出，避免 bootstrap/SpaceRegistry 的写入污染恢复
+    计数。注册操作本身幂等，正常训练仍由 :func:`make_train_context` 调用。
+    """
+    bootstrap(backend)
+
+    from pure_integer_ai.cognition.understanding.emergent_role import (
+        register_position_hist,
+    )
+    from pure_integer_ai.cognition.understanding.modification_direction import (
+        register_modification_hist,
+    )
+    from pure_integer_ai.storage.abstract_mark import register_abstract_mark
+    from pure_integer_ai.storage.chapter_seq import register_chapter_seq
+    from pure_integer_ai.storage.composes_attr import register_composes_attr
+    from pure_integer_ai.storage.concept_correspondence import (
+        register_concept_correspondence,
+    )
+    from pure_integer_ai.storage.concept_identity import register_concept_identity
+    from pure_integer_ai.storage.experience_count import register_experience_count
+    from pure_integer_ai.storage.op_confidence import register_op_confidence
+    from pure_integer_ai.storage.pronoun_resolution_count import (
+        register_pronoun_resolution_count,
+    )
+    from pure_integer_ai.storage.selection_pref_count import (
+        register_selection_pref_count,
+    )
+    from pure_integer_ai.storage.sense_candidates import register_sense_candidates
+    from pure_integer_ai.storage.structure_match_count import (
+        register_structure_match_count,
+    )
+    from pure_integer_ai.teacher.weaning_calibration import (
+        register_weaning_calibration,
+    )
+
+    register_position_hist(backend)
+    register_weaning_calibration(backend)
+    register_composes_attr(backend)
+    register_op_confidence(backend)
+    register_concept_identity(backend)
+    register_concept_correspondence(backend)
+    register_experience_count(backend)
+    register_structure_match_count(backend)
+    register_chapter_seq(backend)
+    register_selection_pref_count(backend)
+    register_sense_candidates(backend)
+    register_pronoun_resolution_count(backend)
+    register_modification_hist(backend)
+    register_abstract_mark(backend)
+    register_word_form_index(backend)
+
+
 def _item_document_identity(
         ctx: TrainContext,
         item: CollectedItem,
@@ -408,4 +418,5 @@ __all__ = [
     "_item_observation_identity",
     "_item_occurrence_scope",
     "make_train_context",
+    "register_train_context_tables",
 ]

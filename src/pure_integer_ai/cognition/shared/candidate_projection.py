@@ -153,7 +153,7 @@ class CandidateProjectionProtocol:
             return self.refresh_kind
         if from_state == self.active_state and to_state == self.inactive_state:
             return self.demotion_kind
-        if (from_state == self.active_state
+        if (from_state in (self.inactive_state, self.active_state)
                 and to_state == self.superseded_state):
             return self.supersede_kind
         raise ValueError("候选投影生命周期转换不合法")
@@ -1195,7 +1195,12 @@ class EvidenceCandidateProjector:
             provenance_kind: int, epistemic_origin: int = 0,
             content_version: int = 0, qualifiers: tuple[int, ...] = (),
             ) -> CandidateGraphProjection:
-        """把 H-00 已确认的同组替代追加为 active->superseded 图事件。"""
+        """把 H-00 已确认的同组替代追加为当前图态到 superseded 事件。
+
+        H-00 active 生命周期与图内 active 可消费态不是同一个维度：冲突候选
+        可以先被图降为 inactive，随后才被 parser revision 合法替代。因此替代
+        允许从图的 active 或 inactive 出发，但仍要求 H-00 已确认 replacement。
+        """
         definition = self.engine.definition(hypothesis)
         replacement_definition = self.engine.definition(replacement)
         candidate_ref = self.graph.ontology.resolve(definition.candidate)
@@ -1205,8 +1210,10 @@ class EvidenceCandidateProjector:
             raise CandidateProjectionError("替代双方候选尚未物化")
         projection = self.graph.project(candidate_ref)
         replacement_projection = self.graph.project(replacement_ref)
-        if projection.state != self.graph.protocol.active_state:
-            raise CandidateProjectionError("只有 active 图候选可以被替代")
+        if projection.state not in (
+                self.graph.protocol.active_state,
+                self.graph.protocol.inactive_state):
+            raise CandidateProjectionError("只有未 superseded 图候选可以被替代")
         if replacement_projection.state != self.graph.protocol.active_state:
             raise CandidateProjectionError("replacement 图候选必须 active")
         if not self.graph._same_competition(hypothesis, replacement):
@@ -1236,7 +1243,7 @@ class EvidenceCandidateProjector:
             hypothesis,
             decision,
             event_kind=self.graph.protocol.supersede_kind,
-            from_state=self.graph.protocol.active_state,
+            from_state=projection.state,
             to_state=self.graph.protocol.superseded_state,
             evidence=evidence,
             timestamp_seq=timestamp_seq,

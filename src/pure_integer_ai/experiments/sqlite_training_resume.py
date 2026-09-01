@@ -12,8 +12,11 @@ import argparse
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import sqlite3
+import tempfile
 from typing import Any
 
 from pure_integer_ai.storage.backend import StorageBackend
@@ -286,18 +289,23 @@ def prepare_sqlite_page_resume(
     binding = load_sqlite_training_resume(
         source_root, require_k_drive=require_k_drive)
     source_database = source_root / "training.sqlite3"
-    source = sqlite3.connect(f"file:{source_database}?mode=ro", uri=True)
-    target = sqlite3.connect(destination)
+    # The source binding is immutable and was already fingerprinted above.
+    # Use a byte-for-byte staged copy instead of sqlite3.Connection.backup:
+    # on multi-gigabyte databases the latter can be interrupted after writing
+    # a partial file, leaving a destination that opens but reports malformed
+    # pages.  Atomic replace keeps a failed copy from becoming a checkpoint.
+    fd, partial_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".partial",
+        dir=str(destination.parent),
+    )
+    os.close(fd)
+    partial = Path(partial_name)
     try:
-        source.backup(target)
-        target.commit()
+        shutil.copyfile(source_database, partial)
+        os.replace(partial, destination)
     except BaseException:
-        target.close()
-        source.close()
+        partial.unlink(missing_ok=True)
         raise
-    else:
-        target.close()
-        source.close()
     page_count, page_size, schema_sha, counts_sha, counts = (
         _database_fingerprint(destination))
     if (page_count != binding.page_count or page_size != binding.page_size

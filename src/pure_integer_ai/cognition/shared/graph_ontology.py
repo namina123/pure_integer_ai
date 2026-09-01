@@ -90,7 +90,8 @@ class GraphOntology:
 
     def __init__(self, backend: StorageBackend, *, space_id: int,
                  space_identity: SpaceIdentity,
-                 scoped_identities: ScopedIdentityStore) -> None:
+                 scoped_identities: ScopedIdentityStore,
+                 persist_statement_rows: bool = False) -> None:
         assert_int(space_id, _where="GraphOntology.space_id")
         if type(space_id) is not int or space_id <= 0:
             raise ValueError("GraphOntology.space_id 必须为严格正整数")
@@ -104,6 +105,7 @@ class GraphOntology:
             backend,
             self._objects,
             scoped_identities.assertion_records,
+            persist_rows=persist_statement_rows,
         )
         self._nodes = NodeStore(backend)
         self._identity_to_ref: dict[ObjectIdentity, TypedRef] = {}
@@ -111,6 +113,10 @@ class GraphOntology:
         self._records_by_node: dict[tuple[int, int], GraphObjectRecord] = {}
         self._refs_by_node: dict[tuple[int, int], TypedRef] = {}
         self._source_hashes: dict[SourceRef, int] = {}
+
+    def enable_physical_statement_projection(self) -> None:
+        """为需要独立物理索引的发布训练上下文开启 statement 行写入。"""
+        self._statements.enable_physical_rows()
 
     @property
     def space_id(self) -> int:

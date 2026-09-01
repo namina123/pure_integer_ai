@@ -32,8 +32,12 @@ from pure_integer_ai.cognition.shared.hypothesis import (
     EVIDENCE_SUPPORT,
     EVIDENCE_UNKNOWN,
     EvidenceRecord,
+    HypothesisLedger,
     LIFECYCLE_ARCHIVED,
     LIFECYCLE_SUPERSEDED,
+)
+from pure_integer_ai.cognition.shared.hypothesis_resolution import (
+    HypothesisResolver,
 )
 from pure_integer_ai.cognition.shared.identity import (
     GLOBAL_OWNER_SCOPE,
@@ -49,6 +53,10 @@ from pure_integer_ai.cognition.shared.scope_identity import document_scope
 from pure_integer_ai.cognition.shared.semantic_graph import (
     AtomicPropositionPredicates,
     SemanticGraph,
+)
+from pure_integer_ai.cognition.shared.training_hypothesis import (
+    TrainingHypothesisEventSink,
+    TrainingHypothesisHistoryProtocol,
 )
 from pure_integer_ai.crosscut.determinism.hasher import Hasher
 from pure_integer_ai.experiments.evaluation_protocol import ProtocolKey
@@ -143,6 +151,17 @@ def _candidate_engine() -> EvidenceCandidateEngine:
         document_scope(aggregate),
         1,
     ))
+
+
+def _history_protocol() -> TrainingHypothesisHistoryProtocol:
+    """声明 W-06 H-00/H-04 在正式训练 Core 中的独立历史边界。"""
+    aggregate = _aggregate_source()
+    return TrainingHypothesisHistoryProtocol(
+        (W06_NAMESPACE, 708),
+        (W06_NAMESPACE, 701),
+        aggregate,
+        document_scope(aggregate),
+    )
 
 
 def _verifier() -> IndependentObjectVerifier:
@@ -278,12 +297,37 @@ class W06RelationLearningRuntime:
         self.projection_protocol = _projection_protocol()
         self.candidate_graph = CandidateProjectionGraph(
             context.graph_ontology, self.projection_protocol)
-        self.learning = CandidateLearningRuntime(
-            _candidate_engine(),
-            self.candidate_graph,
-            _verifier(),
-            CandidateProjectionMetadata(SOURCE_BARE_TEXT, EPI_STRUCTURED),
-        )
+        history = context.training_candidate_history
+        if history is None:
+            raise W06LearningError("W-06 正式 owner 缺少 Core 训练候选历史")
+        history_protocol = _history_protocol()
+        sink = TrainingHypothesisEventSink(history, history_protocol)
+        verifier = _verifier()
+        metadata = CandidateProjectionMetadata(
+            SOURCE_BARE_TEXT, EPI_STRUCTURED)
+        if sink.hypotheses():
+            self.learning = CandidateLearningRuntime.restore_for_training_graph(
+                _candidate_engine().protocol,
+                self.candidate_graph,
+                verifier,
+                metadata,
+                history,
+                history_protocol,
+            )
+        else:
+            ledger = HypothesisLedger(sink)
+            resolver = HypothesisResolver(ledger, sink=sink)
+            engine = EvidenceCandidateEngine(
+                _candidate_engine().protocol,
+                ledger=ledger,
+                resolver=resolver,
+            )
+            self.learning = CandidateLearningRuntime(
+                engine,
+                self.candidate_graph,
+                verifier,
+                metadata,
+            )
         self.relation_protocol = w06_relation_protocol()
         self.consumer: ActiveRelationClosureConsumer | None = None
         self.closure: RelationClosureRuntime | None = None

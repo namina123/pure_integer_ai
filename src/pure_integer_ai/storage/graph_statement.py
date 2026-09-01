@@ -85,7 +85,8 @@ class GraphStatementStore:
 
     def __init__(self, backend: StorageBackend,
                  objects: GraphObjectRepository,
-                 assertions: AssertionRecordStore) -> None:
+                 assertions: AssertionRecordStore,
+                 *, persist_rows: bool = False) -> None:
         if not isinstance(objects, GraphObjectRepository):
             raise TypeError("objects 必须是 GraphObjectRepository")
         if not isinstance(assertions, AssertionRecordStore):
@@ -96,9 +97,13 @@ class GraphStatementStore:
         self._records_by_hash: dict[int, GraphStatementRecord] = {}
         self._predicates_by_hash: dict[int, GraphObjectRecord] = {}
         self._legacy_namespace_empty: bool | None = None
+        # Most contexts use assertion_record as the canonical projection and
+        # keep the historical table empty.  Training publication can opt in to
+        # a physical, byte-for-byte statement index for independent readers.
+        self._persist_rows = bool(persist_rows)
 
     def add(self, record: GraphStatementRecord) -> GraphStatementRecord:
-        """核验 graph-statement assertion 投影；新格式不再追加冗余旧行。"""
+        """核验 graph-statement assertion 投影并按模式写物理索引。"""
         record = self._validate(record)
         cached = self._records_by_hash.get(record.assertion_hash)
         if cached is not None:
@@ -113,9 +118,15 @@ class GraphStatementStore:
         expected = self._from_projection(projection)
         if expected != record:
             raise GraphStatementIntegrityError("assertion 投影与 statement 不一致")
-        if self._legacy_rows(record.assertion_hash):
-            raise GraphStatementIntegrityError(
-                "新 graph-statement 角色不得与旧冗余行混存")
+        legacy_rows = self._legacy_rows(record.assertion_hash)
+        if legacy_rows:
+            if (len(legacy_rows) != 1
+                    or self._from_row(legacy_rows[0]) != expected):
+                raise GraphStatementIntegrityError(
+                    "graph-statement 物理投影与 assertion 不一致")
+        elif self._persist_rows:
+            self._backend.insert(GRAPH_STATEMENT_TABLE, self._to_row(expected))
+            self._legacy_namespace_empty = False
         self._records_by_hash[record.assertion_hash] = expected
         return expected
 
@@ -129,9 +140,10 @@ class GraphStatementStore:
         projected = self._from_projection(projection)
         legacy_rows = self._legacy_rows(assertion_hash)
         if projection.assertion_role == ASSERTION_ROLE_GRAPH_STATEMENT:
-            if legacy_rows:
+            if legacy_rows and (len(legacy_rows) != 1
+                                or self._from_row(legacy_rows[0]) != projected):
                 raise GraphStatementIntegrityError(
-                    "新 graph-statement 角色不得与旧冗余行混存")
+                    "graph-statement 物理投影与 assertion 不一致")
             record = projected
         else:
             if len(legacy_rows) != 1:
@@ -146,6 +158,11 @@ class GraphStatementStore:
         """外部 load 或故障注入后清空 statement 投影核验缓存。"""
         self._records_by_hash.clear()
         self._predicates_by_hash.clear()
+        self._legacy_namespace_empty = None
+
+    def enable_physical_rows(self) -> None:
+        """开启当前上下文的物理 statement 索引写入。"""
+        self._persist_rows = True
         self._legacy_namespace_empty = None
 
     def query(self, *, predicate_identity_hash: int | None = None,
@@ -192,9 +209,11 @@ class GraphStatementStore:
                     "query 命中重复 assertion statement")
             legacy_seen.add(legacy.assertion_hash)
             projection = self._projection(legacy.assertion_hash)
-            if projection.assertion_role != ASSERTION_ROLE_GENERIC:
-                raise GraphStatementIntegrityError(
-                    "旧 statement 与新 graph-statement 角色混存")
+            if projection.assertion_role not in {
+                    ASSERTION_ROLE_GENERIC,
+                    ASSERTION_ROLE_GRAPH_STATEMENT,
+                    }:
+                raise GraphStatementIntegrityError("statement assertion 角色非法")
             projected = self._from_projection(projection)
             if projected != legacy:
                 raise GraphStatementIntegrityError(

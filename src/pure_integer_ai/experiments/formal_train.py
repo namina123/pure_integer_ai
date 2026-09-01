@@ -136,6 +136,7 @@ from pure_integer_ai.experiments.train_context import (
     _item_observation_identity,
     _item_occurrence_scope,
     make_train_context,
+    register_train_context_tables,
 )
 from pure_integer_ai.experiments.language_observation import (
     _apply_word_form_providers,
@@ -721,20 +722,30 @@ def _formal_train_impl(config: FormalTrainConfig,
                 "curriculum_mastery_protocol 必须是 CurriculumMasteryProtocol")
         mastery_stage_keys = mastery_protocol.stage_keys_for(
             tuple(requested_stages))
+    # SQLite page-resume copies a complete checkpoint into the target before
+    # formal training starts.  Register only its schema, then validate exact
+    # table counts and id floors before any context/space bootstrap can write
+    # rows.  The old ordering created bootstrap spaces first and made a valid
+    # page copy look like a recovery conflict.
+    preloaded_recovery_cursor_payload = None
+    if config.sqlite_resume_binding_sha256 is not None:
+        register_train_context_tables(backend)
+        if config.language_dialogue_successor_protocol is not None:
+            from pure_integer_ai.storage.dialogue_successor import (
+                register_dialogue_successor_tables,
+            )
+            register_dialogue_successor_tables(backend)
+        from pure_integer_ai.experiments.sqlite_training_resume import (
+            validate_preloaded_sqlite_resume,
+        )
+        preloaded_recovery_cursor_payload = validate_preloaded_sqlite_resume(
+            backend,
+            Path(config.run_dir) / config.base_run_id,
+            expected_manifest_sha256=config.sqlite_resume_binding_sha256,
+            require_k_drive=(Path(config.run_dir).drive.upper() == "K:"),
+        )
+
     ctx = make_train_context(backend, teacher=teacher, weights=weights)
-    if config.typed_relation_runtime_factory is not None:
-        factory = config.typed_relation_runtime_factory
-        if not callable(factory):
-            raise TypeError("typed_relation_runtime_factory 必须可调用")
-        runtime = factory(ctx)
-        if runtime is None:
-            raise ValueError("typed_relation_runtime_factory 不得返回 None")
-        # runtime 的 graph owner 必须就是当前 formal context；禁止旁路库
-        # 伪装成正式训练结果。
-        if getattr(runtime, "semantic_graph", None) is not None and (
-                runtime.semantic_graph.ontology is not ctx.graph_ontology):
-            raise ValueError("typed relation runtime 未绑定当前 TrainContext 图")
-        ctx.typed_relation_runtime = runtime
     # Resume validation fingerprints the already-preloaded SQLite schema.  The
     # dialogue successor tables are an optional extension (not part of the
     # global bootstrap), so register them before page-resume validation when
@@ -832,16 +843,7 @@ def _formal_train_impl(config: FormalTrainConfig,
                 backend, config.run_dir,
                 config.base_run_id).cursor_payload   # E1 终 dump base
         else:
-            from pure_integer_ai.experiments.sqlite_training_resume import (
-                validate_preloaded_sqlite_resume,
-            )
-            recovery_cursor_payload = validate_preloaded_sqlite_resume(
-                backend,
-                Path(config.run_dir) / config.base_run_id,
-                expected_manifest_sha256=(
-                    config.sqlite_resume_binding_sha256),
-                require_k_drive=(Path(config.run_dir).drive.upper() == "K:"),
-            )
+            recovery_cursor_payload = preloaded_recovery_cursor_payload
         # E8：载入 base run 的 cursor state（已完成阶段集·skippable 跳过）
         base_state = cursor_state_from_payload(
             recovery_cursor_payload,
@@ -1155,6 +1157,23 @@ def _formal_train_impl(config: FormalTrainConfig,
             config.language_logic_closure_builder,
             config.language_logic_closure_course,
         )
+
+    # Typed relation owners consume the language occurrence/span protocols.
+    # Construct them only after those protocols are installed so relation
+    # endpoints can be materialized into the same authoritative graph.
+    if config.typed_relation_runtime_factory is not None:
+        factory = config.typed_relation_runtime_factory
+        if not callable(factory):
+            raise TypeError("typed_relation_runtime_factory 必须可调用")
+        runtime = factory(ctx)
+        if runtime is None:
+            raise ValueError("typed_relation_runtime_factory 不得返回 None")
+        # runtime 的 graph owner 必须就是当前 formal context；禁止旁路库
+        # 伪装成正式训练结果。
+        if getattr(runtime, "semantic_graph", None) is not None and (
+                runtime.semantic_graph.ontology is not ctx.graph_ontology):
+            raise ValueError("typed relation runtime 未绑定当前 TrainContext 图")
+        ctx.typed_relation_runtime = runtime
     generation_factory = config.language_generation_runtime_factory
     if all(default_generation_configured):
         from pure_integer_ai.experiments.language_generation_connector_factory import (

@@ -872,17 +872,26 @@ class SQLiteBackend(_BaseBackend):
             capability_profile: BackendCapabilityProfile | None = None,
             device_budget: BackendDeviceBudget | None = None,
             performance_mode: str = "durable",
+            read_only: bool = False,
             ) -> None:
         """创建 SQLite 后端，并按实例持久性或注入配置绑定能力 profile。
 
         ``bulk`` 是训练期显式性能档位：关闭 journal 并降低同步等待，适合
         可从源课程重建的临时训练 run；``durable`` 默认保持 SQLite 的正常
-        崩溃恢复语义。两档不改变表结构、整数记录或查询结果。
+        崩溃恢复语义。``read_only`` 只允许恢复已有完整 schema 和读取数据，
+        用于发布模型直接消费冻结训练图。三者都不改变整数记录或查询结果。
         """
         super().__init__()
+        if type(read_only) is not bool:
+            raise TypeError("read_only 必须是 bool")
         if performance_mode not in {"durable", "bulk"}:
             raise ValueError("performance_mode 必须是 durable 或 bulk")
+        if read_only and performance_mode != "durable":
+            raise ValueError("只读 SQLite 只能使用 durable 物理档位")
+        if read_only and path in {"", ":memory:"}:
+            raise ValueError("只读 SQLite 必须指定已有数据库路径")
         self._performance_mode = performance_mode
+        self._read_only = read_only
         # 仅由 SQLite 评测 clone 设置；普通持久库永不进入自动删除路径。
         self._delete_on_close_path: str | None = None
         if capability_profile is not None and device_budget is not None:
@@ -899,7 +908,16 @@ class SQLiteBackend(_BaseBackend):
                 budget=device_budget,
             )
         )
-        self._conn = sqlite3.connect(path)
+        connection_path = path
+        connection_uri = False
+        if read_only:
+            from pathlib import Path
+            resolved = Path(path).resolve()
+            if not resolved.is_file():
+                raise ValueError("只读 SQLite 数据库不存在")
+            connection_path = f"file:{resolved.as_posix()}?mode=ro"
+            connection_uri = True
+        self._conn = sqlite3.connect(connection_path, uri=connection_uri)
         self._conn.execute("PRAGMA foreign_keys=ON")
         if performance_mode == "bulk":
             # This mode is opt-in and intended for rebuildable training roots.
@@ -912,6 +930,11 @@ class SQLiteBackend(_BaseBackend):
     def performance_mode(self) -> str:
         """返回实例启动时选择的 SQLite 性能档位。"""
         return self._performance_mode
+
+    @property
+    def read_only(self) -> bool:
+        """返回当前 owner 是否禁止一切物理写入。"""
+        return self._read_only
 
     def storage_capabilities(self) -> BackendCapabilityProfile:
         """返回当前 SQLiteBackend 实例的显式物理能力和预算。"""
@@ -934,6 +957,15 @@ class SQLiteBackend(_BaseBackend):
         return clauses, params
 
     def _do_create_table(self, table, columns):
+        if self._read_only:
+            existing = self._conn.execute(
+                f"PRAGMA table_info({self._q(table)})").fetchall()
+            existing_names = {str(row[1]) for row in existing}
+            required_names = {str(column) for column, _kind in columns}
+            if not existing or not required_names.issubset(existing_names):
+                raise RuntimeError(
+                    f"只读 SQLite 缺少表或列: {table}")
+            return
         cols = ", ".join(
             f"{self._q(c)} {_SQLITE_AFFINITY.get(t, 'INTEGER')}" for c, t in columns
         )
@@ -941,7 +973,7 @@ class SQLiteBackend(_BaseBackend):
         self._conn.execute(sql)
 
     def _do_ensure_index(self, table, columns, *, defer_indexes=False):
-        if defer_indexes:
+        if defer_indexes or self._read_only:
             return  # 批量加载时延迟建索引（性能·决策7）
         idx_name = "idx_" + table + "_" + "_".join(columns)
         cols = ", ".join(self._q(c) for c in columns)
@@ -950,6 +982,7 @@ class SQLiteBackend(_BaseBackend):
         )
 
     def _do_insert(self, table, row):
+        self._require_writable()
         cols = ", ".join(self._q(c) for c in row)
         ph = ", ".join("?" for _ in row)
         self._conn.execute(
@@ -958,6 +991,7 @@ class SQLiteBackend(_BaseBackend):
         )
 
     def _do_insert_many(self, table, rows):
+        self._require_writable()
         columns = tuple(rows[0])
         if any(set(row) != set(columns) for row in rows):
             return super()._do_insert_many(table, rows)
@@ -969,6 +1003,7 @@ class SQLiteBackend(_BaseBackend):
         )
 
     def _do_update(self, table, where, set_):
+        self._require_writable()
         set_parts, set_params = [], []
         for c, v in set_.items():
             if isinstance(v, tuple) and len(v) == 2 and v[0] == "+=":
@@ -1015,6 +1050,7 @@ class SQLiteBackend(_BaseBackend):
         return cur.fetchone()[0]
 
     def _do_delete(self, table, where):
+        self._require_writable()
         where_parts, where_params = self._equality_clauses(where)
         where_clause = " AND ".join(where_parts) or "1=1"
         cur = self._conn.execute(
@@ -1032,6 +1068,11 @@ class SQLiteBackend(_BaseBackend):
         if getattr(self, "_suppress_commit", False):
             return
         self._conn.commit()
+
+    def _require_writable(self) -> None:
+        """在任何 SQL mutation 之前拒绝只读 owner，避免依赖宿主报错文本。"""
+        if self._read_only:
+            raise RuntimeError("只读 SQLite owner 禁止写入")
 
     def close(self) -> None:
         delete_path = self._delete_on_close_path

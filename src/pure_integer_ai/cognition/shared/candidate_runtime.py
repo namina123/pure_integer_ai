@@ -695,10 +695,10 @@ class CandidateLearningRuntime:
         if not history:
             return None
         projection = self.graph.project(candidate)
-        if projection.state != self.graph.protocol.active_state:
-            return projection
         snapshot = self.engine.ledger.snapshot(hypothesis)
         if snapshot.lifecycle == LIFECYCLE_SUPERSEDED:
+            if projection.state == self.graph.protocol.superseded_state:
+                return projection
             transitions = self.engine.ledger.transition_history(hypothesis)
             if not transitions or transitions[-1].replacement is None:
                 raise RuntimeError("superseded H-00 候选缺 replacement transition")
@@ -708,6 +708,8 @@ class CandidateLearningRuntime:
                 timestamp_seq=timestamp_seq,
                 **self.metadata.kwargs(),
             )
+        if projection.state != self.graph.protocol.active_state:
+            return projection
         return self.projector.demote(
             hypothesis,
             timestamp_seq=timestamp_seq,

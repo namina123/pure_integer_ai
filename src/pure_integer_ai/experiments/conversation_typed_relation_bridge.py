@@ -25,6 +25,82 @@ from pure_integer_ai.experiments.ph2_w06_learning import (
     build_w06_learning_runtime,
 )
 from pure_integer_ai.experiments.ph2_w06_payload import W06TrainingPayload
+from pure_integer_ai.cognition.shared.scope_identity import document_scope
+from pure_integer_ai.experiments.ph2_w06_span_graph_protocol import (
+    w06_span_anchor_predicate,
+    w06_span_endpoint_predicate,
+)
+
+
+def _materialize_relation_spans(context, runtime) -> None:
+    """把 relation 来源原文的端点/锚点落入共享 Span 图。
+
+    Authored JSONL 只在训练构造阶段存在；发布图保留来源、区间和角色绑定，
+    使后续查询可以从整数图恢复关系而不回读课程表面。
+    """
+    span_index = getattr(context, "span_index", None)
+    if span_index is None:
+        raise RuntimeError("W-06 typed relation 必须先安装 occurrence/span 协议")
+    ontology = context.graph_ontology
+    endpoint_predicate = ontology.materialize(w06_span_endpoint_predicate())
+    anchor_predicate = ontology.materialize(w06_span_anchor_predicate())
+    for candidate in runtime.registered_candidates():
+        source = candidate.source_ref
+        scope = document_scope(source)
+        raw_text = candidate.surface
+        proposition_ref = ontology.materialize(candidate.proposition.proposition)
+        bindings = tuple(candidate.proposition.canonical_bindings())
+        endpoint_by_identity = {
+            endpoint.identity: endpoint for endpoint in candidate.endpoints
+        }
+        if (len(bindings) != len(candidate.endpoints)
+                or len(endpoint_by_identity) != len(candidate.endpoints)
+                or {binding.filler for binding in bindings}
+                != set(endpoint_by_identity)):
+            raise RuntimeError("W-06 endpoint 与 RoleBinding 数量不一致")
+        # The relation anchor and each endpoint are independent source spans.
+        anchor = candidate.proposition.source_anchor
+        source_key = source.stable_key()
+        if anchor.components[:len(source_key)] != source_key:
+            raise RuntimeError("W-06 anchor 与 relation 来源不一致")
+        anchor_payload = anchor.components[len(source_key):]
+        if len(anchor_payload) != 3:
+            raise RuntimeError("W-06 anchor occurrence identity 布局非法")
+        anchor_start, anchor_end, anchor_ordinal = anchor_payload
+        anchor_ref = span_index.ensure_ref(
+            source=source,
+            raw_text=raw_text,
+            scope=scope,
+            members=((anchor_start, anchor_end),),
+            ordinal=anchor_ordinal,
+        )
+        ontology.relate(
+            anchor_predicate,
+            anchor_ref,
+            proposition_ref,
+            scope=scope,
+            provenance_kind=source.source_kind,
+            content_version=source.versions.parser.value,
+        )
+        for binding in bindings:
+            endpoint = endpoint_by_identity[binding.filler]
+            endpoint_ref = span_index.ensure_ref(
+                source=source,
+                raw_text=raw_text,
+                scope=scope,
+                members=((endpoint.start, endpoint.end),),
+                ordinal=endpoint.ordinal,
+            )
+            binding_ref = ontology.materialize(
+                binding.identity_for(candidate.proposition.proposition))
+            ontology.relate(
+                endpoint_predicate,
+                endpoint_ref,
+                binding_ref,
+                scope=scope,
+                provenance_kind=source.source_kind,
+                content_version=source.versions.parser.value,
+            )
 
 
 _COURSE_BUILDERS = {
@@ -110,7 +186,13 @@ def build_authored_w06_learning_runtime(
         ) -> W06RelationLearningRuntime:
     """在指定正式 TrainContext 上消费 authored relation，返回共享 owner。"""
     adapter = build_authored_w06_adapter(course_paths, pack_root)
-    return build_w06_learning_runtime(backend, adapter, context=context)
+    # W-06 is the publication-facing relation slice: retain a physical
+    # graph_statement index for independent readers while preserving the
+    # assertion record as its canonical source of truth.
+    context.graph_ontology.enable_physical_statement_projection()
+    runtime = build_w06_learning_runtime(backend, adapter, context=context)
+    _materialize_relation_spans(context, runtime)
+    return runtime
 
 
 __all__ = [

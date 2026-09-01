@@ -565,8 +565,8 @@ def test_runtime_identity_cache_is_state_neutral_and_explicitly_invalidated():
         backend.close()
 
 
-def test_statement_projection_is_state_neutral_and_rejects_legacy_mixing():
-    """新 statement 只占 assertion 角色；旧冗余行混入后清缓存必须失败。"""
+def test_statement_projection_accepts_exact_physical_index_and_rejects_drift():
+    """assertion 为权威；精确物理索引可恢复，任一字段漂移必须失败。"""
     backend = DictBackend()
     try:
         ctx = make_train_context(backend)
@@ -584,7 +584,14 @@ def test_statement_projection_is_state_neutral_and_rejects_legacy_mixing():
 
         backend.insert(GRAPH_STATEMENT_TABLE, _legacy_statement_row(statement))
         ontology.clear_runtime_caches()
-        with pytest.raises(GraphStatementIntegrityError, match="混存"):
+        assert ontology.statements(
+            predicate=predicate, subject=subject) == (statement,)
+
+        row = _legacy_statement_row(statement)
+        row["assertion_hash"] += 1
+        backend.insert(GRAPH_STATEMENT_TABLE, row)
+        ontology.clear_runtime_caches()
+        with pytest.raises(GraphStatementIntegrityError):
             ontology.statements(predicate=predicate, subject=subject)
     finally:
         backend.close()
