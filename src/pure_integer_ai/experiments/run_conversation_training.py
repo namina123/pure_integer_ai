@@ -666,6 +666,37 @@ def run_conversation_training(*, project_root: str | Path,
         _build_w09_builder(Path(project_root).resolve())
         if typed_semantic and 4 in active_stages else None
     )
+    typed_relation_runtime_factory = None
+    typed_relation_report: dict[str, int] | None = None
+    if typed_semantic:
+        from pure_integer_ai.experiments.conversation_typed_relation_bridge import (
+            _course_builder,
+            build_authored_w06_learning_runtime,
+        )
+        authored_paths = tuple(
+            path for path in paths if _course_builder(path) is not None)
+        if authored_paths:
+            # Authored pack publication is immutable.  It belongs to the
+            # concrete run identity, not the shared campaign root, so a new
+            # run never overwrites or tries to republish an earlier artifact.
+            typed_relation_root = run_dir / "typed_relation_bridge"
+
+            def _build_typed_relation_runtime(ctx):
+                nonlocal typed_relation_report
+                runtime = build_authored_w06_learning_runtime(
+                    backend,
+                    ctx,
+                    authored_paths,
+                    typed_relation_root,
+                )
+                report = runtime.report()
+                typed_relation_report = {
+                    name: int(getattr(report, name))
+                    for name in report.__dataclass_fields__
+                }
+                return runtime
+
+            typed_relation_runtime_factory = _build_typed_relation_runtime
     previous = gates.TRAINING_MODE
     dialogue_successor_counts = (0, 0)
     try:
@@ -709,6 +740,7 @@ def run_conversation_training(*, project_root: str | Path,
                 language_dialogue_successor_protocol=(
                     dialogue_successor_protocol),
                 language_generation_runtime_factory=generation_factory,
+                typed_relation_runtime_factory=typed_relation_runtime_factory,
                 w09_weaning_builder=w09_builder,
                 w09_execute_zero_call_windows=w09_builder is not None,
                 typed_language_stage_items_only=(
@@ -741,13 +773,14 @@ def run_conversation_training(*, project_root: str | Path,
                 result.typed_language_h2_report),
             "typed_language_floor": _typed_floor_summary(
                 result.typed_language_floor_report),
+            "typed_relation_learning": typed_relation_report,
             "active_stages": active_stages,
             "resume_from": resume_from,
-        "resume_pack_mode": (
-            "additive_shard" if allow_additive_resume_pack else "exact"),
-        "typed_language_stage_items_only": bool(
-            typed_language_stage_items_only),
-        "diagnostic_only": True,
+            "resume_pack_mode": (
+                "additive_shard" if allow_additive_resume_pack else "exact"),
+            "typed_language_stage_items_only": bool(
+                typed_language_stage_items_only),
+            "diagnostic_only": True,
             "storage_performance_mode": storage_performance_mode,
             "sqlite_page_resume": bool(sqlite_page_resume),
             "sqlite_resume_source_manifest_sha256": (
@@ -793,6 +826,7 @@ def run_conversation_training(*, project_root: str | Path,
         "training_item_count": len(train_items),
         "heldout_probe_count": len(heldout_items) if with_heldout_probe else 0,
         "typed_course": typed_report.to_dict(),
+        "typed_relation_learning": typed_relation_report,
         "typed_language_floor": _typed_floor_summary(
             result.typed_language_floor_report),
         "causal_only": causal_only,

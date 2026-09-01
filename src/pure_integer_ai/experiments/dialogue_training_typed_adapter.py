@@ -103,6 +103,12 @@ class TypedDialogueCourseAdapter:
             # negative typed attachments remain auditable data, but cannot be
             # submitted to the training owner as a positive request.
             return None
+        if case.payload_kind == "TypedRelationQuery":
+            # Authored W-06 relation observations are consumed by the shared
+            # relation bridge during formal training.  They are not dialogue
+            # generation requests and must not be misclassified by this
+            # generation-only adapter.
+            return None
         if case.payload_kind is None:
             raise TypedDialogueAdapterError("typed payload 缺少 payload_kind")
         value = case.typed_payload.to_value()

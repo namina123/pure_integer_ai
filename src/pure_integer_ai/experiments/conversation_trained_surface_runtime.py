@@ -391,6 +391,7 @@ class TrainedSurfaceRuntime:
 def load_trained_surface_runtime(*, project_root: str | Path,
                                  training_run_root: str | Path,
                                  expected_pack_sha256: str | None = None,
+                                 require_k_drive: bool = True,
                                  extra_course_paths: tuple[str | Path, ...] = (),
                                  extra_evidence_paths: tuple[str | Path, ...] = (),
                                  extra_variant_course_paths: tuple[str | Path, ...] = (),
@@ -504,6 +505,7 @@ def load_trained_surface_runtime(*, project_root: str | Path,
     )
     observation = load_training_observation(
         training_run_root, expected_pack_sha256=expected_pack_sha256,
+        require_k_drive=require_k_drive,
     )
     if observation.graph_size <= 0 or observation.concept_node_count <= 0:
         raise TrainedSurfaceRuntimeError("训练 SQLite 图为空")
@@ -516,6 +518,7 @@ def load_trained_surface_runtime(*, project_root: str | Path,
             response_organization_artifact_root,
             expected_run_id=observation.run_id,
             expected_pack_sha256=observation.pack_sha256,
+            require_k_drive=require_k_drive,
         )
         organization_model = artifact.model
     frozen_slot_hints = {

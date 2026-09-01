@@ -514,6 +514,9 @@ class FormalTrainConfig:
     # L-05B2A typed formal generation owner factory；None 保留版本化 legacy 兼容链。
     # factory 必须从当前 TrainContext 的真实 S-02/S-07/R-01 owner 装配请求 mapper、planner 和 renderer。
     language_generation_runtime_factory: Any = None
+    # 正式对话 relation bridge：由调用方提供 factory(ctx)，把 authored
+    # typed relation 消费到当前 TrainContext 的共享 H-05/R-00 图中。
+    typed_relation_runtime_factory: Any = None
     # L-05B2B 默认课程入口：loader 与 component factory 必须成对提供，且与直接 factory 互斥。
     # generation loader 加载 connector 理论；可选 relation/postcheck loader 分别加载 R-01/G-04 课程。
     # component factory 只需提供辅助组件；未配置 relation loader 时保留旧 alias 注入兼容路径。
@@ -719,6 +722,19 @@ def _formal_train_impl(config: FormalTrainConfig,
         mastery_stage_keys = mastery_protocol.stage_keys_for(
             tuple(requested_stages))
     ctx = make_train_context(backend, teacher=teacher, weights=weights)
+    if config.typed_relation_runtime_factory is not None:
+        factory = config.typed_relation_runtime_factory
+        if not callable(factory):
+            raise TypeError("typed_relation_runtime_factory 必须可调用")
+        runtime = factory(ctx)
+        if runtime is None:
+            raise ValueError("typed_relation_runtime_factory 不得返回 None")
+        # runtime 的 graph owner 必须就是当前 formal context；禁止旁路库
+        # 伪装成正式训练结果。
+        if getattr(runtime, "semantic_graph", None) is not None and (
+                runtime.semantic_graph.ontology is not ctx.graph_ontology):
+            raise ValueError("typed relation runtime 未绑定当前 TrainContext 图")
+        ctx.typed_relation_runtime = runtime
     # Resume validation fingerprints the already-preloaded SQLite schema.  The
     # dialogue successor tables are an optional extension (not part of the
     # global bootstrap), so register them before page-resume validation when

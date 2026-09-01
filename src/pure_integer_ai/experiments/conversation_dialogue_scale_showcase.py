@@ -152,11 +152,20 @@ def load_training_observation(
         run_root: str | Path,
         *,
         expected_pack_sha256: str | None = None,
+        require_k_drive: bool = True,
         ) -> TrainingObservation:
-    """只读加载 K 盘训练摘要和 SQLite 计数，并核验两者绑定。"""
+    """只读加载训练摘要和 SQLite 计数，并核验两者绑定。
+
+    训练/施工调用默认只允许 K 盘。闭合发布包可显式关闭盘符限制，以便把
+    同一份只读模型复制到任意受支持文件系统后运行。
+    """
+    if type(require_k_drive) is not bool:
+        raise TypeError("require_k_drive 必须是严格 bool")
     root = Path(run_root).resolve()
-    if root.drive.upper() != "K:" or not root.is_dir():
-        raise ValueError("training observation run root 必须是存在的 K 盘目录")
+    if not root.is_dir() or (require_k_drive and root.drive.upper() != "K:"):
+        raise ValueError(
+            "training observation run root 必须是存在的目录"
+            + ("且位于 K 盘" if require_k_drive else ""))
     summary_path = root / "training_summary.json"
     if not summary_path.is_file():
         raise ValueError("training observation 缺少 training_summary.json")
@@ -204,7 +213,8 @@ def load_training_observation(
     stages = tuple(int(item) for item in summary["stages_completed"])
     cursor_path = root / "training_cursor.int"
     if cursor_path.is_file():
-        cursor = recover_training_cursor(root, require_k_drive=True)
+        cursor = recover_training_cursor(
+            root, require_k_drive=require_k_drive)
         try:
             run_id_u8 = tuple(str(summary["run_id"]).encode("utf-8"))
         except (KeyError, UnicodeEncodeError) as error:

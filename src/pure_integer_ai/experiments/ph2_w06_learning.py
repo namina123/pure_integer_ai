@@ -53,6 +53,7 @@ from pure_integer_ai.cognition.shared.semantic_graph import (
 from pure_integer_ai.crosscut.determinism.hasher import Hasher
 from pure_integer_ai.experiments.evaluation_protocol import ProtocolKey
 from pure_integer_ai.experiments.formal_train import make_train_context
+from pure_integer_ai.experiments.train_context import TrainContext
 from pure_integer_ai.experiments.ph2_w06_adapter import (
     W06EvidenceBinding,
     W06RelationCandidate,
@@ -262,8 +263,17 @@ class W06LearningResult:
 class W06RelationLearningRuntime:
     """把 W-06 adapter 输出接入 SemanticGraph、H-05、H-04 和 R-00。"""
 
-    def __init__(self, backend) -> None:
-        context = make_train_context(backend)
+    def __init__(self, backend, *, context: TrainContext | None = None) -> None:
+        """建立 W-06 owner；正式训练可注入现有 TrainContext。\n\n        注入 context 时所有 SemanticGraph、候选投影和 H-05 状态都绑定到
+        正式训练正在使用的同一 SQLite 图，避免形成 evaluator-local 的旁路库。
+        未注入时保留既有 public bounded runtime 行为。
+        """
+        if context is None:
+            context = make_train_context(backend)
+        elif not isinstance(context, TrainContext):
+            raise TypeError("W-06 context 必须是 TrainContext")
+        if context.backend is not backend:
+            raise ValueError("W-06 context 必须绑定传入 backend")
         self.semantic_graph = _semantic_graph(context.graph_ontology)
         self.projection_protocol = _projection_protocol()
         self.candidate_graph = CandidateProjectionGraph(
@@ -600,9 +610,11 @@ class W06RelationLearningRuntime:
 def build_w06_learning_runtime(
         backend,
         adapter: W06TypedAdapterOutput,
+        *,
+        context: TrainContext | None = None,
         ) -> W06RelationLearningRuntime:
     """构建 public bounded runtime 并应用 accepted train Evidence。"""
-    runtime = W06RelationLearningRuntime(backend)
+    runtime = W06RelationLearningRuntime(backend, context=context)
     runtime.apply_all(adapter)
     return runtime
 

@@ -71,7 +71,13 @@ W06_RELATION_REGISTRY = {
         ("PURE_ALIAS", "REFERS"),
         (W06_AUTHORED_SOURCE, W06_WIKIDATA_SOURCE),
         (W06_WIKTIONARY_SOURCE, W06_CONCEPTNET_SOURCE, W06_AUTHORED_SOURCE),
-        ("ALIAS_REFERS_STABLE_RELATION_LABEL",),
+        # 早期 authored pack 已发布的 evidence kind 与稳定 registry 名称
+        # 都是同一关系 owner 的公开命名；在 registry 中显式登记两者，
+        # 不把已存在的来源记录改写成另一种语义。
+        (
+            "ALIAS_REFERS_STABLE_RELATION_LABEL",
+            "ALIAS_REFERS_RELATION_LABEL",
+        ),
         (
             "NONE", "CONTENT_REPLACEMENT", "DIRECTION_REVERSAL",
             "PSEUDO_RELATION", "CONFLICT_SOURCE", "PARSER_REVISION",

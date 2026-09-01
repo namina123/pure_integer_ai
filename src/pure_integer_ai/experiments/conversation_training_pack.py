@@ -615,6 +615,10 @@ def _typed_projection(
         ) -> tuple[CanonicalJsonObject | None, str | None, SourceRef | None]:
     """保留已登记 authored observation；普通对话记录明确返回空。"""
     name = path.name
+    # Authored relation records are consumed by the dedicated W-06 bridge
+    # during formal training.  They are intentionally not projected into the
+    # dialogue-generation adapter, whose typed count must remain generation
+    # only; the bridge still fails loudly on malformed relation input.
     if name in {
             "authored_generation_postcheck_seed_v1.jsonl.sample",
             "dialogue_postcheck_bridge_train_v1.course.jsonl.sample",

@@ -507,6 +507,8 @@ def _adapt_proposition(
         value: dict[str, Any],
         schema: RelationSchema,
         endpoints: tuple[W06RelationEndpoint, ...],
+        *,
+        validate_schema: bool = True,
         ) -> AtomicPropositionDefinition:
     """恢复 Proposition/Context/RoleBinding，并与 schema 和 endpoint 交叉核验。"""
     proposition = _object_key(value["proposition_key"], where="proposition_key")
@@ -544,7 +546,8 @@ def _adapt_proposition(
         if (_occurrence_source(anchor) != definition.source
                 or semantic_source(context) != definition.source):
             raise W06TypedAdapterError("W-06 anchor/context 与 Proposition 来源漂移")
-        schema.validate_definition(definition)
+        if validate_schema:
+            schema.validate_definition(definition)
         return definition
     except (TypeError, ValueError) as error:
         if isinstance(error, W06TypedAdapterError):
@@ -661,7 +664,11 @@ def _adapt_candidate(
     endpoints = _adapt_endpoints(value["endpoints"], surface=value["surface"])
     schema = _adapt_schema(value["relation_schema"])
     proposition = _adapt_proposition(
-        value["candidate_definition"], schema, endpoints)
+        value["candidate_definition"],
+        schema,
+        endpoints,
+        validate_schema=observation.perturbation_kind != "TYPE_MISMATCH",
+    )
     if (schema.relation != authored_relation_identity(profile.relation_kind)
             or proposition.predicate != schema.relation):
         raise W06TypedAdapterError("W-06 relation identity 未匹配冻结 relation kind")

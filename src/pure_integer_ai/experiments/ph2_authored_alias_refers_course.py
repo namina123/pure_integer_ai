@@ -189,7 +189,8 @@ def compile_authored_alias_refers_course(
     seeds = read_authored_alias_refers_seeds(sample_path)
     try:
         return publish_authored_course(
-            tuple(compile_relation_seed(seed) for seed in seeds),
+            tuple(compile_relation_seed(
+                seed, use_relation_profiles=False) for seed in seeds),
             sample_path,
             release_root,
             _SPEC,

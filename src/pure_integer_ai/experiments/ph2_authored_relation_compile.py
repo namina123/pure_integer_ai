@@ -91,12 +91,43 @@ def authored_relation_identity(kind: int) -> ObjectIdentity:
         (_COURSE_NAMESPACE, 1, kind), versions=_VERSIONS)
 
 
-def authored_relation_schema_identity(kind: int) -> ObjectIdentity:
-    """按冻结 D-02C 坐标恢复一等 schema identity。"""
+def authored_relation_schema_identity(
+        kind: int,
+        *,
+        slot_signature: tuple[tuple[int, tuple[int, ...]], ...] | None = None,
+        ) -> ObjectIdentity:
+    """恢复一等 schema identity，并把严格 slot 形状纳入身份。
+
+    ``schema_kind`` 是课程级语义坐标，但一个 typed schema 的允许对象类型
+    也是定义的一部分。反向/扰动样本可能在同一 relation family 中改变
+    endpoint 类型；若仍只按 ``schema_kind`` 编址，会把两个不同 schema
+    错误地合并。保留无签名调用的冻结旧身份，同时让编译后的 payload 对
+    不同 slot 形状拥有可复现且独立的一等身份。
+    """
     if type(kind) is not int or kind <= 0:
         raise ValueError("authored schema kind 必须是正严格整数")
+    components = [_COURSE_NAMESPACE, 2, kind]
+    if slot_signature is not None:
+        if (not isinstance(slot_signature, tuple)
+                or any(not isinstance(role, int)
+                       or not isinstance(kinds, tuple)
+                       or not kinds
+                       or any(type(item) is not int for item in kinds)
+                       for role, kinds in slot_signature)):
+            raise ValueError("authored schema slot_signature 非法")
+        normalized_signature = tuple(sorted(
+            ((role, tuple(sorted(kinds))) for role, kinds in slot_signature),
+            key=lambda item: item[0],
+        ))
+        shape_token = _stable_positive_int(
+            "relation-schema-shape",
+            "|".join(
+                f"{role}:{','.join(str(item) for item in kinds)}"
+                for role, kinds in normalized_signature),
+        )
+        components.extend((3, shape_token))
     return structure_concept_identity(
-        (_COURSE_NAMESPACE, 2, kind), versions=_VERSIONS)
+        tuple(components), versions=_VERSIONS)
 
 
 def authored_relation_role_identity(kind: int) -> ObjectIdentity:
@@ -139,9 +170,42 @@ def _endpoint_identity(seed, source: SourceRef) -> ObjectIdentity:
     raise ValueError("relation endpoint kind 未由 typed compiler 支持")
 
 
+def _allowed_kinds(
+        seed: AuthoredRelationSeed, binding, endpoint, *,
+        use_relation_profiles: bool = True,
+        ) -> frozenset[int]:
+    """恢复 relation profile 声明的稳定 Role 类型集合。
+
+    authored seed 允许省略重复的 ``allowed_object_kinds``；此时不能把
+    当前 endpoint 的实际类型误当作 schema 定义，否则同一 schema 会因
+    反向/替换样本而漂移。W-06 profile 是类型合同的唯一注册源；对尚未
+    注册的历史课程保留旧的单 endpoint 回退，避免改变其既有编译语义。
+    """
+    # Keep an intentional TYPE_MISMATCH payload self-consistent so it can be
+    # round-tripped as data.  W-06 performs the semantic rejection against the
+    # registered profile before candidate formation.
+    if seed.perturbation_kind == "TYPE_MISMATCH":
+        return frozenset({endpoint.object_kind})
+    if binding.allowed_object_kinds:
+        return frozenset(binding.allowed_object_kinds)
+    if not use_relation_profiles:
+        return frozenset({endpoint.object_kind})
+    try:
+        from pure_integer_ai.experiments.ph2_w06_source_semantic import (
+            W06_RELATION_PROFILES,
+        )
+        profile = W06_RELATION_PROFILES.get(seed.relation_family)
+        if profile is not None:
+            return profile.allowed_for_role(binding.role_kind)
+    except (ImportError, KeyError):
+        pass
+    return frozenset({endpoint.object_kind})
+
+
 def compile_relation_seed(
         seed: AuthoredRelationSeed, *,
         rational_role_values: tuple[tuple[int, int, int], ...] = (),
+        use_relation_profiles: bool = True,
         ) -> AuthoredCompiledSeed:
     """生成 candidate relation、schema、RoleBinding 和 consumer request payload。"""
     if not isinstance(seed, AuthoredRelationSeed):
@@ -154,7 +218,6 @@ def compile_relation_seed(
         _VERSIONS,
     )
     relation = authored_relation_identity(seed.relation_kind)
-    schema_identity = authored_relation_schema_identity(seed.schema_kind)
     endpoints = {
         item.endpoint_id: _endpoint_identity(item, source)
         for item in seed.endpoints
@@ -166,12 +229,44 @@ def compile_relation_seed(
     slots = tuple(
         RelationSlotSchema(
             roles[item.role_kind],
-            frozenset(item.allowed_object_kinds or {
-                endpoints[item.endpoint_id].object_kind}),
+            _allowed_kinds(
+                seed,
+                item,
+                endpoints[item.endpoint_id],
+                use_relation_profiles=use_relation_profiles,
+            ),
             1,
             1,
         )
         for item in seed.bindings
+    )
+    slot_signature = tuple(
+        (item.role_kind, tuple(sorted(slot.allowed_object_kinds)))
+        for item, slot in zip(seed.bindings, slots)
+    )
+    # Keep the frozen schema identity for profile-conforming seeds (this
+    # preserves existing W-06 artifacts).  Only a genuinely non-profile
+    # shape gets an identity extension; that prevents collisions without
+    # rewriting compatible published packs.
+    profile_shape = None
+    if use_relation_profiles:
+        try:
+            from pure_integer_ai.experiments.ph2_w06_source_semantic import (
+                W06_RELATION_PROFILES,
+            )
+            profile = W06_RELATION_PROFILES.get(seed.relation_family)
+            if profile is not None:
+                profile_shape = tuple(sorted(
+                    (role, tuple(sorted(allowed)))
+                    for role, allowed in profile.role_object_kinds))
+        except ImportError:
+            profile_shape = None
+    normalized_shape = tuple(sorted(slot_signature))
+    schema_identity = authored_relation_schema_identity(
+        seed.schema_kind,
+        slot_signature=slot_signature
+        if profile_shape is not None and normalized_shape != profile_shape
+        else None,
     )
     constraints = ()
     if seed.directionality == DIRECTION_SYMMETRIC:
@@ -208,7 +303,11 @@ def compile_relation_seed(
             for item in seed.bindings
         ),
     )
-    relation_schema.validate_definition(definition)
+    # TYPE_MISMATCH is an intentional negative proposal.  Preserve its full
+    # typed payload so W-06 can route it through the schema-rejection firewall;
+    # validating it here would erase the very evidence the adapter must audit.
+    if seed.perturbation_kind != "TYPE_MISMATCH":
+        relation_schema.validate_definition(definition)
     endpoint_payload = [
         {
             "end": item.end,

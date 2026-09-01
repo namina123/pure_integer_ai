@@ -123,6 +123,14 @@ python -m pure_integer_ai.experiments.run_conversation_training `
 
 本轮发现并修复了 Runtime 追问调用已删除硬编码指代表导致的 `ImportError`：现在可注入对话层 resolver，未注入时仅基于同一绑定问题的确定性特征重合，缺少证据则保持澄清/未知。OASST1 回应组织 artifact 的 held-out 能力仍为 `NE`，因此没有把它放入首个 release，避免把未达标文件误当能力结果。下一阶段应在不改变当前发布根的前提下，优化冷启动与长会话性能，再补独立发布 validator 的公开运行证据。
 
+## Typed relation 接线修复（2026-09-01）
+
+此前 authored relation 课程虽已编译，却未进入正式 `TrainContext`，导致高层关系图为空。现已将七类 relation 的公开课程通过
+`conversation_typed_relation_bridge` 接入 `formal_train`：编译器按稳定 Role/type 形状生成 schema identity，故同一 schema 不会因反向样本漂移；`TYPE_MISMATCH` 保留为自洽负例并由 W-06 profile firewall 拒绝，不进入 accepted candidate。注册的 typed 课程投影失败会直接报错，不再静默退回纯文本。
+
+受控正式入口切片（仅 `max_cases=1`，非能力宣称）位于
+`K:\pure_integer_ai_work\formal_typed_relation_smoke_20260901\stage1-authored-relation-20260901d`。摘要记录 50 个 accepted candidate、1 个 schema rejection、50 条 train Evidence、14 个 relation family、19 个 active candidate；SQLite 已写入 W-06 图对象和 assertion。旧 alias/refers v1 含冻结协议不接受的 Occurrence 指代端点，未送入 W-06 bridge；兼容的 v2 pack 已接入。该切片只用于确认接线，完整 Stage 1-4 训练仍需在资源允许时另建 run。
+
 ## 性能推进轮（2026-08-30）
 
 本轮只修改运行时派生缓存，不改变训练 SQLite、整数 artifact、回答阈值或来源证据链：

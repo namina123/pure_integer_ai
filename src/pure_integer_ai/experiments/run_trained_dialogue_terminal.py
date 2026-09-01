@@ -624,6 +624,9 @@ def run_trained_dialogue_terminal(
         )
         release = load_public_model_release(
             release_root,
+            # A closed public release is location-independent. K: remains the
+            # mandatory training/data drive, but must not become a runtime ABI.
+            require_k_drive=False,
             # The fast tier is explicit and opt-in.  It keeps path/size/closed
             # manifest checks but leaves full payload SHA auditing to strict
             # startup and the independent release validator.
@@ -676,8 +679,10 @@ def run_trained_dialogue_terminal(
     run_root_value = resolved_training_run_root or training_run_root
     if run_root_value is not None:
         run_root = Path(run_root_value).resolve()
-        if run_root.drive.upper() != "K:" or not run_root.is_dir():
-            raise ValueError("training_run_root 必须是 K 盘已存在目录")
+        if (not run_root.is_dir()
+                or release is None and run_root.drive.upper() != "K:"):
+            raise ValueError(
+                "training_run_root 必须是已存在目录；非发布入口必须位于 K 盘")
         course_paths, max_cases, source_identity_map = _course_paths_for_training_run(
             root, run_root, extra_course_paths)
         source_identities = None
@@ -701,11 +706,13 @@ def run_trained_dialogue_terminal(
                 source_path_identities=(source_identity_map or source_identities))
             expected_pack_sha256 = pack.pack_sha256
         load_training_observation(
-            run_root, expected_pack_sha256=expected_pack_sha256)
+            run_root, expected_pack_sha256=expected_pack_sha256,
+            require_k_drive=(release is None))
         trained_surface = load_trained_surface_runtime(
             project_root=root,
             training_run_root=run_root,
             expected_pack_sha256=expected_pack_sha256,
+            require_k_drive=(release is None),
             response_organization_artifact_root=(
                 response_organization_artifact_root),
             extra_variant_course_paths=tuple(
@@ -735,6 +742,7 @@ def run_trained_dialogue_terminal(
                 ) -> LearnedDialogueResponseRuntime:
             artifact = load_learned_dialogue_response_artifact(
                 artifact_root,
+                require_k_drive=(release is None),
                 verify_payload_hashes=(
                     performance_tier != "deferred-narrow-fast"))
             sqlite_intent = (
@@ -878,6 +886,7 @@ def run_trained_dialogue_terminal(
     if science_passage_artifact_root is not None:
         science_passage_runtime = ScidbCsqPassageRuntime(
             science_passage_artifact_root,
+            require_k_drive=(release is None),
             verify_database_sha256=(
                 performance_tier != "deferred-narrow-fast"),
         )
@@ -932,12 +941,15 @@ def run_trained_dialogue_terminal(
     session_capability = None
     if session_root is not None:
         session_path = Path(session_root).resolve()
-        if session_path.drive.upper() != "K:" or not session_path.is_dir():
-            raise ValueError("session_root 必须是 K 盘已存在目录")
+        if (not session_path.is_dir()
+                or release is None and session_path.drive.upper() != "K:"):
+            raise ValueError(
+                "session_root 必须是已存在目录；非发布入口必须位于 K 盘")
         if run_root_value is not None and session_path == Path(run_root_value).resolve():
             raise ValueError("session_root 不得与 training_run_root 相同")
         session_capability = open_existing_run_root(
-            session_path, label="broad dialogue session root")
+            session_path, require_k_drive=(release is None),
+            label="broad dialogue session root")
         ensure_normal_relative_directory(
             session_capability, "broad_dialogue_checkpoints",
             label="broad dialogue checkpoint directory")
@@ -1208,8 +1220,8 @@ def run_trained_dialogue_terminal(
             science_passage_runtime.close()
         if metrics_output is not None:
             metrics_path = Path(metrics_output).resolve()
-            if metrics_path.drive.upper() != "K:":
-                raise ValueError("metrics_output 必须是 K 盘路径")
+            if release is None and metrics_path.drive.upper() != "K:":
+                raise ValueError("非发布入口 metrics_output 必须是 K 盘路径")
             if not latency_us:
                 raise ValueError("metrics_output 没有可记录的对话轮次")
             ordered = sorted(latency_us)

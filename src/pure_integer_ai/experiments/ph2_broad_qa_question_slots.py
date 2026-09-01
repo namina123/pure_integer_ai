@@ -19,21 +19,6 @@ QUESTION_SLOT_SHA256 = (
     "f3783c7c38bf05f9e099edb80e9e0e1ff90aa5d1b7dd868ac4285e3e2c65c7ca")
 _ANSWER_KINDS = (
     "CAUSE", "ENTITY", "LOCATION", "MANNER", "QUANTITY", "TIME", "TYPE")
-def _aligned_simplified_surface(value: str) -> str:
-    """兼容旧公开问式 artifact 的外部坐标适配。"""
-    from pure_integer_ai.experiments.ph2_broad_qa_question_slots_compat import (
-        aligned_surface,
-    )
-    return aligned_surface(value)
-
-
-def _is_contextual_slot(
-        question: str, start: int, kind: str, surface: str) -> bool:
-    """兼容旧公开问式 artifact 的外部上下文适配。"""
-    from pure_integer_ai.experiments.ph2_broad_qa_question_slots_compat import (
-        contextual_slot_allowed,
-    )
-    return contextual_slot_allowed(question, start, kind, surface)
 
 
 # object-model: exception
@@ -75,12 +60,9 @@ class BroadQaQuestionSlots:
         """按上下文选择最长且互不重叠的问式槽 span。"""
         if not isinstance(question, str):
             raise TypeError("question 必须是字符串")
-        # 注入 provider 是运行时语言关系的权威来源。它可能表达长度变化或
-        # 多对多表面，不能再把问题投影到固定长度外部脚本视图后复用坐标。
-        # provider 缺省时才使用旧问式 artifact 的外部坐标适配。
-        search_question = (
-            question if surface_variant_provider is not None
-            else _aligned_simplified_surface(question))
+        # 原文坐标始终是唯一坐标。语言变体必须来自模型随包携带的图 provider；
+        # 缺少 provider 时只接受 artifact 中逐字出现的证据，不调用宿主语言库。
+        search_question = question
         candidates = []
         for kind, surfaces in self.entries:
             for surface in surfaces:
@@ -99,10 +81,7 @@ class BroadQaQuestionSlots:
                     start = search_question.find(candidate_surface)
                     while start >= 0:
                         end = start + len(candidate_surface)
-                        if _is_contextual_slot(
-                                search_question, start, kind,
-                                candidate_surface):
-                            candidates.append((start, end, kind))
+                        candidates.append((start, end, kind))
                         start = search_question.find(
                             candidate_surface, start + 1)
         candidates.sort(key=lambda item: (-(item[1] - item[0]), item))

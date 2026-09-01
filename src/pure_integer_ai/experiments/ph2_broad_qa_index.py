@@ -12,10 +12,6 @@ from pure_integer_ai.experiments.ph2_broad_qa_contract import (
     BroadQaSelectionManifest,
     BroadQaTargetSelectionManifest,
 )
-from pure_integer_ai.experiments.ph2_broad_qa_source import (
-    iter_broad_qa_candidate_pages,
-    project_broad_qa_passages,
-)
 from pure_integer_ai.experiments.v02_run_store import HostProcessMemory
 from pure_integer_ai.storage.integer_codec import encode_integer_tuple
 
@@ -88,6 +84,13 @@ def build_broad_qa_index(
         worker_count: int = 1,
         ) -> dict[str, object]:
     """流式读取主空间页，写文档/证据表并生成 delta-varint postings。"""
+    # Wikipedia parsing is a build-time dependency. Keep it outside the
+    # read-only query import graph so a closed release needs only CPython.
+    from pure_integer_ai.experiments.ph2_broad_qa_source import (
+        iter_broad_qa_candidate_pages,
+        project_broad_qa_passages,
+    )
+
     if not isinstance(selection, (
             BroadQaSelectionManifest, BroadQaTargetSelectionManifest)):
         raise TypeError("broad QA selection 类型错误")
