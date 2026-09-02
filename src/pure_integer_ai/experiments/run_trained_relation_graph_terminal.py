@@ -163,7 +163,9 @@ def run_trained_relation_graph_terminal(
                     break
                 request_id = None
                 if protocol_stream:
-                    request = json.loads(raw.decode("utf-8"))
+                    # Windows 管道或编辑器可能在首行带 UTF-8 BOM；它不应
+                    # 改变 JSONL 协议语义，因此仅在输入边界容忍一次 BOM。
+                    request = json.loads(raw.decode("utf-8-sig"))
                     if not isinstance(request, dict):
                         raise ValueError("JSONL 请求必须是对象")
                     request_id = request.get("id")
