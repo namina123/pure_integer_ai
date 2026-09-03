@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -29,6 +30,30 @@ from pure_integer_ai.cognition.shared.dialogue_pipeline import (
 
 
 _FALLBACK_HASHER = Hasher("trained_relation_graph.fallback.v1")
+
+
+def _locate_release_root(training_database: Path) -> Path:
+    """从训练图 SQLite 向上恢复发布根（含 trained_graph_release.json）。"""
+    candidate = training_database.parent
+    while True:
+        if (candidate / "trained_graph_release.json").is_file():
+            return candidate
+        parent = candidate.parent
+        if parent == candidate:
+            raise ValueError("训练图 SQLite 不在发布根内")
+        candidate = parent
+
+
+def _require_session_outside_release(session: str | Path,
+                                     release_root: Path) -> None:
+    """拒绝把会话库解析到 release root 内；包外是唯一允许的会话位置。"""
+    resolved = Path(session).expanduser().resolve()
+    release = release_root.resolve()
+    try:
+        resolved.relative_to(release)
+    except ValueError:
+        return
+    raise ValueError("runtime memory 会话库不得位于 release root 内")
 
 
 def load_fallback_surfaces(path: str | Path) -> tuple[str, ...]:
@@ -132,10 +157,18 @@ def run_trained_relation_graph_terminal(
         # 发布 runtime 的每一轮交互都必须进入 Interaction Memory 图；默认把
         # 会话库放在模型旁的运行时文件，不污染只读训练 SQLite 或发布清单。
         training_path = Path(training_database).resolve()
-        # 运行时记忆必须持久化，但不能改变 release root 的闭合清单；放在
-        # release root 同级，迁移模型时可整体复制或按会话独立携带。
-        memory_database = training_path.parents[2] / (
-            training_path.parents[1].name + "_runtime_memory.sqlite3")
+        # 阶段 A 边界修正：release root 必须保持只读闭合。默认会话库不再
+        # 推导到 release root 任何祖先/同级目录，而是使用用户级包外会话
+        # 目录（可用 PURE_INTEGER_AI_SESSION_DIR 覆盖），并拒绝落在
+        # release root 内；模型迁移时会话库按独立会话携带。
+        release_root = _locate_release_root(training_path)
+        session_dir = Path(
+            os.environ.get("PURE_INTEGER_AI_SESSION_DIR")
+            or (Path.home() / ".pure_integer_ai_sessions")
+        ).expanduser().resolve()
+        memory_database = session_dir / (
+            release_root.name + "_runtime_memory.sqlite3")
+        _require_session_outside_release(memory_database, release_root)
     startup_started = time.perf_counter_ns()
     memory = (
         None if memory_database is None
@@ -225,14 +258,20 @@ def run_trained_relation_graph_terminal(
                         and result.generation.connector is None):
                     raise RuntimeError(
                         "strict graph Core 回答绕过 typed connector")
+                # 阶段 A 边界：strict 发布路由不再把表层相似召回当作回答来源。
+                # TrainedDialogueMemoryGraph.recall 目前仍只按 1--3 宽度码点
+                # 片段重叠返回 raw_text，不能形成实体/事件/属性/时间/指代
+                # 结构候选；在阶段 D 改造成结构候选接口前，发布路由断开该
+                # 路径并记录阻塞。Memory 仍保留 append 观察写入与 recent_turns
+                # 热区（供 Dialogue 承接），但不再直接输出旧表层。
                 recalled = (
                     None if result is not None
                     or decision.result_code == GRAPH_RELATION_CONFLICT
                     or memory is None
+                    or strict_graph
                     else memory.recall(
                         text,
-                        minimum_similarity_permille=(850 if strict_graph else 500),
-                        speaker_kind=(2 if strict_graph else None)))
+                        minimum_similarity_permille=500))
                 dialogue_answer = (
                     None if result is not None or recalled is not None
                     or dialogue is None
@@ -240,21 +279,6 @@ def run_trained_relation_graph_terminal(
                         text, history=tuple(history[-6:])) if strict_graph
                           else dialogue.respond(
                               text, history=tuple(history[-6:]))))
-                # Answer-side memory remains a high-confidence cache.  User
-                # interaction facts are recalled after exact Dialogue paths
-                # but before approximate ones.  Only confidence=1000 denotes
-                # an occurrence-verified exact learned turn in this runtime;
-                # a merely similar Dialogue sentence must not override a
-                # durable user fact after restart.
-                if (strict_graph and result is None and recalled is None
-                        and memory is not None
-                        and (dialogue_answer is None
-                             or dialogue_answer.trace.result_mode
-                             == DIALOGUE_RESULT_CLARIFICATION)):
-                    recalled = memory.recall(
-                        text,
-                        minimum_similarity_permille=250,
-                        speaker_kind=1)
                 surface = (
                     result.surface if result is not None
                     else recalled.surface if recalled is not None

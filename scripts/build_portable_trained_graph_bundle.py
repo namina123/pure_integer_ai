@@ -15,6 +15,7 @@ import uuid
 ENTRY_MODULES = (
     "pure_integer_ai.experiments.run_trained_relation_graph_terminal",
     "pure_integer_ai.experiments.trained_graph_release",
+    "pure_integer_ai.experiments.runtime_boundary_validator",
 )
 
 

@@ -991,19 +991,22 @@ class SqliteDialogueSuccessorRuntime:
             query_features: set[tuple[int, ...]],
             candidate_count: int,
             current: str,
+            *,
+            diagnostic_replay: bool = False,
             ) -> GraphDialogueAnswer | None:
-        """自然语言低证据只输出已训练图澄清；混乱码型保持无结果。"""
+        """自然语言低证据只输出已训练图澄清；混乱码型保持无结果。
+
+        ``diagnostic_replay`` 只允许开发/对照调用打开；发布承重路径必须
+        保持关闭，否则会把按输入长度挑选的无依据问句当作澄清暴露给用户。
+        """
         if self._malformed_surface(current):
             return None
         candidate = self._query_clarification(
             ranked, query_tokens, query_features)
-        # A ranked list can contain ordinary response candidates without a
-        # valid clarification path.  Natural-language input must still be
-        # answered by a learned clarification structure in that case; tying
-        # this fallback to ``not ranked`` made the public strict route raise
-        # for normal prose whenever an unrelated candidate shared a feature.
-        if candidate is None:
-            candidate = self._structural_clarification_candidate(
+        # 生产路径只接受有结构依据的澄清（当前/回答节点存在已学习多 token
+        # 关系与共享长片段）。完全没有结构证据时不得按长度或问句形状选句。
+        if candidate is None and diagnostic_replay:
+            candidate = self._diagnostic_structural_clarification_candidate(
                 sum(len(token) for token in query_tokens),
             )
         if candidate is None:
@@ -1017,15 +1020,15 @@ class SqliteDialogueSuccessorRuntime:
                                DIALOGUE_RESULT_CLARIFICATION, 0, 1),
             candidate_count)
 
-    def _structural_clarification_candidate(
+    def _diagnostic_structural_clarification_candidate(
             self, codepoint_count: int,
             ) -> _GraphDialogueCandidate | None:
-        """从已训练 Dialogue 图按输入长度取一个澄清路径。
+        """诊断对照：从已训练 Dialogue 图按输入长度取一个澄清路径。
 
-        完全没有共享整数片段时，不能把任意近邻句当作回答；但自然语言
-        输入本身也不应暴露开发态 UNKNOWN。这里仍只从 Dialogue 图的
-        occurrence 端点冷读候选，并以回答中的已学习疑问结构作最终约束。
-        查询范围由训练时记录的当前输入码点数界定，结果固定排序且有界。
+        本方法只能由 ``diagnostic_replay=True`` 的显式对照调用触发；发布
+        承重路径禁止使用。它按训练时记录的当前输入码点数冷读候选，并以
+        回答中的已学习疑问结构作最终约束，结果固定排序且有界。该路径保留
+        仅为对照旧行为与回归评估，不构成能力证据。
         """
         if (type(codepoint_count) is not int or codepoint_count <= 0
                 or codepoint_count > _GRAPH_DIALOGUE_MAX_RESPONSE_CODEPOINTS):
@@ -1069,12 +1072,14 @@ class SqliteDialogueSuccessorRuntime:
             *,
             history: tuple[tuple[int, str], ...] = (),
             minimum_confidence_permille: int = 700,
+            diagnostic_replay: bool = False,
             ) -> GraphDialogueAnswer | None:
         """执行输入拆分→图路径理解/过程选择→结果组合的自由对话链。
 
         该路径不读取旧字符 posting，也不返回随机表层。候选、回答和 trace
         均由训练 SQLite 的 occurrence/图投影恢复；无候选时返回 ``None``，
-        由上层决定是否以正式协议错误结束。
+        由上层决定是否以正式协议错误结束。``diagnostic_replay`` 只允许
+        显式对照打开按长度选澄清的诊断路径；发布承重路径必须保持 ``False``。
         """
         if type(current) is not str or not current.strip():
             raise ValueError("current 必须是非空文本")
@@ -1087,7 +1092,8 @@ class SqliteDialogueSuccessorRuntime:
         query_features = _integer_token_features(query_tokens)
         if not query_features:
             return self._low_evidence_answer(
-                query_tokens, [], set(), 0, current)
+                query_tokens, [], set(), 0, current,
+                diagnostic_replay=diagnostic_replay)
         query_features = tuple(dict.fromkeys(
             (*_integer_token_unigrams(query_tokens), *query_features)))
         # 冷索引只按持久化码点 hash 建立候选范围；真正的 token/n-gram
@@ -1116,7 +1122,8 @@ class SqliteDialogueSuccessorRuntime:
             )))
         if not candidate_keys:
             return self._low_evidence_answer(
-                query_tokens, [], set(query_features), 0, current)
+                query_tokens, [], set(query_features), 0, current,
+                diagnostic_replay=diagnostic_replay)
         history_tokens = tuple(
             token for _speaker, surface in history[-6:]
             for token in _integer_tokens(surface))
@@ -1161,7 +1168,7 @@ class SqliteDialogueSuccessorRuntime:
         if not ranked:
             return self._low_evidence_answer(
                 query_tokens, [], set(query_features), len(candidate_keys),
-                current)
+                current, diagnostic_replay=diagnostic_replay)
         ranked.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], item[4]))
         publishable = tuple(item for item in ranked
                             if self._publishable_response(item[5].response_surface))
@@ -1208,7 +1215,8 @@ class SqliteDialogueSuccessorRuntime:
             if candidate is None:
                 return self._low_evidence_answer(
                     query_tokens, ranked, query_feature_set,
-                    len(candidate_keys), current)
+                    len(candidate_keys), current,
+                    diagnostic_replay=diagnostic_replay)
             return GraphDialogueAnswer(
                 _graph_result_stage(
                     candidate.response_tokens, candidate.response_surface)[1],
@@ -1223,7 +1231,8 @@ class SqliteDialogueSuccessorRuntime:
             if candidate is None:
                 return self._low_evidence_answer(
                     query_tokens, ranked, query_feature_set,
-                    len(candidate_keys), current)
+                    len(candidate_keys), current,
+                    diagnostic_replay=diagnostic_replay)
             return GraphDialogueAnswer(
                 _graph_result_stage(
                     candidate.response_tokens, candidate.response_surface)[1],
@@ -1240,7 +1249,8 @@ class SqliteDialogueSuccessorRuntime:
             if candidate is None:
                 return self._low_evidence_answer(
                     query_tokens, ranked, query_feature_set,
-                    len(candidate_keys), current)
+                    len(candidate_keys), current,
+                    diagnostic_replay=diagnostic_replay)
             return GraphDialogueAnswer(
                 _graph_result_stage(
                     candidate.response_tokens, candidate.response_surface)[1],

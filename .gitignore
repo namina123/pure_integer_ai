@@ -59,3 +59,6 @@ Thumbs.db
 *.log
 *.tmp
 scratch/
+
+# --- 施工代理个人分析（非项目本体）---
+_agent_analysis/
