@@ -476,8 +476,8 @@ class TypedDialogueSemanticQueryMapper:
         """返回当前 typed payload 的现役及历史结构索引。
 
         结构索引是候选族的来源无关身份。旧 checkpoint 在 fingerprint
-        编码修订前写入过 adoption 族，postcheck 也沿用该族读取已采用
-        候选，因此只读查询需要携带兼容别名；训练路径仍只写现役键。
+        编码修订前写入过现役族；本查询只携带现役族与 fingerprint v1
+        兼容键，不把不同契约（ADOPTION vs POSTCHECK）的族混入彼此恢复。
         """
         if not isinstance(current, LanguageSemanticCourseInput):
             raise TypeError("typed semantic structure lookup 输入类型错误")
@@ -492,15 +492,16 @@ class TypedDialogueSemanticQueryMapper:
             return ()
         _candidate_rows(current.payload_kind, raw)
         family_value = _structure_family_value(current.payload_kind, raw)
+        # POSTCHECK was historically aliased onto the ADOPTION family so a
+        # held-out postcheck could read a candidate taught as an earlier
+        # adoption.  With several authored POSTCHECK courses sharing the same
+        # structure family, that alias pulls distinct ADOPTION sources into
+        # the POSTCHECK recovery and makes the authored candidate-key match
+        # ambiguous (decision_goal=False).  Each POSTCHECK lesson is taught
+        # under its own POSTCHECK family with a full authored candidate_key,
+        # so the alias is not needed to recover a POSTCHECK goal; restore the
+        # per-contract separation and read only the declared family.
         family_values = [family_value]
-        # POSTCHECK verifies a prior adoption.  Historical runs indexed it
-        # under the shared ADOPTION family; retain that explicit protocol
-        # alias without selecting a candidate or reading surface text.
-        if (current.payload_kind == "GenerationAdoptionPostcheckQuery"
-                and raw.get("postcheck", {}).get("enabled") == 1
-                and "GenerationAdoptionPostcheckQuery:ADOPTION"
-                not in family_values):
-            family_values.append("GenerationAdoptionPostcheckQuery:ADOPTION")
         owner = current.source.owner
         versions = current.source.versions
         identities = []
