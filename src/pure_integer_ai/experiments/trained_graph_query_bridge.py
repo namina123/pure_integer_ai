@@ -125,7 +125,7 @@ class TrainedCoreQueryRuntime:
             )
             return self._finalize(
                 state, (), termination=TERMINATION_CLARIFY_MISSING_BINDING,
-                reason="NO_CONCEPT_ANCHOR")
+                reason="CLARIFY_MISSING_BINDING")
         initial = seed_query(
             query_key,
             anchors=tuple(QueryAnchor(
