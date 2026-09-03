@@ -14,11 +14,17 @@ from pure_integer_ai.experiments.trained_relation_graph_runtime import (
     GRAPH_RELATION_CONFLICT,
     TrainedRelationGraphRuntime,
 )
+from pure_integer_ai.experiments.trained_generation_connector_runtime import (
+    TrainedGenerationConnectorRuntime,
+)
 from pure_integer_ai.experiments.trained_dialogue_memory_graph import (
     TrainedDialogueMemoryGraph,
 )
 from pure_integer_ai.experiments.dialogue_successor_graph import (
     SqliteDialogueSuccessorRuntime,
+)
+from pure_integer_ai.cognition.shared.dialogue_pipeline import (
+    DIALOGUE_RESULT_CLARIFICATION,
 )
 
 
@@ -96,7 +102,7 @@ def _peak_working_set_bytes() -> int:
 def run_trained_relation_graph_terminal(
         *,
         training_database: str | Path,
-        fallback_surfaces: tuple[str, ...],
+        fallback_surfaces: tuple[str, ...] | None,
         memory_database: str | Path | None = None,
         memory_tenant_id: int = 1,
         memory_user_id: int = 1,
@@ -105,12 +111,16 @@ def run_trained_relation_graph_terminal(
         output_stream: BinaryIO | None = None,
         protocol_stream: bool = False,
         metrics_output: str | Path | None = None,
+        strict_graph: bool = False,
         ) -> int:
-    """运行图优先交互；未唯一命中时输出模型数据中的自然语言表层。"""
-    if (not isinstance(fallback_surfaces, tuple)
-            or not fallback_surfaces
-            or any(type(item) is not str or not item.strip()
-                   for item in fallback_surfaces)):
+    """运行图优先交互；strict_graph 发布模式只接受三类图路由。"""
+    if strict_graph:
+        if fallback_surfaces not in (None, ()):
+            raise ValueError("strict graph 不接受 fallback_surfaces")
+    elif (not isinstance(fallback_surfaces, tuple)
+          or not fallback_surfaces
+          or any(type(item) is not str or not item.strip()
+                 for item in fallback_surfaces)):
         raise ValueError("fallback_surfaces 必须是非空文本 tuple")
     metrics_path = (
         None if metrics_output is None else Path(metrics_output).resolve())
@@ -118,6 +128,14 @@ def run_trained_relation_graph_terminal(
         raise ValueError("metrics_output 已存在，拒绝覆盖")
     stream_in = sys.stdin.buffer if input_stream is None else input_stream
     stream_out = sys.stdout.buffer if output_stream is None else output_stream
+    if strict_graph and memory_database is None:
+        # 发布 runtime 的每一轮交互都必须进入 Interaction Memory 图；默认把
+        # 会话库放在模型旁的运行时文件，不污染只读训练 SQLite 或发布清单。
+        training_path = Path(training_database).resolve()
+        # 运行时记忆必须持久化，但不能改变 release root 的闭合清单；放在
+        # release root 同级，迁移模型时可整体复制或按会话独立携带。
+        memory_database = training_path.parents[2] / (
+            training_path.parents[1].name + "_runtime_memory.sqlite3")
     startup_started = time.perf_counter_ns()
     memory = (
         None if memory_database is None
@@ -128,12 +146,17 @@ def run_trained_relation_graph_terminal(
             session_id=memory_session_id,
         ))
     try:
-        dialogue = SqliteDialogueSuccessorRuntime(training_database)
+        dialogue = SqliteDialogueSuccessorRuntime(
+            training_database, graph_dialogue=strict_graph)
     except ValueError:
+        if strict_graph:
+            raise
         dialogue = None
     else:
         if dialogue.count() <= 0:
             dialogue.close()
+            if strict_graph:
+                raise RuntimeError("strict graph 缺少 Dialogue 图路径")
             dialogue = None
     history = (
         [] if memory is None
@@ -150,7 +173,11 @@ def run_trained_relation_graph_terminal(
         "dialogue_graph": 0,
         "boundary": 0,
     }
+    generation_runtime = None
     try:
+        if strict_graph:
+            generation_runtime = TrainedGenerationConnectorRuntime(
+                training_database)
         with TrainedRelationGraphRuntime(training_database) as runtime:
             startup_us = max(
                 0, (time.perf_counter_ns() - startup_started) // 1000)
@@ -184,26 +211,63 @@ def run_trained_relation_graph_terminal(
                     text = payload.decode("utf-8")
                     if not text.strip():
                         continue
+                # 记忆是正式运行时的承重路径：先记录用户输入，再执行三图
+                # 查询。即使后续图核验失败，该次交互也不会静默丢失。
+                if memory is not None:
+                    memory.append(text, speaker_kind=1)
                 started = time.perf_counter_ns()
-                decision = runtime.query(text)
+                decision = runtime.query(
+                    text,
+                    surface_generator=generation_runtime,
+                )
                 result = decision.answer
+                if (strict_graph and result is not None
+                        and result.generation.connector is None):
+                    raise RuntimeError(
+                        "strict graph Core 回答绕过 typed connector")
                 recalled = (
                     None if result is not None
                     or decision.result_code == GRAPH_RELATION_CONFLICT
                     or memory is None
-                    else memory.recall(text))
+                    else memory.recall(
+                        text,
+                        minimum_similarity_permille=(850 if strict_graph else 500),
+                        speaker_kind=(2 if strict_graph else None)))
                 dialogue_answer = (
                     None if result is not None or recalled is not None
-                    or decision.result_code == GRAPH_RELATION_CONFLICT
                     or dialogue is None
-                    else dialogue.respond(text, history=tuple(history[-6:])))
+                    else (dialogue.respond_graph(
+                        text, history=tuple(history[-6:])) if strict_graph
+                          else dialogue.respond(
+                              text, history=tuple(history[-6:]))))
+                # Answer-side memory remains a high-confidence cache.  User
+                # interaction facts are recalled after exact Dialogue paths
+                # but before approximate ones.  Only confidence=1000 denotes
+                # an occurrence-verified exact learned turn in this runtime;
+                # a merely similar Dialogue sentence must not override a
+                # durable user fact after restart.
+                if (strict_graph and result is None and recalled is None
+                        and memory is not None
+                        and (dialogue_answer is None
+                             or dialogue_answer.trace.result_mode
+                             == DIALOGUE_RESULT_CLARIFICATION)):
+                    recalled = memory.recall(
+                        text,
+                        minimum_similarity_permille=250,
+                        speaker_kind=1)
                 surface = (
                     result.surface if result is not None
                     else recalled.surface if recalled is not None
                     else dialogue_answer.surface
                     if dialogue_answer is not None
-                    else _fallback(text, fallback_surfaces)
+                    else ("" if strict_graph else _fallback(text, fallback_surfaces))
                 )
+                if strict_graph and not surface.strip():
+                    # A release must never expose a boundary route.  If all
+                    # three trained graph owners fail to produce a path, the
+                    # protocol fails closed after the input has been recorded.
+                    raise RuntimeError(
+                        "strict graph 三类图均无可组合结果")
                 if result is not None:
                     route_counts["core_graph"] += 1
                     core_fact_reads += result.fact_reads
@@ -213,6 +277,8 @@ def run_trained_relation_graph_terminal(
                 elif dialogue_answer is not None:
                     route_counts["dialogue_graph"] += 1
                     dialogue_posting_reads += dialogue_answer.posting_rows_read
+                elif strict_graph:
+                    raise RuntimeError("strict graph 禁止 boundary 路由")
                 else:
                     route_counts["boundary"] += 1
                 if protocol_stream:
@@ -223,27 +289,71 @@ def run_trained_relation_graph_terminal(
                     }
                     if result is not None:
                         response["source"] = {
-                            "kind": "core_relation_graph",
+                            "kind": ("core_graph" if strict_graph
+                                     else "core_relation_graph"),
                             "source_hash": result.source_hash,
                             "proposition": list(
                                 result.proposition.stable_key()),
-                            "frame_source_hash": (
-                                result.generation.frame_source_hash),
                         }
+                        if strict_graph:
+                            response["source"]["generation"] = {
+                                "kind": "typed_connector_graph",
+                                "connector": list(
+                                    result.generation.connector.stable_key()),
+                                "representation_count": len(
+                                    result.generation.representations),
+                                "trace": list(result.generation.trace),
+                            }
+                        else:
+                            response["source"]["frame_source_hash"] = (
+                                result.generation.frame_source_hash)
                     elif recalled is not None:
                         response["source"] = {
-                            "kind": "interaction_memory_graph",
+                            "kind": ("memory_graph" if strict_graph
+                                     else "interaction_memory_graph"),
                             "source_hash": recalled.source_hash,
                             "source_ref": list(
                                 recalled.source.stable_key()),
                         }
                     elif dialogue_answer is not None:
                         response["source"] = {
-                            "kind": "core_dialogue_successor_graph",
+                            "kind": "dialogue_graph",
                             "source_hash": dialogue_answer.source_hash,
-                            "proposition": list(
-                                dialogue_answer.proposition_ref),
+                            "proposition": list(dialogue_answer.proposition_ref),
+                            "confidence_permille": dialogue_answer.confidence_permille,
+                            "trace": {
+                                "schema": "dialogue_pipeline_v1",
+                                "understanding_tokens": [
+                                    list(token) for token in
+                                    dialogue_answer.trace.understanding_tokens],
+                                "understanding_token_count": len(
+                                    dialogue_answer.trace.understanding_tokens),
+                                "process_candidate_count": dialogue_answer.trace.process_candidate_count,
+                                "process_selected_key": list(
+                                    dialogue_answer.trace.process_selected_key),
+                                "input_exact": (
+                                    dialogue_answer.trace.input_exact),
+                                "result_mode": (
+                                    dialogue_answer.trace.result_mode),
+                                "transformation_count": (
+                                    dialogue_answer.trace.transformation_count),
+                                "support_count": (
+                                    dialogue_answer.trace.support_count),
+                                "confidence_permille": (
+                                    dialogue_answer.trace.confidence_permille),
+                                "result_tokens": [
+                                    list(token) for token in
+                                    dialogue_answer.trace.result_tokens],
+                                "result_token_count": len(dialogue_answer.trace.result_tokens),
+                                "stable_key": list(
+                                    dialogue_answer.trace.stable_key()),
+                            },
                         }
+                        if (strict_graph
+                                and dialogue_answer.trace.result_mode
+                                == DIALOGUE_RESULT_CLARIFICATION):
+                            response["type"] = "clarify"
+                            response["source"]["status"] = "insufficient_evidence"
                     payload = json.dumps(response,
                         ensure_ascii=False, sort_keys=True,
                         separators=(",", ":")).encode("utf-8") + b"\n"
@@ -252,7 +362,6 @@ def run_trained_relation_graph_terminal(
                     stream_out.write(surface.encode("utf-8") + b"\n")
                 stream_out.flush()
                 if memory is not None:
-                    memory.append(text, speaker_kind=1)
                     memory.append(surface, speaker_kind=2)
                 history.extend(((1, text), (2, surface)))
                 if len(history) > 6:
@@ -260,6 +369,8 @@ def run_trained_relation_graph_terminal(
                 latencies_us.append(max(
                     0, (time.perf_counter_ns() - started) // 1000))
     finally:
+        if generation_runtime is not None:
+            generation_runtime.close()
         if memory is not None:
             memory.close()
         if dialogue is not None:
@@ -311,7 +422,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         release = load_trained_graph_release(args.release_root)
         training_database = release.training_database
-        fallback_surfaces = load_fallback_surfaces(release.fallback_surfaces)
+        # 发布 strict graph 不读取边界表层文件；所有输出只能来自三类图。
+        fallback_surfaces = ()
     else:
         if args.training_database is None or args.fallback_surfaces is None:
             parser.error("必须指定 --release-root 或训练数据库与表层文件")
@@ -326,6 +438,7 @@ def main(argv: list[str] | None = None) -> int:
         memory_session_id=args.memory_session_id,
         metrics_output=args.metrics_output,
         protocol_stream=args.protocol == "jsonl",
+        strict_graph=args.release_root is not None,
     )
 
 

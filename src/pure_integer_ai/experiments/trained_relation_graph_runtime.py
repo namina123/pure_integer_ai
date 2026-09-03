@@ -7,8 +7,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from pure_integer_ai.cognition.shared.identity import ObjectIdentity
+from pure_integer_ai.cognition.shared.hypothesis import (
+    EvidenceRecord,
+    HypothesisKey,
+    HypothesisSnapshot,
+)
 from pure_integer_ai.cognition.shared.semantic_graph import (
     MaterializedAtomicProposition,
 )
@@ -48,6 +54,16 @@ class ActiveRelationGraphSnapshot:
 
     propositions: tuple[MaterializedAtomicProposition, ...]
     candidate_identities: tuple[ObjectIdentity, ...]
+
+
+@dataclass(frozen=True)
+class ActiveRelationGenerationInput:
+    """一个 active Core 命题及其当前 H-00 Evidence 投影。"""
+
+    proposition: MaterializedAtomicProposition
+    hypothesis: HypothesisKey
+    snapshot: HypothesisSnapshot
+    evidence: tuple[EvidenceRecord, ...]
 
 
 @dataclass(frozen=True)
@@ -91,12 +107,27 @@ class RelationSurfaceFrame:
 
 @dataclass(frozen=True)
 class GraphRelationGeneration:
-    """由目标 RoleBinding 值和图内已学框架组合得到的表层。"""
+    """由 Core 命题和已学生成图执行得到的表层。"""
 
     surface: str
     frame_proposition: ObjectIdentity
     frame_source_hash: int
     slot_count: int
+    connector: ObjectIdentity | None = None
+    representations: tuple[ObjectIdentity, ...] = ()
+    trace: tuple[int, ...] = ()
+
+
+class RelationGraphSurfaceGenerator(Protocol):
+    """把一个 active Core 命题交给外部注入的生成图 owner。"""
+
+    def generate_relation(
+            self,
+            source: ActiveRelationGenerationInput,
+            fact: ActiveRelationSurface,
+            ) -> GraphRelationGeneration:
+        """只从已恢复图状态生成，不读取课程或旧 Span frame。"""
+        ...
 
 
 @dataclass(frozen=True)
@@ -195,7 +226,12 @@ class TrainedRelationGraphRuntime:
         """兼容返回图回答；未命中或图内竞争都不猜测。"""
         return self.query(text).answer
 
-    def query(self, text: str) -> GraphRelationDecision:
+    def query(
+            self,
+            text: str,
+            *,
+            surface_generator: RelationGraphSurfaceGenerator | None = None,
+            ) -> GraphRelationDecision:
         """查询 active 图并保留未命中与明确竞争之间的路由差异。"""
         if type(text) is not str or not text.strip():
             raise ValueError("关系查询输入必须是非空文本")
@@ -257,7 +293,16 @@ class TrainedRelationGraphRuntime:
         if not recognized_surfaces.issubset({
                 binding.surface for binding in best[4].bindings}):
             return GraphRelationDecision(GRAPH_RELATION_CONFLICT, None)
-        generation = self._generate_surface(best[4])
+        generation = (
+            self._generate_surface(best[4])
+            if surface_generator is None
+            else surface_generator.generate_relation(
+                self.generation_input(best[4].proposition),
+                best[4],
+            )
+        )
+        if not isinstance(generation, GraphRelationGeneration):
+            raise TypeError("relation surface generator 返回类型错误")
         return GraphRelationDecision(GRAPH_RELATION_ANSWER, GraphRelationAnswer(
             generation.surface,
             best[4].proposition,
@@ -305,6 +350,19 @@ class TrainedRelationGraphRuntime:
             if item.definition.proposition in active
         )
 
+    def generation_input(
+            self,
+            proposition: ObjectIdentity,
+            ) -> ActiveRelationGenerationInput:
+        """按完整 Proposition 返回当前 active Evidence，不从表层反查。"""
+        if not isinstance(proposition, ObjectIdentity):
+            raise TypeError("generation proposition 必须是 ObjectIdentity")
+        item = self._generation_inputs.get(proposition)
+        if item is None:
+            raise TrainedRelationGraphError(
+                "查询命题没有唯一 active generation input")
+        return item
+
     def _restore_active_snapshot(self) -> ActiveRelationGraphSnapshot:
         """联合 H-00/H-04、候选 lifecycle 图和 S-00 拓扑恢复 active 集。"""
         engine = self.owner.learning.engine
@@ -320,6 +378,7 @@ class TrainedRelationGraphRuntime:
         propositions: list[MaterializedAtomicProposition] = []
         identities: list[ObjectIdentity] = []
         directionalities: list[int] = []
+        generation_inputs: list[ActiveRelationGenerationInput] = []
         direction_predicate = w06_directionality_binding_predicate()
         direction_values = {
             w06_directionality_value(DIRECTION_FORWARD): DIRECTION_FORWARD,
@@ -340,6 +399,10 @@ class TrainedRelationGraphRuntime:
             projection = self.owner.candidate_graph.project(candidate)
             if projection.state != active_state:
                 continue
+            active_candidate = engine.active(hypothesis)
+            if active_candidate is None:
+                raise TrainedRelationGraphError(
+                    "active relation 缺少 H-00/H-04 active Evidence 投影")
             atomic = self.owner.semantic_graph.read_atomic(candidate)
             if atomic.definition.proposition != definition.candidate:
                 raise TrainedRelationGraphError("active 候选与语义命题身份漂移")
@@ -348,17 +411,45 @@ class TrainedRelationGraphRuntime:
                 if binding.predicate == direction_predicate)
             if len(direction) != 1 or direction[0] not in direction_values:
                 raise TrainedRelationGraphError("active relation 方向性字段不闭合")
+            active_ids = frozenset(
+                active_candidate.snapshot.support_evidence_ids
+                + active_candidate.snapshot.refute_evidence_ids
+                + active_candidate.snapshot.unknown_evidence_ids
+            )
+            evidence = tuple(
+                item
+                for item in engine.ledger.evidence_history(hypothesis)
+                if item.evidence_id in active_ids
+            )
+            if not evidence:
+                raise TrainedRelationGraphError(
+                    "active relation 缺少当前未被替代 Evidence")
             identities.append(definition.candidate)
             propositions.append(atomic)
             directionalities.append(direction_values[direction[0]])
+            generation_inputs.append(ActiveRelationGenerationInput(
+                atomic,
+                active_candidate.hypothesis,
+                active_candidate.snapshot,
+                evidence,
+            ))
         ordered = sorted(
-            zip(identities, propositions, directionalities, strict=True),
+            zip(
+                identities,
+                propositions,
+                directionalities,
+                generation_inputs,
+                strict=True,
+            ),
             key=lambda item: item[0].stable_key(),
         )
         if not ordered:
             raise TrainedRelationGraphError("训练图没有可消费的 active typed relation")
         self._directionality_by_proposition = {
             item[0]: item[2] for item in ordered
+        }
+        self._generation_inputs = {
+            item[0]: item[3] for item in ordered
         }
         return ActiveRelationGraphSnapshot(
             tuple(item[1] for item in ordered),
@@ -585,6 +676,7 @@ class TrainedRelationGraphRuntime:
 
 
 __all__ = [
+    "ActiveRelationGenerationInput",
     "ActiveRelationGraphSnapshot",
     "ActiveRelationSurface",
     "GRAPH_RELATION_ANSWER",
@@ -595,6 +687,7 @@ __all__ = [
     "GraphRelationDecision",
     "RelationSurfaceFrame",
     "RelationSurfaceBinding",
+    "RelationGraphSurfaceGenerator",
     "TrainedRelationGraphError",
     "TrainedRelationGraphRuntime",
 ]

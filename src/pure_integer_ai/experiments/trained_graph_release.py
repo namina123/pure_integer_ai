@@ -37,6 +37,7 @@ _STATE_FIELDS = (
     "split_counts",
     "typed_course",
     "typed_language_floor",
+    "typed_relation_generation",
     "stage_weaning_ready",
     "weaning_ready",
     "weaning_blockers",
@@ -55,7 +56,6 @@ class TrainedGraphRelease:
     release_id: str
     training_database: Path
     training_cursor: Path
-    fallback_surfaces: Path
     source_manifest: Path
     protocol_config: Path
     manifest: dict[str, object]
@@ -180,41 +180,6 @@ def _source_license(
                 "sha256": _sha256(declaration),
             }
     raise TrainedGraphReleaseError(f"训练来源缺少许可: {path.name}")
-
-
-def _contains_text(value: object, target: str) -> bool:
-    """在结构化训练记录中查找完全相同的表层值。"""
-    if value == target:
-        return True
-    if isinstance(value, dict):
-        return any(_contains_text(item, target) for item in value.values())
-    if isinstance(value, list):
-        return any(_contains_text(item, target) for item in value)
-    return False
-
-
-def _verify_fallback_source(
-        path: Path, surfaces: tuple[str, ...]) -> tuple[str, ...]:
-    """核验每条边界表层都来自指定训练记录，而不是发布期手写。"""
-    missing = set(surfaces)
-    try:
-        with path.open("rb") as stream:
-            for raw in stream:
-                if not raw.strip():
-                    continue
-                value = json.loads(raw.decode("utf-8"))
-                missing = {
-                    surface for surface in missing
-                    if not _contains_text(value, surface)
-                }
-                if not missing:
-                    break
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise TrainedGraphReleaseError("边界表层训练来源不可回读") from error
-    if missing:
-        raise TrainedGraphReleaseError(
-            f"边界表层未见于训练来源: {len(missing)}")
-    return surfaces
 
 
 def _source_ledger(
@@ -363,18 +328,11 @@ def build_trained_graph_release(
         training_run_root: str | Path,
         release_root: str | Path,
         release_id: str,
-        fallback_surfaces: tuple[str, ...],
-        fallback_surface_source: str | Path,
         require_k_drive: bool = True,
         ) -> TrainedGraphRelease:
     """构造仅含训练后图状态的闭合发布根，不复制课程或 QA。"""
     if type(release_id) is not str or not release_id.strip():
         raise TrainedGraphReleaseError("release_id 必须是非空文本")
-    if (not isinstance(fallback_surfaces, tuple) or not fallback_surfaces
-            or any(type(item) is not str or not item.strip()
-                   or "\n" in item or "\r" in item
-                   for item in fallback_surfaces)):
-        raise TrainedGraphReleaseError("fallback_surfaces 必须是单行非空文本 tuple")
     project = Path(project_root).resolve()
     training = Path(training_run_root).resolve()
     target = Path(release_root).resolve()
@@ -401,6 +359,32 @@ def build_trained_graph_release(
             or summary.get("pack_sha256") != resume.get("pack_sha256")
             or summary.get("pack_sha256") != pack.get("pack_sha256")):
         raise TrainedGraphReleaseError("训练 summary/resume/pack 身份不闭合")
+    relation_generation = summary.get("typed_relation_generation")
+    if relation_generation is not None:
+        materialization_path = training / (
+            "trained_relation_generation_materialization.json")
+        materialization = _read_object(
+            materialization_path,
+            label="relation generation materialization",
+        )
+        if (not isinstance(relation_generation, dict)
+                or materialization.get("format")
+                != "TRAINED_RELATION_GENERATION_MATERIALIZATION_V1"
+                or materialization.get("schema_version") != 1
+                or materialization.get("run_id") != training.name
+                or materialization.get("database_sha256") != database_sha
+                or materialization.get("alias_manifest_sha256")
+                != relation_generation.get("alias_manifest_sha256")
+                or materialization.get("active_core_count")
+                != relation_generation.get("active_core_count")
+                or materialization.get("materialized_realization_count")
+                != relation_generation.get("materialized_realization_count")
+                or materialization.get("active_realization_count")
+                != relation_generation.get("active_realization_count")
+                or resume.get("materialization_manifest_sha256")
+                != _sha256(materialization_path)):
+            raise TrainedGraphReleaseError(
+                "relation generation materialization 身份不闭合")
     state = {key: summary[key] for key in _STATE_FIELDS if key in summary}
     state.update({
         "format": "PURE_INTEGER_TRAINED_GRAPH_STATE_V1",
@@ -436,21 +420,6 @@ def build_trained_graph_release(
     }
     source_ledger = _source_ledger(
         project, _training_lineage(training, pack, summary))
-    fallback_source = Path(fallback_surface_source).resolve()
-    if not fallback_source.is_file():
-        raise TrainedGraphReleaseError("边界表层训练来源不存在")
-    fallback_digest = _sha256(fallback_source)
-    source_digests = {
-        item["sha256"] for item in source_ledger["sources"]
-        if isinstance(item, dict) and type(item.get("sha256")) is str
-    }
-    if fallback_digest not in source_digests:
-        raise TrainedGraphReleaseError("边界表层来源未进入训练 lineage")
-    _verify_fallback_source(fallback_source, fallback_surfaces)
-    source_ledger["fallback_surface_source"] = {
-        "name": fallback_source.name,
-        "sha256": fallback_digest,
-    }
     protocol = {
         "format": "PURE_INTEGER_TRAINED_GRAPH_DIALOGUE_PROTOCOL_V1",
         "schema_version": 1,
@@ -470,8 +439,6 @@ def build_trained_graph_release(
     shutil.copyfile(
         required["training_cursor.int"], staging / "model/training_cursor.int")
     (staging / "model/training_state.json").write_bytes(_canonical_json(state))
-    (staging / "model/fallback_surfaces.txt").write_text(
-        "\n".join(fallback_surfaces) + "\n", encoding="utf-8", newline="\n")
     (staging / "source_manifest.json").write_bytes(
         _canonical_json(source_ledger))
     (staging / "dialogue_protocol.json").write_bytes(_canonical_json(protocol))
@@ -490,7 +457,6 @@ def build_trained_graph_release(
             "training_database": "model/training.sqlite3",
             "training_cursor": "model/training_cursor.int",
             "training_state": "model/training_state.json",
-            "fallback_surfaces": "model/fallback_surfaces.txt",
             "source_manifest": "source_manifest.json",
             "protocol_config": "dialogue_protocol.json",
         },
@@ -532,6 +498,12 @@ def load_trained_graph_release(
     rows = manifest.get("files")
     if not isinstance(entry, dict) or not isinstance(rows, list) or not rows:
         raise TrainedGraphReleaseError("trained graph release inventory 非法")
+    if ("fallback_surfaces" in entry
+            or any(isinstance(row, dict)
+                   and Path(str(row.get("path", ""))).name
+                   == "fallback_surfaces.txt" for row in rows)):
+        raise TrainedGraphReleaseError(
+            "trained graph release 禁止 fallback 表层")
     declared = {TRAINED_GRAPH_RELEASE_MANIFEST, TRAINED_GRAPH_RELEASE_DIGEST}
     for ordinal, row in enumerate(rows):
         if (not isinstance(row, dict)
@@ -583,7 +555,6 @@ def load_trained_graph_release(
         manifest["release_id"],
         entry_path("training_database"),
         entry_path("training_cursor"),
-        entry_path("fallback_surfaces"),
         entry_path("source_manifest"),
         entry_path("protocol_config"),
         manifest,

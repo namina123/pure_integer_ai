@@ -250,22 +250,44 @@ class CandidateProjectionGraph:
 
     def __init__(
             self, ontology: GraphOntology,
-            protocol: CandidateProjectionProtocol) -> None:
-        """绑定当前图并物化调用方注入的候选生命周期协议身份。"""
+            protocol: CandidateProjectionProtocol,
+            *, read_only: bool = False) -> None:
+        """绑定当前图并恢复候选生命周期协议身份。
+
+        ``read_only`` 用于发布图恢复：协议节点必须已经存在，不能因为构造
+        一个 facade 而向只读训练 SQLite 追加物化对象。
+        """
         if not isinstance(ontology, GraphOntology):
             raise TypeError("ontology 必须是 GraphOntology")
         if not isinstance(protocol, CandidateProjectionProtocol):
             raise TypeError("protocol 必须是 CandidateProjectionProtocol")
+        if type(read_only) is not bool:
+            raise TypeError("read_only 必须是严格 bool")
         self.ontology = ontology
         self.protocol = protocol
-        self._protocol_refs = {
-            identity: ontology.materialize(identity)
-            for identity in (
-                *protocol.predicate_identities(),
-                *protocol.state_identities(),
-                *protocol.kind_identities(),
-            )
-        }
+        identities = (
+            *protocol.predicate_identities(),
+            *protocol.state_identities(),
+            *protocol.kind_identities(),
+        )
+        if read_only:
+            refs = {identity: ontology.resolve(identity)
+                    for identity in identities}
+            missing = tuple(
+                identity.stable_key()
+                for identity, ref in refs.items() if ref is None)
+            if missing:
+                raise CandidateProjectionError(
+                    f"只读候选图缺少协议对象: {missing}")
+            self._protocol_refs = {
+                identity: ref for identity, ref in refs.items()
+                if ref is not None
+            }
+        else:
+            self._protocol_refs = {
+                identity: ontology.materialize(identity)
+                for identity in identities
+            }
 
     def preflight_definition(
             self, definition: EvidenceCandidateDefinition,

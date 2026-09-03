@@ -10,9 +10,20 @@ from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
+import unicodedata
 
 from pure_integer_ai.cognition.shared.graph_ontology import (
     relation_concept_identity,
+)
+from pure_integer_ai.cognition.shared.dialogue_pipeline import (
+    DIALOGUE_RESULT_CLARIFICATION,
+    DIALOGUE_RESULT_EXACT,
+    DIALOGUE_RESULT_RESPONSE_CLASS,
+    DIALOGUE_RESULT_TRANSFER,
+    DialoguePipelineTrace,
+    integer_token_features,
+    integer_token_values,
+    transfer_dialogue_surface,
 )
 from pure_integer_ai.cognition.shared.hypothesis import (
     EPISTEMIC_SUPPORTED,
@@ -63,6 +74,51 @@ _GRAPH_DIGEST = Hasher("dialogue.successor.graph.assertions.v1")
 _EVIDENCE_ID = Hasher("dialogue.successor.evidence.v1")
 _FEATURE_HASH = Hasher("pure_integer_ai.concept.v1")
 _SUCCESSOR_RESPONSE_CACHE_SIZE = 128
+_GRAPH_DIALOGUE_MAX_RESPONSE_CODEPOINTS = 512
+_GRAPH_DIALOGUE_MAX_CANDIDATES = 64
+_GRAPH_DIALOGUE_MAX_HOT_CANDIDATES = 128
+_GRAPH_DIALOGUE_MAX_POSTINGS_PER_FEATURE = 256
+_GRAPH_DIALOGUE_MAX_EXACT_LOOKUP_CODEPOINTS = 96
+_GRAPH_DIALOGUE_MAX_EXACT_CANDIDATES = 512
+_GRAPH_DIALOGUE_MAX_ANCHOR_QUERIES = 12
+
+
+def _integer_tokens(surface: str) -> tuple[tuple[int, ...], ...]:
+    """按通用 Unicode 边界拆分输入，不携带任何语言词表或转换规则。
+
+    空白与标点形成边界，字母/数字/标记连续运行保持为一个 token；其余
+    符号按单码点保留。这样 CJK 等无空格文字仍会留下可组合的码点序列，
+    而拉丁词、数字和代码标记不会被强制逐字拆散。
+    """
+    return integer_token_values(surface)
+
+
+def _integer_token_features(tokens: tuple[tuple[int, ...], ...]) -> tuple[tuple[int, ...], ...]:
+    """从 token 序列派生一至三元整数片段，长片段优先而不依赖语言。"""
+    return integer_token_features(tokens)
+
+
+def _integer_token_unigrams(tokens: tuple[tuple[int, ...], ...]) -> tuple[tuple[int, ...], ...]:
+    """仅生成单 token 整数片段，供大规模启动倒排使用。"""
+    return tuple((1, len(token), *token) for token in tokens)
+
+
+def _render_integer_tokens(tokens: tuple[tuple[int, ...], ...]) -> str:
+    """结果阶段仅从已选图路径的整数 token 序列重建可读表层。"""
+    return "".join(chr(value) for token in tokens for value in token)
+
+
+def _contains_token_sequence(
+        values: tuple[tuple[int, ...], ...],
+        target: tuple[tuple[int, ...], ...],
+        ) -> bool:
+    """按严格 token 序判断连续包含，不使用语言规则或集合近似。"""
+    if not target or len(target) > len(values):
+        return False
+    return any(
+        values[start:start + len(target)] == target
+        for start in range(len(values) - len(target) + 1)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +168,47 @@ class DialogueSuccessorAnswer:
     posting_rows_read: int
 
 
+# Compatibility name for older callers; the implementation is the shared
+# cognition protocol so public and experiment runtimes consume one value type.
+GraphDialogueTrace = DialoguePipelineTrace
+
+
+def _graph_understanding_stage(
+        surface: str,
+        ) -> tuple[tuple[int, ...], ...]:
+    """理解阶段：以通用 Unicode token 把输入投影为整数图查询单元。"""
+    tokens = _integer_tokens(surface)
+    if not tokens:
+        raise ValueError("graph dialogue 理解阶段没有 token")
+    return tokens
+
+
+def _graph_result_stage(
+        tokens: tuple[tuple[int, ...], ...],
+        learned_surface: str,
+        ) -> tuple[tuple[int, ...], str]:
+    """结果阶段：核验并恢复已选 occurrence 表层，不添写任何语言。"""
+    if type(learned_surface) is not str or _integer_tokens(learned_surface) != tokens:
+        raise RuntimeError("dialogue successor 结果 token/occurrence 漂移")
+    surface = learned_surface[:_GRAPH_DIALOGUE_MAX_RESPONSE_CODEPOINTS]
+    result = _integer_tokens(surface)
+    if not surface.strip():
+        raise RuntimeError("dialogue successor 结果 token 为空")
+    return result, surface
+
+
+@dataclass(frozen=True, slots=True)
+class GraphDialogueAnswer:
+    """由 successor occurrence 图组合得到的自由对话结果。"""
+
+    surface: str
+    source_hash: int
+    proposition_ref: tuple[int, int]
+    confidence_permille: int
+    trace: GraphDialogueTrace
+    posting_rows_read: int
+
+
 @dataclass(frozen=True, slots=True)
 class _ObservedCodepoint:
     """一个输入码点及其权威 occurrence 位置。"""
@@ -120,6 +217,20 @@ class _ObservedCodepoint:
     occurrence: TypedRef
     occurrence_codepoint_ordinal: int
     turn_ordinal: int
+
+
+@dataclass(frozen=True, slots=True)
+class _GraphDialogueCandidate:
+    """运行时从 occurrence 端点恢复的单条 successor 图路径。"""
+
+    key: tuple[int, int]
+    source_hash: int
+    current_surface: str
+    response_surface: str
+    current_tokens: tuple[tuple[int, ...], ...]
+    response_tokens: tuple[tuple[int, ...], ...]
+    current_features: tuple[tuple[int, ...], ...]
+    response_features: tuple[tuple[int, ...], ...]
 
 
 class DialogueSuccessorTrainingRuntime:
@@ -378,12 +489,15 @@ def install_dialogue_successor_runtime(
 class SqliteDialogueSuccessorRuntime:
     """从训练 SQLite 只读查询后继投影，并回源恢复回答正文。"""
 
-    def __init__(self, database: str | Path, *, shortlist_limit: int = 32) -> None:
+    def __init__(self, database: str | Path, *, shortlist_limit: int = 32,
+                 graph_dialogue: bool = False) -> None:
         path = Path(database).resolve()
         if not path.is_file():
             raise ValueError("dialogue successor database 不存在")
         if type(shortlist_limit) is not int or shortlist_limit <= 0:
             raise ValueError("shortlist_limit 必须是正整数")
+        if type(graph_dialogue) is not bool:
+            raise TypeError("graph_dialogue 必须是严格 bool")
         self.path = path
         self.shortlist_limit = shortlist_limit
         self.connection = sqlite3.connect(
@@ -415,7 +529,23 @@ class SqliteDialogueSuccessorRuntime:
         self._hash_index: dict[int, dict[int, dict[tuple[int, int], int]]] = {
             FEATURE_CURRENT_TURN: {}, FEATURE_HISTORY_TURN: {}}
         self._projection_lengths: dict[tuple[int, int], tuple[int, int]] = {}
-        self._load_integer_posting_index()
+        if not graph_dialogue:
+            self._load_integer_posting_index()
+        # Strict graph mode keeps only projection identities and an integer
+        # posting index resident.  Source text and token tuples are cold data;
+        # they are page'd in only for shortlisted candidates and retained in a
+        # bounded LRU cache.
+        self._graph_candidate_count = 0
+        self._graph_candidate_cache: OrderedDict[
+            tuple[int, int], _GraphDialogueCandidate] = OrderedDict()
+        self._graph_feature_index: OrderedDict[
+            int, tuple[tuple[int, int], ...]] = OrderedDict()
+        if graph_dialogue:
+            self._graph_candidate_count = int(self.connection.execute(
+                f'SELECT COUNT(*) FROM "{DIALOGUE_SUCCESSOR_TABLE}"'
+            ).fetchone()[0])
+            if self._graph_candidate_count <= 0:
+                raise RuntimeError("dialogue successor 图没有可组合路径")
 
     def close(self) -> None:
         """关闭当前只读 SQLite owner。"""
@@ -429,6 +559,719 @@ class SqliteDialogueSuccessorRuntime:
         row = self.connection.execute(
             f'SELECT COUNT(*) FROM "{DIALOGUE_SUCCESSOR_TABLE}"').fetchone()
         return int(row[0])
+
+    def _load_graph_postings(
+            self, feature_hashes: tuple[int, ...],
+            ) -> tuple[tuple[int, int], ...]:
+        """按查询从 SQLite 倒排页入少量候选，不预载全库 posting。"""
+        wanted = tuple(dict.fromkeys(int(value) for value in feature_hashes))
+        if not wanted:
+            return ()
+        # Keep one occurrence per queried feature.  The caller uses this
+        # multiplicity as the first integer evidence signal; collapsing to a
+        # set here made every candidate tie and could discard exact turns from
+        # the bounded shortlist.
+        per_feature: dict[int, tuple[tuple[int, int], ...]] = {}
+        missing: list[int] = []
+        for feature_hash in wanted:
+            cached = self._graph_feature_index.get(feature_hash)
+            if cached is None:
+                missing.append(feature_hash)
+            else:
+                per_feature[feature_hash] = cached
+                self._graph_feature_index.move_to_end(feature_hash)
+        for offset in range(0, len(missing), 400):
+            chunk = tuple(missing[offset:offset + 400])
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.connection.execute(
+                f'''SELECT DISTINCT feature_hash, proposition_space_id,
+                           proposition_local_id
+                    FROM "{DIALOGUE_SUCCESSOR_FEATURE_TABLE}"
+                    WHERE feature_kind=? AND feature_hash IN ({placeholders})
+                    ORDER BY feature_hash, proposition_space_id,
+                             proposition_local_id''',
+                (FEATURE_CURRENT_TURN, *chunk),
+            ).fetchall()
+            grouped: dict[int, list[tuple[int, int]]] = {
+                value: [] for value in chunk}
+            for row in rows:
+                feature_hash = int(row[0])
+                key = (int(row[1]), int(row[2]))
+                values = grouped.setdefault(feature_hash, [])
+                if len(values) < _GRAPH_DIALOGUE_MAX_POSTINGS_PER_FEATURE:
+                    values.append(key)
+            for feature_hash in chunk:
+                cached = tuple(grouped.get(feature_hash, ()))
+                self._graph_feature_index[feature_hash] = cached
+                self._graph_feature_index.move_to_end(feature_hash)
+                per_feature[feature_hash] = cached
+        while len(self._graph_feature_index) > _GRAPH_DIALOGUE_MAX_HOT_CANDIDATES:
+            self._graph_feature_index.popitem(last=False)
+        return tuple(
+            key
+            for feature_hash in wanted
+            for key in per_feature.get(feature_hash, ())
+        )
+
+    def _materialize_graph_candidate(
+            self, key: tuple[int, int]) -> _GraphDialogueCandidate:
+        """按 proposition 键冷读 occurrence/source，并维护有界热缓存。"""
+        cached = self._graph_candidate_cache.get(key)
+        if cached is not None:
+            self._graph_candidate_cache.move_to_end(key)
+            return cached
+        if (not isinstance(key, tuple) or len(key) != 2
+                or any(type(item) is not int or item <= 0 for item in key)):
+            raise ValueError("dialogue successor proposition 键非法")
+        row = self.connection.execute(
+            f'''SELECT p.source_hash,
+                       cs.start, ce.end, rs.start, re.end,
+                       sc.raw_text, sr.raw_text,
+                       cs.source_hash, ce.source_hash,
+                       rs.source_hash, re.source_hash
+                FROM "{DIALOGUE_SUCCESSOR_TABLE}" AS p
+                JOIN occurrence AS cs
+                  ON cs.space_id=p.current_start_space_id
+                 AND cs.local_id=p.current_start_local_id
+                JOIN occurrence AS ce
+                  ON ce.space_id=p.current_end_space_id
+                 AND ce.local_id=p.current_end_local_id
+                JOIN occurrence AS rs
+                  ON rs.space_id=p.response_start_space_id
+                 AND rs.local_id=p.response_start_local_id
+                JOIN occurrence AS re
+                  ON re.space_id=p.response_end_space_id
+                 AND re.local_id=p.response_end_local_id
+                JOIN source_record AS sc ON sc.source_hash=cs.source_hash
+                JOIN source_record AS sr ON sr.source_hash=rs.source_hash
+                WHERE p.proposition_space_id=? AND p.proposition_local_id=?''',
+            key,
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("dialogue successor projection 端点缺失")
+        source_hash = int(row[0])
+        if any(source_hash != int(row[index]) for index in range(7, 11)):
+            raise RuntimeError("dialogue successor occurrence 来源漂移")
+        current_start, current_end = int(row[1]), int(row[2])
+        response_start, response_end = int(row[3]), int(row[4])
+        current_raw, response_raw = row[5], row[6]
+        if (not isinstance(current_raw, str)
+                or not isinstance(response_raw, str)
+                or current_start < 0 or current_end <= current_start
+                or current_end > len(current_raw)
+                or response_start < 0 or response_end <= response_start
+                or response_end > len(response_raw)):
+            raise RuntimeError("dialogue successor occurrence span 越界")
+        current_surface = current_raw[current_start:current_end].strip()
+        response_surface = response_raw[response_start:response_end].strip()
+        current_tokens = _integer_tokens(current_surface)
+        response_tokens = _integer_tokens(response_surface)
+        if not current_surface or not response_surface or not current_tokens \
+                or not response_tokens:
+            raise RuntimeError("dialogue successor 图路径表层为空")
+        candidate = _GraphDialogueCandidate(
+            key, source_hash, current_surface, response_surface,
+            current_tokens, response_tokens,
+            tuple(dict.fromkeys((
+                *_integer_token_unigrams(current_tokens),
+                *_integer_token_features(current_tokens),
+            ))),
+            _integer_token_features(response_tokens),
+        )
+        self._graph_candidate_cache[key] = candidate
+        self._graph_candidate_cache.move_to_end(key)
+        while len(self._graph_candidate_cache) > _GRAPH_DIALOGUE_MAX_HOT_CANDIDATES:
+            self._graph_candidate_cache.popitem(last=False)
+        return candidate
+
+    def _exact_graph_candidate_keys(
+            self,
+            feature_hashes: tuple[int, ...],
+            codepoint_count: int,
+            ) -> tuple[tuple[int, int], ...]:
+        """按当前 turn 的整数多重集寻找精确图候选。
+
+        普通 posting 读取必须有界，但常见短句的单码点 posting 可能被前
+        256 条截断。这里仅对短查询执行一次持久化聚合：候选的当前特征
+        数量和每个整数 hash 的出现次数都必须与查询相同，随后仍由
+        ``_materialize_graph_candidate`` 逐 occurrence 回源确认表层。
+        """
+        if (not feature_hashes or type(codepoint_count) is not int
+                or codepoint_count <= 0
+                or codepoint_count > _GRAPH_DIALOGUE_MAX_EXACT_LOOKUP_CODEPOINTS):
+            return ()
+        counts = Counter(int(value) for value in feature_hashes)
+        hashes = tuple(counts)
+        placeholders = ",".join("?" for _ in hashes)
+        clauses = []
+        params: list[int] = [
+            FEATURE_CURRENT_TURN, codepoint_count, *hashes,
+            codepoint_count, len(hashes),
+        ]
+        for feature_hash, count in counts.items():
+            clauses.append(
+                "SUM(CASE WHEN f.feature_hash=? THEN 1 ELSE 0 END)=?")
+            params.extend((feature_hash, count))
+        rows = self.connection.execute(
+            f'''SELECT f.proposition_space_id, f.proposition_local_id
+                FROM "{DIALOGUE_SUCCESSOR_FEATURE_TABLE}" AS f
+                JOIN "{DIALOGUE_SUCCESSOR_TABLE}" AS p
+                  ON p.proposition_space_id=f.proposition_space_id
+                 AND p.proposition_local_id=f.proposition_local_id
+                WHERE f.feature_kind=?
+                  AND p.current_feature_count=?
+                  AND f.feature_hash IN ({placeholders})
+                GROUP BY f.proposition_space_id, f.proposition_local_id
+                HAVING COUNT(*)=? AND COUNT(DISTINCT f.feature_hash)=?
+                   AND {' AND '.join(clauses)}
+                ORDER BY f.proposition_space_id, f.proposition_local_id
+                LIMIT ?''',
+            (*params, _GRAPH_DIALOGUE_MAX_EXACT_CANDIDATES),
+        ).fetchall()
+        return tuple((int(row[0]), int(row[1])) for row in rows)
+
+    def _anchor_graph_candidate_keys(
+            self,
+            query_tokens: tuple[tuple[int, ...], ...],
+            ) -> tuple[tuple[int, int], ...]:
+        """查找覆盖当前输入至少三分之二的完整已学连续片段。
+
+        这里只补足高频码点 posting 截断造成的不可达候选。每个候选仍须由
+        occurrence 回源，并且其完整 current token 序必须等于查询中的连续片段；
+        最长宽度一旦有结果就停止，避免短常用片段接管较长输入。
+        """
+        token_count = len(query_tokens)
+        if token_count <= 1:
+            return ()
+        minimum_width = max(1, (token_count * 2 + 2) // 3)
+        query_count = 0
+        for width in range(token_count - 1, minimum_width - 1, -1):
+            found: dict[tuple[int, int], None] = {}
+            for start in range(token_count - width + 1):
+                if query_count >= _GRAPH_DIALOGUE_MAX_ANCHOR_QUERIES:
+                    break
+                query_count += 1
+                fragment = query_tokens[start:start + width]
+                codepoint_count = sum(len(token) for token in fragment)
+                if codepoint_count < 2:
+                    continue
+                hashes = tuple(
+                    _FEATURE_HASH.h63(chr(value)) or 1
+                    for token in fragment for value in token)
+                for key in self._exact_graph_candidate_keys(
+                        hashes, codepoint_count):
+                    candidate = self._materialize_graph_candidate(key)
+                    if candidate.current_tokens == fragment:
+                        found[key] = None
+            if found:
+                return tuple(found)
+            if query_count >= _GRAPH_DIALOGUE_MAX_ANCHOR_QUERIES:
+                break
+        return ()
+
+    @staticmethod
+    def _query_clarification(
+            ranked: list[tuple[int, int, int, int, int,
+                               _GraphDialogueCandidate]],
+            query_tokens: tuple[tuple[int, ...], ...],
+            query_features: set[tuple[int, ...]],
+            ) -> _GraphDialogueCandidate | None:
+        """只从与当前输入相连的回答节点选择疑问式澄清。"""
+        marked = []
+        for item in ranked:
+            # A clarification must retain a learned multi-token relation on
+            # the current turn.  A single shared codepoint is insufficient:
+            # it would turn arbitrary unknown text into an unrelated answer.
+            if item[2] <= 0:
+                continue
+            candidate = item[5]
+            if (not _contains_token_sequence(
+                    query_tokens, candidate.current_tokens)
+                    or 3 * len(candidate.current_tokens)
+                    < 2 * len(query_tokens)):
+                continue
+            response_shared = sum(
+                1 for feature in query_features.intersection(
+                    candidate.response_features)
+                if feature and feature[0] > 1)
+            if response_shared <= 0:
+                continue
+            if any("QUESTION" in unicodedata.name(value, "")
+                   for value in candidate.response_surface):
+                marked.append((response_shared, item))
+        if not marked:
+            return None
+        marked.sort(key=lambda value: (
+            -value[0], -value[1][2], -value[1][1], -value[1][3],
+            value[1][4], value[1][5].key))
+        return marked[0][1][5]
+
+    @staticmethod
+    def _response_similarity(
+            left: _GraphDialogueCandidate,
+            right: _GraphDialogueCandidate,
+            ) -> int:
+        """计算两条回答路径的长整数片段 Dice，相同表层视为满分。"""
+        if left.response_surface == right.response_surface:
+            return 1000
+        left_features = {
+            value for value in left.response_features
+            if value and value[0] > 1}
+        right_features = {
+            value for value in right.response_features
+            if value and value[0] > 1}
+        denominator = len(left_features) + len(right_features)
+        if denominator == 0:
+            return 0
+        return (2000 * len(left_features & right_features)) // denominator
+
+    def _transfer_answer(
+            self,
+            query_tokens: tuple[tuple[int, ...], ...],
+            current: str,
+            ranked: list[tuple[int, int, int, int, int,
+                               _GraphDialogueCandidate]],
+            candidate_count: int,
+            ) -> GraphDialogueAnswer | None:
+        """把查询中的新变项代入已学 successor 结构，不复制近邻整句。"""
+        transformed = []
+        for row in ranked:
+            if row[0] or row[1] < 500 or row[2] <= 0:
+                continue
+            candidate = row[5]
+            transfer = transfer_dialogue_surface(
+                current,
+                candidate.current_surface,
+                candidate.response_surface,
+            )
+            if transfer is None:
+                continue
+            confidence = min(
+                950,
+                max(600, row[1])
+                + min(250, transfer.anchor_count * 20
+                      + transfer.replacement_count * 50),
+            )
+            transformed.append((
+                confidence,
+                transfer.anchor_count,
+                transfer.replacement_count,
+                row[2],
+                -len(transfer.surface),
+                candidate,
+                transfer,
+            ))
+        if not transformed:
+            return None
+        transformed.sort(key=lambda item: (
+            -item[0], -item[1], -item[2], -item[3], -item[4],
+            item[5].key,
+        ))
+        best = transformed[0]
+        candidate = best[5]
+        transfer = best[6]
+        return GraphDialogueAnswer(
+            transfer.surface,
+            candidate.source_hash,
+            candidate.key,
+            best[0],
+            GraphDialogueTrace(
+                query_tokens,
+                len(ranked),
+                candidate.key,
+                0,
+                transfer.result_tokens,
+                best[0],
+                DIALOGUE_RESULT_TRANSFER,
+                transfer.replacement_count,
+                1,
+            ),
+            candidate_count,
+        )
+
+    def _response_class_answer(
+            self,
+            query_tokens: tuple[tuple[int, ...], ...],
+            ranked: list[tuple[int, int, int, int, int,
+                               _GraphDialogueCandidate]],
+            candidate_count: int,
+            ) -> GraphDialogueAnswer | None:
+        """由完整输入锚点的多来源后继形成响应类，拒绝字符近邻聚类。"""
+        by_current: dict[
+            tuple[tuple[int, ...], ...],
+            list[tuple[int, int, int, int, int, _GraphDialogueCandidate]],
+        ] = {}
+        for row in ranked:
+            candidate = row[5]
+            current_tokens = candidate.current_tokens
+            if (row[0] or not current_tokens
+                    or len(current_tokens) >= len(query_tokens)
+                    or 3 * len(current_tokens) < 2 * len(query_tokens)
+                    or not _contains_token_sequence(
+                        query_tokens, current_tokens)
+                    or not self._publishable_response(
+                        candidate.response_surface)):
+                continue
+            by_current.setdefault(current_tokens, []).append(row)
+        classes = []
+        for current_tokens, rows in by_current.items():
+            by_response: dict[str, list[_GraphDialogueCandidate]] = {}
+            for row in rows:
+                candidate = row[5]
+                by_response.setdefault(
+                    candidate.response_surface, []).append(candidate)
+            for response_surface, candidates in by_response.items():
+                sources = {candidate.source_hash for candidate in candidates}
+                if len(sources) < 2:
+                    continue
+                candidate = min(candidates, key=lambda item: item.key)
+                coverage = 1000 * len(current_tokens) // len(query_tokens)
+                classes.append((
+                    coverage,
+                    len(sources),
+                    len(current_tokens),
+                    -len(response_surface),
+                    candidate,
+                ))
+        if not classes:
+            return None
+        classes.sort(key=lambda item: (
+            -item[0], -item[1], -item[2], -item[3],
+            tuple(ord(value) for value in item[4].response_surface),
+            item[4].key,
+        ))
+        selected = classes[0]
+        candidate = selected[4]
+        confidence = min(
+            950,
+            selected[0] + min(200, (selected[1] - 1) * 50),
+        )
+        result_tokens, surface = _graph_result_stage(
+            candidate.response_tokens, candidate.response_surface)
+        return GraphDialogueAnswer(
+            surface,
+            candidate.source_hash,
+            candidate.key,
+            confidence,
+            GraphDialogueTrace(
+                query_tokens,
+                len(ranked),
+                candidate.key,
+                0,
+                result_tokens,
+                confidence,
+                DIALOGUE_RESULT_RESPONSE_CLASS,
+                0,
+                selected[1],
+            ),
+            candidate_count,
+        )
+
+    @staticmethod
+    def _malformed_surface(surface: str) -> bool:
+        """仅把非法 Unicode 标量或替换码点视为混乱码型输入。"""
+        if any(
+            ord(value) == 0xFFFD
+            or unicodedata.category(value) in {"Cs", "Cn"}
+            for value in surface):
+            return True
+        # Number-letter symbols mixed with ordinary letters are code-like
+        # noise for this boundary.  The rule is category based and carries
+        # no language vocabulary or script table.
+        categories = tuple(unicodedata.category(value) for value in surface)
+        return len(surface) > 1 and "Nl" in categories and any(
+            category.startswith("L") and category != "Nl"
+            for category in categories)
+
+    def _low_evidence_answer(
+            self,
+            query_tokens: tuple[tuple[int, ...], ...],
+            ranked: list[tuple[int, int, int, int, int,
+                               _GraphDialogueCandidate]],
+            query_features: set[tuple[int, ...]],
+            candidate_count: int,
+            current: str,
+            ) -> GraphDialogueAnswer | None:
+        """自然语言低证据只输出已训练图澄清；混乱码型保持无结果。"""
+        if self._malformed_surface(current):
+            return None
+        candidate = self._query_clarification(
+            ranked, query_tokens, query_features)
+        # A ranked list can contain ordinary response candidates without a
+        # valid clarification path.  Natural-language input must still be
+        # answered by a learned clarification structure in that case; tying
+        # this fallback to ``not ranked`` made the public strict route raise
+        # for normal prose whenever an unrelated candidate shared a feature.
+        if candidate is None:
+            candidate = self._structural_clarification_candidate(
+                sum(len(token) for token in query_tokens),
+            )
+        if candidate is None:
+            return None
+        return GraphDialogueAnswer(
+            _graph_result_stage(
+                candidate.response_tokens, candidate.response_surface)[1],
+            candidate.source_hash, candidate.key, 0,
+            GraphDialogueTrace(query_tokens, len(ranked), candidate.key, 0,
+                               candidate.response_tokens, 0,
+                               DIALOGUE_RESULT_CLARIFICATION, 0, 1),
+            candidate_count)
+
+    def _structural_clarification_candidate(
+            self, codepoint_count: int,
+            ) -> _GraphDialogueCandidate | None:
+        """从已训练 Dialogue 图按输入长度取一个澄清路径。
+
+        完全没有共享整数片段时，不能把任意近邻句当作回答；但自然语言
+        输入本身也不应暴露开发态 UNKNOWN。这里仍只从 Dialogue 图的
+        occurrence 端点冷读候选，并以回答中的已学习疑问结构作最终约束。
+        查询范围由训练时记录的当前输入码点数界定，结果固定排序且有界。
+        """
+        if (type(codepoint_count) is not int or codepoint_count <= 0
+                or codepoint_count > _GRAPH_DIALOGUE_MAX_RESPONSE_CODEPOINTS):
+            return None
+        rows = self.connection.execute(
+            f'''SELECT proposition_space_id, proposition_local_id
+                FROM "{DIALOGUE_SUCCESSOR_TABLE}"
+                WHERE current_feature_count>0
+                ORDER BY ABS(current_feature_count-?),
+                         proposition_space_id, proposition_local_id
+                LIMIT ?''',
+            (codepoint_count, _GRAPH_DIALOGUE_MAX_EXACT_CANDIDATES),
+        ).fetchall()
+        candidates = []
+        for row in rows:
+            candidate = self._materialize_graph_candidate(
+                (int(row[0]), int(row[1])),
+            )
+            if any("QUESTION" in unicodedata.name(value, "")
+                   for value in candidate.response_surface):
+                candidates.append(candidate)
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda item: (
+                len(item.response_tokens),
+                tuple(ord(value) for value in item.response_surface),
+                item.key,
+            ),
+        )
+
+    @staticmethod
+    def _publishable_response(surface: str) -> bool:
+        """只拒绝空表层；代码、Markdown 和各语言文字均是可学习结构。"""
+        return bool(surface.strip())
+
+    def respond_graph(
+            self,
+            current: str,
+            *,
+            history: tuple[tuple[int, str], ...] = (),
+            minimum_confidence_permille: int = 700,
+            ) -> GraphDialogueAnswer | None:
+        """执行输入拆分→图路径理解/过程选择→结果组合的自由对话链。
+
+        该路径不读取旧字符 posting，也不返回随机表层。候选、回答和 trace
+        均由训练 SQLite 的 occurrence/图投影恢复；无候选时返回 ``None``，
+        由上层决定是否以正式协议错误结束。
+        """
+        if type(current) is not str or not current.strip():
+            raise ValueError("current 必须是非空文本")
+        if self._graph_candidate_count <= 0:
+            raise RuntimeError("graph dialogue runtime 未启用")
+        if (type(minimum_confidence_permille) is not int
+                or not 0 <= minimum_confidence_permille <= 1000):
+            raise ValueError("minimum_confidence_permille 必须是 0..1000")
+        query_tokens = _graph_understanding_stage(current)
+        query_features = _integer_token_features(query_tokens)
+        if not query_features:
+            return self._low_evidence_answer(
+                query_tokens, [], set(), 0, current)
+        query_features = tuple(dict.fromkeys(
+            (*_integer_token_unigrams(query_tokens), *query_features)))
+        # 冷索引只按持久化码点 hash 建立候选范围；真正的 token/n-gram
+        # 结构与 occurrence 正文在有限 shortlist 内再核验。这样启动和
+        # 常规查询都不会把全部候选表层加载到内存。
+        query_hash_sequence = tuple(
+            _FEATURE_HASH.h63(chr(value)) or 1
+            for token in query_tokens for value in token)
+        query_hashes = tuple(dict.fromkeys(query_hash_sequence))
+        hit_counts: Counter[tuple[int, int]] = Counter()
+        for key in self._load_graph_postings(query_hashes):
+            hit_counts[key] += 1
+        exact_keys = self._exact_graph_candidate_keys(
+            query_hash_sequence,
+            sum(len(token) for token in query_tokens),
+        )
+        candidate_keys = list(exact_keys)
+        if not exact_keys:
+            anchor_keys = self._anchor_graph_candidate_keys(query_tokens)
+            candidate_keys = list(dict.fromkeys((
+                *anchor_keys,
+                *sorted(
+                hit_counts,
+                key=lambda key: (-hit_counts[key], key),
+                )[:_GRAPH_DIALOGUE_MAX_HOT_CANDIDATES],
+            )))
+        if not candidate_keys:
+            return self._low_evidence_answer(
+                query_tokens, [], set(query_features), 0, current)
+        history_tokens = tuple(
+            token for _speaker, surface in history[-6:]
+            for token in _integer_tokens(surface))
+        history_features = set((*_integer_token_unigrams(history_tokens),
+                                *_integer_token_features(history_tokens)))
+        query_feature_set = set(query_features)
+        ranked: list[tuple[int, int, int, int, int, _GraphDialogueCandidate]] = []
+        # 倒排已经把范围限制在命中至少一个 token/n-gram 的候选；不能再按
+        # proposition 序号截前 N 条，否则早期的“你好”等合法路径会被任意
+        # 排序截掉。仅在排序结果阶段保留有限候选，保证计算和输出有界。
+        for ordinal, key in enumerate(candidate_keys):
+            candidate = self._materialize_graph_candidate(key)
+            candidate_features = set(candidate.current_features)
+            shared = len(query_feature_set & candidate_features)
+            if shared <= 0:
+                continue
+            long_shared = sum(1 for item in query_feature_set & candidate_features
+                              if item and item[0] > 1)
+            history_shared = (len(history_features & set(candidate.current_features))
+                              if history_features else 0)
+            # 长 token 片段、当前覆盖和上下文热区均为整数证据；不使用浮点。
+            exact = int(candidate.current_surface == current.strip())
+            if exact:
+                confidence = 1000
+            else:
+                # The query must cover a learned structural fragment.  A raw
+                # character overlap is insufficient for a multi-token turn;
+                # without a shared n-gram it remains an in-graph clarify,
+                # never a guessed answer.  All scores are integer evidence.
+                query_coverage = (1000 * shared
+                                  // max(1, len(query_feature_set)))
+                structure_bonus = min(250, long_shared * 125)
+                history_bonus = min(150, history_shared * 50)
+                confidence = min(
+                    1000,
+                    query_coverage + structure_bonus + history_bonus,
+                )
+                if len(query_tokens) > 1 and long_shared == 0:
+                    confidence = min(confidence, 599)
+            ranked.append((exact, confidence, long_shared, history_shared,
+                           -ordinal, candidate))
+        if not ranked:
+            return self._low_evidence_answer(
+                query_tokens, [], set(query_features), len(candidate_keys),
+                current)
+        ranked.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], item[4]))
+        publishable = tuple(item for item in ranked
+                            if self._publishable_response(item[5].response_surface))
+        if publishable:
+            ranked = list(publishable)
+        best = ranked[0]
+        # 对完全相同的已学输入，按图中回答路径的重复支持做统计聚合，
+        # 不以 proposition 序号随机挑一条表层。并列时以整数 token 序稳定决胜。
+        if best[0]:
+            exact_rows = tuple(item for item in ranked
+                               if item[0] and self._publishable_response(
+                                   item[5].response_surface))
+            if not exact_rows:
+                exact_rows = tuple(item for item in ranked if item[0])
+            response_counts = Counter(item[5].response_surface
+                                      for item in exact_rows)
+            winner_surface, _winner_count = min(
+                response_counts.items(),
+                key=lambda item: (
+                    -item[1], len(item[0]),
+                    tuple(ord(value) for value in item[0])))
+            best = min((item for item in exact_rows
+                        if item[5].response_surface == winner_surface),
+                       key=lambda item: item[4])
+        else:
+            ranked = ranked[:_GRAPH_DIALOGUE_MAX_CANDIDATES]
+            best = ranked[0]
+        # The current trained projection restores complete learned turns; it
+        # does not yet provide a proved compositional generator.  Therefore a
+        # non-exact input can only yield an in-graph clarification.  Never
+        # publish a merely similar occurrence as if it answered the user's
+        # sentence, even when the integer overlap score saturates.
+        if not best[0]:
+            transferred = self._transfer_answer(
+                query_tokens, current, ranked, len(candidate_keys))
+            if transferred is not None:
+                return transferred
+            response_class = self._response_class_answer(
+                query_tokens, ranked, len(candidate_keys))
+            if response_class is not None:
+                return response_class
+            candidate = self._query_clarification(
+                ranked, query_tokens, query_feature_set)
+            if candidate is None:
+                return self._low_evidence_answer(
+                    query_tokens, ranked, query_feature_set,
+                    len(candidate_keys), current)
+            return GraphDialogueAnswer(
+                _graph_result_stage(
+                    candidate.response_tokens, candidate.response_surface)[1],
+                candidate.source_hash, candidate.key,
+                0, GraphDialogueTrace(query_tokens, len(ranked), candidate.key, 0,
+                                      candidate.response_tokens, 0,
+                                      DIALOGUE_RESULT_CLARIFICATION, 0, 1),
+                len(candidate_keys))
+        if best[1] < minimum_confidence_permille:
+            candidate = self._query_clarification(
+                ranked, query_tokens, query_feature_set)
+            if candidate is None:
+                return self._low_evidence_answer(
+                    query_tokens, ranked, query_feature_set,
+                    len(candidate_keys), current)
+            return GraphDialogueAnswer(
+                _graph_result_stage(
+                    candidate.response_tokens, candidate.response_surface)[1],
+                candidate.source_hash, candidate.key,
+                0, GraphDialogueTrace(query_tokens, len(ranked), candidate.key, 0,
+                                      candidate.response_tokens, 0,
+                                      DIALOGUE_RESULT_CLARIFICATION, 0, 1),
+                len(candidate_keys))
+        if (not best[0] and len(ranked) > 1
+                and best[1] == ranked[1][1]
+                and best[2:4] == ranked[1][2:4]):
+            candidate = self._query_clarification(
+                ranked, query_tokens, query_feature_set)
+            if candidate is None:
+                return self._low_evidence_answer(
+                    query_tokens, ranked, query_feature_set,
+                    len(candidate_keys), current)
+            return GraphDialogueAnswer(
+                _graph_result_stage(
+                    candidate.response_tokens, candidate.response_surface)[1],
+                candidate.source_hash, candidate.key,
+                0, GraphDialogueTrace(query_tokens, len(ranked), candidate.key, 0,
+                                      candidate.response_tokens, 0,
+                                      DIALOGUE_RESULT_CLARIFICATION, 0, 1),
+                len(candidate_keys))
+        response_tokens = best[5].response_tokens
+        # 结果阶段沿 occurrence 恢复的回答 token 组合成输出；原始字符只在
+        # 该图路径已选定后用于渲染，不作为候选裁决依据。
+        result_tokens, surface = _graph_result_stage(
+            response_tokens, best[5].response_surface)
+        return GraphDialogueAnswer(
+            surface,
+            best[5].source_hash,
+            best[5].key,
+            best[1],
+            GraphDialogueTrace(
+                query_tokens,
+                len(ranked),
+                best[5].key,
+                best[0],
+                result_tokens,
+                best[1],
+                DIALOGUE_RESULT_EXACT,
+                0,
+                1,
+            ),
+            len(candidate_keys),
+        )
 
     def _load_integer_posting_index(self) -> None:
         """启动时把稀疏整数 posting 聚合到有界 runtime 倒排。
@@ -790,6 +1633,8 @@ class SqliteDialogueSuccessorRuntime:
 
 __all__ = [
     "DialogueSuccessorAnswer",
+    "GraphDialogueAnswer",
+    "GraphDialogueTrace",
     "DialogueSuccessorProtocol",
     "DialogueSuccessorTrainingRun",
     "DialogueSuccessorTrainingRuntime",

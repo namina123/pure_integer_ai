@@ -311,6 +311,7 @@ class TrainedDialogueMemoryGraph:
             surface: str,
             *,
             minimum_similarity_permille: int = 500,
+            speaker_kind: int | None = None,
             ) -> DialogueMemoryRecall | None:
         """按有界 posting 查询相关表层，并要求来源仍有活动 Memory manifest。"""
         if type(surface) is not str or not surface.strip():
@@ -318,21 +319,27 @@ class TrainedDialogueMemoryGraph:
         if (type(minimum_similarity_permille) is not int
                 or not 0 <= minimum_similarity_permille <= 1000):
             raise ValueError("Memory similarity 必须是 0..1000 整数")
+        if (speaker_kind is not None
+                and (type(speaker_kind) is not int or speaker_kind <= 0)):
+            raise ValueError("Memory speaker_kind 必须是正整数或 None")
         query_features = self._features(surface)
         hits: dict[int, int] = {}
         posting_reads = 0
         # 长特征优先；每个特征的 page-in 都有固定上限，不随总 Memory 线性扫描。
         for feature, width in sorted(
                 query_features, key=lambda item: (-item[1], item[0])):
+            where = {
+                "tenant_id": self.owner.tenant_id,
+                "user_id": self.owner.user_id,
+                "session_id": self.owner.session_id,
+                "feature_hash": feature,
+                "feature_width": width,
+            }
+            if speaker_kind is not None:
+                where["speaker_kind"] = speaker_kind
             rows = self.backend.select(
                 DIALOGUE_MEMORY_POSTING_TABLE,
-                where={
-                    "tenant_id": self.owner.tenant_id,
-                    "user_id": self.owner.user_id,
-                    "session_id": self.owner.session_id,
-                    "feature_hash": feature,
-                    "feature_width": width,
-                },
+                where=where,
                 order_by="turn_seq",
                 descending=True,
                 limit=_MAX_POSTINGS_PER_FEATURE,
@@ -361,17 +368,19 @@ class TrainedDialogueMemoryGraph:
                 1, len(query_exact) + len(candidate_exact))
             if score < minimum_similarity_permille:
                 continue
+            posting_where = {"source_hash": source_hash}
+            if speaker_kind is not None:
+                posting_where["speaker_kind"] = speaker_kind
             posting_rows = self.backend.select(
-                DIALOGUE_MEMORY_POSTING_TABLE,
-                where={"source_hash": source_hash})
+                DIALOGUE_MEMORY_POSTING_TABLE, where=posting_where)
             if not posting_rows:
                 raise RuntimeError("Memory 来源缺少整数 posting")
             turn_seq = posting_rows[0]["turn_seq"]
-            speaker_kind = posting_rows[0]["speaker_kind"]
+            candidate_speaker_kind = posting_rows[0]["speaker_kind"]
             if any(
-                    row["turn_seq"] != turn_seq
-                    or row["speaker_kind"] != speaker_kind
-                    for row in posting_rows):
+                row["turn_seq"] != turn_seq
+                or row["speaker_kind"] != candidate_speaker_kind
+                for row in posting_rows):
                 raise RuntimeError("Memory posting 来源元数据漂移")
             ranked.append((
                 score,
@@ -379,7 +388,7 @@ class TrainedDialogueMemoryGraph:
                 turn_seq,
                 record,
                 source,
-                speaker_kind,
+                candidate_speaker_kind,
             ))
         ranked.sort(key=lambda item: (-item[0], -item[1], -item[2]))
         if not ranked:
