@@ -220,10 +220,58 @@ class TrainedGraphQueryBridge:
         if hops and state.termination in {
                 TERMINATION_ANSWER_CLOSED, TERMINATION_NO_FRONTIER}:
             generation = self._generate_from_closed(hops, anchors)
+        # 阶段 C：把闭合命题经 ResponsePlan 组织并执行 token postcheck。生成
+        # dict 只作为可重放 trace；真实发布承重回答从 ResponsePlan 渲染。若
+        # plan 无法通过 postcheck（无结构证据/必填槽缺 token），则回答保持
+        # None 由上层 fail-closed，不退回旧表层回放。
+        response_plan = self._response_plan_from_closed(hops, anchors)
         return self._finalize(
             state, hops, termination=state.termination,
             reason=_TERMINATION_NAMES.get(state.termination, "OPEN"),
-            generation=generation)
+            generation=generation,
+            response_plan=(None if response_plan is None
+                           else response_plan.to_dict()))
+
+    def _best_closed_fact(
+            self,
+            hops: tuple[QueryHop, ...],
+            ) -> tuple[ActiveRelationSurface, object] | None:
+        """从 Core hops 反查可生成命题；无闭合事实返回 None。"""
+        core_hops = tuple(item for item in hops if item.space == _CORE)
+        for hop in core_hops:
+            if hop.predicate not in self.core_fact_index:
+                continue
+            fact = self.core_fact_index[hop.predicate]
+            try:
+                generated = self.core_runtime._generate_surface(fact)
+            except RuntimeError:
+                continue
+            if not generated.surface.strip():
+                continue
+            return fact, generated
+        return None
+
+    def _response_plan_from_closed(
+            self,
+            hops: tuple[QueryHop, ...],
+            anchors: tuple[ConceptAnchor, ...],
+            ) -> object | None:
+        """从已闭合 Core 事实构造可验证 ResponsePlan（阶段 C 发布承重路径）。
+
+        只接受通过 token postcheck 的 plan；失败返回 None 由上层 fail-closed，
+        不退回任何旧表层/近邻/整句回放。anchor 表层只作为 realization 证据。
+        """
+        from pure_integer_ai.experiments.generation_organization import (
+            plan_from_active_fact,
+        )
+        found = self._best_closed_fact(hops)
+        if found is None:
+            return None
+        fact, generated = found
+        try:
+            return plan_from_active_fact(fact, generated)
+        except (TypeError, ValueError):
+            return None
 
     def _generate_from_closed(
             self,
@@ -236,23 +284,10 @@ class TrainedGraphQueryBridge:
         重填到同 predicate/role 的生成框架，产出由图内 token 组合的新句子。
         anchor 输入表层不作为槽位，只作为 realization 证据。
         """
-        core_hops = tuple(item for item in hops if item.space == _CORE)
-        # 反向：把 hop 的 to_filler/表层还原为可生成命题。
-        best = None
-        for hop in core_hops:
-            if hop.predicate not in self.core_fact_index:
-                continue
-            fact = self.core_fact_index[hop.predicate]
-            try:
-                generated = self.core_runtime._generate_surface(fact)
-            except RuntimeError:
-                continue
-            if not generated.surface.strip():
-                continue
-            best = generated
-            break
-        if best is None:
+        found = self._best_closed_fact(hops)
+        if found is None:
             return None
+        _fact, best = found
         return {
             "kind": "slot_fill_generation",
             "surface": best.surface,
@@ -265,6 +300,7 @@ class TrainedGraphQueryBridge:
     def _finalize(state: QueryState, hops: tuple[QueryHop, ...], *,
                   termination: int, reason: str,
                   generation: dict[str, object] | None = None,
+                  response_plan: dict[str, object] | None = None,
                   ) -> dict[str, object]:
         """把最终状态、多跳路径与终止原因组装为可重放 trace。"""
         bindings = tuple(
@@ -304,6 +340,7 @@ class TrainedGraphQueryBridge:
             "evidence": evidence,
             "bindings": bindings,
             "generation": generation,
+            "response_plan": response_plan,
             "query_key": list(state.query_key),
             "state_key": list(state.stable_key()),
         }
