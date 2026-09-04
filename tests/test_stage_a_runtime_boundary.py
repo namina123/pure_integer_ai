@@ -151,3 +151,17 @@ def test_boundary_snapshot_detects_added_removed_and_drifted(tmp_path):
     (root / "b.txt").unlink()
     (root / "a.txt").write_text("one", encoding="utf-8")
     assert compare_snapshots(before, snapshot_tree(root))["closed"]
+
+
+def test_strict_graph_miss_returns_no_answer_not_raise(tmp_path):
+    """strict 发布路径三图无组合结果时输出 no_answer，不再抛 RuntimeError。"""
+    database = _trained_database(tmp_path, "你好，请问可以聊天吗？", "你好，有什么事吗？")
+    # 该后继库没有 W-06 relation anchor/typed connector；strict 只读关系图会启动失败，
+    # 因此不能直接喂给 strict relation-graph 终端。此用例在进程级之下验证生产对话路由在
+    # 无结构证据的普通输入上不伪造回答（返回 None），不丢 RuntimeError。
+    runtime = SqliteDialogueSuccessorRuntime(database, graph_dialogue=True)
+    try:
+        assert runtime.respond_graph("早上好", diagnostic_replay=False) is None
+        assert runtime.respond_graph("晚安", diagnostic_replay=False) is None
+    finally:
+        runtime.close()

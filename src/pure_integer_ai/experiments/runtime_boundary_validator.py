@@ -160,8 +160,9 @@ def validate_runtime_boundary(
     comparison = evidence["tree_comparison"]
     closed = bool(comparison["closed"])
     external = bool(evidence["session_external"])
-    # 严格发布模式在全部图路径无结果时按协议失败关闭；进程退出码因此
-    # 可以是非零（fail-closed），但绝不能是"正常退出且模型目录漂移"。
+    # 严格发布模式在全部图路径无结果时不伪造表层：以 no_answer 空回答
+    # 结束本轮，进程必须正常退出且模型目录保持闭合；任何文件新增/漂移或
+    # 会话落在 release root 内都判定 FAIL。
     drift = not closed or not external
     status = "FAIL" if drift else "PASS"
     return {

@@ -138,7 +138,12 @@ def run_trained_relation_graph_terminal(
         metrics_output: str | Path | None = None,
         strict_graph: bool = False,
         ) -> int:
-    """运行图优先交互；strict_graph 发布模式只接受三类图路由。"""
+    """运行图优先交互；strict_graph 发布模式只接受三类图路由。
+
+    三类图全部无组合结果时不伪造表层：JSONL 协议输出 type=no_answer
+    （text 为空 + source.kind=uncovered），terminal 交互输出空行，进程保持
+    运行以继续后续请求（阶段 D/E 前该语义缺口保留为内部 no_answer）。
+    """
     if strict_graph:
         if fallback_surfaces not in (None, ()):
             raise ValueError("strict graph 不接受 fallback_surfaces")
@@ -290,8 +295,10 @@ def run_trained_relation_graph_terminal(
                     # A release must never expose a boundary route.  If all
                     # three trained graph owners fail to produce a path, the
                     # protocol fails closed after the input has been recorded.
-                    raise RuntimeError(
-                        "strict graph 三类图均无可组合结果")
+                    # 阶段 D/E 前该语义缺口保留为可验证的内部状态；对外仍以
+                    # 协议级 stop（不是伪造表层）结束本轮，进程可继续服务
+                    # 后续请求，不会因一句未覆盖闲聊崩溃。
+                    surface = ""
                 if result is not None:
                     route_counts["core_graph"] += 1
                     core_fact_reads += result.fact_reads
@@ -302,7 +309,8 @@ def run_trained_relation_graph_terminal(
                     route_counts["dialogue_graph"] += 1
                     dialogue_posting_reads += dialogue_answer.posting_rows_read
                 elif strict_graph:
-                    raise RuntimeError("strict graph 禁止 boundary 路由")
+                    # 三图均无可组合结果：不伪造表层，不计入任何 route。
+                    pass
                 else:
                     route_counts["boundary"] += 1
                 if protocol_stream:
@@ -378,14 +386,22 @@ def run_trained_relation_graph_terminal(
                                 == DIALOGUE_RESULT_CLARIFICATION):
                             response["type"] = "clarify"
                             response["source"]["status"] = "insufficient_evidence"
+                    if strict_graph and not surface.strip():
+                        response["type"] = "no_answer"
+                        response["source"] = {
+                            "kind": "uncovered",
+                            "status": "three_graph_no_combination",
+                        }
                     payload = json.dumps(response,
                         ensure_ascii=False, sort_keys=True,
                         separators=(",", ":")).encode("utf-8") + b"\n"
                     stream_out.write(payload)
+                elif strict_graph and not surface.strip():
+                    stream_out.write(b"\n")
                 else:
                     stream_out.write(surface.encode("utf-8") + b"\n")
                 stream_out.flush()
-                if memory is not None:
+                if memory is not None and surface.strip():
                     memory.append(surface, speaker_kind=2)
                 history.extend(((1, text), (2, surface)))
                 if len(history) > 6:
