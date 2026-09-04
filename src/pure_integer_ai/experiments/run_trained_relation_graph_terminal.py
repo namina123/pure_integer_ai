@@ -329,7 +329,10 @@ def run_trained_relation_graph_terminal(
                         }
                         if strict_graph:
                             response["source"]["generation"] = {
-                                "kind": "typed_connector_graph",
+                                "kind": (
+                                    "typed_connector_graph"
+                                    if result.generation.representations
+                                    else "structural_connector_graph"),
                                 "connector": list(
                                     result.generation.connector.stable_key()),
                                 "representation_count": len(

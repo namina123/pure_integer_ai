@@ -661,7 +661,12 @@ class TrainedGenerationConnectorRuntime:
             source: ActiveRelationGenerationInput,
             fact: ActiveRelationSurface,
             ) -> GraphRelationGeneration:
-        """执行 G-00/G-01/G-02/S-07/G-03/R-01 并渲染 Core 命题。"""
+        """执行 G-00/G-01/G-02/S-07/G-03/R-01 并渲染 Core 命题。
+
+        已核验 Core 命题但发布图 R-01 尚未 realize 该 claim 原文时，
+        退回 connector 帧的 structural 出口（唯一可见槽 = claim 本体），
+        绝不因缺词形把整个发布路由打死。
+        """
         if not isinstance(source, ActiveRelationGenerationInput):
             raise TypeError("relation generation source 类型错误")
         if not isinstance(fact, ActiveRelationSurface):
@@ -669,12 +674,36 @@ class TrainedGenerationConnectorRuntime:
         if source.proposition.definition.proposition != fact.proposition:
             raise TrainedGenerationConnectorError(
                 "relation generation Core 命题与查询事实漂移")
-        templates = self.templates()
-        if len(templates) != 1:
+        # A typed stage-4 run may legitimately publish several single-claim
+        # connector templates under one LanguageBranch (each authored claim
+        # gets its own connector/sentence/proposition-structure), while a
+        # production Core query carries its own semantic predicate.  The
+        # connector theory is an answer-realization frame: its claim slot is
+        # refilled per query from this fact's evidence, so every same-shape
+        # template in the branch renders the incoming claim identically.
+        # Therefore a blanket len(templates) != 1 check is wrong for a
+        # complete typed model.  Only two conditions are genuinely unsafe:
+        # (1) templates that belong to different LanguageBranches (mixed
+        #     language/realization), or (2) templates under one branch that
+        #     disagree on the realized semantic predicate.  Otherwise choose
+        #     the deterministically first template.
+        candidate_templates = ()
+        branch_keys = set()
+        predicates = set()
+        for owner in self._branches:
+            branch_keys.add(owner.branch)
+            for candidate in owner.templates:
+                candidate_templates += (candidate,)
+                predicates.add(candidate.predicate)
+        if not candidate_templates or len(branch_keys) != 1:
             raise TrainedGenerationConnectorError(
-                "当前发布图没有唯一默认 LanguageBranch connector: "
-                f"count={len(templates)}")
-        template = templates[0]
+                "发布图没有唯一 LanguageBranch connector 域: "
+                f"branches={len(branch_keys)}")
+        if len(predicates) != 1:
+            raise TrainedGenerationConnectorError(
+                "发布图 LanguageBranch connector 覆盖不同语义谓词: "
+                f"predicates={len(predicates)}")
+        template = candidate_templates[0]
         protocols = _generation_protocols(
             self.context, template.language_branch)
         bound = _bound_relation_proposition(
@@ -718,6 +747,32 @@ class TrainedGenerationConnectorRuntime:
             owner=template.language_branch.owner,
             versions=template.language_branch.versions,
         )
+        # R-01 只在训练把该 claim 原文的 Representation 注册进 realizes 时，typed
+        # G-03 才能按 expected_value 精确选中一个词形。若发布图 connector 分支从未
+        # realize 过这条 claim 文本（0903e 含全量 authored claims，f 切片只含通用帧），
+        # typed preview 会以 surface_missing 硬失败并把整个进程打死。这里对已核验的
+        # Core 命题仍保留结构化出口：connector 帧已把非命题槽全部声明为 S-07 silent，
+        # 唯一可见槽就是该 claim 本体，因此按帧结构发射 claim 与 0903e 的 typed 输出
+        # 同源同面（非整句 successor 回放，文本来自 Core Evidence Span 包络），并以
+        # 独立 trace 标记 structural 出口，保证发布路由不误标为 typed 渲染。
+        if not any(
+                binding.filler == expected_representation
+                for item in realizes
+                for binding in item.proposition.bindings):
+            structural_trace = integer_tuple_fingerprint(
+                (*template.connector.stable_key(),
+                 *(ord(character) for character in claim)),
+                domain="trained.relation.typed.structural.v1",
+            )
+            return GraphRelationGeneration(
+                claim,
+                source.proposition.definition.proposition,
+                fact.source_hash,
+                1,
+                template.connector,
+                (),
+                structural_trace,
+            )
         state = LogicEvidenceState.from_status(
             source.snapshot.epistemic_status)
         candidate = GenerationCandidate(
