@@ -23,7 +23,17 @@ def main() -> int:
     ROOT.mkdir(parents=True)
     before = pair_probe.base._sha256(DATABASE)
     keys = pair_probe._inventory_by_kind()
-    triple = tuple(sorted((keys[4], keys[16], keys[17])))
+    variant = os.environ.get("PURE_INTEGER_CORE_TRIPLE_VARIANT", "primary")
+    if variant == "primary":
+        triple = tuple(sorted((keys[4], keys[16], keys[17])))
+    elif variant == "alternate":
+        # The alternate keys are selected deterministically from the same
+        # trained Core graph, not synthesized or copied from a surface.
+        from scripts.select_core_graph_input_keys import select_core_graph_input_keys
+        selected = dict(select_core_graph_input_keys(DATABASE, per_kind=2))
+        triple = tuple(sorted((selected[4][0], selected[16][1], selected[17][0])))
+    else:
+        raise ValueError(f"unknown triple variant: {variant}")
     checkpoint = ROOT / "triple-001.checkpoint.json"
     pair_probe._write_json(checkpoint, {
         "format": "PURE_INTEGER_CORE_GRAPH_TRIPLE_CHECKPOINT_V1",

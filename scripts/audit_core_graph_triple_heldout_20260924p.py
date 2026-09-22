@@ -4,14 +4,18 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from scripts.audit_core_graph_pair_heldout_20260924o import _response_plan_refs
 
 
-RUN = Path(r"K:/pure_integer_ai_work/current_runs/core-graph-triple-heldout-20260924p")
-OUT = Path(
-    r"K:/pure_integer_ai_work/audits/core-graph-triple-qualification-20260924p")
+RUN = Path(os.environ.get(
+    "PURE_INTEGER_CORE_TRIPLE_AUDIT_RUN_ROOT",
+    r"K:/pure_integer_ai_work/current_runs/core-graph-triple-heldout-20260924p"))
+OUT = Path(os.environ.get(
+    "PURE_INTEGER_CORE_TRIPLE_AUDIT_OUT",
+    r"K:/pure_integer_ai_work/audits/core-graph-triple-qualification-20260924p"))
 
 
 def _sha256(path: Path) -> str:
