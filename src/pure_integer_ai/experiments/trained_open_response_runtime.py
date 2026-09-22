@@ -774,10 +774,10 @@ def _generic_graph_values(
     selected_by_slot: dict[
         ObjectIdentity, tuple[ObjectIdentity, list[BindingEntry]]
     ] = {}
-    if len(contract.graph_slots) > 1:
-        # 多槽不能分别从全局候选集任取“第一个”。先按同一闭合关系的
+    if contract.graph_slots:
+        # 图槽不能分别从全局候选集任取“第一个”。先按同一闭合关系的
         # proposition/role/member ordinal 构造完整赋值；只有所有可用关系
-        # 给出同一组 filler 时才闭合。这样两个 Entity/Event/Concept 槽的
+        # 给出同一组 filler 时才闭合。这样 Entity/Event/Concept 槽的
         # 次序来自训练图角色拓扑，而不是 ObjectIdentity 排序或表层位置猜测。
         assignments: dict[
             tuple[tuple[int, ...], ...],
@@ -904,16 +904,34 @@ def _generic_graph_values(
                             and getattr(hop, "proposition", ())
                             not in requested_propositions):
                         continue
-                    eligible_hops.append(hop)
+                    eligible_hops.append((hop, fillers))
             # A direct active Proposition hop contains the authoritative
             # ordered relation members.  Raw ontology hops from the same root
             # are structural evidence only and must not create competing
             # connector assignments.
             if not eligible_hops:
                 eligible_hops = [
-                    hop for hop in graph_hops
+                    (hop, getattr(hop, "relation_fillers", ()))
+                    for hop in graph_hops
                     if getattr(hop, "space", None) == SPACE_CORE]
-            for hop in eligible_hops:
+            # A root can occur in several trained relations.  Prefer the
+            # relation witness carrying the most explicit roots in this same
+            # query; stable-key order and source text never break ties.
+            if requested_roots and eligible_hops:
+                def root_overlap(item):
+                    hop, fillers = item
+                    keys = {
+                        getattr(hop, "from_filler", ()),
+                        getattr(hop, "to_filler", ()),
+                        *fillers,
+                    }
+                    return len(keys & requested_roots)
+                highest_overlap = max(
+                    root_overlap(item) for item in eligible_hops)
+                eligible_hops = [
+                    item for item in eligible_hops
+                    if root_overlap(item) == highest_overlap]
+            for hop, _fillers in eligible_hops:
                 if getattr(hop, "space", None) != SPACE_CORE:
                     continue
                 if requested_roots:
