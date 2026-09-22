@@ -873,9 +873,15 @@ def _generic_graph_values(
                 tuple[tuple[int, ...], ...],
                 dict[ObjectIdentity, tuple[ObjectIdentity, list[BindingEntry]]],
             ] = {}
+            # Generation may reach this function through the same QueryState
+            # after the bridge has normalized requested graph keys.  The
+            # canonical visible-key set is therefore the authoritative
+            # explicit-root carrier; relying only on the optional call
+            # argument made proposition slots disappear during generation.
             requested_roots = frozenset(explicit_graph_input_keys)
+            root_candidates = requested_roots | frozenset(graph_visible_keys)
             requested_propositions = frozenset(
-                key for key in requested_roots
+                key for key in root_candidates
                 if (_graph_identity(key) is not None
                     and _graph_identity(key).object_kind == OBJECT_PROPOSITION))
             eligible_hops = []
@@ -964,6 +970,20 @@ def _generic_graph_values(
                             grouped[category].append(identity)
                     if identity.object_kind == OBJECT_PROPOSITION:
                         grouped[GENERIC_RESPONSE_GRAPH_TOPIC].append(identity)
+                # An explicit proposition graph root is a first-class Core
+                # binding in this same QueryState, but it is intentionally not
+                # duplicated in ``relation_fillers`` (those are ordered
+                # relation members).  Permit a topic/proposition slot to
+                # consume that root without inventing an ordinal or reading
+                # source text.  The explicit-root guard keeps ordinary text
+                # relations on their existing member-only contract.
+                if requested_propositions:
+                    for root_key in requested_propositions:
+                        root = _graph_identity(root_key)
+                        if root is not None and root in by_category[
+                                GENERIC_RESPONSE_GRAPH_PROPOSITION]:
+                            grouped[GENERIC_RESPONSE_GRAPH_TOPIC].append(root)
+                            grouped[GENERIC_RESPONSE_GRAPH_PROPOSITION].append(root)
                 assignment: dict[
                     ObjectIdentity,
                     tuple[ObjectIdentity, list[BindingEntry]],
@@ -1150,19 +1170,47 @@ class _GenericResponseDirectives:
         if (set(graph_values)
                 != {item.binding.slot for item in contract.graph_slots}):
             raise ValueError("generic G-03 graph fillers do not cover its contract")
+        graph_categories = {
+            item.binding.slot: item.category for item in contract.graph_slots
+        }
         result = []
         for value in sentence.values:
             source = sources[value.slot]
             directive = directives[value.slot]
             silent = source == context_binding
+            # A proposition supplied as an explicit graph root is structural
+            # QueryState evidence, not an observed language span.  Keep it in
+            # the typed connector and its proof, but make that slot silent so
+            # G-03 never invents a surface from the proposition stable key or
+            # falls back to source text.  Entity/event slots still require an
+            # exact observed span below.
+            graph_value = graph_values.get(value.slot)
+            structural_silent = (
+                not silent
+                and graph_value is not None
+                and graph_value.observed_surface is None
+                and graph_value.filler.object_kind == OBJECT_PROPOSITION
+                and graph_categories.get(value.slot) in {
+                    GENERIC_RESPONSE_GRAPH_TOPIC,
+                    GENERIC_RESPONSE_GRAPH_PROPOSITION,
+                }
+            )
+            if structural_silent:
+                if directive.surface_prefix_steps:
+                    raise ValueError(
+                        "proposition graph root cannot use surface prefix steps")
+                silent = True
             if silent:
                 if (value.filler != context_identity
-                        or directive.action != self.surface_protocol.silent_action):
+                        and not structural_silent):
+                    raise ValueError(
+                        "generic 静默槽没有绑定当前 Memory 上下文")
+                if (not structural_silent
+                        and directive.action != self.surface_protocol.silent_action):
                     raise ValueError("generic 静默槽没有绑定当前 Memory 上下文")
                 budget = None
                 use_key = ()
             elif source.source == self.value_protocol.role_filler_source:
-                graph_value = graph_values.get(value.slot)
                 if (graph_value is None
                         or value.filler != graph_value.filler
                         or directive.action != self.surface_protocol.emit_action):
@@ -1208,7 +1256,8 @@ class _GenericResponseDirectives:
             result.append(SurfaceSlotDirective(
                 sentence.address,
                 value.slot,
-                directive.action,
+                (self.surface_protocol.silent_action
+                 if structural_silent else directive.action),
                 directive.instruction,
                 trace,
                 directive.surface_prefix_steps,
