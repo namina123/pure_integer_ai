@@ -92,27 +92,27 @@ def learned(adapted):
 
 def test_w06_learning_closes_current_train_lifecycle_without_rejection_pollution(
         learned):
-    """当前 50 条 accepted Evidence 必须形成真实 H-05/R-00 分态结果。"""
+    """当前语义唯一化后的 accepted Evidence 必须形成真实 H-05/R-00 分态结果。"""
     _backend, runtime = learned
     assert runtime.report() == W06LearningResult(
-        candidate_count=50,
+        candidate_count=40,
         schema_rejection_count=1,
         relation_family_count=14,
         evidence_application_count=50,
-        evidence_account_count=64,
-        active_candidate_count=17,
+        evidence_account_count=65,
+        active_candidate_count=14,
         archived_candidate_count=19,
-        superseded_candidate_count=7,
-        conflict_candidate_count=13,
+        superseded_candidate_count=0,
+        conflict_candidate_count=7,
         unknown_candidate_count=1,
         reparse_count=7,
         withdrawal_count=0,
     )
     candidate_report = runtime.learning.report()
-    assert candidate_report.candidate_count == 50
-    assert candidate_report.prediction_count == 64
-    assert candidate_report.active_projection_count == 17
-    assert len(runtime.active_candidates()) == 17
+    assert candidate_report.candidate_count == 40
+    assert candidate_report.prediction_count == 57
+    assert candidate_report.active_projection_count == 14
+    assert len(runtime.active_candidates()) == 14
 
 
 def test_w06_learning_materializes_semantic_definitions_and_fourteen_families(
@@ -184,25 +184,18 @@ def test_w06_learning_preserves_refute_conflict_unknown_archive_and_projection(
 
 def test_w06_parser_revision_supports_replacement_before_superseding_old_candidate(
         learned):
-    """七个 reparse 必须先激活 replacement，再以派生 refute 退出旧候选。"""
+    """语义唯一化后 reparse 保留同一命题，不再制造 superseded 候选。"""
     _backend, runtime = learned
     reparses = tuple(
         item for item in runtime.applications() if item.reparse)
     assert len(reparses) == 7
     for application in reparses:
-        assert len(application.superseded_candidates) == 1
-        target = application.superseded_candidates[0]
-        replacement = application.binding.candidate
-        target_snapshot = runtime.snapshot_for(target)
-        replacement_snapshot = runtime.snapshot_for(replacement)
-        assert target_snapshot.snapshot.lifecycle == LIFECYCLE_SUPERSEDED
-        assert replacement_snapshot.active_fact is not None
-        transition = runtime.learning.engine.ledger.transition_history(
-            target_snapshot.formation.hypothesis)[-1]
-        assert transition.replacement == replacement_snapshot.formation.hypothesis
-        assert application.accounts[0].candidate == replacement
-        assert application.accounts[-1].candidate == target
-        assert application.accounts[-1].derived_supersede is True
+        assert len(application.superseded_candidates) == 0
+        assert application.binding.candidate in {
+            account.candidate for account in application.accounts
+        }
+        assert all(account.derived_supersede is False
+                   for account in application.accounts)
 
 
 def test_w06_register_and_evidence_routes_are_deduplicated(learned, adapted):

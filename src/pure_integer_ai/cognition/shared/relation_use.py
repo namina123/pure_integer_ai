@@ -28,8 +28,10 @@ from pure_integer_ai.cognition.shared.semantic_object import (
 )
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 
-_USE_EVENT_VERSION = 1
-_USE_SNAPSHOT_VERSION = 1
+_USE_EVENT_VERSION = 2
+_USE_EVENT_VERSION_LEGACY = 1
+_USE_SNAPSHOT_VERSION = 2
+_USE_SNAPSHOT_VERSION_LEGACY = 1
 
 
 class RelationUseIntegrityError(RuntimeError):
@@ -332,6 +334,18 @@ class RelationUseWriteMetadata:
             *_pack(self.qualifiers),
         )
 
+    @classmethod
+    def from_stable_key(cls, key: tuple[int, ...]) -> "RelationUseWriteMetadata":
+        """从 Event 身份恢复 metadata，限定载荷只在 Event 内保存一次。"""
+        key = _strict_key(key, where="RelationUseWriteMetadata.stable_key")
+        if len(key) < 4:
+            raise RelationUseIntegrityError("Use metadata 稳定键长度非法")
+        qualifiers, cursor = _take(
+            key, 3, label="metadata qualifiers", allow_empty=True)
+        if cursor != len(key):
+            raise RelationUseIntegrityError("Use metadata 稳定键含尾随字段")
+        return cls(key[0], key[1], key[2], qualifiers)
+
 
 @dataclass(frozen=True)
 class MaterializedRelationUse:
@@ -364,6 +378,10 @@ class RelationUseGraph:
                 *protocol.state_identities(),
             )
         }
+        self._route_events: dict[
+            tuple[tuple[int, ...], tuple[int, ...]], ObjectIdentity
+        ] = {}
+        self._route_index_loaded = False
 
     def preflight_many(
             self, definitions: tuple[RelationUseDefinition, ...], *,
@@ -374,9 +392,14 @@ class RelationUseGraph:
         if len(set(routes)) != len(routes):
             raise RelationUseIntegrityError("同批 Core Use 路由不得重复")
         for definition in definitions:
-            event = self._event_identity(definition)
-            if self.ontology.resolve(event) is not None:
-                prior = self.read(event)
+            event = self._event_identity(definition, metadata)
+            existing_event = (
+                event if self.ontology.resolve(event) is not None else None)
+            if existing_event is None:
+                self._ensure_route_index()
+                existing_event = self._route_events.get(definition.route_key())
+            if existing_event is not None:
+                prior = self.read(existing_event)
                 if prior.definition != definition:
                     raise RelationUseIntegrityError(
                         "同一 Core Use 路由已绑定不同采用事实")
@@ -392,8 +415,9 @@ class RelationUseGraph:
         """整批预检后幂等写入 Use 拓扑，snapshot 最后落图。"""
         self.preflight_many(definitions, metadata=metadata)
         for definition in definitions:
-            event_identity_value = self._event_identity(definition)
+            event_identity_value = self._event_identity(definition, metadata)
             event = self.ontology.materialize(event_identity_value)
+            self._route_events[definition.route_key()] = event_identity_value
             proposition = self.ontology.materialize(definition.proposition)
             hypothesis = self.ontology.materialize(
                 definition.hypothesis.object_identity())
@@ -416,7 +440,8 @@ class RelationUseGraph:
                     predicate, event, target,
                     scope=definition.context.scope,
                     metadata=metadata,
-                    qualifiers=metadata.qualifiers,
+                    qualifiers=self._edge_qualifiers(
+                        event_identity_value, metadata),
                 )
             self._relate(
                 self.protocol.event_snapshot,
@@ -426,7 +451,10 @@ class RelationUseGraph:
                 metadata=metadata,
                 qualifiers=self._snapshot_qualifiers(definition, metadata),
             )
-        return tuple(self.read(self._event_identity(item)) for item in definitions)
+        return tuple(
+            self.read(self._event_identity(item, metadata))
+            for item in definitions
+        )
 
     def read(self, event: ObjectIdentity) -> MaterializedRelationUse:
         """从 Event snapshot 和全部 typed 边双向恢复一次 Core Use。"""
@@ -445,7 +473,12 @@ class RelationUseGraph:
             raise RelationUseIntegrityError(
                 "Core Use Event snapshot 必须是唯一自指 statement")
         definition, metadata = self._parse_snapshot(snapshots[0])
-        if self._event_identity(definition) != event:
+        event_version = self._event_key(event)[0]
+        expected_event = self._event_identity(
+            definition,
+            metadata if event_version == _USE_EVENT_VERSION else None,
+        )
+        if expected_event != event:
             raise RelationUseIntegrityError("Core Use Event 路由与 snapshot 不一致")
         expected = (
             (self.protocol.event_proposition, definition.proposition),
@@ -461,6 +494,11 @@ class RelationUseGraph:
             ),
         )
         statements = [snapshots[0]]
+        snapshot_qualifiers = (
+            self._legacy_snapshot_qualifiers(definition, metadata)
+            if event_version == _USE_EVENT_VERSION_LEGACY
+            else self._snapshot_qualifiers(definition, metadata)
+        )
         for predicate, target in expected:
             rows = self.ontology.statements(
                 predicate=self._refs[predicate],
@@ -472,12 +510,12 @@ class RelationUseGraph:
                     "Core Use Event typed 拓扑缺失或存在竞争端点")
             self._validate_statement(
                 rows[0], definition.context.scope, metadata,
-                metadata.qualifiers,
+                self._edge_qualifiers(event, metadata),
             )
             statements.append(rows[0])
         self._validate_statement(
             snapshots[0], definition.context.scope, metadata,
-            self._snapshot_qualifiers(definition, metadata),
+            snapshot_qualifiers,
         )
         return MaterializedRelationUse(
             definition,
@@ -501,6 +539,8 @@ class RelationUseGraph:
                 raise RelationUseIntegrityError(
                     "Use snapshot Event 使用了其他协议命名空间")
             events[identity] = identity
+            self._route_events[self._parse_event_route(identity)[1:3]] = identity
+        self._route_index_loaded = True
         return tuple(
             self.read(events[key])
             for key in sorted(events, key=ObjectIdentity.stable_key)
@@ -510,16 +550,45 @@ class RelationUseGraph:
         """在已复制的 Core 图上重建同一 Use 协议 facade。"""
         return RelationUseGraph(ontology, self.protocol)
 
-    def _event_identity(self, definition: RelationUseDefinition) -> ObjectIdentity:
-        """以来源、完整 context 和局部 use_key 构造一等 Event 路由身份。"""
-        return event_identity(
-            definition.context.source,
-            (
-                _USE_EVENT_VERSION,
+    def _ensure_route_index(self) -> None:
+        """按需建立一次 route→Event 索引，增量写入不再扫描全历史。"""
+        if not self._route_index_loaded:
+            self.history()
+
+    def _event_identity(
+            self, definition: RelationUseDefinition,
+            metadata: RelationUseWriteMetadata | None = None,
+            ) -> ObjectIdentity:
+        """以来源和完整 Use payload 构造一等 Event 路由身份。
+
+        v2 将 definition/metadata 从每条 assertion qualifier 移到 Event
+        对象身份中；Event 只物化一次，role/snapshot 边只保存短版本标记，
+        因而不会把完整 proof 复制到五条 role 边。
+        """
+        return self._event_identity_versioned(definition, metadata)
+
+    def _event_identity_versioned(
+            self, definition: RelationUseDefinition,
+            metadata: RelationUseWriteMetadata | None,
+            ) -> ObjectIdentity:
+        """构造 v1 兼容或 v2 紧凑 Event 身份。"""
+        if metadata is None:
+            declaration = (
+                _USE_EVENT_VERSION_LEGACY,
                 *_pack(self.protocol.event_namespace_key),
                 *_pack(definition.context.stable_key()),
                 *_pack(definition.use_key),
-            ),
+            )
+        else:
+            declaration = (
+                _USE_EVENT_VERSION,
+                *_pack(self.protocol.event_namespace_key),
+                *_pack(definition.stable_key()),
+                *_pack(metadata.stable_key()),
+            )
+        return event_identity(
+            definition.context.source,
+            declaration,
         )
 
     @staticmethod
@@ -538,24 +607,77 @@ class RelationUseGraph:
             ) -> tuple[tuple[int, ...], RelationUseContext, tuple[int, ...]]:
         """解析 Event 的协议命名空间、完整 context 和局部 use_key。"""
         key = self._event_key(event)
+        namespace, cursor = _take(key, 1, label="event namespace")
+        if key[0] == _USE_EVENT_VERSION_LEGACY:
+            context_key, cursor = _take(key, cursor, label="event context")
+            use_key, cursor = _take(key, cursor, label="event use key")
+            if cursor != len(key):
+                raise RelationUseIntegrityError(
+                    "Relation Use Event 含尾随字段")
+            context = RelationUseContext.from_stable_key(context_key)
+            if semantic_source(event) != context.source:
+                raise RelationUseIntegrityError(
+                    "Relation Use Event 来源与 context 不一致")
+            return namespace, context, use_key
         if key[0] != _USE_EVENT_VERSION:
             raise RelationUseIntegrityError("Relation Use Event 版本未注册")
+        definition_key, cursor = _take(
+            key, cursor, label="event definition")
+        _metadata_key, cursor = _take(key, cursor, label="event metadata")
+        if cursor != len(key):
+            raise RelationUseIntegrityError(
+                "Relation Use Event 含尾随字段")
+        definition = RelationUseDefinition.from_stable_key(definition_key)
+        if semantic_source(event) != definition.context.source:
+            raise RelationUseIntegrityError(
+                "Relation Use Event 来源与 context 不一致")
+        return namespace, definition.context, definition.use_key
+
+    def _event_payload(
+            self, event: ObjectIdentity,
+            ) -> tuple[tuple[int, ...], RelationUseDefinition,
+                       RelationUseWriteMetadata | None]:
+        """恢复 Event 的 namespace、Use definition 和可选 metadata。"""
+        key = self._event_key(event)
+        if not key:
+            raise RelationUseIntegrityError("Relation Use Event key 为空")
         namespace, cursor = _take(key, 1, label="event namespace")
-        context_key, cursor = _take(key, cursor, label="event context")
-        use_key, cursor = _take(key, cursor, label="event use key")
+        if key[0] == _USE_EVENT_VERSION_LEGACY:
+            raise RelationUseIntegrityError(
+                "legacy Relation Use Event 未内嵌 definition")
+        if key[0] != _USE_EVENT_VERSION:
+            raise RelationUseIntegrityError("Relation Use Event 版本未注册")
+        definition_key, cursor = _take(key, cursor, label="event definition")
+        metadata_key, cursor = _take(key, cursor, label="event metadata")
         if cursor != len(key):
             raise RelationUseIntegrityError("Relation Use Event 含尾随字段")
-        context = RelationUseContext.from_stable_key(context_key)
-        if semantic_source(event) != context.source:
-            raise RelationUseIntegrityError("Relation Use Event 来源与 context 不一致")
-        return namespace, context, use_key
+        definition = RelationUseDefinition.from_stable_key(definition_key)
+        metadata = RelationUseWriteMetadata.from_stable_key(metadata_key)
+        if semantic_source(event) != definition.context.source:
+            raise RelationUseIntegrityError(
+                "Relation Use Event 来源与 context 不一致")
+        return namespace, definition, metadata
 
     def _parse_snapshot(
             self, statement: GraphStatement,
             ) -> tuple[RelationUseDefinition, RelationUseWriteMetadata]:
         """从 snapshot qualifiers 恢复 Use 定义和外部来源限定键。"""
         qualifiers = statement.assertion.qualifiers
-        if not qualifiers or qualifiers[0] != _USE_SNAPSHOT_VERSION:
+        if not qualifiers:
+            raise RelationUseIntegrityError("Core Use snapshot 版本未注册")
+        event = self.ontology.identity_of(statement.subject)
+        if qualifiers == (_USE_SNAPSHOT_VERSION,):
+            _namespace, definition, metadata = self._event_payload(event)
+            if metadata is None:
+                raise RelationUseIntegrityError(
+                    "v2 snapshot 缺少 Event metadata")
+            assertion = statement.assertion
+            if (assertion.provenance_kind != metadata.provenance_kind
+                    or assertion.epistemic_origin != metadata.epistemic_origin
+                    or assertion.content_version != metadata.content_version):
+                raise RelationUseIntegrityError("Use snapshot metadata 不一致")
+            return definition, metadata
+        if qualifiers[0] != _USE_SNAPSHOT_VERSION_LEGACY:
             raise RelationUseIntegrityError("Core Use snapshot 版本未注册")
         definition_key, cursor = _take(
             qualifiers, 1, label="snapshot definition")
@@ -579,12 +701,29 @@ class RelationUseGraph:
     def _snapshot_qualifiers(
             definition: RelationUseDefinition,
             metadata: RelationUseWriteMetadata) -> tuple[int, ...]:
-        """把完整 Use snapshot 与调用方限定键编码为一份图内载荷。"""
+        """返回紧凑 snapshot 标记；完整 payload 位于唯一 Event 身份。"""
+        return (_USE_SNAPSHOT_VERSION,)
+
+    @staticmethod
+    def _legacy_snapshot_qualifiers(
+            definition: RelationUseDefinition,
+            metadata: RelationUseWriteMetadata,
+            ) -> tuple[int, ...]:
+        """重建 v1 snapshot 限定项，仅供旧 Event 读取兼容。"""
         return (
-            _USE_SNAPSHOT_VERSION,
+            _USE_SNAPSHOT_VERSION_LEGACY,
             *_pack(definition.stable_key()),
             *_pack(metadata.qualifiers),
         )
+
+    @staticmethod
+    def _edge_qualifiers(
+            event: ObjectIdentity,
+            metadata: RelationUseWriteMetadata,
+            ) -> tuple[int, ...]:
+        """v2 role 边只留短标记，旧 Event 保留原 metadata qualifier。"""
+        key = RelationUseGraph._event_key(event)
+        return (2,) if key and key[0] == _USE_EVENT_VERSION else metadata.qualifiers
 
     def _relate(
             self, predicate: ObjectIdentity, subject: TypedRef,

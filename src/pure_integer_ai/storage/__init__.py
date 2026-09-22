@@ -73,9 +73,6 @@ def bootstrap(backend: StorageBackend) -> None:
     from pure_integer_ai.storage.curriculum_mastery import (
         register_curriculum_mastery_tables,
     )
-    from pure_integer_ai.storage.integer_index_store import (
-        register_integer_index_tables,
-    )
 
     register_space_table(backend)
     register_node_tables(backend)
@@ -97,7 +94,9 @@ def bootstrap(backend: StorageBackend) -> None:
     register_span_tables(backend)
     register_training_candidate_event_tables(backend)
     register_curriculum_mastery_tables(backend)
-    register_integer_index_tables(backend)
+    # token/aggregate exchange tables are deliberately absent here.  They
+    # belong to the training owner and must not be reachable from production
+    # storage bootstrap, even as an optional branch.
 
 
 def build_storage_role_registry() -> StorageRoleRegistry:

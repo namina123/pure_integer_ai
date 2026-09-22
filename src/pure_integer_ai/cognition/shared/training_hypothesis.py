@@ -220,12 +220,14 @@ class TrainingCandidateHistoryLog:
         protocol_key = protocol.stable_key()
         protocol_hash = _PROTOCOL_HASHER.h63(protocol_key) or 1
         result = []
-        for record in self._records.query(
+        records = self._records.query(
                 space_id=self.core_space_id,
                 protocol_hash=protocol_hash,
-                event_kind=event_kind):
+                event_kind=event_kind)
+        payloads = self._records.read_payload_many(records)
+        for record in records:
             envelope = decode_integer_stream(
-                self._records.read_payload(record))
+                payloads[record.event_hash])
             if len(envelope) != record.original_size:
                 raise TrainingCandidateEventIntegrityError(
                     "训练候选事件原始 payload 长度与信封漂移")

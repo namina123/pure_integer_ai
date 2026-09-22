@@ -144,7 +144,7 @@ def resolve_pronoun_occurrence(edge_store: EdgeStore, concept_index: ConceptInde
         for feature_key in dict.fromkeys(feature_keys):
             feat_ref = concept_index.ensure(
                 feature_key, space_id=memory_space_id, tier=TIER_PRIMARY)
-            edge_store.add(
+            edge_store.add_assertion_once(
                 space_id_from=pronoun_ref[0], local_id_from=pronoun_ref[1],
                 space_id_to=feat_ref[0], local_id_to=feat_ref[1],
                 edge_type=EDGE_PROPERTY, strength=1,
@@ -187,7 +187,7 @@ def resolve_pronoun_occurrence(edge_store: EdgeStore, concept_index: ConceptInde
     # 时序衰减权重 = OCCURRENCE_STRENGTH（#733·recency 1..3 衰减窗口过激改常量·见模块常量注释）
     # effective_weight 检索 max(0, OCCURRENCE_STRENGTH×DECAY_K − logical_age)·layer 3 候选 score 复用此式。
     decay_weight = OCCURRENCE_STRENGTH
-    edge_store.add(
+    edge_store.add_assertion_once(
         space_id_from=pronoun_ref[0], local_id_from=pronoun_ref[1],
         space_id_to=best_ref[0], local_id_to=best_ref[1],
         edge_type=EDGE_REFERS_TO, subtype=SUBTYPE_OCCURRENCE,

@@ -78,6 +78,95 @@ def _stable_positive_int(namespace: str, value: str) -> int:
     return result if result > 0 else 1
 
 
+def _stable_positive_ints(namespace: str, values: tuple[int, ...]) -> int:
+    """把显式整数语义形状压为稳定来源段，不读取表层文字。"""
+    if (not isinstance(values, tuple) or not values
+            or any(type(item) is not int for item in values)):
+        raise ValueError("semantic identity values 必须是非空严格整数 tuple")
+    payload = canonical_json_bytes({
+        "namespace": namespace,
+        "values": list(values),
+    })
+    result = int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+    result &= (1 << 63) - 1
+    return result if result > 0 else 1
+
+
+def _packed(values: tuple[int, ...]) -> tuple[int, ...]:
+    """给可变长端点签名增加长度前缀，保持纯整数边界无歧义。"""
+    return len(values), *values
+
+
+def _endpoint_semantic_signature(endpoint) -> tuple[int, ...]:
+    """返回 endpoint 声明的类型/local_id 或 occurrence 区间整数形状。"""
+    if endpoint.local_id is not None:
+        return (endpoint.object_kind, 1, endpoint.local_id)
+    return (
+        endpoint.object_kind,
+        2,
+        endpoint.start,
+        endpoint.end,
+        endpoint.ordinal,
+    )
+
+
+def authored_relation_semantic_key(seed: AuthoredRelationSeed) -> tuple[int, ...]:
+    """按 relation/Role/端点声明恢复跨来源唯一 Proposition 语义键。
+
+    ``seed_id``、source revision、surface、context local id 和 perturbation
+    都不属于命题语义；对称 relation 的两端按声明整数形状规范化，避免
+    ``a-b`` 与 ``b-a`` 物化为两个命题。该键仅由显式整数合同组成。
+    """
+    endpoint_by_id = {item.endpoint_id: item for item in seed.endpoints}
+    rows = tuple(
+        (item.role_kind, item.ordinal,
+         _endpoint_semantic_signature(endpoint_by_id[item.endpoint_id]))
+        for item in seed.bindings
+    )
+    if seed.directionality == DIRECTION_SYMMETRIC:
+        endpoint_shapes = tuple(sorted(
+            (_endpoint_semantic_signature(item) for item in seed.endpoints)))
+        role_shapes = tuple(sorted(
+            (item.role_kind, item.ordinal) for item in seed.bindings))
+        values: list[int] = [
+            1, seed.relation_kind, seed.schema_kind, seed.directionality,
+            len(endpoint_shapes),
+        ]
+        for shape in endpoint_shapes:
+            values.extend(_packed(shape))
+        values.append(len(role_shapes))
+        for role, ordinal in role_shapes:
+            values.extend((role, ordinal))
+        return tuple(values)
+    values = [
+        1, seed.relation_kind, seed.schema_kind, seed.directionality,
+        len(rows),
+    ]
+    for role, ordinal, shape in sorted(rows):
+        values.extend((role, ordinal, *_packed(shape)))
+    return tuple(values)
+
+
+def _semantic_source(seed: AuthoredRelationSeed) -> SourceRef:
+    """建立不随 SourceRefRecord/revision 漂移的语义来源。"""
+    semantic_key = authored_relation_semantic_key(seed)
+    return authored_semantic_source(semantic_key)
+
+
+def authored_semantic_source(semantic_key: tuple[int, ...]) -> SourceRef:
+    """从已核验语义整数键恢复其稳定 SourceRef。"""
+    if (not isinstance(semantic_key, tuple) or not semantic_key
+            or any(type(item) is not int for item in semantic_key)):
+        raise ValueError("semantic_key 必须是非空严格整数 tuple")
+    return SourceRef(
+        _COURSE_SOURCE_KIND,
+        _stable_positive_ints("relation-semantic-source", semantic_key),
+        0,
+        GLOBAL_OWNER_SCOPE,
+        _VERSIONS,
+    )
+
+
 def _identity_key(identity: ObjectIdentity) -> list[int]:
     """把一等对象身份投影为规范严格整数列表。"""
     return list(identity.stable_key())
@@ -146,7 +235,7 @@ def authored_relation_rule_identity(kind: int) -> ObjectIdentity:
         (_COURSE_NAMESPACE, 5, kind), versions=_VERSIONS)
 
 
-def _endpoint_identity(seed, source: SourceRef) -> ObjectIdentity:
+def _endpoint_identity(seed, source: SourceRef, *, semantic_identity: bool = False) -> ObjectIdentity:
     """按 endpoint object kind 调用现役身份构造器，不走裸 ObjectIdentity 拼装。"""
     if seed.object_kind == OBJECT_CONCEPT:
         assert seed.local_id is not None
@@ -154,20 +243,39 @@ def _endpoint_identity(seed, source: SourceRef) -> ObjectIdentity:
             (_COURSE_NAMESPACE, 10, seed.local_id), versions=_VERSIONS)
     if seed.object_kind == OBJECT_ENTITY:
         assert seed.local_id is not None
-        return entity_identity(source, (10, seed.local_id))
+        return entity_identity(_semantic_endpoint_source(seed.object_kind)
+                               if semantic_identity else source,
+                               (10, seed.local_id))
     if seed.object_kind == OBJECT_EVENT:
         assert seed.local_id is not None
-        return event_identity(source, (10, seed.local_id))
+        return event_identity(_semantic_endpoint_source(seed.object_kind)
+                              if semantic_identity else source,
+                              (10, seed.local_id))
     if seed.object_kind == OBJECT_OCCURRENCE:
         return occurrence_identity(
             source, start=seed.start, end=seed.end, ordinal=seed.ordinal)
     if seed.object_kind == OBJECT_PROPOSITION:
         assert seed.local_id is not None
-        return proposition_identity(source, (10, seed.local_id))
+        return proposition_identity(
+            (_semantic_endpoint_source(seed.object_kind)
+             if semantic_identity else source), (10, seed.local_id))
     if seed.object_kind == OBJECT_SET_EXPR:
         assert seed.local_id is not None
-        return set_expr_identity(source, (10, seed.local_id))
+        return set_expr_identity(
+            (_semantic_endpoint_source(seed.object_kind)
+             if semantic_identity else source), (10, seed.local_id))
     raise ValueError("relation endpoint kind 未由 typed compiler 支持")
+
+
+def _semantic_endpoint_source(object_kind: int) -> SourceRef:
+    """为显式 local_id 端点提供跨命题稳定的整数声明空间。"""
+    return SourceRef(
+        _COURSE_SOURCE_KIND,
+        _COURSE_NAMESPACE,
+        object_kind,
+        GLOBAL_OWNER_SCOPE,
+        _VERSIONS,
+    )
 
 
 def _allowed_kinds(
@@ -206,20 +314,28 @@ def compile_relation_seed(
         seed: AuthoredRelationSeed, *,
         rational_role_values: tuple[tuple[int, int, int], ...] = (),
         use_relation_profiles: bool = True,
+        semantic_identity: bool = False,
         ) -> AuthoredCompiledSeed:
     """生成 candidate relation、schema、RoleBinding 和 consumer request payload。"""
     if not isinstance(seed, AuthoredRelationSeed):
         raise TypeError("compile_relation_seed 需要 AuthoredRelationSeed")
-    source = SourceRef(
+    # Proposition/endpoint identities are semantic, not per Observation.  A
+    # parser revision or a second supporting source therefore points at the
+    # same graph proposition while its SourceRefRecord remains independent
+    # evidence metadata in the Companion pack.
+    if type(semantic_identity) is not bool:
+        raise TypeError("semantic_identity 必须是 bool")
+    source = (_semantic_source(seed) if semantic_identity else SourceRef(
         _COURSE_SOURCE_KIND,
         _stable_positive_int("relation-family", seed.family),
         _stable_positive_int("relation-seed", seed.seed_id),
         GLOBAL_OWNER_SCOPE,
         _VERSIONS,
-    )
+    ))
     relation = authored_relation_identity(seed.relation_kind)
     endpoints = {
-        item.endpoint_id: _endpoint_identity(item, source)
+        item.endpoint_id: _endpoint_identity(
+            item, source, semantic_identity=semantic_identity)
         for item in seed.endpoints
     }
     roles = {
@@ -284,23 +400,52 @@ def compile_relation_seed(
         constraints,
     )
     proposition = proposition_identity(source, (1, 1))
+    binding_specs = list(seed.bindings)
+    if semantic_identity and seed.directionality == DIRECTION_SYMMETRIC:
+        endpoint_by_id = {item.endpoint_id: item for item in seed.endpoints}
+        ordered_endpoints = sorted(
+            seed.endpoints,
+            key=_endpoint_semantic_signature,
+        )
+        if (len({
+                _endpoint_semantic_signature(item)
+                for item in ordered_endpoints
+        }) != len(ordered_endpoints)):
+            raise ValueError("对称 relation endpoint 语义形状重复，无法规范化")
+        ordered_roles = sorted(seed.bindings, key=lambda item: (
+            item.role_kind, item.ordinal))
+        by_role = {
+            binding.role_kind: binding for binding in ordered_roles
+        }
+        binding_specs = [
+            type(binding)(
+                binding.role_registry,
+                binding.role_kind,
+                endpoint.endpoint_id,
+                binding.ordinal,
+                binding.allowed_object_kinds,
+            )
+            for binding, endpoint in zip(ordered_roles, ordered_endpoints)
+        ]
     definition = AtomicPropositionDefinition(
         proposition,
         relation,
         occurrence_identity(
             source,
-            start=seed.anchor.start,
-            end=seed.anchor.end,
-            ordinal=seed.anchor.ordinal,
+            start=0 if semantic_identity else seed.anchor.start,
+            end=1 if semantic_identity else seed.anchor.end,
+            ordinal=0 if semantic_identity else seed.anchor.ordinal,
         ),
-        context_scope_identity(source, (1, seed.context_local_id)),
+        context_scope_identity(
+            source, (1, 1) if semantic_identity
+            else (1, seed.context_local_id)),
         tuple(
             AtomicRoleBinding(
                 roles[item.role_kind],
                 endpoints[item.endpoint_id],
                 item.ordinal,
             )
-            for item in seed.bindings
+            for item in binding_specs
         ),
     )
     # TYPE_MISMATCH is an intentional negative proposal.  Preserve its full
@@ -479,12 +624,18 @@ def compile_relation_seed(
         },
         "surface": seed.surface,
     }
+    if semantic_identity:
+        payload_value["semantic_key"] = list(
+            authored_relation_semantic_key(seed))
+        payload_value["source_anchor_span"] = [
+            seed.anchor.start, seed.anchor.end, seed.anchor.ordinal,
+        ]
     if not isinstance(rational_role_values, tuple):
         raise TypeError("rational_role_values 必须是 tuple")
     rational_payload = []
     seen_rational_roles = set()
     binding_by_role = {
-        item.role_kind: item for item in seed.bindings
+        item.role_kind: item for item in binding_specs
     }
     for item in rational_role_values:
         if (not isinstance(item, tuple) or len(item) != 3

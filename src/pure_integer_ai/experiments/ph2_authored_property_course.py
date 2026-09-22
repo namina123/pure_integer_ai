@@ -244,13 +244,16 @@ def read_authored_property_seeds(
 
 def compile_authored_property_course(
         sample_path: str | Path,
-        release_root: str | Path) -> AuthoredCourseBuild:
+        release_root: str | Path,
+        *,
+        semantic_identity: bool = False) -> AuthoredCourseBuild:
     """编译并发布 D-02C.3 六维 typed PROPERTY 极小 pack。"""
     seeds = read_authored_property_seeds(sample_path)
     try:
         return publish_authored_course(
             tuple(compile_relation_seed(
                 item.relation,
+                semantic_identity=semantic_identity,
                 rational_role_values=((
                     ROLE_PROPERTY_INTENSITY,
                     item.intensity_num,

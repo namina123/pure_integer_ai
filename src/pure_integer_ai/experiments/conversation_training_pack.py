@@ -640,6 +640,47 @@ def _typed_projection(
             return payload, compiled.payload_kind, source
         except (TypeError, ValueError, KeyError, RuntimeError):
             return None, None, None
+    if name == "authored_discourse_revision_seed_v1.jsonl.sample":
+        from pure_integer_ai.experiments.ph2_authored_discourse_compile import (
+            compile_discourse_seed,
+        )
+        from pure_integer_ai.experiments.ph2_authored_discourse_schema import (
+            AuthoredDiscourseSeed,
+        )
+        try:
+            seed = AuthoredDiscourseSeed.from_dict(record)
+            compiled = compile_discourse_seed(seed)
+            raw_source = compiled.observation_payload.to_value().get(
+                "source_ref_key")
+            source = (SourceRef.from_stable_key(tuple(raw_source))
+                      if isinstance(raw_source, list) else None)
+            return None, None, source
+        except (TypeError, ValueError, KeyError, RuntimeError):
+            return None, None, None
+    if name == "authored_discourse_information_seed_v1.jsonl.sample":
+        from pure_integer_ai.experiments.ph2_authored_discourse_information_course import (
+            information_source_ref,
+        )
+        family = record.get("family")
+        seed_id = record.get("seed_id")
+        logical_order = record.get("logical_order")
+        if (isinstance(family, str) and family
+                and isinstance(seed_id, str) and seed_id
+                and type(logical_order) is int and logical_order > 0):
+            return None, None, information_source_ref(
+                path.name, seed_id, logical_order)
+        return None, None, None
+    if name == "authored_event_time_aspect_seed_v1.jsonl.sample":
+        from pure_integer_ai.experiments.event_time_structure_training_bridge import (
+            event_time_source_ref,
+        )
+        seed_id = record.get("seed_id")
+        logical_order = record.get("logical_order")
+        if (isinstance(seed_id, str) and seed_id
+                and type(logical_order) is int and logical_order > 0):
+            return None, None, event_time_source_ref(
+                path.name, seed_id, logical_order)
+        return None, None, None
     if name == "authored_generation_generalization_seed_v1.jsonl.sample":
         raw = record.get("observation_payload")
         if isinstance(raw, dict):

@@ -99,15 +99,21 @@ def test_bridge_closed_query_carries_response_plan(tmp_path):
     """桥闭合查询的 trace 携带可验证 ResponsePlan（含 slot 顺序 + realization）。"""
     database = _trained_database(tmp_path)
     with TrainedGraphQueryBridge(database) as bridge:
-        result = bridge.query("麻雀集合", minimum_depth=1, max_depth=3)
+        result = bridge.query(
+            "麻雀集合包含于鸟类集合", minimum_depth=1, max_depth=3)
         rp = result.get("response_plan")
         assert rp is not None
         assert rp["response_act"]
         assert rp["slot_sequence"]
         assert rp["realization_candidates"]
         # 槽位表层按 Span 顺序出现；realization 表层完整（token postcheck 已验）。
-        assert "".join(
-            s["filler_surface"] for s in rp["slot_sequence"]) or True
+        assert all(
+            s["filler_surface_values"] for s in rp["slot_sequence"])
+        assert all(
+            type(s["required"]) is int for s in rp["slot_sequence"])
+        assert all(
+            item["surface_values"]
+            for item in rp["realization_candidates"])
 
 
 def test_response_plan_token_postcheck_rejects_missing_required_slot():

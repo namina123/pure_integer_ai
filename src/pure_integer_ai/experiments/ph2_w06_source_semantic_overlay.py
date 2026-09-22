@@ -14,6 +14,36 @@ from pure_integer_ai.experiments.ph2_authored_alias_refers_w06_course import (
     compile_authored_alias_refers_w06_course,
     read_authored_alias_refers_w06_seeds,
 )
+from pure_integer_ai.experiments.ph2_authored_causes_course import (
+    PACK_NAME as CAUSES_PACK_NAME,
+    compile_authored_causes_course,
+    read_authored_causes_seeds,
+)
+from pure_integer_ai.experiments.ph2_authored_mereology_course import (
+    PACK_NAME as MEREOLOGY_PACK_NAME,
+    compile_authored_mereology_course,
+    read_authored_mereology_seeds,
+)
+from pure_integer_ai.experiments.ph2_authored_precedes_course import (
+    PACK_NAME as PRECEDES_PACK_NAME,
+    compile_authored_precedes_course,
+    read_authored_precedes_seeds,
+)
+from pure_integer_ai.experiments.ph2_authored_property_course import (
+    PACK_NAME as PROPERTY_PACK_NAME,
+    compile_authored_property_course,
+    read_authored_property_seeds,
+)
+from pure_integer_ai.experiments.ph2_authored_semantic_pair_course import (
+    PACK_NAME as SEMANTIC_PAIR_PACK_NAME,
+    compile_authored_semantic_pair_course,
+    read_authored_semantic_pair_seeds,
+)
+from pure_integer_ai.experiments.ph2_authored_subset_member_course import (
+    PACK_NAME as SUBSET_MEMBER_PACK_NAME,
+    compile_authored_subset_member_course,
+    read_authored_subset_member_seeds,
+)
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     DatasetContractError,
     canonical_json_bytes,
@@ -58,6 +88,50 @@ W06_EXPECTED_PARENT_SHA256 = {
     W06_INVALIDATION_PATH: "21cf4d3cd65afeb0f93054773b97fa4194ee5f14dc463ff40af5813fdb0facce",
     W06_W05_RECEIPT_PATH: "64c2fff496e766df880d2db1b184e2b8a009abd3b37b1a1b1331900458ccff78",
 }
+_SEMANTIC_RELATION_COURSES = (
+    (
+        SUBSET_MEMBER_PACK_NAME,
+        "data/ph2/authored_relation_subset_member_seed_v1.jsonl.sample",
+        compile_authored_subset_member_course,
+        read_authored_subset_member_seeds,
+        None,
+    ),
+    (
+        PROPERTY_PACK_NAME,
+        "data/ph2/authored_relation_property_seed_v1.jsonl.sample",
+        compile_authored_property_course,
+        read_authored_property_seeds,
+        "relation",
+    ),
+    (
+        MEREOLOGY_PACK_NAME,
+        "data/ph2/authored_relation_mereology_seed_v1.jsonl.sample",
+        compile_authored_mereology_course,
+        read_authored_mereology_seeds,
+        None,
+    ),
+    (
+        SEMANTIC_PAIR_PACK_NAME,
+        "data/ph2/authored_relation_similar_antonym_seed_v1.jsonl.sample",
+        compile_authored_semantic_pair_course,
+        read_authored_semantic_pair_seeds,
+        None,
+    ),
+    (
+        PRECEDES_PACK_NAME,
+        "data/ph2/authored_relation_precedes_seed_v1.jsonl.sample",
+        compile_authored_precedes_course,
+        read_authored_precedes_seeds,
+        None,
+    ),
+    (
+        CAUSES_PACK_NAME,
+        "data/ph2/authored_relation_causes_seed_v1.jsonl.sample",
+        compile_authored_causes_course,
+        read_authored_causes_seeds,
+        None,
+    ),
+)
 
 
 class W06SourceOverlayError(RuntimeError):
@@ -150,11 +224,38 @@ def build_w06_source_semantic_overlay(repo_root: str | Path) -> dict[str, Any]:
     temp_parent = _overlay_temp_parent(root)
     temp = _make_overlay_temp_dir(temp_parent)
     try:
-        build = compile_authored_alias_refers_w06_course(v2_path, temp)
+        build = compile_authored_alias_refers_w06_course(
+            v2_path, temp / "alias", semantic_identity=True)
         report = audit_w06_authored_source_isolation(build.pack_root, stable)
         pack_manifest_sha = hashlib.sha256(
             canonical_json_bytes(build.manifest.to_dict())
         ).hexdigest()
+        semantic_relation_packs = {}
+        for ordinal, (
+                pack_key, sample_relative, builder, reader, relation_field,
+        ) in enumerate(_SEMANTIC_RELATION_COURSES, start=1):
+            sample_path = root / sample_relative
+            raw_seeds = reader(sample_path)
+            seeds = tuple(
+                getattr(item, relation_field) if relation_field else item
+                for item in raw_seeds)
+            relation_build = builder(
+                sample_path,
+                temp / f"relation-{ordinal:02d}",
+                semantic_identity=True,
+            )
+            isolation = audit_w06_authored_source_isolation(
+                relation_build.pack_root, seeds)
+            semantic_relation_packs[pack_key] = {
+                "pack_manifest_sha256": hashlib.sha256(
+                    canonical_json_bytes(relation_build.manifest.to_dict())
+                ).hexdigest(),
+                "record_count": relation_build.manifest.record_count,
+                "source_cluster_count": len(
+                    relation_build.manifest.source_cluster_keys),
+                "source_key": isolation.source_key,
+                "train_observation_count": isolation.train_observation_count,
+            }
     finally:
         shutil.rmtree(temp, ignore_errors=True)
         try:
@@ -187,6 +288,7 @@ def build_w06_source_semantic_overlay(repo_root: str | Path) -> dict[str, Any]:
         "parent_identities": parents,
         "relation_profiles": _profile_value(),
         "relation_substage_order": list(W06_RELATION_SUBSTAGE_ORDER),
+        "semantic_relation_packs": semantic_relation_packs,
         "stable_v2_course": {
             "evaluator_family_count": len(report.evaluator_families),
             "evaluator_label_count": report.evaluator_label_count,
@@ -196,11 +298,13 @@ def build_w06_source_semantic_overlay(repo_root: str | Path) -> dict[str, Any]:
             "held_out_observation_count": report.held_out_observation_count,
             "pack_key": PACK_NAME,
             "pack_manifest_sha256": pack_manifest_sha,
+            "record_count": build.manifest.record_count,
             "sample_sha256": _sha256(v2_path),
             "source_independence_policy": (
                 "DISTINCT_CLUSTER_OWNER_SEED_FAMILY_TEMPLATE"
             ),
             "source_key": report.source_key,
+            "source_cluster_count": len(build.manifest.source_cluster_keys),
             "teacher_evidence_count": report.teacher_evidence_count,
             "teacher_family_count": len(report.teacher_families),
             "teacher_owner_count": len(report.teacher_owner_keys),

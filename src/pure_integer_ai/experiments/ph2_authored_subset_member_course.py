@@ -191,12 +191,15 @@ def read_authored_subset_member_seeds(
 
 def compile_authored_subset_member_course(
         sample_path: str | Path,
-        release_root: str | Path) -> AuthoredCourseBuild:
+        release_root: str | Path,
+        *,
+        semantic_identity: bool = False) -> AuthoredCourseBuild:
     """编译并发布 D-02C.2 typed SUBSET/MEMBER 极小 pack。"""
     seeds = read_authored_subset_member_seeds(sample_path)
     try:
         return publish_authored_course(
-            tuple(compile_relation_seed(seed) for seed in seeds),
+            tuple(compile_relation_seed(seed, semantic_identity=semantic_identity)
+                  for seed in seeds),
             sample_path,
             release_root,
             _SPEC,

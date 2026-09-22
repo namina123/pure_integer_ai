@@ -121,8 +121,8 @@ def test_w06_runtime_worker_and_mode_are_bit_identical(tmp_path):
     ]
     assert len({_logic_key(item) for item in outcomes}) == 1
     for outcome in outcomes:
-        assert outcome.candidate_count == 50
-        assert outcome.active_candidate_count == 17
+        assert outcome.candidate_count == 40
+        assert outcome.active_candidate_count == 14
         assert outcome.transaction_event_count == 5
         assert outcome.payload_gets_this_call > 0
         assert outcome.payload_bytes_this_call > 0
@@ -201,7 +201,7 @@ def test_w06_runtime_has_16_shards_five_events_and_resource_bounds(
     assert [item["shard_ordinal"] for item in preview["shards"]] == list(
         range(16))
     assert sum(len(item["candidate_keys"])
-               for item in preview["shards"]) == 50
+               for item in preview["shards"]) == 40
     assert cursor["completed_shards"] == list(range(16))
     assert dump["transaction_event_count"] == 5
     mapping = {
@@ -266,16 +266,16 @@ def test_w06_runtime_preserves_receipts_and_owns_no_historical_table(
 
 def test_w06_runtime_reports_seven_substages_and_frozen_counts(
         runtime_evidence):
-    """七关系 summary 必须保持 50 candidate、64 account 与 17 active。"""
+    """七关系 summary 必须保持 40 candidate、65 account 与 14 active。"""
     _, outcome, dump, _ = runtime_evidence
     learning = dump["commit"]["learning"]
     summaries = dump["commit"]["relation_summaries"]
     assert tuple(summaries) == tuple(sorted(W06_RELATION_SUBSTAGE_ORDER))
-    assert learning["candidate_count"] == 50
+    assert learning["candidate_count"] == 40
     assert learning["schema_rejection_count"] == 1
     assert learning["relation_family_count"] == 14
-    assert learning["evidence_account_count"] == 64
-    assert learning["active_candidate_count"] == 17
+    assert learning["evidence_account_count"] == 65
+    assert learning["active_candidate_count"] == 14
     expected = {
         "PURE_ALIAS_REFERS": (5, 2),
         "SUBSET_MEMBER": (5, 2),
@@ -290,8 +290,8 @@ def test_w06_runtime_reports_seven_substages_and_frozen_counts(
         for key, value in summaries.items()
     } == expected
     artifacts = dict(outcome.artifact_counts)
-    assert artifacts["CANDIDATE"] == 50
-    assert artifacts["EVIDENCE_ACCOUNT"] == 64
-    assert artifacts["ACTIVE_RELATION"] == 17
+    assert artifacts["CANDIDATE"] == 40
+    assert artifacts["EVIDENCE_ACCOUNT"] == 65
+    assert artifacts["ACTIVE_RELATION"] == 14
     assert artifacts["SCHEMA_REJECTION"] == 1
     assert artifacts["SUBSTAGE"] == 7

@@ -31,9 +31,15 @@ from pure_integer_ai.experiments.ph2_language_course_contract import (
 from pure_integer_ai.experiments.ph2_language_coverage_contract import (
     SAMPLE_FAMILIES,
 )
+from pure_integer_ai.cognition.shared.identity import (
+    GLOBAL_OWNER_SCOPE,
+    SourceRef,
+    VersionBundle,
+)
 
 
 SOURCE_KEY = "AUTHORED_CC0_V1"
+INFORMATION_SOURCE_KIND = 215
 LICENSE_ID = "CC0-1.0"
 COURSE_VERSION = 1
 ARTIFACT_VERSION = 1
@@ -49,6 +55,28 @@ COURSE_MANIFEST_PATH = Path(
     "data/ph2/manifests/lc07_discourse_information_course_v1.json")
 FORMAL_ARTIFACT_RELATIVE_ROOT = (
     "ph2_dataset_artifacts/d02_language_courses_v1")
+
+
+def information_source_ref(
+        path_name: str, seed_id: str, logical_order: int) -> SourceRef:
+    """返回 LC-07 information seed 与训练 corpus 共用的来源身份。"""
+    if (not isinstance(path_name, str) or not path_name
+            or not isinstance(seed_id, str) or not seed_id
+            or type(logical_order) is not int or logical_order <= 0):
+        raise ValueError("information source identity 参数非法")
+    source_id = int.from_bytes(
+        hashlib.sha256(path_name.encode("utf-8")).digest()[:8], "big")
+    source_id &= (1 << 63) - 1
+    if source_id == 0:
+        source_id = 1
+    document_id = logical_order
+    return SourceRef(
+        INFORMATION_SOURCE_KIND,
+        source_id,
+        document_id,
+        GLOBAL_OWNER_SCOPE,
+        VersionBundle(),
+    )
 
 CANDIDATE_KINDS = (
     "AMBIGUOUS_RELATION",
@@ -1560,6 +1588,7 @@ __all__ = [
     "COURSE_MANIFEST_PATH",
     "EVALUATOR_DIMENSIONS",
     "FORMAL_ARTIFACT_RELATIVE_ROOT",
+    "INFORMATION_SOURCE_KIND",
     "PACK_NAME",
     "PAYLOAD_KIND",
     "AuthoredDiscourseInformationCourseError",
@@ -1569,6 +1598,7 @@ __all__ = [
     "build_discourse_information_course_manifest",
     "compile_authored_discourse_information_course",
     "default_discourse_information_sample_bytes",
+    "information_source_ref",
     "read_authored_discourse_information_seeds",
     "validate_discourse_information_payload",
 ]

@@ -392,7 +392,11 @@ class CandidateLearningRuntime:
                 requests, hypotheses, strict=True):
             prior = candidate_hypotheses.get(definition.candidate)
             if prior is not None and prior != hypothesis:
-                raise RuntimeError("同一候选对象绑定了不同 Hypothesis")
+                raise RuntimeError(
+                    "同一候选对象绑定了不同 Hypothesis: "
+                    f"candidate={definition.candidate.stable_key()} "
+                    f"prior={prior.stable_key()} "
+                    f"incoming={hypothesis.stable_key()}")
             candidate_hypotheses[definition.candidate] = hypothesis
             candidate_ref = self.graph.ontology.resolve(definition.candidate)
             if prior is None:

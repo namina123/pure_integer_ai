@@ -222,6 +222,9 @@ def _code_inventory(target: Path) -> list[dict[str, object]]:
 
 def build(project_root: str | Path, release_root: str | Path,
           output_root: str | Path, *, package_id: str) -> dict[str, object]:
+    raise RuntimeError(
+        "legacy public_model_release 对话包已隔离；请使用 strict "
+        "trained_graph_release 三图发布包")
     project = Path(project_root).resolve()
     release = Path(release_root).resolve()
     output = Path(output_root).resolve()

@@ -225,6 +225,81 @@ class EdgeStore:
             row_counts[key] = row_counts.get(key, 0) + 1
             self._cooccurs_row_counts = row_counts
 
+    def add_assertion_once(
+            self, *, space_id_from: int, local_id_from: int,
+            space_id_to: int, local_id_to: int, edge_type: int,
+            strength: int = DEFAULT_STRENGTH, source: int,
+            tier: int = TIER_PRIMARY, epistemic_origin: int | None = None,
+            subtype: int | None = None, order_index: int | None = None,
+            role: int | None = None, memory_time_attach: int | None = None,
+            belief_p: int = 0, belief_q: int = 1, sn: int = 0, tn: int = 0,
+            content_version: int = 0) -> bool:
+        """按完整逻辑身份只写一次，既有脏重复或竞争状态直接拒绝。"""
+        assert_int(
+            space_id_from, local_id_from, space_id_to, local_id_to,
+            edge_type, strength, source, tier, belief_p, belief_q,
+            sn, tn, content_version,
+            _where="EdgeStore.add_assertion_once",
+        )
+        if not is_registered_edge_type(edge_type):
+            raise ValueError(
+                f"edge_type={edge_type} 未在 C9-bis 权威表登记")
+        logical_key = {
+            "space_id_from": space_id_from,
+            "local_id_from": local_id_from,
+            "space_id_to": space_id_to,
+            "local_id_to": local_id_to,
+            "edge_type": edge_type,
+            "source": source,
+            "epistemic_origin": epistemic_origin,
+            "subtype": subtype,
+            "order_index": order_index,
+            "role": role,
+            "memory_time_attach": memory_time_attach,
+            "content_version": content_version,
+        }
+        rows = self._b.select("edge", where=logical_key)
+        if len(rows) > 1:
+            raise LegacyAssertionAmbiguity(
+                "同一完整 edge 逻辑身份已有重复记录；禁止在脏谱系上续写")
+        expected = {
+            **logical_key,
+            "strength": strength,
+            "base_strength": strength,
+            "belief_p": belief_p,
+            "belief_q": belief_q,
+            "sn": sn,
+            "tn": tn,
+            "tier": tier,
+        }
+        if rows:
+            if any(rows[0].get(column) != expected[column]
+                   for column, _type in EDGE_COLUMNS):
+                raise EdgeMutationConflict(
+                    "同一 edge 逻辑身份已有不同可变状态；必须走显式更新")
+            return False
+        self.add(
+            space_id_from=space_id_from,
+            local_id_from=local_id_from,
+            space_id_to=space_id_to,
+            local_id_to=local_id_to,
+            edge_type=edge_type,
+            strength=strength,
+            source=source,
+            tier=tier,
+            epistemic_origin=epistemic_origin,
+            subtype=subtype,
+            order_index=order_index,
+            role=role,
+            memory_time_attach=memory_time_attach,
+            belief_p=belief_p,
+            belief_q=belief_q,
+            sn=sn,
+            tn=tn,
+            content_version=content_version,
+        )
+        return True
+
     def _ensure_cooccurs_row_counts(self) -> dict[tuple[int, int, int, int], int]:
         """一次读取既有 COOCCURS 行，供 dedup 后续 O(1) 命中。"""
         if self._cooccurs_row_counts is None:

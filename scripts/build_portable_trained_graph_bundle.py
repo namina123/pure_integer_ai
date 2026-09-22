@@ -5,6 +5,7 @@ import argparse
 import ast
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -100,6 +101,21 @@ def _copy_code(project: Path, target: Path) -> int:
     return len(files)
 
 
+def _copy_release_file(source: str, destination: str) -> str:
+    """Avoid another physical copy of the multi-gigabyte model on one volume."""
+    source_path = Path(source)
+    destination_path = Path(destination)
+    if source_path.name == "training.sqlite3":
+        try:
+            os.link(source_path, destination_path)
+        except OSError as error:
+            raise RuntimeError(
+                "portable model hardlink failed; refusing a silent large copy"
+            ) from error
+        return str(destination_path)
+    return shutil.copy2(source_path, destination_path)
+
+
 def _write_launchers(target: Path) -> None:
     (target / "启动终端.cmd").write_text(
         "@echo off\r\nsetlocal\r\nchcp 65001 >nul\r\n"
@@ -166,13 +182,14 @@ def build(project_root: str | Path, release_root: str | Path,
             "## 启动\n\n"
             "Windows 双击 `启动终端.cmd`，或运行 `python run.py terminal`。\n"
             "JSONL 接口运行 `python run.py jsonl`，每行输入 `\u007b\"op\":\"turn\",\"text\":\"...\"\u007d`。\n"
+            "需要显式消费模型内 Concept/Entity/Event、Event-Time 或 Dialogue 命题图时，可在 turn 中增加 `graph_object_keys` 二维整数数组；这些一等对象与文字、Memory 和 Dialogue 在同一次 QueryState 中计算。\n"
             "输入 `\u007b\"op\":\"quit\"\u007d` 结束。\n\n"
             "模型目录只读；需要持久会话时使用 `--session` 指向模型目录之外的 SQLite 文件。\n"
             "本包不携带课程、外部 QA、论文、密钥或 OpenCC。它是当前训练结果的独立测试包。\n",
             encoding="utf-8", newline="\n")
         _write_launchers(temporary)
         shutil.copytree(release, temporary / "model" / release.name,
-                        copy_function=shutil.copy2)
+                        copy_function=_copy_release_file)
         files = _inventory(temporary)
         manifest = {
             "format": "PURE_INTEGER_TRAINED_GRAPH_PORTABLE_BUNDLE_V1",

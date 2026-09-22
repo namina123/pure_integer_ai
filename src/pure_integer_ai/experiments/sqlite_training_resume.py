@@ -134,8 +134,20 @@ def _validate_summary(root: Path, files: dict[str, Path]) -> tuple[str, dict[str
     summary = _read_json(files["summary"], label="training summary")
     run_id = summary.get("run_id")
     stages = summary.get("stages_completed")
+    # A resumable checkpoint may be a partial campaign slice: the local run
+    # can have completed no new stage while still sealing a valid graph built
+    # on top of an earlier cumulative stage set.  Integrity publication is
+    # distinct from training readiness, so an empty local stage list is valid
+    # when the summary explicitly records cumulative progress and blockers.
+    partial = (
+        isinstance(stages, list)
+        and not stages
+        and isinstance(summary.get("cumulative_stages_completed"), list)
+        and summary.get("recovery_status") is None
+    )
     if (not isinstance(run_id, str) or run_id != root.name
-            or not isinstance(stages, list) or not stages
+            or not isinstance(stages, list)
+            or (not stages and not partial)
             or summary.get("database") is None):
         raise SQLiteTrainingResumeError("training summary is not completed")
     database = Path(str(summary["database"]))

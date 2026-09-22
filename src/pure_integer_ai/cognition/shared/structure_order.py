@@ -350,6 +350,12 @@ class StructureOrderGraph:
             raise TypeError("predicates 必须是 StructureOrderGraphPredicates")
         self._ontology = ontology
         self._predicates = predicates
+        # 发布图是冻结只读输入；同一 structure/constraint 会先被 connector
+        # 恢复、再被协议核验，缓存完整 materialized 结果即可避免重复扫描。
+        # 可写训练图不启用该缓存，避免把新增拓扑与旧读结果混合。
+        self._read_only = bool(getattr(ontology.backend, "read_only", False))
+        self._constraint_cache: dict[tuple[int, ...], MaterializedStructureOrderConstraint] = {}
+        self._structure_cache: dict[tuple[int, ...], MaterializedStructureOrder] = {}
         self._validate_predicates()
 
     @property
@@ -361,6 +367,14 @@ class StructureOrderGraph:
     def predicates(self) -> StructureOrderGraphPredicates:
         """返回调用方注入的结构顺序 predicate 协议。"""
         return self._predicates
+
+    def resolve_structure(self, identity: ObjectIdentity) -> TypedRef | None:
+        """Resolve a structure identity for execution facades.
+
+        The default remains the authoritative graph lookup. Read-only overlays
+        may override this narrow hook without changing ontology persistence.
+        """
+        return self._ontology.resolve(identity)
 
     def define_structure(
             self,
@@ -602,6 +616,11 @@ class StructureOrderGraph:
         constraint_identity = self._ontology.identity_of(constraint)
         if constraint_identity.object_kind != OBJECT_STRUCTURE_CONCEPT:
             raise ValueError("constraint 必须是 StructureConcept")
+        cache_key = constraint_identity.stable_key()
+        if self._read_only:
+            cached = self._constraint_cache.get(cache_key)
+            if cached is not None:
+                return cached
         singleton_specs = (
             (self._predicates.constraint_structure, "structure"),
             (self._predicates.constraint_first_slot, "first slot"),
@@ -700,18 +719,26 @@ class StructureOrderGraph:
             ),
             key=lambda item: item.assertion_hash,
         ))
-        return MaterializedStructureOrderConstraint(
+        result = MaterializedStructureOrderConstraint(
             definition,
             constraint,
             parameters,
             statements,
         )
+        if self._read_only:
+            self._constraint_cache[cache_key] = result
+        return result
 
     def read_structure(self, structure: TypedRef) -> MaterializedStructureOrder:
         """恢复结构的 language/family、全部 slot 和已定义 constraint。"""
         identity = self._ontology.identity_of(structure)
         if identity.object_kind != OBJECT_STRUCTURE_CONCEPT:
             raise ValueError("structure 必须是 StructureConcept")
+        cache_key = identity.stable_key()
+        if self._read_only:
+            cached = self._structure_cache.get(cache_key)
+            if cached is not None:
+                return cached
         language, language_statements = self._single_target(
             self._predicates.structure_language,
             structure,
@@ -743,7 +770,7 @@ class StructureOrderGraph:
             ),
             key=lambda item: item.assertion_hash,
         ))
-        return MaterializedStructureOrder(
+        result = MaterializedStructureOrder(
             structure,
             language,
             family,
@@ -751,6 +778,9 @@ class StructureOrderGraph:
             constraints,
             statements,
         )
+        if self._read_only:
+            self._structure_cache[cache_key] = result
+        return result
 
     def _read_slot(
             self, structure: TypedRef, slot: TypedRef,

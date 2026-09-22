@@ -62,12 +62,15 @@ def read_authored_alias_refers_w06_seeds(
 def compile_authored_alias_refers_w06_course(
         sample_path: str | Path,
         release_root: str | Path,
+        *,
+        semantic_identity: bool = True,
         ) -> AuthoredCourseBuild:
     """编译 append-only v2 pack，不覆盖已冻结的 v1 课程。"""
     seeds = read_authored_alias_refers_w06_seeds(sample_path)
     try:
         return publish_authored_course(
-            tuple(compile_relation_seed(seed) for seed in seeds),
+            tuple(compile_relation_seed(seed, semantic_identity=semantic_identity)
+                  for seed in seeds),
             sample_path,
             release_root,
             _SPEC,

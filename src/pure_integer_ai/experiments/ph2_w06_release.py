@@ -70,10 +70,10 @@ W06_EXPECTED_RETENTION_IDENTITIES = (
     ),
 )
 W06_EXPECTED_ARTIFACT_COUNTS = {
-    "ACTIVE_RELATION": 17,
-    "CANDIDATE": 50,
+    "ACTIVE_RELATION": 14,
+    "CANDIDATE": 40,
     "CARRIER_PROJECTION": 9,
-    "EVIDENCE_ACCOUNT": 64,
+    "EVIDENCE_ACCOUNT": 65,
     "EVIDENCE_APPLICATION": 50,
     "LOGICAL_SHARD": 16,
     "RELATION_FAMILY": 14,
@@ -278,9 +278,9 @@ def _check_candidate_host(
             or readback.get("learning_attempt_count") != 1
             or host_evidence.get("dump_readback") != 0
             or readback.get("dump_readback") != 1
-            or host_evidence.get("new_learning_write_count") != 126
+            or host_evidence.get("new_learning_write_count") != 117
             or host_evidence.get("payload_gets_this_call") != 54
-            or host_evidence.get("payload_bytes_this_call") != 199296
+            or host_evidence.get("payload_bytes_this_call") != 198715
             or readback.get("new_learning_write_count") != 0
             or readback.get("payload_gets_this_call") != 0
             or readback.get("payload_bytes_this_call") != 0
@@ -295,7 +295,7 @@ def _check_candidate_host(
             or host_evidence.get("retention_sha256")
             != readback.get("retention_sha256")
             or writes != {
-                "artifact_writes": 258,
+                "artifact_writes": 246,
                 "evaluator_label_writes": 0,
                 "formal_training_runs": 1,
                 "readback_learning_writes": 0,

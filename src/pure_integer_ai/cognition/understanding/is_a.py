@@ -56,7 +56,7 @@ def build_is_a_edge(edge_store: EdgeStore,
     assert_int(initial_strength, _where="build_is_a_edge.initial_strength")
     if child == parent:
         return 0
-    edge_store.add(
+    created = edge_store.add_assertion_once(
         space_id_from=child[0], local_id_from=child[1],
         space_id_to=parent[0], local_id_to=parent[1],
         edge_type=EDGE_IS_A, strength=initial_strength,
@@ -64,7 +64,7 @@ def build_is_a_edge(edge_store: EdgeStore,
         order_index=None, role=None,   # IS_A 无 order_index 时序语义
         tier=TIER_PRIMARY,
     )
-    return 1
+    return int(created)
 
 
 def has_reverse_isa_edge(edge_store: EdgeStore, child: tuple[int, int],

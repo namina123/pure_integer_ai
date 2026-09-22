@@ -161,9 +161,12 @@ def _protocol_payload(seed: AuthoredRelationSeed, value: dict) -> dict:
     }
 
 
-def _compile_precedes_seed(seed: AuthoredRelationSeed) -> AuthoredCompiledSeed:
+def _compile_precedes_seed(
+        seed: AuthoredRelationSeed,
+        *,
+        semantic_identity: bool = False) -> AuthoredCompiledSeed:
     """把 event-time resolver 和独立 verification protocol 附加到 payload。"""
-    base = compile_relation_seed(seed)
+    base = compile_relation_seed(seed, semantic_identity=semantic_identity)
     value = base.observation_payload.to_value()
     protocol = _protocol_payload(seed, value)
     value["event_time_protocol"] = protocol
@@ -300,12 +303,15 @@ def read_authored_precedes_seeds(
 
 def compile_authored_precedes_course(
         sample_path: str | Path,
-        release_root: str | Path) -> AuthoredCourseBuild:
+        release_root: str | Path,
+        *,
+        semantic_identity: bool = False) -> AuthoredCourseBuild:
     """编译并发布 D-02C.6 typed PRECEDES/event-time 极小 pack。"""
     seeds = read_authored_precedes_seeds(sample_path)
     try:
         return publish_authored_course(
-            tuple(_compile_precedes_seed(seed) for seed in seeds),
+            tuple(_compile_precedes_seed(
+                seed, semantic_identity=semantic_identity) for seed in seeds),
             sample_path,
             release_root,
             _SPEC,

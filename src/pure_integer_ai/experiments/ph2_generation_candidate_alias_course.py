@@ -457,13 +457,26 @@ def build_alias_relation_manifest(
         profile: AliasRelationManifestProfile,
         request: GenerationCandidateAliasCourseRequest,
         ) -> AliasRelationCourseManifest:
-    """将中性 profile 与来源化请求物化为可由 R-01 Loader 恢复的 manifest。"""
+    """编译完整 R-01 课程；每个关系只保存自身完整请求。
+
+    manifest 仍列出全部 entry，每个 entry 仍保留完整来源化请求；不以摘要
+    取代成员，也不改变形成、识别和 active 裁决。整批请求只参与课程指纹，
+    禁止复制进每个 entry 的来源、竞争组、Hypothesis 和 Event 身份。
+    """
     if not isinstance(profile, AliasRelationManifestProfile):
         raise TypeError("alias relation manifest profile 类型错误")
     if not isinstance(request, GenerationCandidateAliasCourseRequest):
         raise TypeError("generation alias manifest request 类型错误")
     protocols = _protocols(profile, request)
-    request_key = request.stable_key()
+    # Keep the full request only as a one-time content input.  Embedding the
+    # complete request in every entry made each Proposition identity grow
+    # linearly with the whole course (and duplicated hundreds of thousands of
+    # integer components).  A versioned SHA-256 integer fingerprint preserves
+    # the batch lock while leaving each entry to carry only its own topology.
+    request_key = integer_tuple_fingerprint(
+        request.stable_key(),
+        domain="gg03.generation.candidate.alias.request.v1",
+    )
     schema_by_relation = {
         protocols.alias.alias_relation: protocols.schemas[0],
         protocols.alias.refers_relation: protocols.schemas[1],

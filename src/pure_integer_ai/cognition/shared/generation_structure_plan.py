@@ -6,7 +6,10 @@ role_seq/token_seq 或旧 generate，也不在 Python 中写死语言角色与�
 """
 from __future__ import annotations
 
+from pure_integer_ai.cognition.shared.generation_observation import ObservedGenerationEvidence
+
 from dataclasses import dataclass
+from pure_integer_ai.cognition.shared.generation_role_binding import PropositionRoleSlotFiller
 from typing import Protocol, Sequence
 
 from pure_integer_ai.cognition.shared.generation_content import (
@@ -15,6 +18,7 @@ from pure_integer_ai.cognition.shared.generation_content import (
     ContentArtifactAttachment,
 )
 from pure_integer_ai.cognition.shared.generation_plan import (
+    GenerationCandidate,
     GenerationLayerDecision,
     GenerationLayerResult,
     GenerationPlanProtocol,
@@ -308,6 +312,7 @@ class PlannedProposition:
     evidence: tuple[EvidenceRecord, ...]
     hypotheses: tuple[HypothesisKey, ...]
     qualifiers: tuple[ObjectIdentity, ...] = ()
+    observation_evidence: tuple[ObservedGenerationEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         _strict_int_tuple(self.candidate_key, label="planned candidate key")
@@ -328,6 +333,10 @@ class PlannedProposition:
                 not isinstance(item, HypothesisKey) for item in self.hypotheses):
             raise TypeError("planned proposition hypotheses 类型错误")
         _object_tuple(self.qualifiers, label="planned proposition qualifiers")
+        if (type(self.observation_evidence) is not tuple
+                or any(not isinstance(item, ObservedGenerationEvidence) or item.target != self.proposition
+                       or item.scope != self.scope for item in self.observation_evidence)):
+            raise ValueError("planned proposition 观察证据必须保持目标和来源作用域")
 
     def stable_key(self) -> tuple[int, ...]:
         """返回命题、四态、来源、Evidence/Hypothesis 和 qualifier 完整键。"""
@@ -347,6 +356,10 @@ class PlannedProposition:
         result.append(len(self.qualifiers))
         for item in self.qualifiers:
             result.extend(_packed(item.stable_key()))
+        if self.observation_evidence:
+            result.extend((2, len(self.observation_evidence)))
+            for item in self.observation_evidence:
+                result.extend(_packed(item.stable_key()))
         return tuple(result)
 
 
@@ -420,6 +433,11 @@ class PropositionSlotFiller:
             *_packed(_slot_value_key(self.value)),
         )
 
+    @property
+    def slot_values(self) -> tuple[StructureSlotValue, ...]:
+        """与完整角色组共用实际槽覆盖消费者，旧稳定整数键保持不变。"""
+        return (self.value,)
+
 
 @dataclass(frozen=True)
 class GenerationSentenceInstance:
@@ -469,12 +487,13 @@ class PlannedSentence:
     proposition_keys: tuple[tuple[int, ...], ...]
     slots: tuple[StructureSlotDefinition, ...]
     values: tuple[StructureSlotValue, ...]
-    proposition_fillers: tuple[PropositionSlotFiller, ...]
+    proposition_fillers: tuple[PropositionSlotFiller | PropositionRoleSlotFiller, ...]
     boundary: ObjectIdentity
     source: SourceRef
     scope: ScopeIdentity
     response_act: ObjectIdentity | None = None
     instance: GenerationSentenceInstance | None = None
+    response_act_value: StructureSlotValue | None = None
 
     def __post_init__(self) -> None:
         _require_structure(self.sentence, label="planned sentence")
@@ -511,7 +530,7 @@ class PlannedSentence:
             raise ValueError("planned sentence value 引用了未声明 slot")
         if not isinstance(self.proposition_fillers, tuple):
             raise TypeError("planned sentence proposition_fillers 必须是 tuple")
-        if any(not isinstance(item, PropositionSlotFiller)
+        if any(not isinstance(item, (PropositionSlotFiller, PropositionRoleSlotFiller))
                for item in self.proposition_fillers):
             raise TypeError("planned sentence proposition_fillers 含非法项")
         filler_keys = tuple(
@@ -520,8 +539,7 @@ class PlannedSentence:
             raise ValueError("同一 Proposition 不得重复绑定 sentence slot")
         if set(filler_keys) != set(self.proposition_keys):
             raise ValueError("sentence slot binding 必须完整覆盖 proposition_keys")
-        filler_values = tuple(
-            item.value for item in self.proposition_fillers)
+        filler_values = tuple(value for item in self.proposition_fillers for value in item.slot_values)
         if len(set(filler_values)) != len(filler_values):
             raise ValueError("不同 Proposition 不得共用同一 slot value")
         if not set(filler_values).issubset(set(self.values)):
@@ -529,12 +547,17 @@ class PlannedSentence:
         if self.response_act is not None:
             _require_instruction(
                 self.response_act, label="planned sentence response act")
-            act_values = tuple(
-                item for item in self.values
-                if item.filler == self.response_act
-            )
+            if self.response_act_value is not None:
+                if (not isinstance(self.response_act_value, StructureSlotValue)
+                        or self.proposition_keys or self.proposition_fillers):
+                    raise ValueError("来源化动作表达槽只供显式非事实句式")
+                act_values = tuple(item for item in self.values if item == self.response_act_value)
+            else:
+                act_values = tuple(item for item in self.values if item.filler == self.response_act)
             if len(act_values) != 1:
                 raise ValueError("response act 必须恰绑定一个实际 slot value")
+        elif self.response_act_value is not None:
+            raise ValueError("动作表达槽必须保留实际 response act")
         if not self.proposition_keys and self.response_act is None:
             raise ValueError("无命题 planned sentence 必须显式绑定 response act")
         _require_instruction(self.boundary, label="sentence boundary")
@@ -596,6 +619,8 @@ class PlannedSentence:
         result.append(0 if self.instance is None else 1)
         if self.instance is not None:
             result.extend(_packed(self.instance.stable_key()))
+        if self.response_act_value is not None:
+            result.extend((2, *_packed(_slot_value_key(self.response_act_value))))
         return tuple(result)
 
 
@@ -883,7 +908,11 @@ def _validate_propositions(
         raise ValueError("proposition plan 必须绑定当前 G-01 selection")
     planned = {item.candidate_key: item for item in propositions.propositions}
     selected_keys = set(selection.selected_candidate_keys)
-    if set(planned) != selected_keys:
+    proposition_keys = {
+        key for key, candidate in selected.items()
+        if isinstance(candidate, GenerationCandidate)
+    }
+    if set(planned) != proposition_keys:
         raise ValueError("proposition plan 必须完整覆盖 selected candidate")
     for key, item in planned.items():
         candidate = selected[key]
@@ -892,7 +921,8 @@ def _validate_propositions(
                 or item.source != candidate.source
                 or item.scope != candidate.scope
                 or item.evidence != candidate.evidence
-                or item.hypotheses != candidate.hypotheses):
+                or item.hypotheses != candidate.hypotheses
+                or item.observation_evidence != candidate.observation_evidence):
             raise ValueError("planned proposition 丢失或替换了候选 Evidence 身份")
     return selected
 

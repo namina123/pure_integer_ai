@@ -25,7 +25,7 @@ from pure_integer_ai.experiments.ph2_w06_span_graph_protocol import (
 from pure_integer_ai.experiments.ph2_w06_learning import (
     W06RelationLearningRuntime,
 )
-from pure_integer_ai.experiments.ph2_w06_adapter import (
+from pure_integer_ai.experiments.ph2_w06_identity_protocol import (
     w06_directionality_binding_predicate,
     w06_directionality_value,
 )
@@ -46,6 +46,9 @@ class TrainedRelationGraphError(RuntimeError):
 GRAPH_RELATION_MISS = 1
 GRAPH_RELATION_ANSWER = 2
 GRAPH_RELATION_CONFLICT = 3
+# 命中了 active relation，但没有注入训练后的 connector。这个结果不能
+# 退化为来源表层重填，也不能伪装成普通 miss；调用方必须 fail closed。
+GRAPH_RELATION_GENERATION_UNAVAILABLE = 4
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,9 @@ class GraphRelationGeneration:
     connector: ObjectIdentity | None = None
     representations: tuple[ObjectIdentity, ...] = ()
     trace: tuple[int, ...] = ()
+    # G-02 typed structure is kept as an optional runtime handoff only.  It is
+    # never used as a semantic identity or serialized into the Core graph.
+    structure_plan: object | None = None
 
 
 class RelationGraphSurfaceGenerator(Protocol):
@@ -156,7 +162,8 @@ class GraphRelationDecision:
         if self.result_code not in {
                 GRAPH_RELATION_MISS,
                 GRAPH_RELATION_ANSWER,
-                GRAPH_RELATION_CONFLICT}:
+                GRAPH_RELATION_CONFLICT,
+                GRAPH_RELATION_GENERATION_UNAVAILABLE}:
             raise ValueError("relation query result_code 未注册")
         if ((self.result_code == GRAPH_RELATION_ANSWER)
                 != (self.answer is not None)):
@@ -293,13 +300,15 @@ class TrainedRelationGraphRuntime:
         if not recognized_surfaces.issubset({
                 binding.surface for binding in best[4].bindings}):
             return GraphRelationDecision(GRAPH_RELATION_CONFLICT, None)
-        generation = (
-            self._generate_surface(best[4])
-            if surface_generator is None
-            else surface_generator.generate_relation(
-                self.generation_input(best[4].proposition),
-                best[4],
-            )
+        if surface_generator is None:
+            # 来源 Span/RoleBinding 表层只能支撑训练期结构检查。生产查询
+            # 必须由独立训练 connector 组织 ResponsePlan；禁止在缺少
+            # connector 时从 SourceRecord.raw_text 重填并直接回答。
+            return GraphRelationDecision(
+                GRAPH_RELATION_GENERATION_UNAVAILABLE, None)
+        generation = surface_generator.generate_relation(
+            self.generation_input(best[4].proposition),
+            best[4],
         )
         if not isinstance(generation, GraphRelationGeneration):
             raise TypeError("relation surface generator 返回类型错误")
@@ -362,6 +371,13 @@ class TrainedRelationGraphRuntime:
             raise TrainedRelationGraphError(
                 "查询命题没有唯一 active generation input")
         return item
+
+    def evidence_history(
+            self, proposition: ObjectIdentity,
+            ) -> tuple[EvidenceRecord, ...]:
+        """恢复已核验 active 命题的完整 H-00 历史；旧证据保留供共同查询裁决。"""
+        source = self.generation_input(proposition)
+        return self.owner.learning.engine.ledger.evidence_history(source.hypothesis)
 
     def _restore_active_snapshot(self) -> ActiveRelationGraphSnapshot:
         """联合 H-00/H-04、候选 lifecycle 图和 S-00 拓扑恢复 active 集。"""
@@ -681,6 +697,7 @@ __all__ = [
     "ActiveRelationSurface",
     "GRAPH_RELATION_ANSWER",
     "GRAPH_RELATION_CONFLICT",
+    "GRAPH_RELATION_GENERATION_UNAVAILABLE",
     "GRAPH_RELATION_MISS",
     "GraphRelationGeneration",
     "GraphRelationAnswer",

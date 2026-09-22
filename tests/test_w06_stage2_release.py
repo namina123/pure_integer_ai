@@ -85,10 +85,10 @@ def _fixture(tmp_path: Path):
     aggregate_sha = hashlib.sha256(aggregate_path.read_bytes()).hexdigest()
 
     artifact_counts = [
-        ["ACTIVE_RELATION", 17],
-        ["CANDIDATE", 50],
+        ["ACTIVE_RELATION", 14],
+        ["CANDIDATE", 40],
         ["CARRIER_PROJECTION", 9],
-        ["EVIDENCE_ACCOUNT", 64],
+        ["EVIDENCE_ACCOUNT", 65],
         ["EVIDENCE_APPLICATION", 50],
         ["LOGICAL_SHARD", 16],
         ["RELATION_FAMILY", 14],
@@ -108,12 +108,12 @@ def _fixture(tmp_path: Path):
     }
     resource_report = {
         "actual_checkpoint_count": 1,
-        "actual_logic_operations": 14_000,
-        "actual_payload_bytes": 199_296,
+        "actual_logic_operations": 13_050,
+        "actual_payload_bytes": 198_715,
         "actual_payload_gets": 54,
-        "actual_recompute_objects": 123,
+        "actual_recompute_objects": 114,
         "actual_records": 541,
-        "actual_segments": 59,
+        "actual_segments": 49,
         "actual_workers": 4,
         "teacher_calls": 0,
     }
@@ -124,9 +124,9 @@ def _fixture(tmp_path: Path):
         "execution_state": dict(W06_FORMAL_EXECUTION_STATE),
         "host_digests": host_digests,
         "learning_attempt_count": 1,
-        "new_learning_write_count": 126,
+        "new_learning_write_count": 117,
         "owned_tables": ["graph_object", "ph2_w06_transaction_event"],
-        "payload_bytes_this_call": 199_296,
+        "payload_bytes_this_call": 198_715,
         "payload_gets_this_call": 54,
         "resource_report": resource_report,
         "retention_sha256": [
@@ -151,7 +151,7 @@ def _fixture(tmp_path: Path):
         "host_evidence": host_evidence,
         "open_generation_state": W06_OPEN_GENERATION_STATE,
         "owner_write_counts": {
-            "artifact_writes": 258,
+            "artifact_writes": 246,
             "evaluator_label_writes": 0,
             "formal_training_runs": 1,
             "readback_learning_writes": 0,

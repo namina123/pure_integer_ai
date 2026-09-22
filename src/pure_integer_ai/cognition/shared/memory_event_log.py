@@ -25,6 +25,7 @@ from pure_integer_ai.cognition.shared.memory_event import (
     MEMORY_EVENT_USE,
     MEMORY_EVENT_USE_OUTCOME,
     MEMORY_OBJECT_INTAKE_MANIFEST,
+    REFERENCE_MEMORY_OBJECT,
     RETENTION_CONSOLIDATED,
     RETENTION_EPISODIC,
     TIME_AXIS_CREATED,
@@ -36,6 +37,7 @@ from pure_integer_ai.cognition.shared.memory_event import (
     HypothesisPayload,
     IntakeManifestPayload,
     MemoryEvent,
+    MemoryLinkedRef,
     MemoryObjectRef,
     LifecycleTransitionPayload,
     ObservationPayload,
@@ -104,6 +106,36 @@ _DECLARATION_EVENT_KINDS = frozenset({
 })
 
 
+# Physical payload encoding only. Domain stable keys and event hashes remain
+# unchanged; every locator is resolved and hash-verified before reconstruction.
+_NORMALIZED_PAYLOAD_STORAGE = 91538
+_NORMALIZED_USE = 1
+_NORMALIZED_USE_OUTCOME = 2
+_STORED_LINK_FULL = 1
+_STORED_LINK_MEMORY_LOCATOR = 2
+
+
+def _pack_storage_key(key: tuple[int, ...]) -> tuple[int, ...]:
+    """Length-prefix one integer field in a normalized physical payload."""
+    return len(key), *key
+
+
+def _take_storage_key(
+        values: tuple[int, ...], cursor: int, *, allow_empty: bool = False,
+        ) -> tuple[tuple[int, ...], int]:
+    """Read one exact field and reject truncated normalized payloads."""
+    if cursor >= len(values):
+        raise MemoryEventIntegrityError("normalized Memory payload lacks field length")
+    size = values[cursor]
+    if type(size) is not int or size < 0 or (size == 0 and not allow_empty):
+        raise MemoryEventIntegrityError("normalized Memory payload field size is invalid")
+    start = cursor + 1
+    end = start + size
+    if end > len(values):
+        raise MemoryEventIntegrityError("normalized Memory payload field is truncated")
+    return values[start:end], end
+
+
 @dataclass(frozen=True)
 class MaterializedMemoryEvent:
     """带物理 hash 和跨 scope 时间线的已核验 Memory 事件。"""
@@ -134,10 +166,8 @@ class _MemoryEventIdentityCodec:
     def event(self, event_hash: int) -> MemoryEvent:
         """从固定信封、payload chunk、scope 和 timestamp 恢复完整事件。"""
         record = self.records.read(event_hash)
-        payload = payload_from_stable_key(
-            record.event_kind,
-            self.records.read_payload(event_hash),
-        )
+        payload = self.decode_payload(
+            record.event_kind, self.records.read_payload(event_hash))
         scope = self.scoped_identities.load_scope(record.scope_hash)
         timestamp = self.scoped_identities.load_timestamp(
             record.timestamp_hash)
@@ -168,6 +198,142 @@ class _MemoryEventIdentityCodec:
             raise MemoryEventIntegrityError(
                 "Memory event payload 恢复结果与固定信封不一致")
         return event
+
+    def _memory_object_hash(self, ref: MemoryObjectRef) -> int:
+        """Return a reversible registry locator for one declared object."""
+        registry = self.scoped_identities.registry
+        key = ref.stable_key()
+        object_hash = registry.find(IDENTITY_MEMORY_OBJECT, key)
+        if object_hash is None or registry.read_key(
+                IDENTITY_MEMORY_OBJECT, object_hash) != key:
+            raise MemoryEventIntegrityError(
+                "normalized Memory payload references an undeclared object")
+        return object_hash
+
+    def _memory_object_ref(self, object_hash: int) -> MemoryObjectRef:
+        """Resolve and verify a stored object locator without trusting its hash."""
+        if type(object_hash) is not int or object_hash <= 0:
+            raise MemoryEventIntegrityError("Memory object locator must be positive")
+        registry = self.scoped_identities.registry
+        key = registry.read_key(IDENTITY_MEMORY_OBJECT, object_hash)
+        ref = MemoryObjectRef.from_stable_key(key)
+        if registry.identity_hash(
+                IDENTITY_MEMORY_OBJECT, ref.stable_key()) != object_hash:
+            raise MemoryEventIntegrityError("Memory object locator hash drifted")
+        return ref
+
+    def _encode_link(self, ref: MemoryLinkedRef) -> tuple[int, ...]:
+        """Normalize only Memory links; other typed links remain self-contained."""
+        if ref.reference_kind != REFERENCE_MEMORY_OBJECT:
+            return _STORED_LINK_FULL, *ref.stable_key()
+        value = ref.value()
+        if not isinstance(value, MemoryObjectRef):
+            raise MemoryEventIntegrityError("Memory link did not restore an object ref")
+        return _STORED_LINK_MEMORY_LOCATOR, self._memory_object_hash(value)
+
+    def _decode_link(self, key: tuple[int, ...]) -> MemoryLinkedRef:
+        """Restore a normalized linked ref and verify any object locator."""
+        if not key:
+            raise MemoryEventIntegrityError("normalized Memory link is empty")
+        if key[0] == _STORED_LINK_FULL:
+            return MemoryLinkedRef.from_stable_key(key[1:])
+        if key[0] == _STORED_LINK_MEMORY_LOCATOR and len(key) == 2:
+            return MemoryLinkedRef.memory(self._memory_object_ref(key[1]))
+        raise MemoryEventIntegrityError("normalized Memory link encoding is invalid")
+
+    def encode_payload(self, event_kind: int, payload) -> tuple[int, ...]:
+        """Store Use attribution with reversible object locators, not deep copies."""
+        if event_kind == MEMORY_EVENT_USE and isinstance(payload, UsePayload):
+            outcome = (() if payload.outcome_ref is None
+                       else self._encode_link(payload.outcome_ref))
+            query = (() if payload.query_kind is None
+                     else self._encode_link(payload.query_kind))
+            return (
+                _NORMALIZED_PAYLOAD_STORAGE,
+                _NORMALIZED_USE,
+                self._memory_object_hash(payload.memory_ref),
+                self._memory_object_hash(payload.episode_ref),
+                *_pack_storage_key(self._encode_link(payload.influence_kind)),
+                *_pack_storage_key(outcome),
+                *_pack_storage_key(payload.used_at.stable_key()),
+                *_pack_storage_key(payload.decision_trace_key),
+                *_pack_storage_key(query),
+                *_pack_storage_key(payload.context_key),
+            )
+        if (event_kind == MEMORY_EVENT_USE_OUTCOME
+                and isinstance(payload, UseOutcomePayload)):
+            outcome = (() if payload.outcome_ref is None
+                       else self._encode_link(payload.outcome_ref))
+            return (
+                _NORMALIZED_PAYLOAD_STORAGE,
+                _NORMALIZED_USE_OUTCOME,
+                self._memory_object_hash(payload.target_ref),
+                *_pack_storage_key(payload.decision_trace_key),
+                *_pack_storage_key(self._encode_link(payload.query_kind)),
+                *_pack_storage_key(payload.context_key),
+                *_pack_storage_key(self._encode_link(payload.outcome_kind)),
+                *_pack_storage_key(outcome),
+                *_pack_storage_key(payload.observed_at.stable_key()),
+                *_pack_storage_key(payload.outcome_trace_key),
+            )
+        return payload.stable_key()
+
+    def decode_payload(self, event_kind: int, key: tuple[int, ...]):
+        """Read normalized or legacy payload bytes into the same domain object."""
+        if not key or key[0] != _NORMALIZED_PAYLOAD_STORAGE:
+            return payload_from_stable_key(event_kind, key)
+        if len(key) < 3:
+            raise MemoryEventIntegrityError("normalized Memory payload is truncated")
+        storage_kind = key[1]
+        if event_kind == MEMORY_EVENT_USE and storage_kind == _NORMALIZED_USE:
+            if len(key) < 4:
+                raise MemoryEventIntegrityError("normalized Use payload is truncated")
+            memory_ref = self._memory_object_ref(key[2])
+            episode_ref = self._memory_object_ref(key[3])
+            influence, cursor = _take_storage_key(key, 4)
+            outcome, cursor = _take_storage_key(key, cursor, allow_empty=True)
+            timestamp, cursor = _take_storage_key(key, cursor)
+            decision, cursor = _take_storage_key(key, cursor, allow_empty=True)
+            query, cursor = _take_storage_key(key, cursor, allow_empty=True)
+            context, cursor = _take_storage_key(key, cursor, allow_empty=True)
+            if cursor != len(key):
+                raise MemoryEventIntegrityError("normalized Use payload has trailing data")
+            return UsePayload(
+                memory_ref,
+                episode_ref,
+                self._decode_link(influence),
+                None if not outcome else self._decode_link(outcome),
+                LogicalTimestamp.from_stable_key(timestamp),
+                decision,
+                None if not query else self._decode_link(query),
+                context,
+            )
+        if (event_kind == MEMORY_EVENT_USE_OUTCOME
+                and storage_kind == _NORMALIZED_USE_OUTCOME):
+            target_ref = self._memory_object_ref(key[2])
+            decision, cursor = _take_storage_key(key, 3)
+            query, cursor = _take_storage_key(key, cursor)
+            context, cursor = _take_storage_key(key, cursor)
+            outcome_kind, cursor = _take_storage_key(key, cursor)
+            outcome, cursor = _take_storage_key(key, cursor, allow_empty=True)
+            timestamp, cursor = _take_storage_key(key, cursor)
+            outcome_trace, cursor = _take_storage_key(
+                key, cursor, allow_empty=True)
+            if cursor != len(key):
+                raise MemoryEventIntegrityError(
+                    "normalized UseOutcome payload has trailing data")
+            return UseOutcomePayload(
+                target_ref,
+                decision,
+                self._decode_link(query),
+                context,
+                self._decode_link(outcome_kind),
+                None if not outcome else self._decode_link(outcome),
+                LogicalTimestamp.from_stable_key(timestamp),
+                outcome_trace,
+            )
+        raise MemoryEventIntegrityError(
+            "normalized payload kind does not match its event kind")
 
     def event_external_key(self, event_hash: int) -> ExternalIdentityKey | None:
         """为 identity registry 提供 self-headed 完整事件键和索引元数据。"""
@@ -435,17 +601,19 @@ class MemoryEventLog:
                 raise MemoryEventIntegrityError(
                     "Memory timeline 逻辑序已被物理 append-only 事件占用")
 
+            payload_key = self._identity_codec.encode_payload(
+                event.event_kind, event.payload)
             record = self._record_for(
                 event_hash,
                 object_hash,
                 event,
+                payload_size=len(payload_key),
                 scope_hash=scope_hash,
                 timestamp_hash=timestamp_hash,
                 clock_hash=clock_hash,
                 timeline=timeline,
                 timeline_timestamp_hash=timeline_timestamp_hash,
             )
-            payload_key = event.payload.stable_key()
 
             def write_event(_: int) -> None:
                 """把已计算身份对应的正规化信封和单份 payload 写入物理表。"""
@@ -1022,7 +1190,7 @@ class MemoryEventLog:
         return retention, lifecycle, retention_clock, lifecycle_clock
 
     def _record_for(self, event_hash: int, object_hash: int,
-                    event: MemoryEvent, *, scope_hash: int,
+                    event: MemoryEvent, *, payload_size: int, scope_hash: int,
                     timestamp_hash: int, clock_hash: int,
                     timeline: LogicalTimestamp,
                     timeline_timestamp_hash: int,
@@ -1042,7 +1210,7 @@ class MemoryEventLog:
             event.object_ref.owner.stable_key(),
             event.event_kind,
             event.object_ref.object_kind,
-            len(event.payload.stable_key()),
+            payload_size,
             scope_hash,
             timestamp_hash,
             clock_hash,
@@ -1081,6 +1249,7 @@ class MemoryEventLog:
             event_hash,
             record.object_hash,
             event,
+            payload_size=record.payload_size,
             scope_hash=record.scope_hash,
             timestamp_hash=record.timestamp_hash,
             clock_hash=record.clock_hash,

@@ -32,7 +32,7 @@ from pure_integer_ai.experiments.ph2_w06_span_graph_protocol import (
 )
 
 
-def _materialize_relation_spans(context, runtime) -> None:
+def _materialize_relation_spans(context, runtime, adapter) -> None:
     """把 relation 来源原文的端点/锚点落入共享 Span 图。
 
     Authored JSONL 只在训练构造阶段存在；发布图保留来源、区间和角色绑定，
@@ -44,28 +44,37 @@ def _materialize_relation_spans(context, runtime) -> None:
     ontology = context.graph_ontology
     endpoint_predicate = ontology.materialize(w06_span_endpoint_predicate())
     anchor_predicate = ontology.materialize(w06_span_anchor_predicate())
-    for candidate in runtime.registered_candidates():
-        source = candidate.source_ref
+    materialized_propositions = set()
+    for envelope in adapter.observations:
+        candidate = envelope.candidate
+        proposition_key = candidate.proposition.proposition.stable_key()
+        if proposition_key in materialized_propositions:
+            # Additional sources remain in SourceRef/Evidence history; one
+            # deterministic span frame is sufficient for surface generation.
+            continue
+        materialized_propositions.add(proposition_key)
+        source = candidate.observation_source
         scope = document_scope(source)
-        raw_text = candidate.surface
+        payload = envelope.observation.typed_payload.to_value()
+        raw_text = payload["surface"]
         proposition_ref = ontology.materialize(candidate.proposition.proposition)
         bindings = tuple(candidate.proposition.canonical_bindings())
         endpoint_by_identity = {
-            endpoint.identity: endpoint for endpoint in candidate.endpoints
+            tuple(item["endpoint_key"]): item
+            for item in payload["endpoints"]
         }
         if (len(bindings) != len(candidate.endpoints)
                 or len(endpoint_by_identity) != len(candidate.endpoints)
-                or {binding.filler for binding in bindings}
+                or {binding.filler.stable_key() for binding in bindings}
                 != set(endpoint_by_identity)):
             raise RuntimeError("W-06 endpoint 与 RoleBinding 数量不一致")
         # The relation anchor and each endpoint are independent source spans.
-        anchor = candidate.proposition.source_anchor
-        source_key = source.stable_key()
-        if anchor.components[:len(source_key)] != source_key:
-            raise RuntimeError("W-06 anchor 与 relation 来源不一致")
-        anchor_payload = anchor.components[len(source_key):]
-        if len(anchor_payload) != 3:
-            raise RuntimeError("W-06 anchor occurrence identity 布局非法")
+        anchor_payload = candidate.observation.typed_payload.to_value().get(
+            "source_anchor_span")
+        if (not isinstance(anchor_payload, list)
+                or len(anchor_payload) != 3
+                or any(type(item) is not int for item in anchor_payload)):
+            raise RuntimeError("W-06 Observation 缺少整数 anchor span")
         anchor_start, anchor_end, anchor_ordinal = anchor_payload
         anchor_ref = span_index.ensure_ref(
             source=source,
@@ -83,13 +92,16 @@ def _materialize_relation_spans(context, runtime) -> None:
             content_version=source.versions.parser.value,
         )
         for binding in bindings:
-            endpoint = endpoint_by_identity[binding.filler]
+            endpoint = endpoint_by_identity.get(
+                binding.filler.stable_key())
+            if endpoint is None:
+                raise RuntimeError("W-06 Observation endpoint identity 缺失")
             endpoint_ref = span_index.ensure_ref(
                 source=source,
                 raw_text=raw_text,
                 scope=scope,
-                members=((endpoint.start, endpoint.end),),
-                ordinal=endpoint.ordinal,
+                members=((endpoint["start"], endpoint["end"]),),
+                ordinal=endpoint["ordinal"],
             )
             binding_ref = ontology.materialize(
                 binding.identity_for(candidate.proposition.proposition))
@@ -163,7 +175,11 @@ def build_authored_w06_adapter(
     for ordinal, path in enumerate(selected, start=1):
         builder = _course_builder(path)
         assert builder is not None
-        build = builder(path, output_root / f"pack-{ordinal:02d}")
+        build = builder(
+            path,
+            output_root / f"pack-{ordinal:02d}",
+            semantic_identity=True,
+        )
         manifest = read_artifact_manifest(build.pack_root / "manifest.json")
         for identity in manifest.files:
             records = read_record_artifact(build.pack_root, identity)
@@ -191,7 +207,14 @@ def build_authored_w06_learning_runtime(
     # assertion record as its canonical source of truth.
     context.graph_ontology.enable_physical_statement_projection()
     runtime = build_w06_learning_runtime(backend, adapter, context=context)
-    _materialize_relation_spans(context, runtime)
+    # The formal factory installs this runtime before round execution, but
+    # W-06 authored evidence is itself the typed relation training payload.
+    # Consume it here so the shared TrainContext receives the candidates,
+    # Evidence lifecycle and closure projections in the same SQLite graph.
+    # ``apply_all`` is idempotent on the teacher route and therefore remains
+    # safe for additive page-resume runs.
+    runtime.apply_all(adapter)
+    _materialize_relation_spans(context, runtime, adapter)
     return runtime
 
 

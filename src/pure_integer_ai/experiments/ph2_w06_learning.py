@@ -60,15 +60,10 @@ from pure_integer_ai.cognition.shared.training_hypothesis import (
 )
 from pure_integer_ai.crosscut.determinism.hasher import Hasher
 from pure_integer_ai.experiments.evaluation_protocol import ProtocolKey
-from pure_integer_ai.experiments.formal_train import make_train_context
-from pure_integer_ai.experiments.train_context import TrainContext
-from pure_integer_ai.experiments.ph2_w06_adapter import (
-    W06EvidenceBinding,
-    W06RelationCandidate,
-    W06TypedAdapterOutput,
+from pure_integer_ai.experiments.train_context import TrainContext, make_train_context
+from pure_integer_ai.experiments.ph2_w06_identity_protocol import (
     W06_IDENTITY_VERSIONS,
     W06_NAMESPACE,
-    w06_relation_protocol,
 )
 from pure_integer_ai.experiments.relation_closure_runtime import (
     RelationClosureRecognitionInput,
@@ -79,6 +74,7 @@ from pure_integer_ai.storage.edge_store import EPI_STRUCTURED, SOURCE_BARE_TEXT
 
 
 _WITHDRAWAL_HASHER = Hasher("ph2.w06.withdrawal.evidence.v1")
+_SEMANTIC_REVISION_HASHER = Hasher("ph2.w06.semantic.revision.evidence.v1")
 
 
 class W06LearningError(RuntimeError):
@@ -249,6 +245,7 @@ class W06EvidenceApplication:
     accounts: tuple[W06EvidenceAccount, ...]
     superseded_candidates: tuple[ObjectIdentity, ...]
     reparse: bool
+    superseded_evidence: tuple[EvidenceRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -294,6 +291,9 @@ class W06RelationLearningRuntime:
         if context.backend is not backend:
             raise ValueError("W-06 context 必须绑定传入 backend")
         self.semantic_graph = _semantic_graph(context.graph_ontology)
+        from pure_integer_ai.experiments.ph2_w06_adapter import (
+            w06_relation_protocol,
+        )
         self.projection_protocol = _projection_protocol()
         self.candidate_graph = CandidateProjectionGraph(
             context.graph_ontology, self.projection_protocol)
@@ -339,12 +339,17 @@ class W06RelationLearningRuntime:
 
     def register_adapter_output(self, adapter: W06TypedAdapterOutput) -> None:
         """预检后物化 50 个合法命题并幂等登记 relation candidates。"""
+        from pure_integer_ai.experiments.ph2_w06_adapter import (
+            W06TypedAdapterOutput,
+        )
         if not isinstance(adapter, W06TypedAdapterOutput):
             raise TypeError("W-06 learning 只接受 W06TypedAdapterOutput")
         if self._adapter is not None:
             if self._adapter != adapter:
                 raise W06LearningError("W-06 runtime 不得重复登记漂移 adapter")
             return
+
+        self.semantic_uniqueness_report = adapter.semantic_uniqueness_report
         if ({item.proposition.proposition for item in adapter.candidates}
                 & {item.proposition for item in adapter.rejections}):
             raise W06LearningError("schema rejection 不得进入合法 candidate 集")
@@ -459,6 +464,53 @@ class W06RelationLearningRuntime:
 
         accounts = []
         superseded = []
+        superseded_evidence = []
+        same_candidate_revision = False
+        prior_application = None
+        if binding.supersedes_observation_key is not None:
+            prior_application = next((
+                item for item in self._applications.values()
+                if item.binding.observation.stable_key
+                == binding.supersedes_observation_key
+            ), None)
+            if prior_application is None:
+                raise W06LearningError(
+                    "reparse supersede target Evidence application 缺失")
+            same_candidate_revision = (
+                prior_application.binding.candidate == binding.candidate)
+            if same_candidate_revision:
+                for ordinal, prior_account in enumerate(
+                        prior_application.accounts):
+                    prior_evidence = prior_account.trace.outcome.evidence
+                    timestamps = self.learning.next_timestamps(3)
+                    source = _teacher_source(binding)
+                    evidence_id = _SEMANTIC_REVISION_HASHER.h63((
+                        prior_evidence.stable_key(),
+                        binding.teacher_record.stable_key.stable_key(),
+                        ordinal,
+                    )) or 1
+                    revision = EvidenceRecord(
+                        evidence_id,
+                        prior_evidence.hypothesis,
+                        EVIDENCE_UNKNOWN,
+                        (
+                            W06_NAMESPACE,
+                            4,
+                            *_pack(binding.teacher_record.stable_key.stable_key()),
+                            prior_evidence.evidence_id,
+                            ordinal,
+                        ),
+                        source,
+                        timestamps[0],
+                        payload=(W06_NAMESPACE, 4, ordinal),
+                        supersedes_evidence_id=prior_evidence.evidence_id,
+                    )
+                    self.learning.revise_evidence(
+                        revision,
+                        resolve_timestamp_seq=timestamps[1],
+                        projection_timestamp_seq=timestamps[2],
+                    )
+                    superseded_evidence.append(revision)
         for ordinal, stance in enumerate(binding.stances):
             accounts.append(self._recognize(
                 binding,
@@ -470,8 +522,8 @@ class W06RelationLearningRuntime:
         if binding.supersedes_observation_key is not None:
             targets = tuple(sorted(
                 (
-                    item.proposition.proposition
-                    for item in self._candidates.values()
+                    item.candidate.proposition.proposition
+                    for item in self._adapter.observations
                     if item.observation.stable_key
                     == binding.supersedes_observation_key
                 ),
@@ -479,7 +531,13 @@ class W06RelationLearningRuntime:
             ))
             if not targets or binding.candidate not in self._candidates:
                 raise W06LearningError("reparse supersede target 或 replacement 缺失")
-            for ordinal, target in enumerate(targets):
+            # Semantic identity deduplication makes a parser revision point at
+            # the same proposition.  Its new support Evidence is appended to
+            # that proposition; only a genuinely different semantic key gets
+            # the legacy candidate-level replacement projection.
+            distinct_targets = (() if same_candidate_revision else tuple(
+                target for target in targets if target != binding.candidate))
+            for ordinal, target in enumerate(distinct_targets):
                 accounts.append(self._recognize(
                     binding,
                     target,
@@ -497,6 +555,7 @@ class W06RelationLearningRuntime:
             tuple(accounts),
             tuple(sorted(set(superseded), key=ObjectIdentity.stable_key)),
             reparse,
+            tuple(superseded_evidence),
         )
         self._applications[route] = application
         return application
@@ -636,7 +695,9 @@ class W06RelationLearningRuntime:
             len(self._adapter.rejections),
             len({item.relation_family for item in self._candidates.values()}),
             len(self._applications),
-            sum(len(item.accounts) for item in self._applications.values()),
+            sum(
+                len(item.accounts) + len(item.superseded_evidence)
+                for item in self._applications.values()),
             len(self.active_candidates()),
             sum(item.snapshot.lifecycle == LIFECYCLE_ARCHIVED for item in snapshots),
             sum(item.snapshot.lifecycle == LIFECYCLE_SUPERSEDED for item in snapshots),

@@ -31,6 +31,7 @@ from pure_integer_ai.cognition.shared.identity import (
     OBJECT_STRUCTURE_CONCEPT,
     ObjectIdentity,
 )
+from pure_integer_ai.cognition.shared.memory_event import MemoryObjectRef
 
 # 可允许的槽位角色类型：结构概念（契约槽）或训练后关系图的 Role（RoleBinding
 # 的 role 身份）。filler 允许的概念/事件/命题/集合节点由训练图实际产生。
@@ -116,6 +117,14 @@ def _identities_key(identities: tuple[ObjectIdentity, ...]) -> tuple[int, ...]:
     for item in ordered:
         out.extend(_packed(item.stable_key()))
     return len(ordered), *out
+
+
+def _memory_refs_key(refs: tuple[MemoryObjectRef, ...]) -> tuple[int, ...]:
+    """保留真实 Memory 引用的空间、owner、版本、种类和完整对象键。"""
+    if type(refs) is not tuple or any(not isinstance(ref, MemoryObjectRef) for ref in refs):
+        raise TypeError("response plan memory_refs 必须是 MemoryObjectRef tuple")
+    return (len(refs), *(value for ref in sorted(refs, key=lambda item: item.stable_key())
+                         for value in _packed(ref.stable_key())))
 
 
 @dataclass(frozen=True)
@@ -214,13 +223,14 @@ class ResponsePlan:
     scope_and_time: tuple[int, ...] = ()
     discourse_links: tuple[ObjectIdentity, ...] = ()
     event_refs: tuple[ObjectIdentity, ...] = ()
-    memory_refs: tuple[ObjectIdentity, ...] = ()
+    memory_refs: tuple[MemoryObjectRef, ...] = ()
     style_ref: ObjectIdentity | None = None
     carrier_ref: ObjectIdentity | None = None
     _stable_key_cache: tuple[int, ...] = field(init=False, repr=False, default=())
 
     def __post_init__(self) -> None:
         _require_instruction(self.response_act, label="response plan act")
+        _memory_refs_key(self.memory_refs)
         if not isinstance(self.claim_refs, tuple) or any(
                 not isinstance(item, ObjectIdentity)
                 for item in self.claim_refs):
@@ -305,7 +315,7 @@ class ResponsePlan:
             *_identities_key(self.claim_refs),
             *_identities_key(self.discourse_links),
             *_identities_key(self.event_refs),
-            *_identities_key(self.memory_refs),
+            *_memory_refs_key(self.memory_refs),
             *_packed(self.scope_and_time),
         ]
         out.append(len(self.slot_sequence))

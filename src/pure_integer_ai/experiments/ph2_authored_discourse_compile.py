@@ -51,15 +51,26 @@ def _versions(parser_version: int) -> VersionBundle:
     )
 
 
-def _source(seed: AuthoredDiscourseSeed, parser_version: int) -> SourceRef:
+def discourse_source_ref_for(
+        family: str, seed_id: str, parser_version: int) -> SourceRef:
     """同一 seed 的跨 parser 来源保持 lineage，只改变版本束。"""
     return SourceRef(
         _COURSE_SOURCE_KIND,
-        _stable_positive_int("discourse-family", seed.family),
-        _stable_positive_int("discourse-seed", seed.seed_id),
+        _stable_positive_int("discourse-family", family),
+        _stable_positive_int("discourse-seed", seed_id),
         GLOBAL_OWNER_SCOPE,
         _versions(parser_version),
     )
+
+
+def discourse_source_ref(
+        seed: AuthoredDiscourseSeed, parser_version: int) -> SourceRef:
+    """根据 discourse seed 返回唯一、可复用的课程来源身份。"""
+    return discourse_source_ref_for(seed.family, seed.seed_id, parser_version)
+
+
+# 旧内部名称保留给本模块历史调用；身份实现只有上面的公开 helper 一份。
+_source = discourse_source_ref
 
 
 def _identity_key(value) -> list[int]:
@@ -169,7 +180,7 @@ def compile_discourse_seed(seed: AuthoredDiscourseSeed) -> AuthoredCompiledSeed:
         1 if seed.parser_revision is None
         else seed.parser_revision.new_parser_version
     )
-    source = _source(seed, parser_version)
+    source = discourse_source_ref(seed, parser_version)
     scope = document_scope(source)
     occurrences = _occurrence_map(seed, source)
     payload = {
@@ -259,4 +270,6 @@ def compile_discourse_seed(seed: AuthoredDiscourseSeed) -> AuthoredCompiledSeed:
     )
 
 
-__all__ = ["compile_discourse_seed"]
+__all__ = [
+    "compile_discourse_seed", "discourse_source_ref", "discourse_source_ref_for",
+]

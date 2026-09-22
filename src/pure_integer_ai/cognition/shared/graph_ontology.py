@@ -108,11 +108,30 @@ class GraphOntology:
             persist_rows=persist_statement_rows,
         )
         self._nodes = NodeStore(backend)
+        # ``next_id`` is process-local.  A reopened persistent graph must resume
+        # above its authoritative node high-water mark before any facade writes.
+        existing = backend.select(
+            "concept_node",
+            where={"space_id": space_id},
+            order_by="local_id",
+            descending=True,
+            limit=1,
+        )
+        if existing:
+            backend.advance_id_pool(space_id, existing[0]["local_id"])
         self._identity_to_ref: dict[ObjectIdentity, TypedRef] = {}
         self._ref_to_identity: dict[TypedRef, ObjectIdentity] = {}
         self._records_by_node: dict[tuple[int, int], GraphObjectRecord] = {}
         self._refs_by_node: dict[tuple[int, int], TypedRef] = {}
         self._source_hashes: dict[SourceRef, int] = {}
+        # 发布 SQLite 是冻结只读图；同一整数端点查询在结构恢复和协议核验
+        # 中会反复出现。缓存完整核验后的结果，不缓存未核验物理行。
+        self._read_only = bool(getattr(backend, "read_only", False))
+        self._statements_cache: dict[
+            tuple[int | None, tuple[int, int] | None, tuple[int, int] | None],
+            tuple[GraphStatement, ...],
+        ] = {}
+        self._statement_by_assertion: dict[int, GraphStatement] = {}
 
     def enable_physical_statement_projection(self) -> None:
         """为需要独立物理索引的发布训练上下文开启 statement 行写入。"""
@@ -264,6 +283,8 @@ class GraphOntology:
         self._records_by_node.clear()
         self._refs_by_node.clear()
         self._source_hashes.clear()
+        self._statements_cache.clear()
+        self._statement_by_assertion.clear()
         self._objects.clear_runtime_caches()
         self._statements.clear_runtime_caches()
         self._scoped_identities.clear_runtime_caches()
@@ -337,6 +358,15 @@ class GraphOntology:
             self.identity_of(subject)
         if object_ref is not None:
             self.identity_of(object_ref)
+        cache_key = (
+            predicate_hash,
+            None if subject is None else subject.node_ref(),
+            None if object_ref is None else object_ref.node_ref(),
+        )
+        if self._read_only:
+            cached = self._statements_cache.get(cache_key)
+            if cached is not None:
+                return cached
         records = self._statements.query(
             predicate_identity_hash=predicate_hash,
             subject_ref=None if subject is None else subject.node_ref(),
@@ -347,6 +377,10 @@ class GraphOntology:
             restored = tuple(item for item in restored if item.subject == subject)
         if object_ref is not None:
             restored = tuple(item for item in restored if item.object == object_ref)
+        if self._read_only:
+            if len(self._statements_cache) >= 32768:
+                self._statements_cache.clear()
+            self._statements_cache[cache_key] = restored
         return restored
 
     def follow(self, start: TypedRef,
@@ -427,6 +461,20 @@ class GraphOntology:
     def _restore_statement(self,
                            record: GraphStatementRecord) -> GraphStatement:
         """联合 statement 行、对象映射和 assertion registry 恢复领域对象。"""
+        if self._read_only:
+            cached = self._statement_by_assertion.get(record.assertion_hash)
+            if cached is not None:
+                if (
+                        cached.predicate_identity_hash != record.predicate_identity_hash
+                        or cached.predicate.node_ref() != record.predicate_ref
+                        or cached.subject.object_kind != record.subject_ref[0]
+                        or cached.subject.node_ref() != record.subject_ref[1:]
+                        or cached.object.object_kind != record.object_ref[0]
+                        or cached.object.node_ref() != record.object_ref[1:]
+                        or cached.scope_hash != record.scope_hash):
+                    raise GraphObjectIntegrityError(
+                        "同一 assertion hash 命中冲突 statement 投影")
+                return cached
         assertion = self._scoped_identities.load_assertion(
             record.assertion_hash)
         scope = self._scoped_identities.load_scope(record.scope_hash)
@@ -455,7 +503,7 @@ class GraphOntology:
         predicate = self._typed_ref(predicate_identity, predicate_record)
         self.identity_of(assertion.subject)
         self.identity_of(assertion.object)
-        return GraphStatement(
+        result = GraphStatement(
             record.assertion_hash,
             record.predicate_identity_hash,
             predicate,
@@ -464,6 +512,11 @@ class GraphOntology:
             record.scope_hash,
             assertion,
         )
+        if self._read_only:
+            if len(self._statement_by_assertion) >= 65536:
+                self._statement_by_assertion.clear()
+            self._statement_by_assertion[record.assertion_hash] = result
+        return result
 
 
 __all__ = [

@@ -123,7 +123,7 @@ def build_property_edges(edge_store: EdgeStore, concept_index: ConceptIndex,
             continue   # 同命题节点同 value 已建→skip（幂等·observe 跨段重 claim / 多轮重 observe 不 corrupt）
         if prop_ref == val:
             continue   # 自环不建（命题节点→自身 value·防御·同 build_causes _insert a==b 守）
-        edge_store.add(
+        edge_store.add_assertion_once(
             space_id_from=prop_ref[0], local_id_from=prop_ref[1],
             space_id_to=val[0], local_id_to=val[1],
             edge_type=EDGE_PROPERTY, strength=DEFAULT_STRENGTH,

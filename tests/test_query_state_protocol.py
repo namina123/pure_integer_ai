@@ -5,9 +5,13 @@ from pure_integer_ai.cognition.shared.query_driver import (
     run_query,
 )
 from pure_integer_ai.cognition.shared.query_state import (
+    ROOT_EXPANDED,
+    ROOT_PENDING,
     SPACE_CORE,
+    SPACE_DIALOGUE,
     SPACE_MEMORY,
     TERMINATION_ANSWER_CLOSED,
+    TERMINATION_CLARIFY_CONFLICT,
     TERMINATION_CLARIFY_MISSING_BINDING,
     TERMINATION_NO_FRONTIER,
     TERMINATION_OPEN,
@@ -15,6 +19,7 @@ from pure_integer_ai.cognition.shared.query_state import (
     FrontierEntry,
     QueryAnchor,
     QueryBudget,
+    QueryRoot,
     QueryState,
     VisitedKey,
     seed_query,
@@ -35,6 +40,16 @@ def test_frontier_priority_orders_slot_gain_descending():
     a = FrontierEntry((5,), SPACE_CORE, depth=2, required_slot_gain=7)
     b = FrontierEntry((4,), SPACE_CORE, depth=1, required_slot_gain=7)
     assert sort_frontier((a, b))[0].edge_key == (4,)
+    # 语义 gain 相同时，owner 定点权重只改变共同 frontier 次序。
+    core = FrontierEntry(
+        (1,), SPACE_CORE, owner_weight=300, required_slot_gain=7)
+    memory = FrontierEntry(
+        (2,), SPACE_MEMORY, owner_weight=200, required_slot_gain=7)
+    dialogue = FrontierEntry(
+        (3,), SPACE_DIALOGUE, owner_weight=100, required_slot_gain=7)
+    assert tuple(item.owner_space for item in sort_frontier(
+        (dialogue, memory, core))) == (
+            SPACE_CORE, SPACE_MEMORY, SPACE_DIALOGUE)
 
 
 def test_termination_reasons_are_protocol_ints():
@@ -42,7 +57,7 @@ def test_termination_reasons_are_protocol_ints():
         TerminationPredicateInput(
             depth=0, minimum_depth=1, node_count=0, edge_count=0,
             read_count=0, frontier_count=0),
-        budgets=(10, 10, 10, 3)) == TERMINATION_OPEN
+        budgets=(10, 10, 10, 3)) == TERMINATION_NO_FRONTIER
     # 缺必要绑定：协议要求自然语言澄清，而不是假装回答或继续空转。
     assert evaluate_termination(
         TerminationPredicateInput(
@@ -50,6 +65,21 @@ def test_termination_reasons_are_protocol_ints():
             read_count=1, frontier_count=0, required_slots_open=2,
             evidence_closed=0),
         budgets=(10, 10, 10, 3)) == TERMINATION_CLARIFY_MISSING_BINDING
+    # 结构/证据/生成均闭合时，任何未扩展图库根仍阻止提前回答。
+    assert evaluate_termination(
+        TerminationPredicateInput(
+            depth=1, minimum_depth=1, node_count=3, edge_count=3,
+            read_count=3, frontier_count=2, roots_pending=1,
+            required_slots_open=0, evidence_closed=1,
+            generation_ready=1, best_score=3),
+        budgets=(10, 10, 10, 3)) == TERMINATION_OPEN
+    assert evaluate_termination(
+        TerminationPredicateInput(
+            depth=1, minimum_depth=1, node_count=3, edge_count=3,
+            read_count=3, frontier_count=0, roots_pending=0,
+            required_slots_open=0, evidence_closed=1,
+            generation_ready=1, best_score=3),
+        budgets=(10, 10, 10, 3)) == TERMINATION_ANSWER_CLOSED
 
 
 class _LinearExpander(QueryExpander):
@@ -130,18 +160,42 @@ def test_driver_never_loops_on_duplicate_state():
         seed.with_(frontier=(FrontierEntry((1,), SPACE_CORE, depth=0),)),
         expander=_Repeater(),
     )
-    assert result.termination in {4, 6}
+    assert result.termination == 6
+    assert result.cycle_hit == 1
     assert result.read_count == 0
+
+
+def test_visited_tail_preserves_conflict_and_missing_binding_reasons():
+    """已访问尾边不是计算失败，冲突/缺槽仍按原证据状态闭合，trace 不丢边。"""
+    class _NoExpansion(QueryExpander):
+        def expand(self, state, edge):
+            raise AssertionError("已访问尾边不能重复读取")
+
+    tail = FrontierEntry((1,), SPACE_CORE, target_key=(2,), direction=1)
+    state = QueryState(
+        (29,), roots=(QueryRoot(SPACE_CORE, (2,), ROOT_EXPANDED, 300),),
+        frontier=(tail,), visited=(VisitedKey(SPACE_CORE, (2,), direction=1),),
+        depth=3, evidence_closed=1, conflict_open=1, read_count=29)
+    result = run_query(state, expander=_NoExpansion())
+    assert result.termination == TERMINATION_CLARIFY_CONFLICT
+    assert result.conflict_open == 1 and result.cycle_hit == 0
+    assert result.frontier == state.frontier and result.read_count == state.read_count
+    missing = run_query(state.with_(required_slots_open=1), expander=_NoExpansion())
+    assert missing.termination == TERMINATION_CLARIFY_MISSING_BINDING
 
 
 def test_query_state_serialization_is_order_stable():
     a = QueryState(
         query_key=(9,),
+        roots=(QueryRoot(SPACE_CORE, (3,), ROOT_PENDING, 300),
+               QueryRoot(SPACE_MEMORY, (2,), ROOT_PENDING, 200)),
         anchors=(QueryAnchor(SPACE_CORE, (3,)), QueryAnchor(SPACE_CORE, (1,))),
         visited=(VisitedKey(SPACE_MEMORY, (2,)), VisitedKey(SPACE_CORE, (1,))),
     )
     b = QueryState(
         query_key=(9,),
+        roots=(QueryRoot(SPACE_MEMORY, (2,), ROOT_PENDING, 200),
+               QueryRoot(SPACE_CORE, (3,), ROOT_PENDING, 300)),
         anchors=(QueryAnchor(SPACE_CORE, (1,)), QueryAnchor(SPACE_CORE, (3,))),
         visited=(VisitedKey(SPACE_CORE, (1,)), VisitedKey(SPACE_MEMORY, (2,))),
     )

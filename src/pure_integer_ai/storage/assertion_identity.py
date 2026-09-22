@@ -34,6 +34,8 @@ IDENTITY_MEMORY_OBJECT = 9
 IDENTITY_MEMORY_EVENT = 10
 IDENTITY_SOURCE_TRUST_ASSESSMENT = 11
 IDENTITY_SOURCE_CLUSTER = 12
+IDENTITY_RESPONSE_VARIANT = 13
+_DEFAULT_IDENTITY_HASHER = Hasher("identity_registry.v1")
 
 IDENTITY_HEADER_TABLE = "identity_header"
 IDENTITY_PART_TABLE = "identity_part"
@@ -64,6 +66,15 @@ class IntegerHasher(Protocol):
     """身份索引所需的最小确定性哈希协议。"""
 
     def h63(self, value: Any) -> int: ...
+
+
+def integer_identity_hash(identity_kind: int, key: tuple[int, ...]) -> int:
+    """Compute the default registry hash without creating a physical row."""
+    _strict_int(identity_kind, where="identity_kind", positive=True)
+    value = _DEFAULT_IDENTITY_HASHER.h63_tagged_int_tuple(
+        identity_kind, _stable_key(key))
+    _strict_int(value, where="identity hash", nonnegative=True)
+    return value if value > 0 else 1
 
 
 class IdentityRegistryError(RuntimeError):
@@ -180,11 +191,21 @@ class IntegerIdentityRegistry:
     def __init__(self, backend: StorageBackend, *,
                  hasher: IntegerHasher | None = None) -> None:
         self._backend = backend
-        self._hasher = hasher or Hasher("identity_registry.v1")
+        self._hasher = hasher or _DEFAULT_IDENTITY_HASHER
         self._event_hasher = hasher or Hasher("assertion_supersede.v1")
         self._identity_hash_cache: dict[
             tuple[int, tuple[int, ...]], int
         ] = {}
+        # 发布 SQLite 由多个 facade/registry 并行消费。首次 read_key 仍
+        # 完整核验 header/part 或 assertion 外部记录；之后复用同一不可变
+        # backend 上已经核验的完整整数键，避免重复 SQL 扫描。
+        shared = None
+        if bool(getattr(backend, "read_only", False)):
+            shared = getattr(backend, "_pi_readonly_identity_keys", None)
+            if shared is None:
+                shared = {}
+                setattr(backend, "_pi_readonly_identity_keys", shared)
+        self._shared_read_keys: dict[tuple[int, int], tuple[int, ...]] | None = shared
         self._assertion_records = AssertionRecordStore(backend)
         self._external_key_resolvers: dict[int, ExternalKeyResolver] = {
             IDENTITY_ASSERTION: self._resolve_assertion_record,
@@ -426,6 +447,14 @@ class IntegerIdentityRegistry:
         """按索引回读完整键，并重新计算哈希防止静默损坏。"""
         _strict_int(identity_kind, where="identity_kind", positive=True)
         _strict_int(identity_hash, where="identity_hash", positive=True)
+        cache_key = (identity_kind, identity_hash)
+        if self._shared_read_keys is not None:
+            cached = self._shared_read_keys.get(cache_key)
+            if cached is not None:
+                if self._identity_hash(identity_kind, cached) != identity_hash:
+                    raise IdentityCollisionError(
+                        f"identity kind={identity_kind} hash={identity_hash} 缓存键重算不一致")
+                return cached
         headers = self._header_rows(identity_kind, identity_hash)
         parts = self._part_rows(identity_kind, identity_hash)
         if not headers:
@@ -445,6 +474,8 @@ class IntegerIdentityRegistry:
         if expected != identity_hash:
             raise IdentityCollisionError(
                 f"identity hash={identity_hash} 与完整键重算结果不一致")
+        if self._shared_read_keys is not None:
+            self._shared_read_keys[cache_key] = key
         return key
 
     def metadata(self, identity_kind: int,
@@ -739,6 +770,7 @@ __all__ = [
     "IDENTITY_PART_TABLE",
     "IDENTITY_SCOPE",
     "IDENTITY_SOURCE_CLUSTER",
+    "IDENTITY_RESPONSE_VARIANT",
     "IDENTITY_SOURCE_RECORD",
     "IDENTITY_SOURCE_TRUST_ASSESSMENT",
     "IDENTITY_SPAN_ROLE",
@@ -749,6 +781,7 @@ __all__ = [
     "IdentityMetadata",
     "IdentityRegistryError",
     "IntegerIdentityRegistry",
+    "integer_identity_hash",
     "LegacyAssertionAmbiguity",
     "SupersedeConflictError",
     "register_assertion_identity_tables",

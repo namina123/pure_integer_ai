@@ -22,6 +22,10 @@ from pure_integer_ai.cognition.shared.generation_structure_plan import (
     generation_sentence_address_key,
 )
 from pure_integer_ai.cognition.shared.hypothesis import HypothesisKey
+from pure_integer_ai.cognition.shared.generation_observed_surface import (
+    ObservedGraphSurfaceProposal,
+    ObservedSurfaceProposal,
+)
 from pure_integer_ai.cognition.shared.identity import (
     OBJECT_LANGUAGE_BRANCH,
     OBJECT_MINIMAL_INSTRUCTION,
@@ -197,6 +201,7 @@ class SurfaceSlotDirective:
     surface_use_key: tuple[int, ...] = ()
     reference_budget: AliasRouteSearchBudget | None = None
     reference_use_key: tuple[int, ...] = ()
+    observed_value_key: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         _sentence_address(
@@ -247,6 +252,10 @@ class SurfaceSlotDirective:
             label="surface directive reference_use_key",
             allow_empty=True,
         )
+        _strict_key(self.observed_value_key, label="surface observed value", allow_empty=True)
+        if self.observed_value_key and (self.surface_prefix_steps
+                or self.reference_budget is not None or self.reference_use_key):
+            raise ValueError("observed surface 不得伪装成 Core alias/reference 路径")
 
     def stable_key(self) -> tuple[int, ...]:
         """返回 slot、动作、预算、use key 和 mapper trace。"""
@@ -271,6 +280,8 @@ class SurfaceSlotDirective:
         if self.reference_budget is not None:
             result.extend(self.reference_budget.stable_key())
         result.extend(_packed(self.reference_use_key))
+        if self.observed_value_key:
+            result.extend((2, *_packed(self.observed_value_key)))
         return tuple(result)
 
 
@@ -342,6 +353,12 @@ class GenerationSurfaceRequest:
             if directive.action not in self.protocol.actions():
                 raise ValueError("surface directive action 未在 protocol 注册")
             requirement = anaphora.get(key)
+            if directive.observed_value_key:
+                sentence = next(item for item in self.structure.syntax.sentences if item.address == key[0])
+                if (directive.action != self.protocol.emit_action
+                        or sentence.proposition_keys or sentence.response_act is None
+                        or self.structure.selection.stance == self.structure.selection.protocol.answer):
+                    raise ValueError("来源化观察表层只供明确的非事实 response-act 槽使用")
             if directive.action == self.protocol.emit_action:
                 if (directive.surface_budget is None
                         or not directive.surface_use_key):
@@ -481,6 +498,7 @@ class SurfaceSlotPreview:
     reference: AliasResolutionProposal | None = None
     surface: AliasResolutionProposal | None = None
     representation: ObjectIdentity | None = None
+    observed_surface: ObservedSurfaceProposal | ObservedGraphSurfaceProposal | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.directive, SurfaceSlotDirective):
@@ -520,9 +538,25 @@ class SurfaceSlotPreview:
             if (self.surface.discovery.allowed_prefix_steps
                     != self.directive.surface_prefix_steps):
                 raise ValueError("surface proposal prefix 策略与 directive 不一致")
+        if self.observed_surface is not None:
+            if not isinstance(self.observed_surface, (
+                    ObservedSurfaceProposal,
+                    ObservedGraphSurfaceProposal,
+                    )):
+                raise TypeError("observed surface proposal 类型错误")
+            if (self.surface is not None or self.reference is not None or self.antecedent is not None
+                    or self.observed_surface.origin != self.value.filler
+                    or self.directive.observed_value_key
+                    != self.observed_surface.value_key):
+                raise ValueError("observed surface 未绑定实际 Memory 槽或混入 Core route")
+        elif self.surface is not None and self.directive.observed_value_key:
+            raise ValueError("Memory 槽不得改走 Core R-01 后备路径")
         if self.representation is not None:
             _identity(self.representation, label="surface representation")
-            if (self.surface is None
+            if self.observed_surface is not None:
+                if self.representation != self.observed_surface.representation:
+                    raise ValueError("observed Representation 与来源化槽不符")
+            elif (self.surface is None
                     or self.surface.result.selected is None
                     or self.surface.result.selected.value != self.representation):
                 raise ValueError("representation 未由唯一 surface proposal 产生")
@@ -549,6 +583,8 @@ class SurfaceSlotPreview:
         result.append(0 if self.representation is None else 1)
         if self.representation is not None:
             result.extend(_packed(self.representation.stable_key()))
+        if self.observed_surface is not None:
+            result.extend((2, *_packed(self.observed_surface.stable_key())))
         return tuple(result)
 
 
@@ -632,11 +668,24 @@ class GenerationSurfacePreview:
                     slot.antecedent is not None,
                     slot.reference is not None,
                     slot.surface is not None,
+                    slot.observed_surface is not None,
                     slot.representation is not None)):
                 raise ValueError("silent slot 不得携带 surface 结果")
             return
         if slot.directive.action != protocol.emit_action:
             raise ValueError("surface slot action 非法")
+        if slot.directive.observed_value_key:
+            if slot.observed_surface is None or slot.representation is None:
+                raise ValueError("emit Memory slot 缺少完整来源化表示")
+            goal = self.request.structure.selection.request.goal
+            observed = slot.observed_surface
+            if (observed.branch != self.request.branch
+                    or observed.source != goal.source
+                    or observed.scope != goal.scope):
+                raise ValueError("emit Memory slot 语言分支或 source/scope 漂移")
+            if (slot.directive.sentence, slot.value.slot) in self.request.antecedent_map():
+                raise ValueError("observed span 不能冒充未解析的 anaphora")
+            return
         if slot.surface is None or slot.representation is None:
             raise ValueError("emit slot 缺唯一 surface 结果")
         self._require_surface_query(slot)
@@ -679,6 +728,12 @@ class GenerationSurfacePreview:
         protocol = self.request.protocol
         if slot.directive.action != protocol.emit_action:
             raise ValueError("surface relation 失败只能发生在 emit slot")
+        if slot.directive.observed_value_key:
+            if (self.reason != protocol.surface_missing_reason
+                    or slot.observed_surface is not None or slot.surface is not None
+                    or slot.reference is not None or slot.representation is not None):
+                raise ValueError("Memory surface 缺失状态与 proposal 不符")
+            return
         expected_antecedent = self.request.antecedent_map().get(
             (slot.directive.sentence, slot.value.slot))
         if self.reason in (
@@ -741,14 +796,22 @@ class SurfaceAdoption:
 
     sentence: ObjectIdentity | GenerationSentenceInstance
     slot: ObjectIdentity
-    proposal: AliasResolutionProposal
+    proposal: (
+        AliasResolutionProposal
+        | ObservedSurfaceProposal
+        | ObservedGraphSurfaceProposal
+    )
     use_key: tuple[int, ...]
     use_stable_key: tuple[int, ...]
 
     def __post_init__(self) -> None:
         _sentence_address(self.sentence, label="surface adoption sentence")
         _identity(self.slot, label="surface adoption slot")
-        if not isinstance(self.proposal, AliasResolutionProposal):
+        if not isinstance(self.proposal, (
+                AliasResolutionProposal,
+                ObservedSurfaceProposal,
+                ObservedGraphSurfaceProposal,
+                )):
             raise TypeError("surface adoption proposal 类型错误")
         _strict_key(self.use_key, label="surface adoption use_key")
         _strict_key(
@@ -800,6 +863,9 @@ class GenerationSurfacePlan:
                     slot.surface,
                     slot.directive.surface_use_key,
                 ))
+            if slot.observed_surface is not None:
+                expected.append((slot.directive.sentence, slot.value.slot,
+                                 slot.observed_surface, slot.directive.surface_use_key))
         actual = tuple(
             (item.sentence, item.slot, item.proposal, item.use_key)
             for item in self.adoptions)

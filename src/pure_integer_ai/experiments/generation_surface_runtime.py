@@ -36,6 +36,11 @@ from pure_integer_ai.cognition.shared.generation_surface import (
     SurfaceSlotPreview,
 )
 from pure_integer_ai.cognition.shared.identity import ObjectIdentity
+from pure_integer_ai.cognition.shared.generation_observed_surface import (
+    ObservedGraphSurfaceProposal,
+    ObservedSurfaceProposal,
+)
+from pure_integer_ai.cognition.shared.alias_resolution import AliasRouteSearchExhausted
 from pure_integer_ai.cognition.shared.relation_use import RelationUseContext
 from pure_integer_ai.experiments.alias_relation_runtime import (
     AliasRelationRuntime,
@@ -46,6 +51,25 @@ from pure_integer_ai.experiments.alias_relation_runtime import (
 def _packed(key: tuple[int, ...]) -> tuple[int, ...]:
     """为可变长稳定键增加长度边界。"""
     return len(key), *key
+
+
+def _observed_budget_counts(
+        proposal: ObservedSurfaceProposal | ObservedGraphSurfaceProposal,
+        ) -> tuple[int, int, int]:
+    """返回 observed proposal 的 fact/state/route 完整规模。"""
+    if isinstance(proposal, ObservedGraphSurfaceProposal):
+        # ``evidence`` is the complete shared QueryState proof and can contain
+        # Core, Memory and Dialogue entries unrelated to the one R-01 route.
+        # It must remain attached to the proposal, but it is not the number of
+        # alias facts searched for this observed graph span.  The direct graph
+        # projection keys are the bounded fact/state witness for this route.
+        return max(1, len(proposal.projection_keys)), len(proposal.projection_keys) + 1, 1
+    facts = {
+        fact.proposition.proposition.stable_key()
+        for rule in proposal.rules
+        for fact in rule.example_route.discovery.considered_facts
+    }
+    return len(facts), len(proposal.rules) + 1, len(proposal.rules)
 
 
 class StructureExecutionRequestMapper(Protocol):
@@ -231,6 +255,9 @@ class GenerationSurfaceRuntime:
             alias: AliasRelationRuntime,
             expected_representations: dict[ObjectIdentity, ObjectIdentity]
             | None = None,
+            observed_surfaces: tuple[
+                ObservedSurfaceProposal | ObservedGraphSurfaceProposal, ...
+            ] = (),
             ) -> None:
         if not isinstance(alias, AliasRelationRuntime):
             raise TypeError("surface runtime alias 类型错误")
@@ -244,6 +271,34 @@ class GenerationSurfaceRuntime:
             raise TypeError("surface runtime expected representations 类型错误")
         self._alias = alias
         self._expected_representations = dict(expected_representations)
+        if (type(observed_surfaces) is not tuple
+                or any(not isinstance(item, (
+                    ObservedSurfaceProposal,
+                    ObservedGraphSurfaceProposal,
+                )) for item in observed_surfaces)):
+            raise TypeError("surface runtime observed proposals 类型错误")
+        grouped = {}
+        for item in observed_surfaces:
+            key = item.value_key, item.branch
+            grouped.setdefault(key, []).append(item)
+        self._observed_surfaces = {}
+        for key, items in grouped.items():
+            if all(isinstance(item, ObservedSurfaceProposal) for item in items):
+                rules = {
+                    rule.stable_key(): rule
+                    for item in items
+                    for rule in item.rules
+                }
+                self._observed_surfaces[key] = ObservedSurfaceProposal(
+                    items[0].value,
+                    tuple(rules[rule_key] for rule_key in sorted(rules)),
+                )
+            elif len(items) == 1 and isinstance(
+                    items[0], ObservedGraphSurfaceProposal):
+                self._observed_surfaces[key] = items[0]
+            else:
+                raise ValueError(
+                    "observed graph surface proposal identity is duplicated")
 
     def preview(
             self, request: GenerationSurfaceRequest,
@@ -265,6 +320,28 @@ class GenerationSurfaceRuntime:
             directive = directives[key]
             if directive.action == protocol.silent_action:
                 slots.append(SurfaceSlotPreview(directive, value))
+                continue
+            if directive.observed_value_key:
+                proposal = self._observed_surfaces.get((directive.observed_value_key, request.branch))
+                if proposal is None:
+                    slots.append(SurfaceSlotPreview(directive, value))
+                    return GenerationSurfacePreview(request, protocol.surface_missing_reason, tuple(slots))
+                budget = directive.surface_budget
+                if budget is None:
+                    raise ValueError("Memory emit slot 缺少显式查询预算")
+                fact_count, state_count, route_count = (
+                    _observed_budget_counts(proposal))
+                if (fact_count > budget.max_facts
+                        or state_count > budget.max_states
+                        or route_count > budget.max_routes):
+                    raise AliasRouteSearchExhausted(
+                        "observed surface 不能在预算内保留完整图证据")
+                expected = self._expected_representations.get(value.slot)
+                if expected is not None and expected != proposal.representation:
+                    raise ValueError("Memory surface Representation 与计划约束漂移")
+                slots.append(SurfaceSlotPreview(directive, value,
+                                               representation=proposal.representation,
+                                               observed_surface=proposal))
                 continue
             if any(
                     step not in registered_prefix_steps
@@ -401,8 +478,15 @@ class GenerationSurfaceRuntime:
 
         commit_requests = []
         metadata = []
+        observed_adoptions = {}
         for slot in preview.slots:
             item_context = use_context_for(slot.directive.sentence)
+            if slot.observed_surface is not None:
+                proposal = slot.observed_surface
+                observed_adoptions[(slot.directive.sentence, slot.value.slot)] = SurfaceAdoption(
+                    slot.directive.sentence, slot.value.slot, proposal, slot.directive.surface_use_key,
+                    proposal.use_key(slot.directive.surface_use_key, goal.source, goal.scope),
+                )
             if slot.reference is not None:
                 commit_requests.append((
                     slot.reference,
@@ -432,7 +516,7 @@ class GenerationSurfaceRuntime:
             uses = self._alias.commit_many(tuple(commit_requests))
         if len(uses) != len(metadata):
             raise RuntimeError("R-01 批量采用数量与 surface proposal 不一致")
-        adoptions = tuple(
+        core_adoptions = tuple(
             SurfaceAdoption(
                 sentence,
                 slot,
@@ -443,7 +527,17 @@ class GenerationSurfaceRuntime:
             for (sentence, slot, proposal, use_key), use
             in zip(metadata, uses)
         )
-        return GenerationSurfacePlan(preview, adoptions)
+        by_proposal = {(item.sentence, item.slot, item.proposal.stable_key()): item
+                       for item in core_adoptions}
+        adoptions = []
+        for slot in preview.slots:
+            for proposal in (slot.reference, slot.surface):
+                if proposal is not None:
+                    adoptions.append(by_proposal[(slot.directive.sentence, slot.value.slot,
+                                                  proposal.stable_key())])
+            if slot.observed_surface is not None:
+                adoptions.append(observed_adoptions[(slot.directive.sentence, slot.value.slot)])
+        return GenerationSurfacePlan(preview, tuple(adoptions))
 
 
 class GenerationSurfaceLayerResolver:

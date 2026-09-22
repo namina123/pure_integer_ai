@@ -405,26 +405,35 @@ class RelationClosureRuntime:
     """复用 H-05 owner，统一 relation forming、recognition、消费和审计。"""
 
     def __init__(
-            self, candidate_runtime: CandidateLearningRuntime,
+            self, candidate_runtime: CandidateLearningRuntime | None,
             semantic_graph: SemanticGraph,
             consumer: ActiveRelationClosureConsumer,
             protocol: RelationClosureProtocol,
             use_owner: RelationUseOwner | None = None) -> None:
-        """绑定同一候选、语义图和消费者，并可从 PH2 Core 图恢复 Use owner。"""
-        if not isinstance(candidate_runtime, CandidateLearningRuntime):
-            raise TypeError("candidate_runtime 必须是 CandidateLearningRuntime")
+        """绑定关系图和消费者；candidate_runtime=None 表示只读投影 owner。
+
+        只读投影只允许从 CandidateProjectionGraph/ActiveRelationClosureConsumer
+        发现已有 active fact，不恢复也不伪造 H-00/H-04 ledger。
+        """
+        if (candidate_runtime is not None
+                and not isinstance(candidate_runtime, CandidateLearningRuntime)):
+            raise TypeError("candidate_runtime 必须是 CandidateLearningRuntime 或 None")
         if not isinstance(semantic_graph, SemanticGraph):
             raise TypeError("semantic_graph 必须是 SemanticGraph")
         if not isinstance(consumer, ActiveRelationClosureConsumer):
             raise TypeError("consumer 必须是 ActiveRelationClosureConsumer")
         if not isinstance(protocol, RelationClosureProtocol):
             raise TypeError("protocol 必须是 RelationClosureProtocol")
-        if candidate_runtime.graph is not consumer.candidate_graph:
+        if (candidate_runtime is not None
+                and candidate_runtime.graph is not consumer.candidate_graph):
             raise ValueError("candidate runtime 与 consumer 必须共享候选图")
         if semantic_graph is not consumer.semantic_graph:
             raise ValueError("runtime 与 consumer 必须共享 SemanticGraph")
-        if consumer.engine is not candidate_runtime.engine:
+        if (candidate_runtime is not None
+                and consumer.engine is not candidate_runtime.engine):
             raise ValueError("live consumer 必须绑定同一 H-05 owner")
+        if candidate_runtime is None and consumer.engine is not None:
+            raise ValueError("只读关系投影必须使用 engine=None")
         if consumer.protocol != protocol:
             raise ValueError("runtime 与 consumer 的关系字段协议不一致")
         if use_owner is not None:
@@ -444,6 +453,8 @@ class RelationClosureRuntime:
         self._uses: dict[
             tuple[tuple[int, ...], tuple[int, ...]], RelationClosureUse
         ] = {}
+        if candidate_runtime is None and use_owner is not None:
+            raise ValueError("只读关系投影不得绑定可写 Core Use owner")
         if use_owner is not None:
             for materialized in use_owner.history():
                 definition = materialized.definition
@@ -830,6 +841,9 @@ class RelationClosureRuntime:
         """分别核验 writer、recognition Evidence、resolver、投影和实际消费。"""
         if not isinstance(spec, RelationClosureCandidateSpec):
             raise TypeError("spec 必须是 RelationClosureCandidateSpec")
+        if self.candidate_runtime is None:
+            raise RelationClosureIncompleteError(
+                "只读关系投影没有 H-00/H-04 owner，不能执行形成审计")
         definition = spec.candidate_definition(self.protocol)
         hypothesis = definition.hypothesis(
             self.candidate_runtime.engine.protocol)
@@ -878,6 +892,9 @@ class RelationClosureRuntime:
             self, performance: RelationClosurePerformanceWindow,
             ) -> RelationClosureReport:
         """生成不含掌握结论的全链计数和整数性能报告。"""
+        if self.candidate_runtime is None:
+            raise RelationClosureIncompleteError(
+                "只读关系投影没有 H-00/H-04 owner，不能生成训练报告")
         if not isinstance(performance, RelationClosurePerformanceWindow):
             raise TypeError("performance 必须是 RelationClosurePerformanceWindow")
         stances = tuple(
@@ -909,6 +926,9 @@ class RelationClosureRuntime:
             self, proposition: ObjectIdentity,
             ) -> RelationClosureEpistemicSnapshot:
         """读取一个 forming 候选的当前 H-00 四态、有效 Evidence 和 active 投影。"""
+        if self.candidate_runtime is None:
+            raise RelationClosureIncompleteError(
+                "只读关系投影没有 H-00/H-04 ledger snapshot")
         if not isinstance(proposition, ObjectIdentity):
             raise TypeError("relation snapshot proposition 类型错误")
         formation = self._formations.get(proposition)
@@ -950,6 +970,9 @@ class RelationClosureRuntime:
             candidate_graph: CandidateProjectionGraph,
             ) -> "RelationClosureRuntime":
         """复制 H-05 owner 和编排账并绑定隔离图，供 held-out 写隔离。"""
+        if self.candidate_runtime is None:
+            raise RelationClosureIncompleteError(
+                "只读关系投影不能 clone 为可评估 owner")
         cloned_candidate = self.candidate_runtime.clone_for_graph(
             candidate_graph)
         cloned_consumer = self.consumer.clone_for_graphs(
@@ -1002,7 +1025,8 @@ class RelationClosureRuntime:
             for use in self._uses.values()
         ))
         return (
-            self.candidate_runtime.state_key(),
+            None if self.candidate_runtime is None
+            else self.candidate_runtime.state_key(),
             formations,
             recognitions,
             uses,

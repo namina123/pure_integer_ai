@@ -17,10 +17,12 @@ from pure_integer_ai.cognition.shared.formal_artifact_bridge import (
     ArtifactInvocationResult,
 )
 from pure_integer_ai.cognition.shared.generation_plan import (
+    GenerationCandidate,
     GenerationLayerDecision,
     GenerationLayerResult,
     GenerationPlanProtocol,
     GenerationPlanningRequest,
+    generation_candidate_subject_key,
 )
 from pure_integer_ai.cognition.shared.identity import (
     OBJECT_MINIMAL_INSTRUCTION,
@@ -293,7 +295,7 @@ def _group_states(candidates) -> dict[tuple[int, ...], LogicEvidenceState]:
     """按完整 BoundProposition 聚合 support/refute，避免跨命题伪造冲突。"""
     grouped: dict[tuple[int, ...], LogicEvidenceState] = {}
     for candidate in candidates:
-        key = candidate.proposition.stable_key()
+        key = generation_candidate_subject_key(candidate)
         previous = grouped.get(key, LogicEvidenceState(False, False))
         grouped[key] = LogicEvidenceState(
             previous.support or candidate.state.support,
@@ -312,14 +314,8 @@ def _ambiguous_competitions(
         if (not _satisfies(candidate.state, required)
                 or (candidate.state.support and candidate.state.refute)):
             continue
-        proposition_key = candidate.proposition.stable_key()
-        for hypothesis in candidate.hypotheses:
-            competition = (
-                *_packed(hypothesis.hypothesis_kind),
-                *_packed(hypothesis.competition_key),
-                *_packed(candidate.source.stable_key()),
-                *_packed(candidate.scope.stable_key()),
-            )
+        proposition_key = generation_candidate_subject_key(candidate)
+        for competition in candidate.competition_keys():
             grouped.setdefault(competition, set()).add(proposition_key)
     return tuple(sorted(
         (frozenset(values) for values in grouped.values() if len(values) > 1),
@@ -362,6 +358,8 @@ class AnswerContentSelector:
             candidate = candidates.get(attachment.candidate_key)
             if candidate is None:
                 raise ValueError("Artifact attachment 指向请求外候选")
+            if not isinstance(candidate, GenerationCandidate):
+                raise ValueError("non-proposition response act cannot adopt an Artifact")
             invocation = attachment.result.invocation
             if invocation.proposition != candidate.proposition.template:
                 raise ValueError("Artifact attachment Proposition 与候选不一致")

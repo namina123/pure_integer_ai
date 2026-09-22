@@ -21,6 +21,7 @@ from pure_integer_ai.cognition.shared.generation_content import (
 from pure_integer_ai.cognition.shared.generation_plan import (
     GenerationCandidate,
     GenerationPlanningRequest,
+    generation_candidate_subject_key,
 )
 from pure_integer_ai.cognition.shared.hypothesis import (
     HypothesisLedger,
@@ -393,7 +394,7 @@ def _grouped_states(
     """按完整 Proposition bound key 聚合候选四态，保留跨 Hypothesis 冲突。"""
     grouped: dict[tuple[int, ...], LogicEvidenceState] = {}
     for candidate in request.candidates:
-        key = candidate.proposition.stable_key()
+        key = generation_candidate_subject_key(candidate)
         prior = grouped.get(key, LogicEvidenceState(False, False))
         grouped[key] = LogicEvidenceState(
             prior.support or candidate.state.support,
@@ -410,14 +411,8 @@ def _ambiguous_propositions(
     for candidate in request.candidates:
         if not _satisfies(candidate.state, request.goal.required):
             continue
-        proposition = candidate.proposition.stable_key()
-        for hypothesis in candidate.hypotheses:
-            competition = (
-                hypothesis.hypothesis_kind,
-                hypothesis.competition_key,
-                candidate.source,
-                candidate.scope,
-            )
+        proposition = generation_candidate_subject_key(candidate)
+        for competition in candidate.competition_keys():
             grouped.setdefault(competition, set()).add(proposition)
     ambiguous: set[tuple[int, ...]] = set()
     for propositions in grouped.values():
@@ -433,6 +428,7 @@ class EvidenceAnswerPolicy:
             self,
             content_protocol: AnswerContentProtocol,
             protocol: EvidenceAnswerPolicyProtocol,
+            *, retain_unknown_candidates: bool = False,
             ) -> None:
         """绑定开放 stance 和原因，不接收 expected、teacher 或 fixture 答案。"""
         if not isinstance(content_protocol, AnswerContentProtocol):
@@ -441,6 +437,9 @@ class EvidenceAnswerPolicy:
             raise TypeError("Evidence answer policy protocol 类型错误")
         self.content_protocol = content_protocol
         self.protocol = protocol
+        if type(retain_unknown_candidates) is not bool:
+            raise TypeError("retain_unknown_candidates 必须是严格 bool")
+        self.retain_unknown_candidates = retain_unknown_candidates
 
     def select(self, request, artifacts) -> AnswerContentDecision:
         """按冲突、歧义、可回答、unknown 顺序生成可由共享 selector 复核的决定。"""
@@ -461,7 +460,7 @@ class EvidenceAnswerPolicy:
         if conflict_props:
             selected = tuple(
                 key for key in candidate_keys
-                if by_key[key].proposition.stable_key() in conflict_props
+                if generation_candidate_subject_key(by_key[key]) in conflict_props
             )
             return self._decision(
                 request,
@@ -473,7 +472,7 @@ class EvidenceAnswerPolicy:
         if ambiguous:
             selected = tuple(
                 key for key in candidate_keys
-                if by_key[key].proposition.stable_key() in ambiguous
+                if generation_candidate_subject_key(by_key[key]) in ambiguous
             )
             return self._decision(
                 request,
@@ -499,7 +498,7 @@ class EvidenceAnswerPolicy:
             request,
             self.content_protocol.unknown,
             self.protocol.unknown_reason,
-            (),
+            candidate_keys if self.retain_unknown_candidates else (),
         )
 
     def _decision(

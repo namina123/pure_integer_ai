@@ -351,7 +351,9 @@ class LanguageGenerationConnectorGraph:
         )
         LanguageGenerationConnectorRegistry(
             self.value_protocol, (definition,))
-        self._validate_definition(definition)
+        # ``materialized_structure`` 已完整恢复并做过所有 S-07 边核验；
+        # 复用它完成 connector 一致性检查，避免同一冻结 structure 再查一遍。
+        self._validate_materialized_definition(materialized_structure, definition)
         metadata = self._uniform_metadata(tuple(statements))
         return MaterializedLanguageConnectorTemplate(
             definition,
@@ -468,6 +470,27 @@ class LanguageGenerationConnectorGraph:
             self.value_protocol,
             definition,
         )
+
+    def _validate_materialized_definition(
+            self,
+            materialized: object,
+            definition: LanguageGenerationConnectorTemplate,
+            ) -> None:
+        """复用刚刚完整恢复的 S-07 结构，执行等价 connector 核验。"""
+        if self.ontology.identity_of(materialized.structure) != definition.structure:
+            raise LanguageConnectorGraphError(
+                "connector structure 与 S-07 恢复结构不一致")
+        slots = tuple(item.definition for item in materialized.slots)
+        if slots != definition.slots:
+            raise LanguageConnectorGraphError(
+                "connector slot schema 与 S-07 图不一致")
+        available = {
+            item.definition.constraint
+            for item in materialized.constraints
+        }
+        if any(item not in available for item in definition.constraints):
+            raise LanguageConnectorGraphError(
+                "connector constraint 不属于目标 surface structure")
 
     @staticmethod
     def validate_against_order_graph(

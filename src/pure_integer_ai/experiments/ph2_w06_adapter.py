@@ -46,6 +46,7 @@ from pure_integer_ai.cognition.shared.typed_relation import (
 from pure_integer_ai.experiments.ph2_authored_relation_compile import (
     authored_relation_identity,
     authored_relation_role_identity,
+    authored_semantic_source,
 )
 from pure_integer_ai.experiments.ph2_dataset_contract import (
     CanonicalJsonObject,
@@ -55,6 +56,12 @@ from pure_integer_ai.experiments.ph2_dataset_contract import (
     TeacherEvidenceRecord,
 )
 from pure_integer_ai.experiments.ph2_w06_contract import W06_ZERO_EXECUTION_STATE
+from pure_integer_ai.experiments.ph2_w06_identity_protocol import (
+    W06_IDENTITY_VERSIONS,
+    W06_NAMESPACE,
+    w06_directionality_binding_predicate,
+    w06_directionality_value,
+)
 from pure_integer_ai.experiments.ph2_w06_payload import W06TrainingPayload
 from pure_integer_ai.experiments.ph2_w06_registry import (
     W06_RELATION_REGISTRY,
@@ -65,15 +72,12 @@ from pure_integer_ai.experiments.ph2_w06_source_semantic import (
     W06_RELATION_PROFILES,
     W06RelationProfile,
 )
-
-
-W06_NAMESPACE = 60606
-W06_IDENTITY_VERSIONS = VersionBundle(
-    CorpusVersion(1),
-    ParserVersion(1),
-    PrimitiveVersion(1),
-    CurriculumVersion(1),
+from pure_integer_ai.experiments.ph2_w06_semantic_uniqueness import (
+    W06SemanticUniquenessReport,
+    audit_w06_semantic_uniqueness,
 )
+
+
 W06_SELECTION_UNSELECTED = "UNSELECTED"
 W06_REJECTION_TYPE_MISMATCH = "TYPE_MISMATCH_REJECTED"
 
@@ -85,6 +89,8 @@ _PAYLOAD_REQUIRED_FIELDS = frozenset({
     "query_kind",
     "relation_family",
     "relation_schema",
+    "semantic_key",
+    "source_anchor_span",
     "surface",
 })
 _PAYLOAD_OPTIONAL_FIELDS = frozenset({
@@ -169,30 +175,29 @@ def _occurrence_source(identity: ObjectIdentity) -> SourceRef:
         raise W06TypedAdapterError("W-06 occurrence SourceRef 非法") from error
 
 
+def _observation_source(
+        source_record: SourceRefRecord,
+        observation: ObservationRecord,
+        ) -> SourceRef:
+    """把公开 SourceRefRecord 全整数键映射为独立 Observation 来源。"""
+    key = source_record.stable_key.stable_key()
+    if observation.source_ref_key != source_record.stable_key:
+        raise W06TypedAdapterError("W-06 Observation/SourceRefRecord 引用漂移")
+    return SourceRef(
+        W06_NAMESPACE,
+        key[-1],
+        observation.logical_order,
+        GLOBAL_OWNER_SCOPE,
+        W06_IDENTITY_VERSIONS,
+    )
+
+
 def _domain_predicate(kind: int) -> ObjectIdentity:
     """返回只描述结构字段的候选 binding predicate，不承载 relation 真值。"""
     return concept_identity(
         (W06_NAMESPACE, 400, kind),
         versions=W06_IDENTITY_VERSIONS,
     )
-
-
-def _direction_identity(directionality: int) -> ObjectIdentity:
-    """把冻结方向枚举提升为一等离散字段值。"""
-    return concept_identity(
-        (W06_NAMESPACE, 401, directionality),
-        versions=W06_IDENTITY_VERSIONS,
-    )
-
-
-def w06_directionality_binding_predicate() -> ObjectIdentity:
-    """返回训练候选中承载关系方向性的一等字段 predicate。"""
-    return _domain_predicate(3)
-
-
-def w06_directionality_value(directionality: int) -> ObjectIdentity:
-    """返回训练图中一个冻结方向枚举对应的一等字段值。"""
-    return _direction_identity(directionality)
 
 
 @dataclass(frozen=True)
@@ -292,6 +297,7 @@ class W06RelationCandidate:
     observation: ObservationRecord
     source_record: SourceRefRecord
     source_ref: SourceRef
+    observation_source: SourceRef
     substage_key: str
     relation_family: str
     directionality: int
@@ -317,7 +323,9 @@ class W06RelationCandidate:
             raise W06TypedAdapterError("W-06 adapter 不得预选 relation candidate")
         if (self.proposition.proposition != self.spec.proposition.proposition
                 or self.schema != self.spec.schema
-                or self.source_ref != self.proposition.source):
+                or self.source_ref != self.proposition.source
+                or self.observation_source != _observation_source(
+                    self.source_record, self.observation)):
             raise W06TypedAdapterError("W-06 candidate 的命题、schema 或来源漂移")
         if self.polarity is not None and not isinstance(
                 self.polarity, ObjectIdentity):
@@ -377,6 +385,7 @@ class W06TypedAdapterOutput:
     rejection_evidence: tuple[W06RejectionEvidenceBinding, ...]
     execution_state: tuple[tuple[str, int], ...] = tuple(
         sorted(W06_ZERO_EXECUTION_STATE.items()))
+    semantic_uniqueness_report: W06SemanticUniquenessReport | None = None
 
     def candidates_for_substage(
             self, substage_key: str) -> tuple[W06RelationCandidate, ...]:
@@ -419,6 +428,16 @@ def _typed_payload(observation: ObservationRecord) -> dict[str, Any]:
         raise W06TypedAdapterError("W-06 relation query_kind 漂移")
     if not isinstance(value.get("surface"), str) or not value["surface"]:
         raise W06TypedAdapterError("W-06 relation surface 非法")
+    semantic_key = value.get("semantic_key")
+    if (not isinstance(semantic_key, list) or not semantic_key
+            or any(type(item) is not int for item in semantic_key)):
+        raise W06TypedAdapterError("W-06 semantic_key 必须是非空严格整数列表")
+    anchor_span = value.get("source_anchor_span")
+    if (not isinstance(anchor_span, list) or len(anchor_span) != 3
+            or any(type(item) is not int or item < 0 for item in anchor_span)
+            or anchor_span[1] <= anchor_span[0]
+            or anchor_span[1] > len(value["surface"])):
+        raise W06TypedAdapterError("W-06 source_anchor_span 非法")
     if not isinstance(value.get("endpoints"), list) or not value["endpoints"]:
         raise W06TypedAdapterError("W-06 relation endpoints 非法")
     candidate = value.get("candidate_definition")
@@ -636,7 +655,7 @@ def _candidate_spec(
             _domain_predicate(2), proposition.context,
             0, CANDIDATE_AS_SUBJECT),
         CandidateBinding(
-            _domain_predicate(3), _direction_identity(directionality),
+            _domain_predicate(3), w06_directionality_value(directionality),
             0, CANDIDATE_AS_SUBJECT),
     ]
     for ordinal, binding in enumerate(proposition.canonical_bindings()):
@@ -662,6 +681,7 @@ def _adapt_candidate(
         ) -> W06RelationCandidate | W06SchemaRejection:
     """把合法 proposal 恢复为 candidate，并在形成前分流类型拒绝项。"""
     value = _typed_payload(observation)
+    declared_semantic_key = tuple(value["semantic_key"])
     relation_family = value["relation_family"]
     if not isinstance(relation_family, str):
         raise W06TypedAdapterError("W-06 relation_family 非文本")
@@ -679,6 +699,9 @@ def _adapt_candidate(
         endpoints,
         validate_schema=observation.perturbation_kind != "TYPE_MISMATCH",
     )
+    if proposition.source != authored_semantic_source(declared_semantic_key):
+        raise W06TypedAdapterError(
+            "W-06 semantic_key 与 Proposition 来源身份不一致")
     if (schema.relation != authored_relation_identity(profile.relation_kind)
             or proposition.predicate != schema.relation):
         raise W06TypedAdapterError("W-06 relation identity 未匹配冻结 relation kind")
@@ -732,6 +755,7 @@ def _adapt_candidate(
         observation,
         source_record,
         proposition.source,
+        _observation_source(source_record, observation),
         observation.substage,
         relation_family,
         directionality,
@@ -877,6 +901,7 @@ def adapt_w06_training_payload(
     except W06RegistryError as error:
         raise W06TypedAdapterError(
             f"W-06 registry payload 审计失败：{error}") from error
+    semantic_uniqueness_report = audit_w06_semantic_uniqueness(payload)
     sources = {item.stable_key: item for item in payload.source_refs}
     observations = {
         item.stable_key: item for item in payload.observations
@@ -899,6 +924,7 @@ def adapt_w06_training_payload(
     rejection_evidence = []
     source_bindings: dict[StableRecordKey, W06SourceBinding] = {}
     schemas: dict[ObjectIdentity, RelationSchema] = {}
+    semantic_candidates: dict[tuple[int, ...], W06RelationCandidate] = {}
     for observation in sorted(
             observations.values(), key=lambda item: item.logical_order):
         source_record = sources.get(observation.source_ref_key)
@@ -918,6 +944,29 @@ def adapt_w06_training_payload(
                 adapted, teacher))
             continue
         candidate = adapted
+        semantic_key = tuple(_typed_payload(observation)["semantic_key"])
+        prior_candidate = semantic_candidates.get(semantic_key)
+        if prior_candidate is not None:
+            if (candidate.schema != prior_candidate.schema
+                    or candidate.proposition.predicate
+                    != prior_candidate.proposition.predicate
+                    or tuple(
+                        (item.role, item.ordinal, item.filler)
+                        for item in candidate.proposition.canonical_bindings())
+                    != tuple(
+                        (item.role, item.ordinal, item.filler)
+                        for item in prior_candidate.proposition.canonical_bindings())):
+                raise W06TypedAdapterError(
+                    "W-06 semantic proposition key 绑定结构竞争")
+            # Multiple source observations are one semantic proposition.  Keep
+            # one candidate identity but preserve every Observation and its
+            # teacher Evidence as an independent history entry.
+            envelope = W06ObservationEnvelope(
+                observation, source_binding, candidate)
+            envelopes.append(envelope)
+            evidence.append(_evidence_binding(envelope, teacher))
+            continue
+        semantic_candidates[semantic_key] = candidate
         prior_schema = schemas.get(candidate.schema.schema)
         if prior_schema is not None and prior_schema != candidate.schema:
             raise W06TypedAdapterError("W-06 同一 schema identity 绑定不同定义")
@@ -930,8 +979,8 @@ def adapt_w06_training_payload(
             envelope, teacher))
     if len({item.proposition.proposition for item in candidates}) != len(candidates):
         raise W06TypedAdapterError("W-06 relation candidate identity 重复")
-    if (len(candidates) + len(rejections) != len(observations)
-            or len(evidence) != len(candidates)
+    if (len(envelopes) != len(evidence)
+            or len(evidence) + len(rejection_evidence) != len(observations)
             or len(rejection_evidence) != len(rejections)):
         raise W06TypedAdapterError("W-06 accepted/rejected proposal 分账不闭合")
     return W06TypedAdapterOutput(
@@ -966,6 +1015,7 @@ def adapt_w06_training_payload(
                 item.teacher_record.stable_key.stable_key(),
             ),
         )),
+        semantic_uniqueness_report=semantic_uniqueness_report,
     )
 
 

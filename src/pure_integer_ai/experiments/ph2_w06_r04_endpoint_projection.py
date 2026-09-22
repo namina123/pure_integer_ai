@@ -40,7 +40,7 @@ W06_R04_EXPECTED_PARENT_SHA256 = {
     W06_R04_SAMPLE_PATH:
         "0bce17b2fff1397a62a919390fc9432394ecfb1192b23f8e2d126a772f2326cc",
     W06_R04_SOURCE_OVERLAY_PATH:
-        "f5cae297254191dffb5bcacdafbdc461dcd1cf3a1340de27d9a8c98c598bfbbc",
+        "dbbddcfc58a72ba874dfb7e8ea35eacb8a9b66abd139727d28eee552b0b6b32b",
     W06_R04_STAGE_PATH:
         "a9beda13955e4708b5f2bb7f4d2b106be1bdf709c82acaefcfa95ca7d276e00a",
 }
@@ -170,9 +170,10 @@ def build_w06_r04_endpoint_projection(repo_root: str | Path) -> dict[str, Any]:
         raise W06R04EndpointProjectionError("R04 train inventory 漂移")
 
     rows = []
+    seen_local: set[tuple[int, ...]] = set()
     canonical_kinds: dict[str, int] = {}
     for seed in accepted:
-        compiled = compile_relation_seed(seed)
+        compiled = compile_relation_seed(seed, semantic_identity=True)
         payload = compiled.observation_payload.to_value()
         endpoints = payload.get("endpoints")
         if not isinstance(endpoints, list) or len(endpoints) != len(seed.endpoints):
@@ -193,6 +194,10 @@ def build_w06_r04_endpoint_projection(repo_root: str | Path) -> dict[str, Any]:
             canonical_kinds[source.endpoint_id] = source.object_kind
             canonical = _canonical_endpoint(
                 source.endpoint_id, source.object_kind)
+            local_key = tuple(local.stable_key())
+            if local_key in seen_local:
+                continue
+            seen_local.add(local_key)
             rows.append({
                 "canonical_endpoint_key": list(canonical.stable_key()),
                 "endpoint_id": source.endpoint_id,

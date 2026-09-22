@@ -1285,6 +1285,9 @@ def run_trained_dialogue_terminal(
 
 
 def main(argv: list[str] | None = None) -> int:
+    raise SystemExit(
+        "legacy successor/表层对话 CLI 已隔离；请使用 strict "
+        "trained_graph_release 三图入口")
     parser = argparse.ArgumentParser(description="run read-only trained dialogue terminal")
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--qa-database", default=None,

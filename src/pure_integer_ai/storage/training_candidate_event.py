@@ -385,6 +385,73 @@ class TrainingCandidateEventRecordStore:
                 "训练候选事件 payload_size 不一致")
         return payload
 
+    def read_payload_many(
+            self,
+            records: tuple[TrainingCandidateEventRecord, ...],
+            ) -> dict[int, tuple[int, ...]]:
+        """批量恢复 payload，避免对每个事件重复执行 chunk 查询。
+
+        训练历史恢复会一次读取同一协议的数千个事件；统一 page-in
+        保留与 ``read_payload`` 相同的长度、顺序和填充校验，但把物理
+        chunk 表只读一次，避免恢复时间和 SQLite 游标数量随事件平方增长。
+        """
+        if not isinstance(records, tuple):
+            raise TypeError("records 必须是 tuple")
+        if not records:
+            return {}
+        if any(not isinstance(item, TrainingCandidateEventRecord)
+               for item in records):
+            raise TypeError("records 必须全部是 TrainingCandidateEventRecord")
+        expected_hashes = tuple(item.event_hash for item in records)
+        if len(set(expected_hashes)) != len(expected_hashes):
+            raise TrainingCandidateEventIntegrityError(
+                "批量训练候选 payload 含重复 event_hash")
+        rows = self.backend.select(TRAINING_CANDIDATE_EVENT_PART_TABLE)
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        wanted = set(expected_hashes)
+        for row in rows:
+            event_hash = row.get("event_hash")
+            if event_hash in wanted:
+                grouped.setdefault(event_hash, []).append(row)
+        result: dict[int, tuple[int, ...]] = {}
+        width = TRAINING_CANDIDATE_EVENT_CHUNK_WIDTH
+        for record in records:
+            chunks = sorted(grouped.get(record.event_hash, ()),
+                             key=lambda row: row.get("chunk_index"))
+            expected = (record.payload_size + width - 1) // width
+            if len(chunks) != expected:
+                raise TrainingCandidateEventIntegrityError(
+                    "训练候选事件 payload chunk 数量不完整")
+            values: list[int] = []
+            for expected_index, row in enumerate(chunks):
+                if (row.get("space_id") != record.space_id
+                        or row.get("chunk_index") != expected_index):
+                    raise TrainingCandidateEventIntegrityError(
+                        "训练候选 chunk 空间或顺序漂移")
+                part_size = row.get("part_size")
+                _strict_int(part_size,
+                            label="training candidate chunk part_size",
+                            positive=True)
+                if part_size > width:
+                    raise TrainingCandidateEventIntegrityError(
+                        "训练候选 chunk 宽度非法")
+                chunk = tuple(row.get(f"part_{index:02d}")
+                              for index in range(width))
+                assert_int(*chunk, _where="training candidate event chunk")
+                if any(type(value) is not int for value in chunk):
+                    raise TrainingCandidateEventIntegrityError(
+                        "训练候选 chunk 必须使用严格整数")
+                if any(value != 0 for value in chunk[part_size:]):
+                    raise TrainingCandidateEventIntegrityError(
+                        "训练候选 chunk 填充位必须为零")
+                values.extend(chunk[:part_size])
+            payload = tuple(values)
+            if len(payload) != record.payload_size:
+                raise TrainingCandidateEventIntegrityError(
+                    "训练候选事件 payload_size 不一致")
+            result[record.event_hash] = payload
+        return result
+
     @staticmethod
     def _validate_payload(
             record: TrainingCandidateEventRecord,

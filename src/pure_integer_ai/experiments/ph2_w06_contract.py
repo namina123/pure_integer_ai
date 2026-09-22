@@ -78,12 +78,30 @@ W06_V2_PACK_PREFIX = (
     "ph2_w06_dataset_artifacts/source_semantic_overlay_v1/packs/"
     + W06_V2_PACK_KEY
 )
+W06_SEMANTIC_PACK_PREFIX = (
+    "ph2_w06_dataset_artifacts/source_semantic_overlay_v1/packs"
+)
+W06_SEMANTIC_PACK_KEYS = {
+    "AUTHORED_CC0_V1--CC0-1.0--alias-refers-v1": W06_V2_PACK_KEY,
+    "AUTHORED_CC0_V1--CC0-1.0--subset-member-v1":
+        "AUTHORED_CC0_V1--CC0-1.0--subset-member-v1",
+    "AUTHORED_CC0_V1--CC0-1.0--property-v1":
+        "AUTHORED_CC0_V1--CC0-1.0--property-v1",
+    "AUTHORED_CC0_V1--CC0-1.0--mereology-v1":
+        "AUTHORED_CC0_V1--CC0-1.0--mereology-v1",
+    "AUTHORED_CC0_V1--CC0-1.0--similar-antonym-v1":
+        "AUTHORED_CC0_V1--CC0-1.0--similar-antonym-v1",
+    "AUTHORED_CC0_V1--CC0-1.0--precedes-v1":
+        "AUTHORED_CC0_V1--CC0-1.0--precedes-v1",
+    "AUTHORED_CC0_V1--CC0-1.0--causes-v1":
+        "AUTHORED_CC0_V1--CC0-1.0--causes-v1",
+}
 W06_EXPECTED_SHA256 = {
     W06_STAGE_MANIFEST_PATH: "a9beda13955e4708b5f2bb7f4d2b106be1bdf709c82acaefcfa95ca7d276e00a",
     W06_GLOBAL_MANIFEST_PATH: "384329cf651ea4c5e4bc9d0b5dc4da7b22a71bc008bfabe468c86278dd9d40b6",
     W06_INVALIDATION_GRAPH_PATH: "21cf4d3cd65afeb0f93054773b97fa4194ee5f14dc463ff40af5813fdb0facce",
     W06_W05_RECEIPT_PATH: "64c2fff496e766df880d2db1b184e2b8a009abd3b37b1a1b1331900458ccff78",
-    W06_SOURCE_OVERLAY_PATH: "f5cae297254191dffb5bcacdafbdc461dcd1cf3a1340de27d9a8c98c598bfbbc",
+    W06_SOURCE_OVERLAY_PATH: "dbbddcfc58a72ba874dfb7e8ea35eacb8a9b66abd139727d28eee552b0b6b32b",
 }
 W06_RESOURCE_BUDGET = {
     "max_checkpoint_count": 1536,
@@ -605,18 +623,24 @@ def open_w06_frozen_context(
     evaluator = []
     for stage_key in stage_keys:
         replacement = stage_key == W06_V1_PACK_KEY
-        effective_key = W06_V2_PACK_KEY if replacement else stage_key
-        if replacement:
-            prefix = W06_V2_PACK_PREFIX
+        effective_key = W06_SEMANTIC_PACK_KEYS.get(stage_key, stage_key)
+        semantic_prefix = W06_SEMANTIC_PACK_PREFIX
+        if stage_key in W06_SEMANTIC_PACK_KEYS:
+            prefix = f"{semantic_prefix}/{effective_key}"
             manifest_path = root / prefix / "manifest.json"
             manifest = read_artifact_manifest(manifest_path)
             canonical_sha = hashlib.sha256(
                 canonical_json_bytes(manifest.to_dict())).hexdigest()
             course = overlay["stable_v2_course"]
-            if (canonical_sha != course["pack_manifest_sha256"]
-                    or manifest.source_key != course["source_key"]
-                    or manifest.record_count != 27
-                    or len(manifest.source_cluster_keys) != 2):
+            semantic_packs = overlay.get("semantic_relation_packs", {})
+            expected = (course if stage_key == W06_V1_PACK_KEY
+                        else semantic_packs.get(stage_key))
+            if (not isinstance(expected, dict)
+                    or canonical_sha != expected["pack_manifest_sha256"]
+                    or manifest.source_key != expected["source_key"]
+                    or manifest.record_count != expected["record_count"]
+                    or len(manifest.source_cluster_keys)
+                    != expected["source_cluster_count"]):
                 raise W06ContractError("W-06 v2 pack 未匹配 source overlay")
             earliest = "W-06"
             manifest_sha = _sha256(manifest_path)

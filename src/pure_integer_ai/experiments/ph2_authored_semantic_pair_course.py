@@ -155,9 +155,11 @@ def _protocol_payload(seed: AuthoredRelationSeed) -> dict:
 
 
 def _compile_semantic_pair_seed(
-        seed: AuthoredRelationSeed) -> AuthoredCompiledSeed:
+        seed: AuthoredRelationSeed,
+        *,
+        semantic_identity: bool = False) -> AuthoredCompiledSeed:
     """把双 owner 和显式 symmetric protocol 附加到共享 payload。"""
-    base = compile_relation_seed(seed)
+    base = compile_relation_seed(seed, semantic_identity=semantic_identity)
     value = base.observation_payload.to_value()
     protocol = _protocol_payload(seed)
     value["semantic_pair_protocol"] = protocol
@@ -305,12 +307,15 @@ def read_authored_semantic_pair_seeds(
 
 def compile_authored_semantic_pair_course(
         sample_path: str | Path,
-        release_root: str | Path) -> AuthoredCourseBuild:
+        release_root: str | Path,
+        *,
+        semantic_identity: bool = False) -> AuthoredCourseBuild:
     """编译并发布 D-02C.5 typed SIMILAR/ANTONYM 极小 pack。"""
     seeds = read_authored_semantic_pair_seeds(sample_path)
     try:
         return publish_authored_course(
-            tuple(_compile_semantic_pair_seed(seed) for seed in seeds),
+            tuple(_compile_semantic_pair_seed(
+                seed, semantic_identity=semantic_identity) for seed in seeds),
             sample_path,
             release_root,
             _SPEC,

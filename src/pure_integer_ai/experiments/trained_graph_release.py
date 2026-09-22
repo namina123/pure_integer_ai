@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 from pathlib import PurePosixPath
 import shutil
@@ -38,6 +39,7 @@ _STATE_FIELDS = (
     "typed_course",
     "typed_language_floor",
     "typed_relation_generation",
+    "grounded_answer_graph_training",
     "stage_weaning_ready",
     "weaning_ready",
     "weaning_blockers",
@@ -201,7 +203,19 @@ def _source_ledger(
                     or type(row[2]) is not int or row[2] < 0):
                 raise TrainedGraphReleaseError(
                     f"source_files[{ordinal}] 非规范")
-            source = _resolve_source(project, training, row[0])
+            # A materialization child intentionally carries the parent's pack
+            # manifest but no course files.  Resolve each declared source
+            # against every lineage root, newest first, before giving up.
+            source = None
+            for candidate_training, _candidate_pack, _candidate_summary in lineage:
+                try:
+                    source = _resolve_source(project, candidate_training, row[0])
+                except TrainedGraphReleaseError:
+                    continue
+                break
+            if source is None:
+                raise TrainedGraphReleaseError(
+                    f"训练来源不可回读: {Path(row[0]).name}")
             digest = _sha256(source)
             if digest != row[1]:
                 raise TrainedGraphReleaseError(
@@ -288,10 +302,16 @@ def _has_materialized_source_closure(
         summary: dict[str, object],
         ) -> bool:
     """判断当前 run 是否已物化其训练图的完整来源闭包。"""
+    # R-01 materialization runs deliberately copy only the pack manifest and
+    # SQLite checkpoint; course files remain owned by the parent training run.
+    # Treating the copied manifest as a closed source set makes release
+    # construction fail on otherwise valid additive materialization runs.
+    if (training / "trained_relation_generation_materialization.json").is_file():
+        return False
     if (type(summary.get("source_record_count")) is not int
             or summary["source_record_count"] <= 0
-            or pack.get("train_surface_count")
-            != summary["source_record_count"]):
+            or type(pack.get("train_surface_count")) is not int
+            or pack["train_surface_count"] <= 0):
         return False
     values: list[object] = []
     for row in pack.get("source_files", ()):
@@ -329,8 +349,17 @@ def build_trained_graph_release(
         release_root: str | Path,
         release_id: str,
         require_k_drive: bool = True,
+        require_dialogue_successor: bool = True,
+        qualification_audit: str | Path | None = None,
         ) -> TrainedGraphRelease:
-    """构造仅含训练后图状态的闭合发布根，不复制课程或 QA。"""
+    """构造仅含训练后图状态的闭合发布根，不复制课程或 QA。
+
+    关系生成增量允许先发布明确标记为非自由对话完成的模型；这只放宽
+    successor 数量门，不会伪造 successor、回放正文或改变能力声明。
+    """
+    if (type(require_k_drive) is not bool
+            or type(require_dialogue_successor) is not bool):
+        raise TypeError("发布开关必须是严格 bool")
     if type(release_id) is not str or not release_id.strip():
         raise TrainedGraphReleaseError("release_id 必须是非空文本")
     project = Path(project_root).resolve()
@@ -359,6 +388,20 @@ def build_trained_graph_release(
             or summary.get("pack_sha256") != resume.get("pack_sha256")
             or summary.get("pack_sha256") != pack.get("pack_sha256")):
         raise TrainedGraphReleaseError("训练 summary/resume/pack 身份不闭合")
+    qualification_path = None
+    if qualification_audit is not None:
+        qualification_path = Path(qualification_audit).resolve(strict=True)
+        qualification = _read_object(
+            qualification_path, label="free-dialogue qualification audit")
+        if (qualification.get("format")
+                != "PURE_INTEGER_FREE_DIALOGUE_QUALIFICATION_AUDIT_V1"
+                or qualification.get("qualification_status")
+                != "PASS_HELDOUT_CONSUMPTION_ONLY"
+                or qualification.get("model_sha256") != database_sha
+                or qualification.get("free_dialogue_complete") != 0
+                or qualification.get("independent_release_required") != 1):
+            raise TrainedGraphReleaseError(
+                "free-dialogue qualification audit 与训练图身份/资格不闭合")
     relation_generation = summary.get("typed_relation_generation")
     if relation_generation is not None:
         materialization_path = training / (
@@ -405,19 +448,29 @@ def build_trained_graph_release(
             required["training.sqlite3"]) as relation_runtime:
         relation_count = len(relation_runtime.active_propositions())
         relation_frame_count = len(relation_runtime.active_surface_frames())
+    from pure_integer_ai.experiments.trained_generation_connector_runtime import (
+        TrainedGenerationConnectorRuntime,
+    )
+    with TrainedGenerationConnectorRuntime(
+            required["training.sqlite3"]) as generation_runtime:
+        generation_connector_count = generation_runtime.template_count
     dialogue_runtime = SqliteDialogueSuccessorRuntime(
         required["training.sqlite3"])
     try:
         dialogue_count = dialogue_runtime.count()
     finally:
         dialogue_runtime.close()
-    if min(relation_count, relation_frame_count, dialogue_count) <= 0:
+    if (min(relation_count, relation_frame_count) <= 0
+            or require_dialogue_successor and dialogue_count <= 0):
         raise TrainedGraphReleaseError("训练图缺少 relation/dialogue 承重状态")
     state["runtime_capability_counts"] = {
         "active_relation_propositions": relation_count,
         "relation_surface_frames": relation_frame_count,
         "dialogue_successor_projections": dialogue_count,
+        "response_connectors": generation_connector_count,
     }
+    state["dialogue_successor_required"] = int(require_dialogue_successor)
+    state["free_dialogue_complete"] = 0
     source_ledger = _source_ledger(
         project, _training_lineage(training, pack, summary))
     protocol = {
@@ -426,7 +479,11 @@ def build_trained_graph_release(
         "transport": "jsonl",
         "encoding": "utf-8",
         "operations": ["turn", "quit", "exit"],
-        "request": {"required": ["op", "text"], "id_optional": True},
+        "request": {"required": ["op", "text"], "id_optional": True,
+                    "graph_object_keys_optional": True,
+                    "graph_object_key_encoding": "integer_arrays",
+                    "core_filler_graph_inputs": True,
+                    "same_query_state_graph_consumption": True},
         "response": {"type": "turn", "text_field": "text"},
         "memory": {"optional": True, "storage": "sqlite", "integer_graph": True},
     }
@@ -435,15 +492,274 @@ def build_trained_graph_release(
     if staging.exists():
         raise TrainedGraphReleaseError("release staging 已存在，拒绝覆盖")
     (staging / "model").mkdir(parents=True)
-    shutil.copyfile(required["training.sqlite3"], staging / "model/training.sqlite3")
+    linked_database = staging / "model/training.sqlite3"
+    try:
+        os.link(required["training.sqlite3"], linked_database)
+    except OSError as error:
+        raise TrainedGraphReleaseError(
+            "同盘模型硬链接失败；拒绝静默复制大模型") from error
+    if _sha256(linked_database) != database_sha:
+        raise TrainedGraphReleaseError("硬链接后的模型身份漂移")
     shutil.copyfile(
         required["training_cursor.int"], staging / "model/training_cursor.int")
     (staging / "model/training_state.json").write_bytes(_canonical_json(state))
     (staging / "source_manifest.json").write_bytes(
         _canonical_json(source_ledger))
     (staging / "dialogue_protocol.json").write_bytes(_canonical_json(protocol))
+    if qualification_path is not None:
+        (staging / "qualification_audit.json").write_bytes(
+            qualification_path.read_bytes())
     payloads = tuple(sorted(
         path for path in staging.rglob("*") if path.is_file()))
+    files = [{
+        "path": path.relative_to(staging).as_posix(),
+        "size_bytes": path.stat().st_size,
+        "sha256": _sha256(path),
+    } for path in payloads]
+    manifest = {
+        "format": TRAINED_GRAPH_RELEASE_FORMAT,
+        "schema_version": 1,
+        "release_id": release_id.strip(),
+        "entry": {
+            "training_database": "model/training.sqlite3",
+            "training_cursor": "model/training_cursor.int",
+            "training_state": "model/training_state.json",
+            "source_manifest": "source_manifest.json",
+            "protocol_config": "dialogue_protocol.json",
+        },
+        "files": files,
+    }
+    if qualification_path is not None:
+        manifest["entry"]["qualification_audit"] = "qualification_audit.json"
+    manifest_path = staging / TRAINED_GRAPH_RELEASE_MANIFEST
+    manifest_path.write_bytes(_canonical_json(manifest))
+    (staging / TRAINED_GRAPH_RELEASE_DIGEST).write_text(
+        _sha256(manifest_path) + "\n", encoding="ascii", newline="\n")
+    staging.rename(target)
+    return load_trained_graph_release(
+        target, require_k_drive=require_k_drive)
+
+
+def _closed_runtime_boundary(path: Path) -> dict[str, object]:
+    """读取主线审计并拒绝任何生产可达的禁用语言路径。"""
+    report = _read_object(path, label="mainline integration audit")
+    modules = report.get("modules")
+    scopes = report.get("reachable_scope_counts")
+    if (report.get("parse_error_count") != 0
+            or type(report.get("module_count")) is not int
+            or not isinstance(modules, list)
+            or not isinstance(scopes, dict)):
+        raise TrainedGraphReleaseError("mainline audit 不完整")
+    forbidden = [
+        item.get("module")
+        for item in modules
+        if (isinstance(item, dict)
+            and item.get("production_reachable") == 1
+            and isinstance(item.get("forbidden_markers"), dict)
+            and item["forbidden_markers"])
+    ]
+    if forbidden:
+        raise TrainedGraphReleaseError(
+            f"发布入口仍可达禁用路径: {sorted(forbidden)}")
+    required_scopes = ("query", "generation", "terminal")
+    if any(type(scopes.get(name)) is not int or scopes[name] <= 0
+           for name in required_scopes):
+        raise TrainedGraphReleaseError("mainline audit 缺少生产入口覆盖")
+    return {
+        "audit_sha256": _sha256(path),
+        "module_count": report["module_count"],
+        "parse_error_count": 0,
+        "production_forbidden_count": 0,
+        "reachable_scope_counts": {
+            name: scopes[name] for name in required_scopes
+        },
+    }
+
+
+def build_event_time_graph_release(
+        *,
+        materialized_run_root: str | Path,
+        mainline_audit: str | Path,
+        release_root: str | Path,
+        release_id: str,
+        require_k_drive: bool = True,
+        ) -> TrainedGraphRelease:
+    """把已封存 Event/Time 绑定图装成现有 strict graph 发布根。
+
+    物化 run 没有 formal_train 的五件套，不能伪造 training summary。本入口
+    改为核验其单调 cursor、最终 receipt、父来源/许可 ledger 和实际运行图。
+    SQLite 在同一 K 卷使用硬链接，避免为候选发布重复占用大模型空间；manifest
+    仍逐文件锁定内容，任一路径修改都会使发布加载失败。
+    """
+    if type(release_id) is not str or not release_id.strip():
+        raise TrainedGraphReleaseError("release_id 必须是非空文本")
+    run = Path(materialized_run_root).resolve()
+    audit_path = Path(mainline_audit).resolve()
+    target = Path(release_root).resolve()
+    if not run.is_dir() or not audit_path.is_file():
+        raise TrainedGraphReleaseError("materialized run 或 mainline audit 不存在")
+    if require_k_drive and (
+            run.drive.upper() != "K:" or target.drive.upper() != "K:"):
+        raise TrainedGraphReleaseError("物化模型和发布根必须位于 K 盘")
+    if target.exists():
+        raise TrainedGraphReleaseError("release root 已存在，拒绝覆盖")
+    # 原地物化阶段把多个生成 owner 连续追加到训练 run 的唯一 SQLite；
+    # cursor 的完整绝对路径只在构建期读取，发布 manifest 不携带宿主路径。
+    cursor_path = run / "event_time_generation_binding_cursor.json"
+    cursor_hint: dict[str, object] = {}
+    if cursor_path.is_file():
+        cursor_hint = _read_object(cursor_path, label="Event/Time binding cursor")
+    database_value = cursor_hint.get("database_path")
+    database = (
+        Path(database_value).resolve(strict=True)
+        if type(database_value) is str and database_value
+        else run / "training.sqlite3"
+    )
+    receipt_path = run / "event_time_generation_binding_receipt.json"
+    ledger_path = run / "parent_manifest.json"
+    if any(not path.is_file() for path in (
+            database, cursor_path, receipt_path, ledger_path)):
+        raise TrainedGraphReleaseError("Event/Time 物化 run 不完整")
+    cursor = _read_object(cursor_path, label="Event/Time binding cursor")
+    receipt = _read_object(receipt_path, label="Event/Time binding receipt")
+    ledger = _read_object(ledger_path, label="Event/Time source ledger")
+    if cursor.get("in_place") == 1:
+        model_root = run.parents[1]
+        if (database.drive.upper() != "K:"
+                or database.parent != model_root
+                or receipt.get("in_place") != 1
+                or cursor.get("database_copy_count") != 0
+                or receipt.get("database_copy_count") != 0
+                or receipt.get("database_path") != str(database)):
+            raise TrainedGraphReleaseError(
+                "Event/Time 原地物化数据库所有权不闭合")
+    elif database != run / "training.sqlite3":
+        raise TrainedGraphReleaseError("Event/Time 复制物化数据库路径漂移")
+    expected_format = "PURE_INTEGER_EVENT_TIME_GENERATION_BINDING_V1"
+    database_sha = _sha256(database)
+    ledger_sha = _sha256(ledger_path)
+    if (cursor.get("format") != expected_format
+            or receipt.get("format") != expected_format
+            or cursor.get("stage") != 3 or receipt.get("stage") != 3
+            or receipt.get("database_sha256") != database_sha
+            or receipt.get("database_bytes") != database.stat().st_size
+            or cursor.get("source_manifest_sha256") != ledger_sha
+            or receipt.get("source_manifest_sha256") != ledger_sha):
+        raise TrainedGraphReleaseError("Event/Time cursor/receipt/模型身份不闭合")
+    for field in (
+            "generation_binding_count",
+            "generation_binding_statement_count",
+            "reused_object_count"):
+        if (type(receipt.get(field)) is not int or receipt[field] <= 0
+                or cursor.get(field) != receipt[field]):
+            raise TrainedGraphReleaseError(f"Event/Time {field} 不闭合")
+    if (receipt.get("semantic_object_copy_count") != 0
+            or receipt.get("source_body_read_for_binding") != 0
+            or receipt.get("successor_answer_route") != 0
+            or receipt.get("free_dialogue_complete") != 0):
+        raise TrainedGraphReleaseError("Event/Time 物化边界违反 strict graph 约束")
+    sources = ledger.get("sources")
+    if (ledger.get("format") != "PURE_INTEGER_TRAINED_GRAPH_SOURCE_LEDGER_V1"
+            or not isinstance(sources, list) or not sources
+            or any(not isinstance(item, dict)
+                   or not isinstance(item.get("license_ids"), list)
+                   or not item["license_ids"]
+                   or type(item.get("sha256")) is not str
+                   or len(item["sha256"]) != 64
+                   for item in sources)):
+        raise TrainedGraphReleaseError("Event/Time 来源/许可 ledger 不完整")
+    boundary = _closed_runtime_boundary(audit_path)
+
+    from pure_integer_ai.experiments.trained_generation_connector_runtime import (
+        TrainedGenerationConnectorRuntime,
+    )
+    from pure_integer_ai.experiments.trained_graph_query_bridge import (
+        TrainedGraphQueryBridge,
+    )
+    from pure_integer_ai.experiments.trained_relation_graph_runtime import (
+        TrainedRelationGraphRuntime,
+    )
+    with TrainedRelationGraphRuntime(database) as relation_runtime:
+        proposition_count = len(relation_runtime.active_propositions())
+        surface_frame_count = len(relation_runtime.active_surface_frames())
+    with TrainedGenerationConnectorRuntime(database) as generation_runtime:
+        connector_count = generation_runtime.template_count
+    with TrainedGraphQueryBridge(database, successor_evidence=False) as query_runtime:
+        binding_count = len(query_runtime.event_time_generation_bindings)
+        topology_edge_count = len(query_runtime.event_time_topology.edges)
+    if (min(proposition_count, surface_frame_count, connector_count,
+            binding_count, topology_edge_count) <= 0
+            or binding_count != receipt["generation_binding_count"]):
+        raise TrainedGraphReleaseError("Event/Time strict runtime 承重状态不闭合")
+
+    state = {
+        "format": "PURE_INTEGER_EVENT_TIME_GRAPH_STATE_V1",
+        "schema_version": 1,
+        "release_id": release_id.strip(),
+        "database_sha256": database_sha,
+        "database_bytes": database.stat().st_size,
+        "source_manifest_sha256": ledger_sha,
+        "binding_receipt_sha256": _sha256(receipt_path),
+        "runtime_boundary": boundary,
+        "runtime_capability_counts": {
+            "active_relation_propositions": proposition_count,
+            "relation_surface_frames": surface_frame_count,
+            "generation_connectors": connector_count,
+            "event_time_generation_bindings": binding_count,
+            "event_time_topology_edges": topology_edge_count,
+        },
+        "semantic_object_copy_count": 0,
+        "successor_answer_route": 0,
+        "source_body_answer_route": 0,
+        "shared_model_file_identity": 1,
+        "weaning_ready": False,
+        "free_dialogue_complete": 0,
+    }
+    protocol = {
+        "format": "PURE_INTEGER_TRAINED_GRAPH_DIALOGUE_PROTOCOL_V1",
+        "schema_version": 1,
+        "transport": "jsonl",
+        "encoding": "utf-8",
+        "operations": ["turn", "quit", "exit"],
+        "request": {"required": ["op", "text"], "id_optional": True,
+                    "graph_object_keys_optional": True,
+                    "graph_object_key_encoding": "integer_arrays",
+                    "core_filler_graph_inputs": True,
+                    "same_query_state_graph_consumption": True},
+        "response": {"type": "turn", "text_field": "text"},
+        "memory": {"optional": True, "storage": "sqlite", "integer_graph": True},
+    }
+    from pure_integer_ai.storage.integer_codec import encode_integer_tuple
+    cursor_record = (
+        1,
+        *tuple(bytes.fromhex(database_sha)),
+        *tuple(bytes.fromhex(ledger_sha)),
+        *tuple(bytes.fromhex(_sha256(receipt_path))),
+        receipt["generation_binding_count"],
+        receipt["generation_binding_statement_count"],
+        receipt["reused_object_count"],
+        0,
+    )
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.with_name(target.name + ".building")
+    if staging.exists():
+        raise TrainedGraphReleaseError("release staging 已存在，拒绝覆盖")
+    (staging / "model").mkdir(parents=True)
+    linked_database = staging / "model/training.sqlite3"
+    try:
+        os.link(database, linked_database)
+    except OSError as error:
+        raise TrainedGraphReleaseError(
+            "同盘模型硬链接失败；拒绝静默复制大模型") from error
+    if _sha256(linked_database) != database_sha:
+        raise TrainedGraphReleaseError("硬链接后的模型身份漂移")
+    (staging / "model/training_cursor.int").write_bytes(
+        encode_integer_tuple(cursor_record))
+    (staging / "model/training_state.json").write_bytes(_canonical_json(state))
+    (staging / "source_manifest.json").write_bytes(_canonical_json(ledger))
+    (staging / "dialogue_protocol.json").write_bytes(_canonical_json(protocol))
+    payloads = tuple(sorted(path for path in staging.rglob("*") if path.is_file()))
     files = [{
         "path": path.relative_to(staging).as_posix(),
         "size_bytes": path.stat().st_size,
@@ -467,8 +783,372 @@ def build_trained_graph_release(
     (staging / TRAINED_GRAPH_RELEASE_DIGEST).write_text(
         _sha256(manifest_path) + "\n", encoding="ascii", newline="\n")
     staging.rename(target)
-    return load_trained_graph_release(
-        target, require_k_drive=require_k_drive)
+    return load_trained_graph_release(target, require_k_drive=require_k_drive)
+
+
+def build_materialized_graph_release(
+        *,
+        project_root: str | Path,
+        materialized_run_root: str | Path,
+        materialization_receipt: str | Path | None = None,
+        qualification_audit: str | Path,
+        mainline_audit: str | Path,
+        parallel_query_receipt: str | Path | None = None,
+        release_root: str | Path,
+        release_id: str,
+        require_k_drive: bool = True,
+        ) -> TrainedGraphRelease:
+    """发布原地物化图，不把它伪装成 formal training run。
+
+    物化运行只携带 cursor/receipt/source ledger；SQLite 在同一 K 卷使用
+    硬链接，课程正文和会话状态永不进入 release root。
+    """
+    if type(release_id) is not str or not release_id.strip():
+        raise TrainedGraphReleaseError("release_id 必须是非空文本")
+    project = Path(project_root).resolve()
+    run = Path(materialized_run_root).resolve()
+    target = Path(release_root).resolve()
+    qualification_path = Path(qualification_audit).resolve(strict=True)
+    audit_path = Path(mainline_audit).resolve(strict=True)
+    if not project.is_dir() or not run.is_dir():
+        raise TrainedGraphReleaseError("project/materialized run root 不存在")
+    if require_k_drive and (
+            run.drive.upper() != "K:" or target.drive.upper() != "K:"):
+        raise TrainedGraphReleaseError("物化模型和发布根必须位于 K 盘")
+    # 资格/主线审计属于 F 盘审计域；只读消费不应把审计副本写回 K 盘。
+    if qualification_path.drive.upper() not in {"F:", "K:"}:
+        raise TrainedGraphReleaseError("资格收据必须位于 F: 或 K: 审计域")
+    if target.exists():
+        raise TrainedGraphReleaseError("release root 已存在，拒绝覆盖")
+    cursor_path = run / "generic_response_cursor.json"
+    receipt_path = Path(materialization_receipt).resolve(strict=True) if (
+        materialization_receipt is not None) else run / "generic_response_receipt.json"
+    source_path = run / "source_manifest.json"
+    parent_source_path = run / "parent_source_manifest.json"
+    if any(not path.is_file() for path in (
+            cursor_path, receipt_path, source_path, parent_source_path)):
+        raise TrainedGraphReleaseError("物化 run 缺少闭合 cursor/receipt/source ledger")
+    cursor = _read_object(cursor_path, label="generic response cursor")
+    database_value = cursor.get("database_path")
+    if cursor.get("in_place") == 1:
+        if type(database_value) is not str or not database_value:
+            raise TrainedGraphReleaseError("原地物化 cursor 缺少数据库路径")
+        database = Path(database_value).resolve(strict=True)
+        if database.drive.upper() != "K:" or database == Path(database.anchor):
+            raise TrainedGraphReleaseError("原地物化数据库必须是 K 盘显式文件")
+    else:
+        database = run / "training.sqlite3"
+        if not database.is_file() or database_value != str(database):
+            raise TrainedGraphReleaseError("复制物化数据库路径漂移")
+    receipt = _read_object(receipt_path, label="generic response receipt")
+    source = _read_object(source_path, label="materialized source manifest")
+    parent_source = _read_object(
+        parent_source_path, label="parent source manifest")
+    database_sha = _sha256(database)
+    broad_receipt = receipt.get("format") == "PURE_INTEGER_BROAD_STRUCTURAL_INCREMENT_V1"
+    development_categories = source.get("graph_role_categories")
+    heldout_categories = parent_source.get("graph_role_categories")
+    structural_categories_closed = (
+        isinstance(development_categories, list)
+        and isinstance(heldout_categories, list)
+        and bool(development_categories) and bool(heldout_categories)
+        and development_categories == sorted(set(development_categories))
+        and heldout_categories == sorted(set(heldout_categories))
+        and all(type(value) is int and 1 <= value <= 5
+                for value in (*development_categories, *heldout_categories))
+    )
+    cursor_closed = (
+        cursor.get("stage") == 4 and cursor.get("in_place") == 1
+        and cursor.get("database_path") == str(database)
+        and cursor.get("database_copy_count") == 0
+        and cursor.get("source_manifest_sha256") == _sha256(source_path)
+        and cursor.get("parent_source_manifest_sha256")
+        == _sha256(parent_source_path))
+    if broad_receipt:
+        receipt_closed = (
+            receipt.get("database") == str(database)
+            and receipt.get("database_copy_count") == 0
+            and receipt.get("database_link_count_before") == 1
+            and receipt.get("database_sha256_after") == database_sha
+            and receipt.get("database_sha256_before")
+            == cursor.get("parent_database_sha256")
+            and receipt.get("course_sha256") == cursor.get("course_sha256")
+            and receipt.get("connector_count") == cursor.get("connector_count")
+            and receipt.get("realization_count") == cursor.get("realization_count")
+            and receipt.get("semantic_variant_count")
+            == cursor.get("semantic_variant_count")
+            and receipt.get("recovered_semantic_variant_count")
+            == cursor.get("semantic_variant_count")
+            and receipt.get("source_text_rows_added") == 0
+            and receipt.get("semantic_variant_duplicate_count") == 0
+            and receipt.get("development_graph_role_categories")
+            == development_categories
+            and receipt.get("heldout_graph_role_categories")
+            == heldout_categories
+            and structural_categories_closed
+            and receipt.get(
+                "development_whole_sentence_representation_count") == 0
+            and receipt.get(
+                "heldout_whole_sentence_representation_count") == 0
+            and receipt.get("duplicate_literal_chunk_count") == 0
+            and receipt.get(
+                "cross_split_semantic_variant_duplicate_count") == 0
+            and receipt.get("recovered_semantic_variant_count")
+            == cursor.get("semantic_variant_count")
+            and receipt.get("semantic_variant_registry_normalized") == 1
+            and receipt.get("successor_answer_route") == 0
+            and receipt.get("free_dialogue_complete") == 0)
+    else:
+        receipt_closed = (
+            receipt.get("stage") == 4
+            and receipt.get("in_place") == 1
+            and receipt.get("database_path") == str(database)
+            and receipt.get("model_sha256") == database_sha
+            and receipt.get("database_bytes") == database.stat().st_size
+            and receipt.get("database_copy_count") == 0
+            and receipt.get("source_text_rows_added") == 0
+            and receipt.get("semantic_variant_duplicate_count") == 0
+            and receipt.get("semantic_variant_registry_normalized") == 1
+            and receipt.get("free_dialogue_complete") == 0
+            and cursor.get("course_sha256") == receipt.get("course_sha256")
+            and cursor.get("source_manifest_sha256")
+            == receipt.get("source_manifest_sha256")
+            and cursor.get("parent_source_manifest_sha256")
+            == receipt.get("parent_source_manifest_sha256"))
+    if not cursor_closed or not receipt_closed:
+        raise TrainedGraphReleaseError("物化 cursor/receipt 身份或 strict 边界不闭合")
+    if int(database.stat().st_nlink) != 1:
+        raise TrainedGraphReleaseError(
+            "物化模型已与其他发布共享硬链接；拒绝创建重复 active release")
+    response_course_formats = {
+        "CONDITIONAL_RESPONSE_COURSE_LEDGER_V1",
+        "STRUCTURAL_RESPONSE_COURSE_LEDGER_V2",
+    }
+    if (source.get("format") not in response_course_formats
+            or parent_source.get("format") != source.get("format")
+            or {source.get("split"), parent_source.get("split")}
+            != {"development", "heldout"}
+            or source.get("free_dialogue_claim", 0) != 0
+            or parent_source.get("free_dialogue_claim", 0) != 0):
+        raise TrainedGraphReleaseError("来源账本必须是 development + heldout 且不宣称自由对话")
+    qualification = _read_object(
+        qualification_path, label="free-dialogue qualification audit")
+    if (qualification.get("format")
+            != "PURE_INTEGER_FREE_DIALOGUE_QUALIFICATION_AUDIT_V1"
+            or qualification.get("qualification_status")
+            != "PASS_HELDOUT_CONSUMPTION_ONLY"
+            or qualification.get("model_sha256") != database_sha
+            or qualification.get("free_dialogue_complete") != 0
+            or qualification.get("independent_release_required") != 1):
+        raise TrainedGraphReleaseError("资格收据与当前物化模型不闭合")
+    boundary = _closed_runtime_boundary(audit_path)
+
+    from pure_integer_ai.experiments.trained_relation_graph_runtime import (
+        TrainedRelationGraphRuntime,
+    )
+    from pure_integer_ai.experiments.trained_generation_connector_runtime import (
+        TrainedGenerationConnectorRuntime,
+    )
+    from pure_integer_ai.experiments.trained_graph_query_bridge import (
+        TrainedGraphQueryBridge,
+    )
+    with TrainedRelationGraphRuntime(database) as relation_runtime:
+        proposition_count = len(relation_runtime.active_propositions())
+        surface_frame_count = len(relation_runtime.active_surface_frames())
+    with TrainedGenerationConnectorRuntime(database) as generation_runtime:
+        connector_count = generation_runtime.template_count
+    with TrainedGraphQueryBridge(database, successor_evidence=False) as query_runtime:
+        bridge_binding_count = len(getattr(
+            query_runtime, "_artifact_semantic_bindings", ()))
+        relation_fact_count = len(
+            query_runtime.core_runtime.active_surface_facts())
+        relation_routes = query_runtime.relation_routes.all()
+        relation_kind_counts: dict[int, int] = {}
+        relation_generation_kind_counts: dict[int, int] = {}
+        for route in relation_routes:
+            relation_kind_counts[route.relation_kind] = (
+                relation_kind_counts.get(route.relation_kind, 0) + 1)
+            if route.generation_registered:
+                relation_generation_kind_counts[route.relation_kind] = (
+                    relation_generation_kind_counts.get(
+                        route.relation_kind, 0) + 1)
+        core_filler_graph_input_count = len(query_runtime.filler_edges)
+    if min(proposition_count, surface_frame_count, connector_count) <= 0:
+        raise TrainedGraphReleaseError("物化图缺少 relation/surface/connector 承重状态")
+    if (len(relation_routes) != relation_fact_count
+            or not relation_kind_counts
+            or core_filler_graph_input_count <= 0):
+        raise TrainedGraphReleaseError(
+            "物化图的 relation capability 或 Core filler 输入索引不闭合")
+    bridge_receipt_sha = None
+    if parallel_query_receipt is not None:
+        bridge_path = Path(parallel_query_receipt).resolve(strict=True)
+        bridge = _read_object(bridge_path, label="parallel query receipt")
+        if bridge.get("protocol") == 1:
+            query_count = bridge.get("queried_user_count")
+            after_ohe = bridge.get("after_ohe")
+            graph_input_count = bridge.get("graph_input_count", 0)
+            graph_inputs_closed = (
+                graph_input_count == 0
+                or (type(graph_input_count) is int
+                    and graph_input_count > 0
+                    and bridge.get("consumed_graph_input_count")
+                    == graph_input_count
+                    and bridge.get("generation_consumed_graph_input_count")
+                    == graph_input_count))
+            modern_closed = (
+                bridge_path.name == "receipt.json"
+                and qualification.get("heldout_root") == bridge_path.parent.name
+                and type(query_count) is int and query_count >= 1
+                and bridge.get("canonical_model_sha256_before") == database_sha
+                and bridge.get("canonical_model_sha256_after") == database_sha
+                and bridge.get("active_spaces") == [1, 2, 3]
+                and bridge.get("three_graph_query_count") == query_count
+                and type(bridge.get("delivery_count")) is int
+                and 0 < bridge["delivery_count"] <= query_count
+                and type(bridge.get("heldout_match_count")) is int
+                and bridge["heldout_match_count"] >= 1
+                and bridge.get("heldout_consumption") == 1
+                and bridge.get("heldout_owner_verified") == 1
+                and graph_inputs_closed
+                and bridge.get("cold_restore_equal") == 1
+                and bridge.get("model_read_only") == 1
+                and isinstance(after_ohe, list) and len(after_ohe) == 3
+                and all(type(value) is int and value > 0
+                        for value in after_ohe)
+                and bridge.get("database_copy_count") == 0
+                and bridge.get("source_text_rows_added") == 0
+                and bridge.get("successor_answer_route") == 0
+                and bridge.get("source_body_answer_route") == 0
+                and bridge.get("character_nearest_route") == 0
+                and bridge.get("opencc_route") == 0
+                and bridge.get("language_vocabulary_route") == 0
+                and bridge.get("free_dialogue_complete") == 0)
+            if not modern_closed:
+                raise TrainedGraphReleaseError(
+                    "现代三图 session 收据与资格审计/当前模型不闭合")
+        else:
+            query = bridge.get("query")
+            if (bridge.get("database_sha256_after") != database_sha
+                    or bridge.get("source_text_selected") != 0
+                    or bridge.get("successor_answer_route") != 0
+                    or bridge.get("source_body_answer_route") != 0
+                    or not isinstance(query, dict)
+                    or type(query.get("three_graph_query_count")) is not int
+                    or query["three_graph_query_count"] <= 0):
+                raise TrainedGraphReleaseError(
+                    "三图并行收据与当前模型不闭合")
+        bridge_receipt_sha = _sha256(bridge_path)
+
+    state = {
+        "format": "PURE_INTEGER_MATERIALIZED_GRAPH_STATE_V1",
+        "schema_version": 1,
+        "release_id": release_id.strip(),
+        "database_sha256": database_sha,
+        "database_bytes": database.stat().st_size,
+        "source_manifest_sha256": _sha256(source_path),
+        "parent_source_manifest_sha256": _sha256(parent_source_path),
+        "materialization_receipt_sha256": _sha256(receipt_path),
+        "qualification_audit_sha256": _sha256(qualification_path),
+        "runtime_boundary": boundary,
+        "runtime_capability_counts": {
+            "active_relation_propositions": proposition_count,
+            "active_relation_surface_facts": relation_fact_count,
+            "relation_surface_frames": surface_frame_count,
+            "response_connectors": connector_count,
+            "artifact_bridge_bindings": bridge_binding_count,
+            "relation_capability_routes": len(relation_routes),
+            "relation_generation_routes": sum(
+                relation_generation_kind_counts.values()),
+            "core_filler_graph_inputs": core_filler_graph_input_count,
+            "semantic_response_variants": int(
+                receipt.get("semantic_variant_count", 0)),
+        },
+        "relation_capability_kind_counts": [
+            [kind, relation_kind_counts[kind]]
+            for kind in sorted(relation_kind_counts)
+        ],
+        "relation_generation_kind_counts": [
+            [kind, relation_generation_kind_counts[kind]]
+            for kind in sorted(relation_generation_kind_counts)
+        ],
+        "parallel_query_receipt_sha256": bridge_receipt_sha,
+        "database_copy_count": 0,
+        "source_body_answer_route": 0,
+        "successor_answer_route": 0,
+        "weaning_ready": False,
+        "stage_weaning_ready": False,
+        "free_dialogue_complete": 0,
+    }
+    protocol = {
+        "format": "PURE_INTEGER_TRAINED_GRAPH_DIALOGUE_PROTOCOL_V1",
+        "schema_version": 1,
+        "transport": "jsonl",
+        "encoding": "utf-8",
+        "operations": ["turn", "quit", "exit"],
+        "request": {"required": ["op", "text"], "id_optional": True,
+                    "graph_object_keys_optional": True,
+                    "graph_object_key_encoding": "integer_arrays",
+                    "core_filler_graph_inputs": True,
+                    "same_query_state_graph_consumption": True},
+        "response": {"type": "turn", "text_field": "text"},
+        "memory": {"optional": True, "storage": "sqlite", "integer_graph": True},
+    }
+    from pure_integer_ai.storage.integer_codec import encode_integer_tuple
+    cursor_record = (
+        1, *tuple(bytes.fromhex(database_sha)),
+        *tuple(bytes.fromhex(_sha256(source_path))),
+        int(receipt.get("connector_count", 0)),
+        int(receipt.get("realization_count", 0)),
+        bridge_binding_count, 0)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.with_name(target.name + ".building")
+    if staging.exists():
+        raise TrainedGraphReleaseError("release staging 已存在，拒绝覆盖")
+    (staging / "model").mkdir(parents=True)
+    linked = staging / "model/training.sqlite3"
+    try:
+        os.link(database, linked)
+    except OSError as error:
+        raise TrainedGraphReleaseError("同盘模型硬链接失败；拒绝静默复制大模型") from error
+    if _sha256(linked) != database_sha:
+        raise TrainedGraphReleaseError("硬链接后的模型身份漂移")
+    (staging / "model/training_cursor.int").write_bytes(
+        encode_integer_tuple(cursor_record))
+    (staging / "model/training_state.json").write_bytes(_canonical_json(state))
+    (staging / "source_manifest.json").write_bytes(_canonical_json(source))
+    (staging / "dialogue_protocol.json").write_bytes(_canonical_json(protocol))
+    # 资格收据已验证；发布副本只保留可搬运身份，不携带 K 盘宿主路径。
+    qualification_public = dict(qualification)
+    qualification_public["model_path"] = "model/training.sqlite3"
+    qualification_public["heldout_root"] = "qualification-heldout"
+    (staging / "qualification_audit.json").write_bytes(
+        _canonical_json(qualification_public))
+    files = [{
+        "path": path.relative_to(staging).as_posix(),
+        "size_bytes": path.stat().st_size,
+        "sha256": _sha256(path),
+    } for path in sorted(path for path in staging.rglob("*") if path.is_file())]
+    manifest = {
+        "format": TRAINED_GRAPH_RELEASE_FORMAT,
+        "schema_version": 1,
+        "release_id": release_id.strip(),
+        "entry": {
+            "training_database": "model/training.sqlite3",
+            "training_cursor": "model/training_cursor.int",
+            "training_state": "model/training_state.json",
+            "source_manifest": "source_manifest.json",
+            "protocol_config": "dialogue_protocol.json",
+            "qualification_audit": "qualification_audit.json",
+        },
+        "files": files,
+    }
+    manifest_path = staging / TRAINED_GRAPH_RELEASE_MANIFEST
+    manifest_path.write_bytes(_canonical_json(manifest))
+    (staging / TRAINED_GRAPH_RELEASE_DIGEST).write_text(
+        _sha256(manifest_path) + "\n", encoding="ascii", newline="\n")
+    staging.rename(target)
+    return load_trained_graph_release(target, require_k_drive=require_k_drive)
 
 
 def load_trained_graph_release(
@@ -567,6 +1247,8 @@ __all__ = [
     "TRAINED_GRAPH_RELEASE_MANIFEST",
     "TrainedGraphRelease",
     "TrainedGraphReleaseError",
+    "build_materialized_graph_release",
+    "build_event_time_graph_release",
     "build_trained_graph_release",
     "load_trained_graph_release",
 ]

@@ -42,6 +42,7 @@
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence, TYPE_CHECKING, runtime_checkable
@@ -79,6 +80,7 @@ from pure_integer_ai.storage.integer_index_store import (
     INTEGER_INDEX_HEADER_TABLE,
     INTEGER_INDEX_MEMBER_TABLE,
     INTEGER_INDEX_OCCURRENCE_TABLE,
+    register_integer_index_tables,
 )
 from pure_integer_ai.experiments.curriculum_mastery_runtime import (
     CurriculumGateCheck,
@@ -518,6 +520,20 @@ class FormalTrainConfig:
     # 正式对话 relation bridge：由调用方提供 factory(ctx)，把 authored
     # typed relation 消费到当前 TrainContext 的共享 H-05/R-00 图中。
     typed_relation_runtime_factory: Any = None
+    # W-08 discourse/topic authored producer; factory(ctx) must materialize
+    # source-bound discourse structure into this same TrainContext graph.
+    discourse_topic_runtime_factory: Any = None
+    # LC-05 Event/State/time/aspect authored producer；必须绑定同一 Core 图。
+    event_time_structure_runtime_factory: Any = None
+    # Grounded Answer event/claim/evidence structure producer; bound to the
+    # same GraphOntology as Core, never a response-surface replay path.
+    grounded_answer_graph_runtime_factory: Any = None
+    # KdConv compact integer attribute structure bridge; consumes only the
+    # immutable integer sidecar and binds into this TrainContext Core graph.
+    kdconv_structure_runtime_factory: Any = None
+    # Carrier projection bridge paths.  These are integer-only references to
+    # existing semantic identities; the runtime never creates missing targets.
+    artifact_semantic_bridge_paths: tuple[str, ...] = ()
     # L-05B2B 默认课程入口：loader 与 component factory 必须成对提供，且与直接 factory 互斥。
     # generation loader 加载 connector 理论；可选 relation/postcheck loader 分别加载 R-01/G-04 课程。
     # component factory 只需提供辅助组件；未配置 relation loader 时保留旧 alias 注入兼容路径。
@@ -617,6 +633,9 @@ class FormalTrainResult:
     probe_set: ProbeSet | None = None   # W4 D4 留出探针集（config.probe_holdout>0 时 formal_train 主入口建·版本化·W6/caller/test 可查·默认 None）
     holdout_retention: int = 0   # W6 E2 模拟退场 eval 采的探针保持率真值（默认 0 bit-identical·cross_verify 通过率×1000·D1 曲线②度量·真泛化 defer W8）
     word_form_course_report: Any = None   # L-01 课程 manifest、可见 split 和去重计数；未配置 provider 时为 None
+    artifact_semantic_bridge_report: Any = None
+    discourse_topic_report: Any = None
+    grounded_answer_graph_report: Any = None
     alias_relation_course_report: Any = None
     language_generation_course_report: Any = None
     language_generation_postcheck_course_report: Any = None
@@ -730,11 +749,43 @@ def _formal_train_impl(config: FormalTrainConfig,
     preloaded_recovery_cursor_payload = None
     if config.sqlite_resume_binding_sha256 is not None:
         register_train_context_tables(backend)
+        register_integer_index_tables(backend)
         if config.language_dialogue_successor_protocol is not None:
             from pure_integer_ai.storage.dialogue_successor import (
                 register_dialogue_successor_tables,
             )
             register_dialogue_successor_tables(backend)
+        # Register the optional artifact-semantic extension only when it is
+        # present in the immutable parent checkpoint or explicitly requested
+        # by this shard.  Unconditional registration changes the target schema
+        # before fingerprint validation and makes a valid checkpoint appear
+        # corrupt when the parent never used that extension.
+        bridge_tables = False
+        if config.artifact_semantic_bridge_paths:
+            bridge_tables = True
+        else:
+            manifest_path = (
+                Path(config.run_dir) / config.base_run_id
+                / "sqlite_resume_manifest.json"
+            )
+            try:
+                manifest = json.loads(
+                    manifest_path.read_text(encoding="utf-8"))
+                table_counts = manifest.get("table_counts", ())
+                bridge_tables = any(
+                    isinstance(row, (list, tuple))
+                    and row
+                    and str(row[0]).startswith("artifact_semantic_")
+                    for row in table_counts
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError,
+                    AttributeError):
+                bridge_tables = False
+        if bridge_tables:
+            from pure_integer_ai.experiments.artifact_semantic_training_bridge import (
+                _register_bridge_tables,
+            )
+            _register_bridge_tables(backend)
         from pure_integer_ai.experiments.sqlite_training_resume import (
             validate_preloaded_sqlite_resume,
         )
@@ -745,6 +796,9 @@ def _formal_train_impl(config: FormalTrainConfig,
             require_k_drive=(Path(config.run_dir).drive.upper() == "K:"),
         )
 
+    # Formal training is the only mainline owner that materializes the
+    # exchange index; production readers keep that facility out of startup.
+    register_integer_index_tables(backend)
     ctx = make_train_context(backend, teacher=teacher, weights=weights)
     # Resume validation fingerprints the already-preloaded SQLite schema.  The
     # dialogue successor tables are an optional extension (not part of the
@@ -838,6 +892,15 @@ def _formal_train_impl(config: FormalTrainConfig,
     todo_stages = list(requested_stages)
     mastery_runtime: CurriculumMasteryRuntime | None = None
     if config.resume and config.base_run_id is not None:
+        # Recovery manifests created with the semantic carrier bridge include
+        # its append-only extension tables.  Register them before loading the
+        # package so the target schema is complete; manifests from older runs
+        # simply ignore these extra runtime tables.
+        if config.artifact_semantic_bridge_paths:
+            from pure_integer_ai.experiments.artifact_semantic_training_bridge import (
+                _register_bridge_tables,
+            )
+            _register_bridge_tables(backend)
         if config.sqlite_resume_binding_sha256 is None:
             recovery_cursor_payload = load_run_package(
                 backend, config.run_dir,
@@ -1174,6 +1237,65 @@ def _formal_train_impl(config: FormalTrainConfig,
                 runtime.semantic_graph.ontology is not ctx.graph_ontology):
             raise ValueError("typed relation runtime 未绑定当前 TrainContext 图")
         ctx.typed_relation_runtime = runtime
+    if config.discourse_topic_runtime_factory is not None:
+        factory = config.discourse_topic_runtime_factory
+        if not callable(factory):
+            raise TypeError("discourse_topic_runtime_factory 必须可调用")
+        runtime = factory(ctx)
+        if runtime is None:
+            raise ValueError("discourse_topic_runtime_factory 不得返回 None")
+        if getattr(runtime, "context", ctx) is not ctx:
+            raise ValueError("discourse topic runtime 未绑定当前 TrainContext 图")
+        ctx.discourse_topic_runtime = runtime
+        ctx.discourse_topic_report = runtime.report()
+    if config.event_time_structure_runtime_factory is not None:
+        factory = config.event_time_structure_runtime_factory
+        if not callable(factory):
+            raise TypeError("event_time_structure_runtime_factory 必须可调用")
+        runtime = factory(ctx)
+        if runtime is None:
+            raise ValueError("event_time structure runtime 不得返回 None")
+        if getattr(runtime, "context", ctx) is not ctx:
+            raise ValueError("event-time structure runtime 未绑定当前 TrainContext 图")
+        ctx.event_time_structure_runtime = runtime
+        ctx.event_time_structure_report = runtime.report()
+    if config.grounded_answer_graph_runtime_factory is not None:
+        factory = config.grounded_answer_graph_runtime_factory
+        if not callable(factory):
+            raise TypeError("grounded_answer_graph_runtime_factory 必须可调用")
+        runtime = factory(ctx)
+        if runtime is None:
+            raise ValueError("grounded answer graph runtime 不得返回 None")
+        if getattr(runtime, "context", ctx) is not ctx:
+            raise ValueError("grounded answer graph runtime 未绑定当前 TrainContext 图")
+        ctx.grounded_answer_graph_runtime = runtime
+        ctx.grounded_answer_graph_report = runtime.report()
+    if config.kdconv_structure_runtime_factory is not None:
+        factory = config.kdconv_structure_runtime_factory
+        if not callable(factory):
+            raise TypeError("kdconv_structure_runtime_factory 必须可调用")
+        runtime = factory(ctx)
+        if runtime is None:
+            raise ValueError("kdconv structure runtime 不得返回 None")
+        if getattr(runtime, "context", ctx) is not ctx:
+            raise ValueError("kdconv structure runtime 未绑定当前 TrainContext 图")
+        ctx.kdconv_structure_runtime = runtime
+        ctx.kdconv_structure_report = runtime.report()
+    if config.artifact_semantic_bridge_paths:
+        from pure_integer_ai.experiments.artifact_semantic_training_bridge import (
+            build_artifact_semantic_training_runtime,
+        )
+        paths = tuple(config.artifact_semantic_bridge_paths)
+        if any(not isinstance(item, str) or not item for item in paths):
+            raise ValueError("artifact_semantic_bridge_paths 必须是非空路径 tuple")
+        # Install the bridge before stage execution, but defer consumption
+        # until the language stages have materialized the target semantic and
+        # proposition identities.  Consuming an empty graph here would turn
+        # every valid reference into a permanent UNRESOLVED row.
+        bridge_runtime = build_artifact_semantic_training_runtime(
+            ctx, paths, consume=False)
+        ctx.artifact_semantic_bridge_runtime = bridge_runtime
+        ctx.artifact_semantic_bridge_report = bridge_runtime.report()
     generation_factory = config.language_generation_runtime_factory
     if all(default_generation_configured):
         from pure_integer_ai.experiments.language_generation_connector_factory import (
@@ -1313,7 +1435,11 @@ def _formal_train_impl(config: FormalTrainConfig,
     mc = metrics or MetricsCollector(mpath)
 
     _effective_boot_relations = train_scope.boot_relations
-    result = FormalTrainResult(run_id=config.run_id, weights=ctx.weights)
+    result = FormalTrainResult(
+        run_id=config.run_id,
+        weights=ctx.weights,
+        grounded_answer_graph_report=ctx.grounded_answer_graph_report,
+    )
     result.stages_requested = list(requested_stages)
     result.evaluation_plan = ctx.evaluation_plan
     result.evaluation_strictly_isolated = ctx.evaluation_strictly_isolated
@@ -1331,6 +1457,8 @@ def _formal_train_impl(config: FormalTrainConfig,
         result.evaluation_plan_sha256 = ctx.evaluation_plan.sha256()
     result.probe_set = ctx.probe_set   # W4 D4 探针集 expose（config.probe_holdout>0 时主入口建·版本化·W6/caller/test 可查）
     result.word_form_course_report = ctx.word_form_course_report
+    result.artifact_semantic_bridge_report = ctx.artifact_semantic_bridge_report
+    result.discourse_topic_report = ctx.discourse_topic_report
     result.alias_relation_course_report = ctx.alias_relation_course_report
     result.language_generation_course_report = (
         ctx.language_generation_course_report)
@@ -2381,6 +2509,12 @@ def _formal_train_impl(config: FormalTrainConfig,
         )
         if stage_loop_scope_token is not None:
             reset_telemetry_scope(stage_loop_scope_token)
+        if ctx.artifact_semantic_bridge_runtime is not None:
+            ctx.artifact_semantic_bridge_runtime.consume()
+            ctx.artifact_semantic_bridge_report = (
+                ctx.artifact_semantic_bridge_runtime.report())
+            result.artifact_semantic_bridge_report = (
+                ctx.artifact_semantic_bridge_report)
         finalize_scope_token = (
             push_telemetry_scope(query="finalize")
             if config.telemetry_enabled else None)

@@ -522,6 +522,13 @@ class EvidenceCandidateEngine:
                         == protocol.formation_reason_key
                         and evidence.payload in formation_payloads):
                     continue
+                # Superseding Evidence records revisions/withdrawals in the
+                # lifecycle ledger.  They intentionally carry a compact
+                # domain payload rather than the prediction/verifier payload
+                # emitted by ``reveal``; keep them in the ledger but do not
+                # decode them as new recognition predictions.
+                if evidence.supersedes_evidence_id != 0:
+                    continue
                 prediction = cls._prediction_from_evidence(evidence)
                 route = (
                     prediction.hypothesis,
@@ -559,6 +566,8 @@ class EvidenceCandidateEngine:
                     and evidence.reason_key
                     == self.protocol.formation_reason_key
                     and evidence.payload in formation_payloads):
+                continue
+            if evidence.supersedes_evidence_id != 0:
                 continue
             prediction, verification = self._recognition_from_evidence(
                 evidence)

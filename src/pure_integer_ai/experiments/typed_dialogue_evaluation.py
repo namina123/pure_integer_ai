@@ -22,6 +22,7 @@ from pure_integer_ai.experiments.evaluation_protocol import (
     ProtocolKey,
     make_evaluation_data_identity,
 )
+from pure_integer_ai.experiments.corpus_identity import integer_content_key
 from pure_integer_ai.experiments.language_generation_h2 import (
     TypedLanguageH2Case,
     TypedLanguageH2Expectation,
@@ -219,8 +220,24 @@ def build_typed_dialogue_evaluation_bundle(
     included = tuple(
         case for case in cases.values()
         if case.split == "train" or case.case_id in selected_eval)
-    for case in sorted(included, key=lambda item: item.case_id):
+    # A source pack may repeat an identical input under several authored
+    # bridge records.  Keep each explicit probe first, then one train item per
+    # exact integer content key; the dropped source refs remain in the pack
+    # and are reported by the training content audit.
+    ordered = tuple(sorted(
+        included,
+        key=lambda item: (0 if item.case_id in selected_eval else 1,
+                          item.case_id),
+    ))
+    seen_content = set()
+    for case in ordered:
         item = items_by_case[case.case_id]
+        content_key = integer_content_key(item)
+        if content_key in seen_content:
+            if case.case_id in selected_eval:
+                raise ValueError("V-00 显式探针内容重复，无法隔离 split")
+            continue
+        seen_content.add(content_key)
         split = selected_eval.get(case.case_id, _V00_SPLITS[0])
         training = split == _V00_SPLITS[0]
         assignments.append(_identity(case, item, split=split, training=training))

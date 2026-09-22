@@ -30,6 +30,9 @@ GRAPH_OBJECT_CODEC_SPAN_SOURCE_V1 = 3
 GRAPH_OBJECT_CODEC_HYPOTHESIS_V1 = 4
 
 GRAPH_OBJECT_CODEC_VALUE_COUNT = 8
+# 单个图对象必须表达一个局部事实。超过该上限通常意味着把整批课程递归
+# 复制进 Event/Hypothesis 身份；拒绝写入，不截断任何整数信息。
+GRAPH_OBJECT_MAX_COMPONENTS = 262_144
 _HYPOTHESIS_SUFFIX_INLINE_COUNT = GRAPH_OBJECT_CODEC_VALUE_COUNT - 3
 _SPAN_INLINE_MEMBER_COUNT = (
     GRAPH_OBJECT_CODEC_VALUE_COUNT - 2) // 2
@@ -285,7 +288,11 @@ class GraphObjectIdentitySpec:
     hypothesis_group: HypothesisGroupSpec | None = None
 
     def __post_init__(self) -> None:
-        _split_object_key(self.stable_key)
+        envelope = _split_object_key(self.stable_key)
+        if len(envelope.components) > GRAPH_OBJECT_MAX_COMPONENTS:
+            raise GraphObjectIdentityError(
+                "单个 graph object components 超出局部身份预算；"
+                "禁止把整批请求复制进 Event/Hypothesis")
         if self.identity_codec not in {
                 GRAPH_OBJECT_CODEC_GENERIC_V1,
                 GRAPH_OBJECT_CODEC_OCCURRENCE_SOURCE_V1,

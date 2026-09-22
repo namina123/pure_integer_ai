@@ -58,10 +58,10 @@ W06_FORMAL_EXECUTION_STATE = {
 }
 
 W06_EXPECTED_COUNTS = {
-    "active_candidate_count": 17,
-    "candidate_count": 50,
+    "active_candidate_count": 14,
+    "candidate_count": 40,
     "carrier_count": 9,
-    "evidence_account_count": 64,
+    "evidence_account_count": 65,
     "logical_shard_count": 16,
     "relation_family_count": 14,
     "relation_scope_cell_count": 27,
@@ -71,22 +71,22 @@ W06_EXPECTED_COUNTS = {
 }
 W06_EXPECTED_DIGESTS = {
     "active_projection": (
-        "53dbc65fb63819a593ea15da4ba41d7bb227fc680db6bb7fded94babc1be1804"
+        "9718d321e12f7b71dcc6b2f228859e02015f38d086adde3bc5a82c4961336afb"
     ),
     "candidate": (
-        "7841573b0c24113bb5e4e3204f8aff38142fabfa4dbc0ddc698b2c1e7ed951e2"
+        "ee2e3b0a67d393eb87b6017ee15a931b08768aa252f82c675e7a5a0c0ba35bdb"
     ),
     "carrier_scope": (
-        "6255fa146963502ad36cecff43a8689d9a11b94cad6623d50722b336ede16883"
+        "233518153f999c00b75befe5ac61324f516afc4ac52d40d76aafc7fbfc409088"
     ),
     "logical": (
-        "f020608dc1a8edc92c5fe42e982bbe28ca8d3400734ecba7ba59f6d5c345306c"
+        "463afaf62917da2239d9ff64327612e2f552e65310216c7c71491b35dff5daf2"
     ),
     "relation": (
-        "aae08dbf5de3e7a5f419c84077591fdee5d09ca0720b40c15561f8ca2d53667b"
+        "9f0a1a17b6a80aa403e3de0465cd80740db47d95e7983db80c1d81dbdf1bd9b6"
     ),
     "source_evidence": (
-        "107cb862cde2a4561be6d5b8e6feec6bad8933351f68870bc1eb86b45a3e5828"
+        "b844979c380f0526ffa58f877de055c344a3f3a8afeadfbfe30eae90fb962157"
     ),
 }
 W06_CASE_FAMILIES = (

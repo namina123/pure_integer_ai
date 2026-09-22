@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pure_integer_ai.cognition.shared.query_state import (
+    ROOT_PENDING,
     TERMINATION_ANSWER_CLOSED,
     TERMINATION_BUDGET_EXHAUSTED,
     TERMINATION_CLARIFY_CONFLICT,
@@ -35,6 +36,7 @@ class TerminationPredicateInput:
     edge_count: int
     read_count: int
     frontier_count: int
+    roots_pending: int = 0
     required_slots_open: int = 0
     evidence_closed: int = 0  # 1=所有必要端点均有活动来源与可核验关系
     conflict_open: int = 0    # 1=存在未裁决冲突
@@ -47,7 +49,8 @@ class TerminationPredicateInput:
     def __post_init__(self) -> None:
         for name in (
                 "depth", "minimum_depth", "node_count", "edge_count",
-                "read_count", "frontier_count", "required_slots_open",
+                "read_count", "frontier_count", "roots_pending",
+                "required_slots_open",
                 "evidence_closed", "conflict_open", "best_score",
                 "second_score", "marginal_gain", "cycle_hit",
                 "generation_ready"):
@@ -118,13 +121,19 @@ def evaluate_termination(
         return TERMINATION_CYCLE_GUARD
     if _budget_exhausted(state, budgets):
         return TERMINATION_BUDGET_EXHAUSTED
+    # 三图非空根必须先在同一 frontier 中实际参与；权重只能改变先后。
+    if state.roots_pending > 0:
+        return TERMINATION_OPEN
     if not _structure_closed(state):
-        return TERMINATION_CLARIFY_MISSING_BINDING
+        return (TERMINATION_OPEN if state.frontier_count > 0
+                else TERMINATION_CLARIFY_MISSING_BINDING)
     if not _conflict_resolved(state):
-        return TERMINATION_CLARIFY_CONFLICT
+        return (TERMINATION_OPEN if state.frontier_count > 0
+                else TERMINATION_CLARIFY_CONFLICT)
     if not _evidence_closed(state):
         # 证据未闭合不是澄清：只要预算允许就继续扩展。
-        return TERMINATION_OPEN
+        return (TERMINATION_OPEN if state.frontier_count > 0
+                else TERMINATION_NO_FRONTIER)
     if (state.depth < state.minimum_depth
             or not _generation_verifiable(state)):
         return TERMINATION_OPEN
@@ -146,14 +155,16 @@ def from_query_state(state: QueryState) -> TerminationPredicateInput:
         edge_count=state.edge_count,
         read_count=state.read_count,
         frontier_count=len(state.frontier),
-        required_slots_open=0,
-        evidence_closed=0,
-        conflict_open=0,
-        best_score=state.score,
-        second_score=0,
-        marginal_gain=0,
-        cycle_hit=0,
-        generation_ready=0,
+        roots_pending=sum(
+            1 for root in state.roots if root.status == ROOT_PENDING),
+        required_slots_open=state.required_slots_open,
+        evidence_closed=state.evidence_closed,
+        conflict_open=state.conflict_open,
+        best_score=state.best_score,
+        second_score=state.second_score,
+        marginal_gain=state.marginal_gain,
+        cycle_hit=state.cycle_hit,
+        generation_ready=state.generation_ready,
     )
 
 

@@ -23,7 +23,7 @@ from pure_integer_ai.cognition.shared.order_hypothesis import (
     OrderObservation,
     OrderPattern,
 )
-from pure_integer_ai.cognition.shared.scope_identity import document_scope
+from pure_integer_ai.cognition.shared.scope_identity import ScopeIdentity, document_scope
 from pure_integer_ai.cognition.shared.structure_order import (
     StructureOrderConstraintDefinition,
 )
@@ -360,9 +360,147 @@ def install_grounded_answer_order_course(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class SourceGenerationOrderCourse:
+    """来源化顺序；零宽成员必须是静默上下文或外部图 filler。"""
+
+    template: object
+    source: SourceRef
+    scope: ScopeIdentity
+    positions: tuple[tuple[int, int], ...]
+    qualifiers: tuple[int, ...]
+    provenance_kind: int
+    silent_slots: tuple[ObjectIdentity, ...] = ()
+    external_slots: tuple[ObjectIdentity, ...] = ()
+
+    def __post_init__(self) -> None:
+        """核验真实来源、完整槽序、静默成员及整数形成证据。"""
+        from pure_integer_ai.experiments.language_generation_connector import (
+            LanguageGenerationConnectorTemplate,
+        )
+        if not isinstance(self.template, LanguageGenerationConnectorTemplate):
+            raise TypeError("生成顺序课程必须持有完整 connector")
+        if not isinstance(self.source, SourceRef) or not isinstance(self.scope, ScopeIdentity):
+            raise TypeError("生成顺序课程来源类型错误")
+        if self.scope.owner != self.source.owner or self.scope.versions != self.source.versions:
+            raise ValueError("生成顺序课程来源与作用域不同")
+        if (type(self.provenance_kind) is not int or self.provenance_kind <= 0
+                or type(self.qualifiers) is not tuple or not self.qualifiers
+                or any(type(v) is not int for v in self.qualifiers)):
+            raise ValueError("生成顺序课程必须保留纯整数证据")
+        count = len(self.template.slots)
+        ordered_slots = tuple(sorted(
+            self.template.slots, key=lambda item: item.slot.components[-1]))
+        all_slots = {item.slot for item in ordered_slots}
+        for label, declared in (
+                ("静默", self.silent_slots),
+                ("外部图 filler", self.external_slots)):
+            if (type(declared) is not tuple
+                    or any(not isinstance(item, ObjectIdentity)
+                           for item in declared)
+                    or len(set(declared)) != len(declared)
+                    or not set(declared) <= all_slots):
+                raise ValueError(f"生成顺序课程{label}成员声明非法")
+        if (set(self.silent_slots) & set(self.external_slots)
+                or len(self.silent_slots) >= count):
+            raise ValueError("生成顺序课程零宽成员类别冲突")
+        if (type(self.positions) is not tuple or len(self.positions) != count
+                or len(self.template.constraints) != count - 1
+                or any(type(pair) is not tuple or len(pair) != 2
+                       or any(type(v) is not int for v in pair)
+                       or pair[0] < 0 or pair[0] > pair[1] for pair in self.positions)):
+            raise ValueError("生成顺序课程区间或约束未完整覆盖成员")
+        zero_width = set(self.silent_slots) | set(self.external_slots)
+        if any(
+                ((slot.slot in zero_width) != (position[0] == position[1]))
+                for slot, position in zip(
+                    ordered_slots, self.positions, strict=True)):
+            raise ValueError(
+                "只有显式静默上下文或外部图 filler 可使用零宽来源坐标")
+        if any(first[1] > second[0] for first, second in zip(self.positions, self.positions[1:])):
+            raise ValueError("生成顺序课程成员互相覆盖")
+        if [item.slot.components[-1] for item in ordered_slots] != list(range(1, count + 1)):
+            raise ValueError("生成顺序课程缺少连续成员序")
+
+
+def install_source_generation_order(course: SourceGenerationOrderCourse,
+                                    lifecycle: StructureOrderLifecycleGraph) -> int:
+    """复用 H-06/H-04/S-07 消费实际来源区间；不创建占位事实或缩减证据。"""
+    if not isinstance(course, SourceGenerationOrderCourse):
+        raise TypeError("来源化生成顺序课程类型错误")
+    template = course.template
+    original = course.source
+    scope = course.scope
+    prefix = (course.provenance_kind, 3, *template.connector.components)
+    learning = OrderLearningProtocol(*(tuple((*prefix, index)) for index in range(1, 6)),
+                                      original, scope)
+    engine = OrderHypothesisEngine(learning)
+    promoter = OrderConstraintPromoter(engine, lifecycle.order_graph, lifecycle)
+    metadata = dict(owner=template.language_branch.owner, versions=template.language_branch.versions)
+    order_kind, constraint_kind, modality = (concept_identity((*prefix, 10, index), **metadata)
+                                             for index in range(1, 4))
+    timestamp = 1
+    count = 0
+    slots = tuple(sorted(template.slots, key=lambda item: item.slot.components[-1]))
+    constraints = tuple(sorted(template.constraints, key=lambda item: item.components[-1]))
+    for index, (before, after, constraint) in enumerate(zip(
+            slots, slots[1:], constraints), 1):
+        first, second = sorted((before.slot, after.slot), key=ObjectIdentity.stable_key)
+        before_position, after_position = course.positions[index - 1:index + 1]
+        if before_position[1] > after_position[0]:
+            raise GroundedAnswerOrderError("训练框架成员相互覆盖，不能晋升顺序")
+        positions = {before.slot: before_position, after.slot: after_position}
+        pattern = OrderPattern(template.language_branch, order_kind, template.proposition_structure,
+                               template.structure, first, second, constraint_kind,
+                               template.context_set)
+        # 多个外部 graph filler 可以合法共享同一零宽 source span；
+        # occurrence identity 仍须按槽序分开，避免把两个图角色误判为同一 occurrence。
+        first_ordinal = index if positions[first] == positions[second] else 0
+        second_ordinal = index + 1 if positions[first] == positions[second] else 0
+        observation = OrderObservation(
+            original, scope, (*prefix, 11, index), template.language_branch,
+            template.proposition_structure, template.structure, first, second,
+            template.context_set, (),
+            occurrence_identity(original, start=positions[first][0], end=positions[first][1], ordinal=first_ordinal),
+            occurrence_identity(original, start=positions[second][0], end=positions[second][1], ordinal=second_ordinal),
+            positions[first][0], positions[second][0],
+            (*course.qualifiers, index, *before_position, *after_position))
+        engine.accumulate(pattern, observation, lambda _pattern, _observation: OrderAssessment(
+            EVIDENCE_SUPPORT, observation.stable_key()), timestamp_seq=timestamp)
+        timestamp += 1
+        decision = engine.resolve(pattern, timestamp_seq=timestamp)
+        timestamp += 1
+        definition = StructureOrderConstraintDefinition(
+            constraint, pattern.language_branch, pattern.structure_family,
+            pattern.structure_candidate, first, second, order_kind, constraint_kind, modality,
+            pattern.context, (), (), (), engine.hypothesis_for(pattern))
+        promoter.promote(StructureOrderPromotionPlan(slots, definition), decision,
+                         timestamp_seq=timestamp, provenance_kind=course.provenance_kind,
+                         content_version=1, qualifiers=course.qualifiers)
+        timestamp += 1
+        count += 1
+    return count
+
+
+def install_relation_frame_order(course, lifecycle: StructureOrderLifecycleGraph) -> int:
+    """保留既有关系课程合同及身份，委托同一个来源化顺序学习器。"""
+    from pure_integer_ai.experiments.relation_generation_structure import (
+        RELATION_CONNECTOR_PROFILE, RelationConnectorCourse,
+    )
+    if not isinstance(course, RelationConnectorCourse):
+        raise TypeError("角色顺序课程类型错误")
+    source = course.source.proposition.definition.source
+    return install_source_generation_order(SourceGenerationOrderCourse(
+        course.template, source, document_scope(source), course.positions,
+        course.qualifiers, RELATION_CONNECTOR_PROFILE), lifecycle)
+
+
 __all__ = [
     "GroundedAnswerOrderError",
     "GroundedAnswerOrderInstallation",
     "GroundedAnswerOrderSemanticsResolver",
     "install_grounded_answer_order_course",
+    "install_relation_frame_order",
+    "SourceGenerationOrderCourse",
+    "install_source_generation_order",
 ]

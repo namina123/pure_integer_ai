@@ -39,7 +39,7 @@ from pure_integer_ai.storage.backend import SQLiteBackend
 
 ROOT = Path(__file__).resolve().parents[1]
 HEAD = "4d57305bc4474081c9304a05287ab4783f49a849"
-OVERLAY_SHA256 = "f5cae297254191dffb5bcacdafbdc461dcd1cf3a1340de27d9a8c98c598bfbbc"
+OVERLAY_SHA256 = "dbbddcfc58a72ba874dfb7e8ea35eacb8a9b66abd139727d28eee552b0b6b32b"
 
 
 @pytest.fixture(scope="module")

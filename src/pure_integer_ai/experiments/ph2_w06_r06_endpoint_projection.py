@@ -40,7 +40,7 @@ W06_R06_EXPECTED_PARENT_SHA256 = {
     W06_R06_SAMPLE_PATH:
         "97490a932619b2a9cdd8b0bbeb80021a61e75e5f7b4c048bf63c39550b02b7d1",
     W06_R06_SOURCE_OVERLAY_PATH:
-        "f5cae297254191dffb5bcacdafbdc461dcd1cf3a1340de27d9a8c98c598bfbbc",
+        "dbbddcfc58a72ba874dfb7e8ea35eacb8a9b66abd139727d28eee552b0b6b32b",
     W06_R06_STAGE_PATH:
         "a9beda13955e4708b5f2bb7f4d2b106be1bdf709c82acaefcfa95ca7d276e00a",
 }
@@ -159,9 +159,11 @@ def build_w06_r06_endpoint_projection(repo_root: str | Path) -> dict[str, Any]:
         raise W06R06EndpointProjectionError("R06 train inventory 漂移")
 
     rows = []
+    seen_local: set[tuple[int, ...]] = set()
     canonical_kinds: dict[str, int] = {}
     for seed in train:
-        payload = compile_relation_seed(seed).observation_payload.to_value()
+        payload = compile_relation_seed(
+            seed, semantic_identity=True).observation_payload.to_value()
         endpoints = payload.get("endpoints")
         if not isinstance(endpoints, list) or len(endpoints) != len(seed.endpoints):
             raise W06R06EndpointProjectionError("compiled endpoint inventory 漂移")
@@ -180,6 +182,10 @@ def build_w06_r06_endpoint_projection(repo_root: str | Path) -> dict[str, Any]:
                     "同一 endpoint_id 跨记录 object kind 冲突")
             canonical_kinds[source.endpoint_id] = source.object_kind
             canonical = _canonical_endpoint(source.endpoint_id, source.object_kind)
+            local_key = tuple(local.stable_key())
+            if local_key in seen_local:
+                continue
+            seen_local.add(local_key)
             rows.append({
                 "canonical_endpoint_key": list(canonical.stable_key()),
                 "endpoint_id": source.endpoint_id,

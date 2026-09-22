@@ -29,8 +29,20 @@ from pure_integer_ai.cognition.shared.identity import (
     VISIBILITY_SESSION,
 )
 from pure_integer_ai.cognition.shared.logic_executor import LogicEvidenceState
+from pure_integer_ai.cognition.shared.memory_event import (
+    MEMORY_OBJECT_HYPOTHESIS,
+    MEMORY_OBJECT_OBSERVATION,
+    MemoryObjectRef,
+)
 from pure_integer_ai.cognition.shared.memory_generation import (
     MemoryGenerationEvidence,
+)
+from pure_integer_ai.cognition.shared.generation_observation import ObservedGenerationEvidence
+from pure_integer_ai.cognition.shared.query_state import (
+    SPACE_CORE,
+    SPACE_DIALOGUE,
+    SPACE_MEMORY,
+    EvidenceEntry,
 )
 from pure_integer_ai.cognition.shared.reasoning_planner import ReasoningPlanResult
 from pure_integer_ai.cognition.shared.scope_identity import ScopeIdentity
@@ -125,6 +137,7 @@ class GenerationCandidate:
     evidence: tuple[EvidenceRecord, ...]
     reasoning: ReasoningPlanResult | None = None
     memory_evidence: tuple[MemoryGenerationEvidence, ...] = ()
+    observation_evidence: tuple[ObservedGenerationEvidence, ...] = ()
     _stable_key_cache: tuple[int, ...] = field(
         init=False, repr=False, compare=False, default=())
 
@@ -147,7 +160,10 @@ class GenerationCandidate:
                 or any(not isinstance(item, MemoryGenerationEvidence)
                        for item in self.memory_evidence)):
             raise TypeError("generation candidate memory_evidence 类型错误")
-        if not self.evidence and not self.memory_evidence:
+        if (not isinstance(self.observation_evidence, tuple)
+                or any(not isinstance(item, ObservedGenerationEvidence) for item in self.observation_evidence)):
+            raise TypeError("generation candidate observation_evidence 类型错误")
+        if not self.evidence and not self.memory_evidence and not self.observation_evidence:
             raise ValueError("generation candidate 必须携带 Core 或 Memory Evidence")
         evidence = tuple(sorted(self.evidence, key=lambda item: item.evidence_id))
         evidence_ids = tuple(item.evidence_id for item in evidence)
@@ -184,11 +200,16 @@ class GenerationCandidate:
                 raise ValueError("generation candidate Memory Evidence 目标命题漂移")
             if item.candidate.query_scope != self.scope:
                 raise ValueError("generation candidate Memory Evidence query scope 漂移")
+        observation_evidence = tuple(sorted(self.observation_evidence, key=lambda item: item.stable_key()))
+        if len({item.stable_key() for item in observation_evidence}) != len(observation_evidence):
+            raise ValueError("generation candidate 观察证据不得重复")
+        if any(item.target != self.proposition or item.scope != self.scope for item in observation_evidence):
+            raise ValueError("generation candidate 观察目标或作用域漂移")
         derived = LogicEvidenceState(
             any(item.stance == EVIDENCE_SUPPORT for item in evidence),
             any(item.stance == EVIDENCE_REFUTE for item in evidence),
         )
-        for item in memory_evidence:
+        for item in (*memory_evidence, *observation_evidence):
             derived = LogicEvidenceState(
                 derived.support or item.state.support,
                 derived.refute or item.state.refute,
@@ -207,6 +228,7 @@ class GenerationCandidate:
                 raise ValueError("generation candidate 未携带 reasoning 引用的全部 Evidence")
         object.__setattr__(self, "evidence", evidence)
         object.__setattr__(self, "memory_evidence", memory_evidence)
+        object.__setattr__(self, "observation_evidence", observation_evidence)
         object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
 
     @property
@@ -227,8 +249,18 @@ class GenerationCandidate:
             *(item.source for item in self.evidence),
             *(source.trace.source
               for item in self.memory_evidence for source in item.sources),
+            *(item.source for item in self.observation_evidence),
         }
         return tuple(sorted(sources, key=lambda item: item.stable_key()))
+
+    def competition_keys(self) -> tuple[tuple[int, ...], ...]:
+        """并列保留既有 Hypothesis 及原始观察竞争，不把 Memory 身份伪装成 H-00。"""
+        records = [(item.hypothesis_kind, item.competition_key, self.source, self.scope)
+                   for item in self.hypotheses]
+        records.extend((item.hypothesis_kind, item.competition_key, item.source, item.scope)
+                       for item in self.observation_evidence)
+        return tuple(sorted({(*_packed(kind), *_packed(competition), *_packed(source.stable_key()),
+                              *_packed(scope.stable_key())) for kind, competition, source, scope in records}))
 
     def stable_key(self) -> tuple[int, ...]:
         """返回命题、状态、来源、scope、Evidence 和 reasoning 的完整候选键。"""
@@ -252,30 +284,217 @@ class GenerationCandidate:
             result.extend(_packed(item.stable_key()))
         reasoning_key = () if self.reasoning is None else self.reasoning.stable_key()
         result.extend(_packed(reasoning_key))
+        if self.observation_evidence:
+            result.extend((2, len(self.observation_evidence)))
+            for item in self.observation_evidence:
+                result.extend(_packed(item.stable_key()))
         return tuple(result)
+
+
+@dataclass(frozen=True)
+class NonPropositionGenerationGoal:
+    """A response-act goal grounded in the current query, not a Core claim."""
+
+    goal_kind: ObjectIdentity
+    context_key: tuple[int, ...]
+    required: LogicEvidenceState
+    source: SourceRef
+    scope: ScopeIdentity
+    target_branch: ObjectIdentity
+
+    def __post_init__(self) -> None:
+        _require_instruction(self.goal_kind, label="non-proposition generation goal kind")
+        _strict_int_tuple(self.context_key, label="non-proposition generation context")
+        if not self.context_key:
+            raise ValueError("non-proposition generation context cannot be empty")
+        if not isinstance(self.required, LogicEvidenceState):
+            raise TypeError("non-proposition generation required state type differs")
+        if not self.required.support and not self.required.refute:
+            raise ValueError("non-proposition generation must request an evidence direction")
+        if not isinstance(self.source, SourceRef) or not isinstance(self.scope, ScopeIdentity):
+            raise TypeError("non-proposition generation source/scope type differs")
+        if (self.scope.owner != self.source.owner
+                or self.scope.versions != self.source.versions):
+            raise ValueError("non-proposition generation source/scope ownership differs")
+        if (not isinstance(self.target_branch, ObjectIdentity)
+                or self.target_branch.object_kind != OBJECT_LANGUAGE_BRANCH):
+            raise ValueError("non-proposition generation requires a LanguageBranch")
+
+    def stable_key(self) -> tuple[int, ...]:
+        return (
+            91562,
+            1,
+            *_packed(self.goal_kind.stable_key()),
+            *_packed(self.context_key),
+            *self.required.stable_key(),
+            *_packed(self.source.stable_key()),
+            *_packed(self.scope.stable_key()),
+            *_packed(self.target_branch.stable_key()),
+        )
+
+
+@dataclass(frozen=True)
+class NonPropositionGenerationCandidate:
+    """Current Memory O/H/E retained for a non-factual response act."""
+
+    context_key: tuple[int, ...]
+    state: LogicEvidenceState
+    source: SourceRef
+    scope: ScopeIdentity
+    observation: MemoryObjectRef
+    hypothesis: MemoryObjectRef
+    hypothesis_kind: tuple[int, ...]
+    competition_key: tuple[int, ...]
+    query_state_key: tuple[int, ...]
+    query_evidence: tuple[EvidenceEntry, ...]
+    active_spaces: tuple[int, ...] = (SPACE_CORE, SPACE_MEMORY, SPACE_DIALOGUE)
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, default=())
+
+    def __post_init__(self) -> None:
+        for label, key in (
+                ("context", self.context_key),
+                ("hypothesis kind", self.hypothesis_kind),
+                ("competition", self.competition_key),
+                ("query state", self.query_state_key)):
+            _strict_int_tuple(key, label=f"non-proposition generation {label}")
+            if not key:
+                raise ValueError(f"non-proposition generation {label} cannot be empty")
+        if not isinstance(self.state, LogicEvidenceState):
+            raise TypeError("non-proposition generation state type differs")
+        if not isinstance(self.source, SourceRef) or not isinstance(self.scope, ScopeIdentity):
+            raise TypeError("non-proposition generation source/scope type differs")
+        if (self.scope.owner != self.source.owner
+                or self.scope.versions != self.source.versions):
+            raise ValueError("non-proposition generation source/scope ownership differs")
+        for ref, kind in (
+                (self.observation, MEMORY_OBJECT_OBSERVATION),
+                (self.hypothesis, MEMORY_OBJECT_HYPOTHESIS)):
+            if (not isinstance(ref, MemoryObjectRef) or ref.object_kind != kind
+                    or ref.owner != self.source.owner
+                    or ref.versions != self.source.versions):
+                raise ValueError("non-proposition generation O/H ownership differs")
+        if self.active_spaces != (SPACE_CORE, SPACE_MEMORY, SPACE_DIALOGUE):
+            raise ValueError("non-proposition generation requires one shared three-graph query")
+        if (type(self.query_evidence) is not tuple
+                or any(not isinstance(item, EvidenceEntry) for item in self.query_evidence)):
+            raise TypeError("non-proposition generation evidence type differs")
+        evidence = tuple(sorted(set(self.query_evidence), key=lambda item: item.stable_key()))
+        if evidence != self.query_evidence:
+            raise ValueError("non-proposition generation evidence must be canonical")
+        related = tuple(item for item in evidence
+                        if item.hypothesis_key == self.hypothesis.stable_key())
+        if ({item.space for item in related} != {SPACE_MEMORY, SPACE_DIALOGUE}
+                or any(item.polarity != 3 or not item.evidence_key for item in related)):
+            raise ValueError("non-proposition generation requires current UNKNOWN Memory/Dialogue evidence")
+        memory = tuple(item for item in related if item.space == SPACE_MEMORY)
+        if (len(memory) != 1
+                or memory[0].source_ref[1:] != self.source.stable_key()
+                or memory[0].scope_key != self.scope.stable_key()):
+            raise ValueError("non-proposition generation Memory evidence source/scope differs")
+        if self.state != LogicEvidenceState(False, False):
+            raise ValueError("non-proposition generation cannot assert a factual truth state")
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
+
+    @property
+    def reasoning(self) -> None:
+        return None
+
+    @property
+    def evidence(self) -> tuple:
+        return ()
+
+    @property
+    def memory_evidence(self) -> tuple:
+        return ()
+
+    @property
+    def observation_evidence(self) -> tuple:
+        return ()
+
+    @property
+    def hypotheses(self) -> tuple:
+        return ()
+
+    @property
+    def citation_sources(self) -> tuple[SourceRef, ...]:
+        return (self.source,)
+
+    def competition_keys(self) -> tuple[tuple[int, ...], ...]:
+        return ((
+            *_packed(self.hypothesis_kind),
+            *_packed(self.competition_key),
+            *_packed(self.source.stable_key()),
+            *_packed(self.scope.stable_key()),
+        ),)
+
+    def stable_key(self) -> tuple[int, ...]:
+        if not self._stable_key_cache:
+            raise RuntimeError("non-proposition generation candidate key is unavailable")
+        return self._stable_key_cache
+
+    def _build_stable_key(self) -> tuple[int, ...]:
+        return (
+            91562,
+            2,
+            *_packed(self.context_key),
+            *self.state.stable_key(),
+            *_packed(self.source.stable_key()),
+            *_packed(self.scope.stable_key()),
+            *_packed(self.observation.stable_key()),
+            *_packed(self.hypothesis.stable_key()),
+            *_packed(self.hypothesis_kind),
+            *_packed(self.competition_key),
+            *_packed(self.query_state_key),
+            len(self.query_evidence),
+            *(value for item in self.query_evidence
+              for value in _packed(item.stable_key())),
+            *_packed(self.active_spaces),
+        )
+
+
+def generation_candidate_subject_key(
+        candidate: GenerationCandidate | NonPropositionGenerationCandidate,
+        ) -> tuple[int, ...]:
+    """Return the proposition or response context identity without conflating them."""
+    if isinstance(candidate, GenerationCandidate):
+        return candidate.proposition.stable_key()
+    if isinstance(candidate, NonPropositionGenerationCandidate):
+        return candidate.context_key
+    raise TypeError("generation candidate type differs")
 
 
 @dataclass(frozen=True)
 class GenerationPlanningRequest:
     """一次生成规划的回答目标和无序 typed 候选集合。"""
 
-    goal: AnswerGenerationGoal
-    candidates: tuple[GenerationCandidate, ...] = ()
+    goal: AnswerGenerationGoal | NonPropositionGenerationGoal
+    candidates: tuple[
+        GenerationCandidate | NonPropositionGenerationCandidate, ...] = ()
     _candidate_keys_cache: tuple[tuple[int, ...], ...] = field(
         init=False, repr=False, compare=False, default=())
     _stable_key_cache: tuple[int, ...] = field(
         init=False, repr=False, compare=False, default=())
 
     def __post_init__(self) -> None:
-        if not isinstance(self.goal, AnswerGenerationGoal):
+        if not isinstance(self.goal, (AnswerGenerationGoal, NonPropositionGenerationGoal)):
             raise TypeError("generation request goal 类型错误")
         if not isinstance(self.candidates, tuple):
             raise TypeError("generation request candidates 必须是 tuple")
-        if any(not isinstance(item, GenerationCandidate) for item in self.candidates):
+        if any(not isinstance(item, (GenerationCandidate, NonPropositionGenerationCandidate))
+               for item in self.candidates):
             raise TypeError("generation request candidates 含非法项")
+        expected_type = (GenerationCandidate if isinstance(self.goal, AnswerGenerationGoal)
+                         else NonPropositionGenerationCandidate)
+        if any(not isinstance(item, expected_type) for item in self.candidates):
+            raise TypeError("generation request goal and candidate domains differ")
         for item in self.candidates:
             if item.scope != self.goal.scope:
                 raise ValueError("generation candidate 必须绑定当前 query scope")
+            if (isinstance(self.goal, NonPropositionGenerationGoal)
+                    and (item.source != self.goal.source
+                         or item.context_key != self.goal.context_key)):
+                raise ValueError("non-proposition candidate does not belong to the current goal")
         candidates = tuple(sorted(
             self.candidates, key=lambda item: item.stable_key()))
         keys = tuple(item.stable_key() for item in candidates)
@@ -669,4 +888,7 @@ __all__ = [
     "GenerationPlanProtocol",
     "GenerationPlanner",
     "GenerationPlanningRequest",
+    "NonPropositionGenerationCandidate",
+    "NonPropositionGenerationGoal",
+    "generation_candidate_subject_key",
 ]

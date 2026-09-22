@@ -150,6 +150,16 @@ class TrainContext:
     language_generation_runtime: Any = None
     language_generation_stage4_runtime: Any = None
     typed_relation_runtime: Any = None
+    discourse_topic_runtime: Any = None
+    discourse_topic_report: Any = None
+    event_time_structure_runtime: Any = None
+    event_time_structure_report: Any = None
+    grounded_answer_graph_runtime: Any = None
+    grounded_answer_graph_report: Any = None
+    kdconv_structure_runtime: Any = None
+    kdconv_structure_report: Any = None
+    artifact_semantic_bridge_runtime: Any = None
+    artifact_semantic_bridge_report: Any = None
     w09_weaning_protocol: Any = None
     w09_weaning_runtime: Any = None
     span_index: Any = None

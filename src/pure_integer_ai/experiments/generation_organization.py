@@ -11,9 +11,21 @@ realization 的选择顺序只由 style/carrier 与已学组合权重决定，�
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from pure_integer_ai.cognition.shared.identity import ObjectIdentity
+from pure_integer_ai.cognition.shared.identity import (
+    OBJECT_EVENT,
+    OBJECT_PROPOSITION,
+    ObjectIdentity,
+)
+from pure_integer_ai.cognition.shared.memory_event import MemoryObjectRef
+from pure_integer_ai.cognition.shared.query_state import (
+    ROOT_EXPANDED,
+    SPACE_CORE,
+    SPACE_MEMORY,
+    TERMINATION_ANSWER_CLOSED,
+    QueryState,
+)
 from pure_integer_ai.cognition.shared.response_plan import (
     FILLER_NODE_KINDS,
     ROLE_NODE_KINDS,
@@ -104,7 +116,9 @@ def build_response_plan(
             # 身份排序），否则 token postcheck 会误判跨序槽位缺失。
             ordered_bindings.append(binding)
     slots = []
-    claim_refs = []
+    claim = ObjectIdentity.from_stable_key(evidence.proposition_key)
+    if claim.object_kind != OBJECT_PROPOSITION:
+        raise ValueError("输出 claim 必须引用实际闭合 Proposition")
     for binding in ordered_bindings:
         role = _role_for_binding(binding)
         allowed_kinds = (binding.filler.object_kind,)
@@ -118,8 +132,6 @@ def build_response_plan(
             binding.source_hash,
             allowed_node_kinds=allowed_kinds,
         ))
-        if binding.filler not in claim_refs:
-            claim_refs.append(binding.filler)
     realization = ResponseRealization(
         generation.surface,
         generation.frame_proposition,
@@ -129,12 +141,15 @@ def build_response_plan(
     try:
         plan = ResponsePlan(
             _RESPONSE_ACT_ANSWER,
-            tuple(claim_refs),
+            (claim,),
             tuple(slots),
             (realization,),
             ((evidence.source_hash,),),
             scope_and_time=(),
-            discourse_links=(),
+            discourse_links=(generation.frame_proposition,),
+            event_refs=tuple(sorted({binding.filler for binding in evidence.bindings
+                                     if binding.filler.object_kind == OBJECT_EVENT},
+                                    key=ObjectIdentity.stable_key)),
             style_ref=None,
             carrier_ref=None,
         )
@@ -170,10 +185,63 @@ def plan_from_active_fact(
     return build_response_plan(evidence)
 
 
+def bind_query_evidence(plan: ResponsePlan, state: QueryState) -> ResponsePlan:
+    """把闭合三图查询的全部证据及实际 Memory 引用交给同一输出计划。"""
+    if (state.termination != TERMINATION_ANSWER_CLOSED
+            or state.conflict_open or not state.evidence_closed):
+        raise ValueError("只有完成证据裁决的 QueryState 可以绑定输出计划")
+    if state.best_candidate_key not in {item.stable_key() for item in plan.claim_refs}:
+        raise ValueError("输出计划未引用 QueryState 实际选中的命题")
+    bound_slots = {(item.role_key, item.filler_key) for item in state.bindings
+                   if item.space == SPACE_CORE}
+    if any((slot.role.stable_key(), slot.filler.stable_key()) not in bound_slots
+           for slot in plan.slot_sequence):
+        raise ValueError("输出槽位必须已经在同一 QueryState 中绑定")
+    memory_roots = tuple(root for root in state.roots
+                         if root.owner_space == SPACE_MEMORY and root.status == ROOT_EXPANDED)
+    memory_refs = {
+        ref.stable_key(): ref for ref in plan.memory_refs}
+    memory_candidates = [root.root_key for root in memory_roots]
+    for evidence in state.evidence:
+        if evidence.space == SPACE_MEMORY:
+            memory_candidates.append(evidence.hypothesis_key)
+            if evidence.evidence_key:
+                memory_candidates.append(evidence.evidence_key)
+    # The Memory owner also contains structural query nodes and role
+    # occurrence identities.  They remain fully represented by QueryState
+    # bindings/evidence_refs, but ResponsePlan.memory_refs is deliberately
+    # typed and may contain only actual MemoryObjectRef values.
+    for key in memory_candidates:
+        try:
+            ref = MemoryObjectRef.from_stable_key(key)
+        except (TypeError, ValueError):
+            continue
+        memory_refs[ref.stable_key()] = ref
+    scope_and_time = list(plan.scope_and_time)
+    if memory_roots:
+        scope_and_time.extend((1, len(memory_roots)))
+        for root in memory_roots:
+            scope_and_time.extend((len(root.scope_key), *root.scope_key,
+                                   len(root.source_ref), *root.source_ref))
+    scoped_sources = tuple(sorted({(item.space, item.scope_key, item.source_ref)
+                                   for item in state.evidence}))
+    scope_and_time.extend((2, len(scoped_sources)))
+    for space, scope, source in scoped_sources:
+        scope_and_time.extend((space, len(scope), *scope, len(source), *source))
+    return replace(
+        plan,
+        memory_refs=tuple(memory_refs[key] for key in sorted(memory_refs)),
+        evidence_refs=tuple(sorted({*plan.evidence_refs,
+                                    *(item.stable_key() for item in state.evidence)})),
+        scope_and_time=tuple(scope_and_time),
+    )
+
+
 __all__ = [
     "ClosedGenerationEvidence",
     "answer_response_act",
     "build_response_plan",
+    "bind_query_evidence",
     "clarify_response_act",
     "plan_from_active_fact",
 ]

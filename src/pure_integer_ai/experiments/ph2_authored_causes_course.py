@@ -130,9 +130,12 @@ def _protocol_payload(seed: AuthoredRelationSeed, value: dict) -> dict:
     }
 
 
-def _compile_causes_seed(seed: AuthoredRelationSeed) -> AuthoredCompiledSeed:
+def _compile_causes_seed(
+        seed: AuthoredRelationSeed,
+        *,
+        semantic_identity: bool = False) -> AuthoredCompiledSeed:
     """把 causal endpoint 与独立核验协议附加到 typed payload。"""
-    base = compile_relation_seed(seed)
+    base = compile_relation_seed(seed, semantic_identity=semantic_identity)
     value = base.observation_payload.to_value()
     protocol = _protocol_payload(seed, value)
     value["causal_protocol"] = protocol
@@ -261,12 +264,15 @@ def read_authored_causes_seeds(
 
 def compile_authored_causes_course(
         sample_path: str | Path,
-        release_root: str | Path) -> AuthoredCourseBuild:
+        release_root: str | Path,
+        *,
+        semantic_identity: bool = False) -> AuthoredCourseBuild:
     """编译并发布 D-02C.7 typed CAUSES 极小 pack。"""
     seeds = read_authored_causes_seeds(sample_path)
     try:
         return publish_authored_course(
-            tuple(_compile_causes_seed(seed) for seed in seeds),
+            tuple(_compile_causes_seed(
+                seed, semantic_identity=semantic_identity) for seed in seeds),
             sample_path,
             release_root,
             _SPEC,

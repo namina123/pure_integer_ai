@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pure_integer_ai.cognition.shared.generation_content import (
     AnswerContentSelection,
 )
+from pure_integer_ai.cognition.shared.generation_plan import GenerationCandidate
 from pure_integer_ai.cognition.shared.generation_structure_plan import (
     DiscoursePlan,
     PlannedSentence,
@@ -31,6 +32,8 @@ from pure_integer_ai.cognition.shared.structure_order import (
 from pure_integer_ai.cognition.shared.structure_order_consumer import (
     StructureSlotValue,
 )
+from pure_integer_ai.cognition.shared.identity import SourceRef
+from pure_integer_ai.cognition.shared.scope_identity import ScopeIdentity
 
 
 def _packed(key: tuple[int, ...]) -> tuple[int, ...]:
@@ -61,6 +64,8 @@ class ResponseActGenerationTemplate:
     linearization_reason: ObjectIdentity
     constraints: tuple[ObjectIdentity, ...] = ()
     context: tuple[ObjectIdentity, ...] = ()
+    content_slots: tuple[StructureSlotDefinition, ...] = ()
+    stance_filler: ObjectIdentity | None = None
 
     def __post_init__(self) -> None:
         """核验模板只含注入身份，并保证约束、上下文确定且不重复。"""
@@ -74,6 +79,10 @@ class ResponseActGenerationTemplate:
             label="response act stance",
             kind=OBJECT_MINIMAL_INSTRUCTION,
         )
+        if self.stance_filler is not None:
+            _identity(self.stance_filler, label="response act stance filler")
+            if not self.content_slots:
+                raise ValueError("来源化 stance filler 只允许用于完整多槽结构")
         _identity(
             self.sentence,
             label="response act sentence",
@@ -81,6 +90,16 @@ class ResponseActGenerationTemplate:
         )
         if not isinstance(self.slot, StructureSlotDefinition):
             raise TypeError("response act slot 必须是 StructureSlotDefinition")
+        if (not isinstance(self.content_slots, tuple)
+                or any(not isinstance(item, StructureSlotDefinition)
+                       for item in self.content_slots)):
+            raise TypeError("response act content slots 类型错误")
+        slots = (self.slot, *self.content_slots)
+        if (len({item.slot for item in slots}) != len(slots)
+                or any(item.structure != self.slot.structure for item in slots)):
+            raise ValueError("response act slots 必须互异并属于同一结构")
+        object.__setattr__(self, "content_slots", tuple(sorted(
+            self.content_slots, key=lambda item: item.slot.stable_key())))
         for identity, label in (
                 (self.boundary, "response act boundary"),
                 (self.linearization_reason,
@@ -120,7 +139,68 @@ class ResponseActGenerationTemplate:
         result.append(len(self.context))
         for identity in self.context:
             result.extend(_packed(identity.stable_key()))
+        # Keep the existing single-slot identity; multi-slot graphs have an
+        # explicit extension containing every slot definition.
+        if self.content_slots:
+            result.extend((2, len(self.content_slots)))
+            for item in self.content_slots:
+                for identity in (item.structure, item.slot, item.role, item.value_type):
+                    result.extend(_packed(identity.stable_key()))
+        if self.stance_filler is not None:
+            result.extend((3, *_packed(self.stance_filler.stable_key())))
         return tuple(result)
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseActGenerationBinding:
+    """同次选择的完整多槽值与来源证明，不赋予候选事实真值。"""
+
+    selection_key: tuple[int, ...]
+    template_key: tuple[int, ...]
+    source: SourceRef
+    scope: ScopeIdentity
+    values: tuple[StructureSlotValue, ...]
+    evidence: tuple[tuple[int, ...], ...]
+    discourse_context: tuple[ObjectIdentity, ...] = ()
+
+    def __post_init__(self) -> None:
+        for key in (self.selection_key, self.template_key):
+            if not isinstance(key, tuple) or not key or any(type(v) is not int for v in key):
+                raise ValueError("response act binding key 必须为非空严格整数")
+        if not isinstance(self.source, SourceRef) or not isinstance(self.scope, ScopeIdentity):
+            raise TypeError("response act binding source/scope 类型错误")
+        if (not isinstance(self.values, tuple) or not self.values
+                or any(not isinstance(item, StructureSlotValue) for item in self.values)):
+            raise TypeError("response act binding values 必须为非空槽值")
+        if len({item.slot for item in self.values}) != len(self.values):
+            raise ValueError("response act binding 不得重复槽位")
+        if (not isinstance(self.evidence, tuple) or not self.evidence
+                or any(not isinstance(key, tuple) or not key
+                       or any(type(v) is not int for v in key) for key in self.evidence)):
+            raise ValueError("response act binding 必须保存完整整数证据")
+        if len(set(self.evidence)) != len(self.evidence):
+            raise ValueError("response act binding 证据不得重复")
+        object.__setattr__(self, "values", tuple(sorted(
+            self.values, key=lambda item: item.slot.stable_key())))
+        object.__setattr__(self, "evidence", tuple(sorted(self.evidence)))
+        if (type(self.discourse_context) is not tuple
+                or any(not isinstance(item, ObjectIdentity) for item in self.discourse_context)
+                or len(set(self.discourse_context)) != len(self.discourse_context)):
+            raise ValueError("response act discourse 必须是唯一的来源化对象")
+
+    def stable_key(self) -> tuple[int, ...]:
+        result = (
+            1, *_packed(self.selection_key), *_packed(self.template_key),
+            *_packed(self.source.stable_key()), *_packed(self.scope.stable_key()),
+            len(self.values),
+            *(v for item in self.values for key in (item.slot.stable_key(), item.filler.stable_key())
+              for v in _packed(key)),
+            len(self.evidence), *(v for key in self.evidence for v in _packed(key)),
+        )
+        if self.discourse_context:
+            result += (2, len(self.discourse_context),
+                       *(v for item in self.discourse_context for v in _packed(item.stable_key())))
+        return result
 
 
 class ResponseActGenerationRegistry:
@@ -128,6 +208,7 @@ class ResponseActGenerationRegistry:
 
     def __init__(
             self, templates: tuple[ResponseActGenerationTemplate, ...],
+            bindings: tuple[ResponseActGenerationBinding, ...] = (),
             ) -> None:
         """建立不可歧义的模板索引，不从身份整数或文字推断用途。"""
         if (not isinstance(templates, tuple) or not templates
@@ -142,6 +223,17 @@ class ResponseActGenerationRegistry:
         self._by_key = {
             (item.branch, item.stance): item for item in self.templates
         }
+        if (not isinstance(bindings, tuple)
+                or any(not isinstance(item, ResponseActGenerationBinding) for item in bindings)):
+            raise TypeError("response act registry bindings 类型错误")
+        binding_keys = tuple((item.selection_key, item.template_key) for item in bindings)
+        if len(set(binding_keys)) != len(binding_keys):
+            raise ValueError("同次 selection/template 不得私选竞争绑定")
+        template_keys = {item.stable_key() for item in self.templates if item.content_slots}
+        if any(item.template_key not in template_keys for item in bindings):
+            raise ValueError("response act binding 必须属于已注册多槽结构")
+        self.bindings = tuple(sorted(bindings, key=lambda item: item.stable_key()))
+        self._bindings = {key: item for key, item in zip(binding_keys, bindings)}
 
     def resolve(
             self, selection: AnswerContentSelection,
@@ -164,13 +256,34 @@ class ResponseActGenerationRegistry:
         branch = selection.request.goal.target_branch
         return branch is not None and (branch, selection.stance) in self._by_key
 
+    def binding(self, selection: AnswerContentSelection) -> ResponseActGenerationBinding | None:
+        """多槽结构只能消费同次选择的完整绑定；不借用旧请求或单槽表达。"""
+        template = self.resolve(selection)
+        if not template.content_slots:
+            return None
+        binding = self._bindings.get((selection.stable_key(), template.stable_key()))
+        if binding is None:
+            raise LookupError("多槽 response act 缺少同次来源化绑定")
+        goal = selection.request.goal
+        if binding.source != goal.source or binding.scope != goal.scope:
+            raise ValueError("response act binding 不属于当前 source/scope")
+        if {item.slot for item in binding.values} != {item.slot for item in template.content_slots}:
+            raise ValueError("response act binding 必须完整覆盖内容槽")
+        if any(item.filler == selection.stance for item in binding.values):
+            raise ValueError("内容槽不得重复 stance 槽")
+        return binding
+
     def stable_key(self) -> tuple[int, ...]:
         """返回全部 response-act 模板的确定性配置键。"""
-        return (
+        result = (
             len(self.templates),
             *(value for item in self.templates
               for value in _packed(item.stable_key())),
         )
+        if self.bindings:
+            result += (2, len(self.bindings), *(v for item in self.bindings
+                                               for v in _packed(item.stable_key())))
+        return result
 
 
 class ResponseActDiscourseRouter:
@@ -190,6 +303,7 @@ class ResponseActDiscourseRouter:
         if not self.registry.matches(selection):
             return self.delegate.plan(selection)
         template = self.registry.resolve(selection)
+        binding = self.registry.binding(selection)
         selected = set(selection.selected_candidate_keys)
         open_questions = tuple(
             obligation
@@ -203,7 +317,10 @@ class ResponseActDiscourseRouter:
             selection.selected_candidate_keys,
             (),
             open_questions,
-            template.context,
+            tuple(sorted({*template.context, *(binding.discourse_context if binding is not None else ())},
+                         key=lambda item: item.stable_key())),
+            declaration_source=None if binding is None else binding.source,
+            declaration_trace=() if binding is None else binding.stable_key(),
         )
 
 
@@ -244,9 +361,11 @@ class ResponseActPropositionRouter:
                 candidate.evidence,
                 candidate.hypotheses,
                 (),
+                candidate.observation_evidence,
             )
             for candidate in selection.request.candidates
-            if candidate.stable_key() in selected
+            if (candidate.stable_key() in selected
+                and isinstance(candidate, GenerationCandidate))
         )
         return PropositionPlan(selection.stable_key(), propositions)
 
@@ -273,32 +392,44 @@ class ResponseActSyntaxRouter:
         if not self.registry.matches(selection):
             return self.delegate.plan(selection, discourse, propositions)
         template = self.registry.resolve(selection)
+        binding = self.registry.binding(selection)
         selection_key = selection.stable_key()
         if (discourse.selection_key != selection_key
                 or propositions.selection_key != selection_key):
             raise ValueError("response act syntax 收到漂移上游计划")
+        proposition_candidate_keys = {
+            candidate.stable_key()
+            for candidate in selection.request.candidates
+            if (candidate.stable_key() in set(selection.selected_candidate_keys)
+                and isinstance(candidate, GenerationCandidate))
+        }
         if (discourse.candidate_keys != selection.selected_candidate_keys
                 or {item.candidate_key for item in propositions.propositions}
-                != set(selection.selected_candidate_keys)):
+                != proposition_candidate_keys):
             raise ValueError("response act syntax 决策候选 Evidence 漂移")
-        value = StructureSlotValue(template.slot.slot, selection.stance)
+        value = StructureSlotValue(template.slot.slot, template.stance_filler or selection.stance)
+        values = (value,) if binding is None else (value, *binding.values)
+        if (discourse.declaration_source != (None if binding is None else binding.source)
+                or discourse.declaration_trace != (() if binding is None else binding.stable_key())):
+            raise ValueError("response act syntax 来源化绑定与 discourse 漂移")
         sentence = PlannedSentence(
             template.sentence,
             template.slot.structure,
             0,
             (),
-            (template.slot,),
-            (value,),
+            (template.slot, *template.content_slots),
+            values,
             (),
             template.boundary,
             selection.request.goal.source,
             selection.request.goal.scope,
             selection.stance,
+            response_act_value=value if template.stance_filler is not None else None,
         )
         obligation = SyntaxLinearizationObligation(
             template.sentence,
             template.slot.structure,
-            (value,),
+            values,
             template.constraints,
             template.context,
             template.linearization_reason,
@@ -317,6 +448,7 @@ class ResponseActSyntaxRouter:
 __all__ = [
     "ResponseActDiscourseRouter",
     "ResponseActGenerationRegistry",
+    "ResponseActGenerationBinding",
     "ResponseActGenerationTemplate",
     "ResponseActPropositionRouter",
     "ResponseActSyntaxRouter",

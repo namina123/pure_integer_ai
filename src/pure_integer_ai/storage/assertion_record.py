@@ -22,6 +22,10 @@ ASSERTION_ROLE_GRAPH_STATEMENT = 1
 
 TYPED_REF_KEY_SIZE = 11
 INLINE_QUALIFIER_COUNT = 3
+# A single assertion must not carry an entire request/proof stable key.  The
+# read codec remains open-ended for historical databases, while new writes
+# fail closed above this bound and must use an explicit graph reference.
+MAX_WRITABLE_QUALIFIER_COMPONENTS = 4096
 
 _REF_FIELD_NAMES = (
     "object_kind",
@@ -253,6 +257,16 @@ class AssertionRecordStore:
     def __init__(self, backend: StorageBackend) -> None:
         self._backend = backend
         self._records_by_hash: dict[int, AssertionRecord] = {}
+        # 发布 SQLite 是不可变只读图，多个 GraphOntology facade 会各自
+        # 创建本 store。把首次完整核验结果挂在同一 backend 上，避免跨
+        # facade 重复读取 record/qualifier；可写训练 backend 不共享。
+        shared = None
+        if bool(getattr(backend, "read_only", False)):
+            shared = getattr(backend, "_pi_readonly_assertion_records", None)
+            if shared is None:
+                shared = {}
+                setattr(backend, "_pi_readonly_assertion_records", shared)
+        self._shared_records_by_hash: dict[int, AssertionRecord] | None = shared
 
     def register(self, record: AssertionRecord) -> None:
         """追加一条完整记录；碰撞、孤儿限定项和既有半写状态均拒绝。"""
@@ -276,6 +290,7 @@ class AssertionRecordStore:
             raise AssertionRecordIncompleteError(
                 f"assertion hash={record.identity_hash} 存在孤儿 qualifier")
 
+        self._check_write_budget(record)
         self._insert_overflow_qualifiers(record)
         self._backend.insert(ASSERTION_RECORD_TABLE, record.to_row())
         if self.read(record.identity_hash) != record:
@@ -290,6 +305,7 @@ class AssertionRecordStore:
 
     def append_new(self, record: AssertionRecord) -> None:
         """在调用方已声明命名空间为空时追加新记录，不执行重复读回。"""
+        self._check_write_budget(record)
         cached = self._records_by_hash.get(record.identity_hash)
         if cached is not None:
             if cached != record:
@@ -315,12 +331,27 @@ class AssertionRecordStore:
         if batch:
             self._backend.insert_many(ASSERTION_QUALIFIER_TABLE, batch)
 
+    @staticmethod
+    def _check_write_budget(record: AssertionRecord) -> None:
+        """阻止新写入把大对象身份逐边复制进 qualifier 表。"""
+        if not isinstance(record, AssertionRecord):
+            raise TypeError("record 必须是 AssertionRecord")
+        if len(record.qualifiers) > MAX_WRITABLE_QUALIFIER_COMPONENTS:
+            raise AssertionRecordError(
+                "assertion qualifiers 超出写入预算；"
+                "请改用图内引用关系，禁止复制整批请求/proof")
+
     def read_optional(self, identity_hash: int) -> AssertionRecord | None:
         """读取可选记录；完全不存在返回空，任一孤儿或半写状态失败。"""
         _strict_int(identity_hash, where="identity_hash", positive=True)
         cached = self._records_by_hash.get(identity_hash)
         if cached is not None:
             return cached
+        if self._shared_records_by_hash is not None:
+            cached = self._shared_records_by_hash.get(identity_hash)
+            if cached is not None:
+                self._records_by_hash[identity_hash] = cached
+                return cached
         rows = self._record_rows(identity_hash)
         qualifier_rows = self._qualifier_rows(identity_hash)
         if not rows:
@@ -330,6 +361,8 @@ class AssertionRecordStore:
             return None
         record = self._read_rows(identity_hash, rows, qualifier_rows)
         self._records_by_hash[identity_hash] = record
+        if self._shared_records_by_hash is not None:
+            self._shared_records_by_hash[identity_hash] = record
         return record
 
     def read(self, identity_hash: int) -> AssertionRecord:
@@ -345,6 +378,11 @@ class AssertionRecordStore:
         cached = self._records_by_hash.get(identity_hash)
         if cached is not None:
             return self._projection_from_record(cached)
+        if self._shared_records_by_hash is not None:
+            cached = self._shared_records_by_hash.get(identity_hash)
+            if cached is not None:
+                self._records_by_hash[identity_hash] = cached
+                return self._projection_from_record(cached)
         rows = self._record_rows(identity_hash)
         if len(rows) != 1:
             raise AssertionRecordIncompleteError(
@@ -354,6 +392,8 @@ class AssertionRecordStore:
     def clear_runtime_caches(self) -> None:
         """外部 load 或故障注入后清空正规化 assertion 运行期缓存。"""
         self._records_by_hash.clear()
+        if self._shared_records_by_hash is not None:
+            self._shared_records_by_hash.clear()
 
     def statement_projections(
             self, *, relation_kind: int | None = None,
@@ -537,6 +577,7 @@ __all__ = [
     "ASSERTION_ROLE_GENERIC",
     "ASSERTION_ROLE_GRAPH_STATEMENT",
     "INLINE_QUALIFIER_COUNT",
+    "MAX_WRITABLE_QUALIFIER_COMPONENTS",
     "AssertionRecord",
     "AssertionRecordCollisionError",
     "AssertionRecordError",

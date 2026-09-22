@@ -168,6 +168,45 @@ class DialogueSuccessorAnswer:
     posting_rows_read: int
 
 
+@dataclass(frozen=True, slots=True)
+class DialogueSuccessorEvidence:
+    """不读取回答正文的后继命题查询证据。"""
+
+    protocol_version: int
+    proposition_space_id: int
+    proposition_local_id: int
+    source_hash: int
+    current_start_space_id: int
+    current_start_local_id: int
+    current_end_space_id: int
+    current_end_local_id: int
+    current_feature_count: int
+    context_turn_count: int
+    response_turn_ordinal: int
+    graph_assertion_count: int
+    graph_assertion_digest: int
+    evidence_id: int
+
+    def __post_init__(self) -> None:
+        values = tuple(getattr(self, field)
+                       for field in self.__dataclass_fields__)
+        if (any(type(value) is not int for value in values)
+                or min(values) <= 0):
+            raise ValueError("Dialogue successor evidence 必须是正整数记录")
+
+    def root_key(self) -> tuple[int, ...]:
+        """返回 QueryState 内不会与 Core proposition 混淆的根键。"""
+        return (
+            91620, 1, self.protocol_version,
+            self.proposition_space_id, self.proposition_local_id,
+        )
+
+    def stable_key(self) -> tuple[int, ...]:
+        """保留后继命题、当前端点和图 Evidence 的完整整数身份。"""
+        return tuple(getattr(self, field)
+                     for field in self.__dataclass_fields__)
+
+
 # Compatibility name for older callers; the implementation is the shared
 # cognition protocol so public and experiment runtimes consume one value type.
 GraphDialogueTrace = DialoguePipelineTrace
@@ -559,6 +598,53 @@ class SqliteDialogueSuccessorRuntime:
         row = self.connection.execute(
             f'SELECT COUNT(*) FROM "{DIALOGUE_SUCCESSOR_TABLE}"').fetchone()
         return int(row[0])
+
+    def exact_graph_evidence(
+            self, current: str,
+            ) -> tuple[DialogueSuccessorEvidence, ...]:
+        """按完整当前 turn 序列返回图证据，不读取 response/source 正文。"""
+        if type(current) is not str or not current.strip():
+            raise ValueError("current 必须是非空文本")
+        query_tokens = _integer_tokens(current.strip())
+        hash_sequence = tuple(
+            _FEATURE_HASH.h63(chr(value)) or 1
+            for token in query_tokens for value in token)
+        if not hash_sequence:
+            return ()
+        keys = self._exact_graph_candidate_keys(
+            hash_sequence, len(hash_sequence))
+        result = []
+        for key in keys:
+            feature_rows = self.connection.execute(
+                f'''SELECT feature_ordinal, feature_hash
+                    FROM "{DIALOGUE_SUCCESSOR_FEATURE_TABLE}"
+                    WHERE proposition_space_id=?
+                      AND proposition_local_id=? AND feature_kind=?
+                    ORDER BY feature_ordinal''',
+                (*key, FEATURE_CURRENT_TURN),
+            ).fetchall()
+            if (tuple(int(row[0]) for row in feature_rows)
+                    != tuple(range(len(feature_rows)))
+                    or tuple(int(row[1]) for row in feature_rows)
+                    != hash_sequence):
+                continue
+            row = self.connection.execute(
+                f'''SELECT protocol_version, proposition_space_id,
+                           proposition_local_id, source_hash,
+                           current_start_space_id, current_start_local_id,
+                           current_end_space_id, current_end_local_id,
+                           current_feature_count, context_turn_count,
+                           response_turn_ordinal, graph_assertion_count,
+                           graph_assertion_digest, evidence_id
+                    FROM "{DIALOGUE_SUCCESSOR_TABLE}"
+                    WHERE proposition_space_id=? AND proposition_local_id=?''',
+                key,
+            ).fetchone()
+            if row is None or int(row[8]) != len(hash_sequence):
+                raise RuntimeError("dialogue successor 精确证据投影漂移")
+            result.append(DialogueSuccessorEvidence(*(
+                int(value) for value in row)))
+        return tuple(sorted(result, key=lambda item: item.stable_key()))
 
     def _load_graph_postings(
             self, feature_hashes: tuple[int, ...],
@@ -1643,6 +1729,7 @@ class SqliteDialogueSuccessorRuntime:
 
 __all__ = [
     "DialogueSuccessorAnswer",
+    "DialogueSuccessorEvidence",
     "GraphDialogueAnswer",
     "GraphDialogueTrace",
     "DialogueSuccessorProtocol",

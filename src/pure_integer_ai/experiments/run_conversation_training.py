@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from pathlib import PurePosixPath
 import shutil
+import sqlite3
 import sys
 
 from pure_integer_ai.config import gates
@@ -53,7 +54,12 @@ from pure_integer_ai.experiments.dialogue_training_typed_adapter import (
 from pure_integer_ai.experiments.dialogue_successor_graph import (
     DialogueSuccessorProtocol,
 )
-from pure_integer_ai.experiments.corpus_identity import assign_corpus_source_refs
+from pure_integer_ai.experiments.corpus_identity import (
+    CorpusContentUniquenessError,
+    aggregate_corpus_content,
+    assign_corpus_source_refs,
+    audit_corpus_content_uniqueness,
+)
 from pure_integer_ai.experiments.evaluation_protocol import (
     collected_item_content_identity,
 )
@@ -137,6 +143,14 @@ def default_course_paths(project_root: str | Path) -> tuple[Path, ...]:
     surface = root / "dlg_raw16_surface_organization_v1.jsonl.sample"
     if surface.is_file():
         paths.append(surface)
+    # POSTCHECK is a distinct typed structure family (separate from ADOPTION)
+    # and must be present in every default pack so the read-only H2 query can
+    # recover a learned POSTCHECK candidate instead of silently seeing zero
+    # structures.  The course is an explicit integer/provenance contract;
+    # registering it here does not merge or replay any source text.
+    postcheck_bridge = root / "dialogue_postcheck_bridge_train_v1.course.jsonl.sample"
+    if postcheck_bridge.is_file():
+        paths.append(postcheck_bridge)
     return tuple(paths)
 
 
@@ -156,6 +170,113 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+_CLEAN_BASELINE_KEYS: dict[str, tuple[str, ...]] = {
+    "edge": (
+        "space_id_from", "local_id_from", "space_id_to", "local_id_to",
+        "edge_type", "source", "epistemic_origin", "subtype",
+        "order_index", "role", "memory_time_attach", "content_version",
+    ),
+    "graph_object": ("identity_hash",),
+    "graph_object_component": ("identity_hash", "component_ordinal"),
+    "graph_statement": ("assertion_hash",),
+    "occurrence": ("space_id", "local_id"),
+    "source_record": ("source_hash",),
+    "span": ("space_id", "local_id"),
+    "span_member": ("space_id", "local_id", "member_ordinal"),
+    "dialogue_successor_projection": (
+        "proposition_space_id", "proposition_local_id",
+    ),
+    "dialogue_successor_feature": (
+        "proposition_space_id", "proposition_local_id",
+        "feature_kind", "feature_ordinal",
+    ),
+    "artifact_semantic_binding": ("binding_id",),
+    "artifact_semantic_binding_part": (
+        "binding_id", "field_code", "part_ordinal",
+    ),
+}
+
+
+def _assert_clean_baseline(database: Path) -> dict[str, object]:
+    """Reject duplicate logical rows in a new database before publication."""
+    conn = sqlite3.connect(
+        f"file:{database.resolve().as_posix()}?mode=ro", uri=True)
+    try:
+        tables = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        results: dict[str, object] = {}
+        failures: list[dict[str, object]] = []
+        for table, columns in _CLEAN_BASELINE_KEYS.items():
+            if table not in tables:
+                continue
+            available = {
+                row[1] for row in conn.execute(
+                    f'PRAGMA table_info("{table}")')
+            }
+            if not set(columns) <= available:
+                continue
+            projection = ", ".join(f'"{column}"' for column in columns)
+            row = conn.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(n - 1), 0) FROM ("
+                f"SELECT {projection}, COUNT(*) AS n FROM \"{table}\" "
+                f"GROUP BY {projection} HAVING COUNT(*) > 1)"
+            ).fetchone()
+            groups, excess = int(row[0] or 0), int(row[1] or 0)
+            results[table] = {
+                "duplicate_groups": groups,
+                "duplicate_excess": excess,
+                "natural_key": list(columns),
+            }
+            if groups or excess:
+                failures.append({
+                    "table": table,
+                    "duplicate_groups": groups,
+                    "duplicate_excess": excess,
+                })
+        if "source_record" in tables:
+            available = {
+                row[1] for row in conn.execute(
+                    'PRAGMA table_info("source_record")')
+            }
+            # The core audit remains integer-only and does not select source
+            #正文.  text_hash is already integrity-checked on SourceRecord
+            # read; codepoint_count separates the normal length domain.
+            content_columns = ("text_hash", "codepoint_count")
+            if set(content_columns) <= available:
+                projection = ", ".join(
+                    f'"{column}"' for column in content_columns)
+                row = conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(n - 1), 0) FROM ("
+                    "SELECT " + projection
+                    + ', COUNT(*) AS n FROM "source_record" '
+                    "GROUP BY " + projection + " HAVING COUNT(*) > 1)"
+                ).fetchone()
+                groups, excess = int(row[0] or 0), int(row[1] or 0)
+                # Content aliases across distinct SourceRef/provenance rows
+                # are expected for W-06 observations.  The corpus gate above
+                # already prevents duplicate training consumption; source
+                # records retain provenance and therefore do not have content
+                # identity as their natural key.  Keep this as a diagnostic,
+                # but never reject a clean graph for it.
+                results["source_record_content"] = {
+                    "duplicate_groups": groups,
+                    "duplicate_excess": excess,
+                    "natural_key": list(content_columns),
+                    "diagnostic_only": True,
+                }
+        if failures:
+            raise RuntimeError(
+                "clean baseline duplicate natural keys: "
+                + json.dumps(failures, ensure_ascii=True, sort_keys=True)
+            )
+        return {"tables": results, "duplicate_groups": 0,
+                "duplicate_excess": 0}
+    finally:
+        conn.close()
 
 
 _CAMPAIGN_REQUIRED_STAGES = (1, 2, 3, 4)
@@ -209,6 +330,16 @@ def _resume_completed_stages(
                 or any(type(item) is not int or item < 1 for item in stages)):
             raise ValueError("resume_from stages_completed 非法")
         completed.update(stages)
+        cumulative = summary.get("cumulative_stages_completed")
+        if cumulative is not None:
+            if (not isinstance(cumulative, list)
+                    or any(type(item) is not int or item < 1
+                           for item in cumulative)):
+                raise ValueError("resume_from cumulative_stages_completed 非法")
+            if not set(stages) <= set(cumulative):
+                raise ValueError("resume_from 局部阶段不属于累计阶段")
+            completed.update(cumulative)
+            break
         parent = summary.get("resume_from")
         if parent is not None and not isinstance(parent, str):
             raise ValueError("resume_from 谱系父节点非法")
@@ -248,6 +379,14 @@ def _resume_lineage_pack_namespace(
         pack_sha = summary.get("pack_sha256")
         if not isinstance(pack_sha, str) or len(pack_sha) != 64:
             raise ValueError("resume_from pack SHA 非法")
+        source_namespace = summary.get("source_namespace")
+        if source_namespace is not None:
+            if (not isinstance(source_namespace, str)
+                    or len(source_namespace) != 64
+                    or any(value not in "0123456789abcdef"
+                           for value in source_namespace)):
+                raise ValueError("resume_from source namespace 非法")
+            return source_namespace
         oldest = pack_sha
         parent = summary.get("resume_from")
         if parent is not None and not isinstance(parent, str):
@@ -460,6 +599,11 @@ def run_conversation_training(*, project_root: str | Path,
                               storage_performance_mode: str = "durable",
                               sqlite_page_resume: bool = False,
                               typed_language_diagnostic_only: bool = False,
+                              clean_baseline: bool = False,
+                              artifact_semantic_bridge_paths: tuple[str | Path, ...] = (),
+                              install_typed_relation_runtime: bool = True,
+                              install_grounded_answer_graph: bool = False,
+                              kdconv_structure_course_path: str | Path | None = None,
                               ) -> dict[str, object]:
     """消费公开 train split，并产出真实 SQLite graph/checkpoint 摘要。"""
     if max_cases is not None and (type(max_cases) is not int or max_cases <= 0):
@@ -467,11 +611,13 @@ def run_conversation_training(*, project_root: str | Path,
     if storage_performance_mode not in {"durable", "bulk"}:
         raise ValueError(
             "storage_performance_mode 必须是 durable 或 bulk")
-    if allow_additive_resume_pack:
-        if resume_from is None:
-            raise ValueError("增量 pack 恢复必须指定 resume_from")
-        if not extra_course_paths:
-            raise ValueError("增量 pack 恢复必须提供新增公开课程")
+    if clean_baseline and (resume_from is not None
+                           or allow_additive_resume_pack
+                           or sqlite_page_resume):
+        raise ValueError(
+            "clean_baseline 禁止 resume、additive pack 和 sqlite page resume")
+    if allow_additive_resume_pack and resume_from is None:
+        raise ValueError("增量 pack 恢复必须指定 resume_from")
     root = Path(run_root).resolve()
     if root.drive.upper() != "K:" or not root.is_dir():
         raise ValueError("run_root 必须是已存在的 K 盘目录")
@@ -480,6 +626,23 @@ def run_conversation_training(*, project_root: str | Path,
         Path(item).resolve() for item in extra_course_paths)
     if len(paths) != len(set(paths)):
         raise ValueError("extra course path 与默认课程重复")
+    if allow_additive_resume_pack and not extra_course_paths:
+        # A default-course addition is a valid additive shard by itself, but
+        # only when the parent pack did not already register that file.  Read
+        # the parent manifest as provenance metadata; do not infer novelty from
+        # content or silently replay an already-consumed course.
+        parent_manifest = root / resume_from / "dialogue_pack_manifest.json"
+        try:
+            parent_payload = json.loads(parent_manifest.read_text(encoding="utf-8"))
+            parent_sources = {
+                str(item[0]) for item in parent_payload.get("source_files", ())
+                if isinstance(item, list) and item and isinstance(item[0], str)
+            }
+        except (FileNotFoundError, OSError, json.JSONDecodeError) as error:
+            raise ValueError("增量 pack 恢复缺少可回读父 pack manifest") from error
+        current_sources = {f"data/ph2/{path.name}" for path in default_paths}
+        if not (current_sources - parent_sources):
+            raise ValueError("增量 pack 恢复必须提供尚未登记的新增公开课程")
     source_identities = (
         {path: f"data/ph2/{path.name}" for path in paths}
         if portable_source_identity else None)
@@ -534,6 +697,37 @@ def run_conversation_training(*, project_root: str | Path,
         heldout_items = pack.training_items(
             split="heldout", causal_only=causal_only,
             defer_indexed_surface=defer_indexed_surface)
+    run_dir = root / run_id
+    # Content identity is stricter than SourceRef identity: a repeated body
+    # under another document/source key must never enter a training graph.
+    candidate_corpus = (
+        list(strict_bundle.corpus)
+        if strict_bundle is not None
+        else train_items + heldout_items if with_heldout_probe else train_items
+    )
+    assign_corpus_source_refs(candidate_corpus, source_namespace=source_namespace)
+    protected_items = tuple(heldout_items) if with_heldout_probe or strict_bundle is not None else ()
+    candidate_corpus, content_aggregation = aggregate_corpus_content(
+        candidate_corpus, protected=protected_items)
+    content_uniqueness = audit_corpus_content_uniqueness(
+        candidate_corpus, fail_closed=False)
+    content_audit_payload = {
+        "run_id": run_id,
+        "pack_sha256": pack.pack_sha256,
+        "source_namespace": source_namespace,
+        "training_item_count": len(train_items),
+        "heldout_item_count": len(heldout_items),
+        "aggregation": content_aggregation.to_dict(),
+        "report": content_uniqueness.to_dict(),
+    }
+    run_dir = root / run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    audit_path = run_dir / "content_uniqueness_audit.json"
+    _write_json(audit_path, content_audit_payload)
+    if content_uniqueness.duplicate_group_count:
+        raise CorpusContentUniquenessError(
+            "训练启动阻断：同一整数内容重复录入；详见 "
+            + str(audit_path))
     contrast = build_dialogue_training_contrast(pack)
     semantic_protocol = occurrence_protocol = span_protocol = None
     semantic_query_protocol = None
@@ -548,10 +742,8 @@ def run_conversation_training(*, project_root: str | Path,
     # checkpoint base already carries the optional dialogue successor tables.
     # Register the same schema before page-resume validation so an additive
     # recovery does not fail merely because this shard has no dialogue turns.
-    if allow_additive_resume_pack and dialogue_successor_protocol is None:
+    if (allow_additive_resume_pack or sqlite_page_resume) and dialogue_successor_protocol is None:
         dialogue_successor_protocol = _dialogue_successor_protocol()
-    run_dir = root / run_id
-    run_dir.mkdir(parents=True, exist_ok=False)
     project_root_path = Path(project_root).resolve()
     surface_evidence_path = (
         project_root_path / "data" / "ph2"
@@ -622,10 +814,17 @@ def run_conversation_training(*, project_root: str | Path,
         "dialogue_structure": pack.dialogue_structure_counts,
         "train_surface_count": len(train_items),
         "heldout_surface_count": len(heldout_items),
+        "content_uniqueness": content_uniqueness.to_dict(),
+        "content_aggregation": content_aggregation.to_dict(),
         "typed_course": typed_report.to_dict(),
         "causal_only": causal_only,
         "extra_course_paths": tuple(
             manifest_identity(item) for item in extra_course_paths),
+        "artifact_semantic_bridge_paths": tuple(
+            str(Path(item).resolve()) for item in artifact_semantic_bridge_paths),
+        "kdconv_structure_course_path": (
+            None if kdconv_structure_course_path is None
+            else str(Path(kdconv_structure_course_path).resolve())),
         "resume_pack_mode": (
             "additive_shard" if allow_additive_resume_pack else "exact"),
         "typed_language_stage_items_only": bool(
@@ -649,11 +848,7 @@ def run_conversation_training(*, project_root: str | Path,
         sqlite_resume_binding_sha256 = sqlite_binding.manifest_sha256
     backend = SQLiteBackend(
         str(database_path), performance_mode=storage_performance_mode)
-    corpus = (
-        list(strict_bundle.corpus)
-        if strict_bundle is not None
-        else train_items + heldout_items if with_heldout_probe else train_items
-    )
+    corpus = list(candidate_corpus)
     if typed_semantic:
         # L-03 occurrence identity needs one corpus-wide ordinal pass; doing
         # this lazily per item would collapse repeated surfaces to one source.
@@ -667,8 +862,8 @@ def run_conversation_training(*, project_root: str | Path,
         if typed_semantic and 4 in active_stages else None
     )
     typed_relation_runtime_factory = None
-    typed_relation_report: dict[str, int] | None = None
-    if typed_semantic:
+    typed_relation_report: dict[str, object] | None = None
+    if typed_semantic and install_typed_relation_runtime:
         from pure_integer_ai.experiments.conversation_typed_relation_bridge import (
             _course_builder,
             build_authored_w06_learning_runtime,
@@ -694,9 +889,97 @@ def run_conversation_training(*, project_root: str | Path,
                     name: int(getattr(report, name))
                     for name in report.__dataclass_fields__
                 }
+                semantic_report = getattr(
+                    runtime, "semantic_uniqueness_report", None)
+                if semantic_report is not None:
+                    typed_relation_report["semantic_uniqueness"] = (
+                        semantic_report.to_dict())
                 return runtime
 
             typed_relation_runtime_factory = _build_typed_relation_runtime
+    discourse_topic_runtime_factory = None
+    discourse_topic_report: dict[str, object] | None = None
+    if typed_semantic:
+        from pure_integer_ai.experiments.discourse_topic_training_bridge import (
+            build_discourse_topic_training_runtime,
+        )
+        discourse_paths = tuple(
+            path for path in paths if path.name in {
+                "authored_discourse_information_seed_v1.jsonl.sample",
+                "authored_discourse_revision_seed_v1.jsonl.sample",
+            }
+        )
+        if discourse_paths:
+            def _build_discourse_topic_runtime(ctx):
+                nonlocal discourse_topic_report
+                runtime = build_discourse_topic_training_runtime(
+                    ctx,
+                    discourse_paths,
+                    authoritative_source_keys=tuple(
+                        item.source_ref.stable_key()
+                        for item in corpus
+                        if item.source_ref is not None
+                    ),
+                )
+                discourse_topic_report = runtime.report()
+                return runtime
+
+            discourse_topic_runtime_factory = _build_discourse_topic_runtime
+    event_time_structure_runtime_factory = None
+    event_time_structure_report: dict[str, object] | None = None
+    if typed_semantic:
+        from pure_integer_ai.experiments.event_time_structure_training_bridge import (
+            build_event_time_structure_training_runtime,
+        )
+        event_time_paths = tuple(
+            path for path in paths
+            if path.name == "authored_event_time_aspect_seed_v1.jsonl.sample")
+        if event_time_paths:
+            def _build_event_time_structure_runtime(ctx):
+                nonlocal event_time_structure_report
+                runtime = build_event_time_structure_training_runtime(
+                    ctx,
+                    event_time_paths,
+                    authoritative_source_keys=tuple(
+                        item.source_ref.stable_key()
+                        for item in corpus
+                        if item.source_ref is not None),
+                )
+                event_time_structure_report = runtime.report()
+                return runtime
+
+            event_time_structure_runtime_factory = (
+                _build_event_time_structure_runtime)
+    grounded_answer_graph_runtime_factory = None
+    grounded_answer_graph_report: dict[str, object] | None = None
+    if typed_semantic and install_grounded_answer_graph:
+        grounded_path = project_root_path / "data" / "ph2" / "grounded_answer_train_v1.jsonl.sample"
+        if not grounded_path.is_file():
+            raise ValueError("grounded answer course 缺失")
+        from pure_integer_ai.experiments.grounded_answer_graph_bridge import (
+            build_grounded_answer_graph_runtime,
+        )
+        def _build_grounded_answer_graph_runtime(ctx):
+            nonlocal grounded_answer_graph_report
+            runtime = build_grounded_answer_graph_runtime(ctx, (grounded_path,))
+            grounded_answer_graph_report = runtime.report()
+            return runtime
+        grounded_answer_graph_runtime_factory = _build_grounded_answer_graph_runtime
+    kdconv_structure_runtime_factory = None
+    kdconv_structure_report: dict[str, object] | None = None
+    if kdconv_structure_course_path is not None:
+        kdconv_path = Path(kdconv_structure_course_path).resolve()
+        if not kdconv_path.is_file():
+            raise ValueError("KdConv structure sidecar 缺失")
+        from pure_integer_ai.experiments.kdconv_structure_bridge import (
+            build_kdconv_structure_runtime,
+        )
+        def _build_kdconv_structure_runtime(ctx):
+            nonlocal kdconv_structure_report
+            runtime = build_kdconv_structure_runtime(ctx, kdconv_path)
+            kdconv_structure_report = runtime.report()
+            return runtime
+        kdconv_structure_runtime_factory = _build_kdconv_structure_runtime
     previous = gates.TRAINING_MODE
     dialogue_successor_counts = (0, 0)
     try:
@@ -741,6 +1024,15 @@ def run_conversation_training(*, project_root: str | Path,
                     dialogue_successor_protocol),
                 language_generation_runtime_factory=generation_factory,
                 typed_relation_runtime_factory=typed_relation_runtime_factory,
+                discourse_topic_runtime_factory=discourse_topic_runtime_factory,
+                event_time_structure_runtime_factory=(
+                    event_time_structure_runtime_factory),
+                grounded_answer_graph_runtime_factory=(
+                    grounded_answer_graph_runtime_factory),
+                kdconv_structure_runtime_factory=(
+                    kdconv_structure_runtime_factory),
+                artifact_semantic_bridge_paths=tuple(
+                    str(Path(item).resolve()) for item in artifact_semantic_bridge_paths),
                 w09_weaning_builder=w09_builder,
                 w09_execute_zero_call_windows=w09_builder is not None,
                 typed_language_stage_items_only=(
@@ -768,12 +1060,18 @@ def run_conversation_training(*, project_root: str | Path,
             "split_counts": pack.split_counts,
             "training_item_count": len(train_items),
             "heldout_probe_count": len(heldout_items),
+            "content_uniqueness": content_uniqueness.to_dict(),
             "typed_course": typed_report.to_dict(),
             "typed_language_h2": _typed_floor_summary(
                 result.typed_language_h2_report),
             "typed_language_floor": _typed_floor_summary(
                 result.typed_language_floor_report),
             "typed_relation_learning": typed_relation_report,
+            "discourse_topic_training": discourse_topic_report,
+            "event_time_structure_training": event_time_structure_report,
+            "kdconv_structure_training": kdconv_structure_report,
+            "artifact_semantic_bridge": getattr(
+                result, "artifact_semantic_bridge_report", None),
             "active_stages": active_stages,
             "resume_from": resume_from,
             "resume_pack_mode": (
@@ -783,6 +1081,7 @@ def run_conversation_training(*, project_root: str | Path,
             "diagnostic_only": True,
             "storage_performance_mode": storage_performance_mode,
             "sqlite_page_resume": bool(sqlite_page_resume),
+            "clean_baseline": bool(clean_baseline),
             "sqlite_resume_source_manifest_sha256": (
                 sqlite_resume_binding_sha256),
             "peak_working_set_bytes": _peak_working_set_bytes(),
@@ -791,6 +1090,9 @@ def run_conversation_training(*, project_root: str | Path,
         }
         _write_json(run_dir / "training_summary.json", summary)
         return summary
+    clean_report = None
+    if clean_baseline:
+        clean_report = _assert_clean_baseline(database_path)
     local_completed_stages = tuple(sorted(result.stages_completed))
     stage_weaning_ready = bool(result.weaning_ready)
     (cumulative_completed_stages,
@@ -825,8 +1127,15 @@ def run_conversation_training(*, project_root: str | Path,
         "dialogue_structure": pack.dialogue_structure_counts,
         "training_item_count": len(train_items),
         "heldout_probe_count": len(heldout_items) if with_heldout_probe else 0,
+        "content_uniqueness": content_uniqueness.to_dict(),
         "typed_course": typed_report.to_dict(),
         "typed_relation_learning": typed_relation_report,
+        "discourse_topic_training": discourse_topic_report,
+        "event_time_structure_training": event_time_structure_report,
+        "grounded_answer_graph_training": grounded_answer_graph_report,
+        "kdconv_structure_training": kdconv_structure_report,
+        "artifact_semantic_bridge": getattr(
+            result, "artifact_semantic_bridge_report", None),
         "typed_language_floor": _typed_floor_summary(
             result.typed_language_floor_report),
         "causal_only": causal_only,
@@ -851,6 +1160,8 @@ def run_conversation_training(*, project_root: str | Path,
         "weaning_blockers": campaign_blockers,
         "storage_performance_mode": storage_performance_mode,
         "sqlite_page_resume": bool(sqlite_page_resume),
+        "clean_baseline": bool(clean_baseline),
+        "clean_baseline_audit": clean_report,
         "sqlite_resume_source_manifest_sha256": (
             sqlite_resume_binding_sha256),
         "storage_write_calls": getattr(backend, "storage_write_calls", 0),
@@ -917,6 +1228,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--typed-language-diagnostic-only", action="store_true",
         help="只读执行 typed H2/floor，跳过 boot/discovery/训练/dump")
+    parser.add_argument(
+        "--clean-baseline", action="store_true",
+        help="从新库训练并在摘要前拒绝关键自然键重复")
+    parser.add_argument(
+        "--artifact-semantic-bridge", action="append", default=[],
+        help="可选的整数 carrier semantic bridge course；只引用已有图身份")
+    parser.add_argument(
+        "--skip-typed-relation-runtime", action="store_true",
+        help=("增量恢复时保留已恢复 typed relation 图，跳过旧 authored producer "
+              "重放；不关闭 typed 输入、occurrence 或 QueryState 协议"),
+    )
+    parser.add_argument(
+        "--install-grounded-answer-graph", action="store_true",
+        help=("把 grounded answer 的 episode/claim/evidence/reference 结构 "
+              "物化到当前共享 GraphOntology；不写入答案正文"),
+    )
+    parser.add_argument(
+        "--kdconv-structure-course", default=None,
+        help="可选 KdConv 纯整数结构 sidecar",
+    )
     args = parser.parse_args(argv)
     summary = run_conversation_training(
         project_root=args.project_root,
@@ -937,6 +1268,11 @@ def main(argv: list[str] | None = None) -> int:
         storage_performance_mode=args.storage_performance_mode,
         sqlite_page_resume=args.sqlite_page_resume,
         typed_language_diagnostic_only=args.typed_language_diagnostic_only,
+        clean_baseline=args.clean_baseline,
+        artifact_semantic_bridge_paths=tuple(args.artifact_semantic_bridge),
+        install_typed_relation_runtime=not args.skip_typed_relation_runtime,
+        install_grounded_answer_graph=args.install_grounded_answer_graph,
+        kdconv_structure_course_path=args.kdconv_structure_course,
     )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True,
                      separators=(",", ":")))

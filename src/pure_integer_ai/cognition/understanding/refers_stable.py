@@ -63,14 +63,14 @@ def build_refers_stable_edge(edge_store: EdgeStore, concept_index: ConceptIndex,
                                            epistemic=epistemic, space_id=space_id,
                                            surface_form_a=surface_form_a)
     # 纯任意能指 → 稳定 REFERS_TO·PURE_ALIAS·进纯同指闭包
-    edge_store.add(
+    created = edge_store.add_assertion_once(
         space_id_from=a[0], local_id_from=a[1],
         space_id_to=b[0], local_id_to=b[1],
         edge_type=EDGE_REFERS_TO, subtype=SUBTYPE_PURE_ALIAS,
         strength=DEFAULT_STRENGTH, source=6,  # SOURCE_DERIVED
         epistemic_origin=epistemic, tier=TIER_PRIMARY,
     )
-    return 1
+    return int(created)
 
 
 def _build_metaphor_three_layer(edge_store: EdgeStore, concept_index: ConceptIndex,
@@ -89,20 +89,20 @@ def _build_metaphor_three_layer(edge_store: EdgeStore, concept_index: ConceptInd
         cat_ref = concept_index.ensure(surface_form_a, space_id=space_id,
                                        tier=TIER_PRIMARY)
         # ② 属性边 a → 范畴节点（保留语义·不丢属性）
-        edge_store.add(
+        created = edge_store.add_assertion_once(
             space_id_from=a[0], local_id_from=a[1],
             space_id_to=cat_ref[0], local_id_to=cat_ref[1],
             edge_type=EDGE_PROPERTY, strength=DEFAULT_STRENGTH,
             source=6, epistemic_origin=epistemic, tier=TIER_PRIMARY,
         )
-        n += 1
+        n += int(created)
     # ③ 喻称 REFERS_TO 子类型·不进纯同指闭包
-    edge_store.add(
+    created = edge_store.add_assertion_once(
         space_id_from=a[0], local_id_from=a[1],
         space_id_to=b[0], local_id_to=b[1],
         edge_type=EDGE_REFERS_TO, subtype=SUBTYPE_METAPHOR,
         strength=DEFAULT_STRENGTH, source=6,
         epistemic_origin=epistemic, tier=TIER_PRIMARY,
     )
-    n += 1
+    n += int(created)
     return n

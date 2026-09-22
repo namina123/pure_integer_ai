@@ -10,6 +10,9 @@ from pure_integer_ai.cognition.shared.alias_resolution import (
 from pure_integer_ai.cognition.shared.generation_content import (
     AnswerContentSelection,
 )
+from pure_integer_ai.cognition.shared.generation_role_binding import (
+    PropositionRoleSlotBinding, PropositionRoleSlotFiller,
+)
 from pure_integer_ai.cognition.shared.generation_structure_execution import (
     GenerationStructureExecutionPlan,
     GenerationStructureExecutionPlanner,
@@ -1191,8 +1194,13 @@ class LanguageGenerationConnectorRegistry:
                 if (binding.role is not None or binding.ordinal is not None
                         or binding.constant is None):
                     raise ValueError("常量槽位必须只声明一等常量")
-        if proposition_count != 1:
-            raise ValueError("connector template 必须恰有一个命题本体槽位")
+        if proposition_count not in (0, 1):
+            raise ValueError("connector template 不得重复命题本体槽位")
+        if proposition_count == 0:
+            roles = tuple((item.role, protocol.ordinal_value(item.ordinal))
+                          for item in template.bindings if item.source == protocol.role_filler_source)
+            if not roles or len(set(roles)) != len(roles):
+                raise ValueError("无整命题槽的 connector 必须声明完整且互异的角色组")
 
     def match(
             self,
@@ -1325,6 +1333,12 @@ class LanguageGenerationConnectorRegistry:
                 raise LanguageGenerationConnectorError(
                     "connector 槽值未解析为一等对象")
             result.append(StructureSlotValue(binding.slot, value))
+        if not any(item.source == protocol.proposition_source for item in template.bindings):
+            declared = {(item.role, protocol.ordinal_value(item.ordinal))
+                        for item in template.bindings if item.source == protocol.role_filler_source}
+            actual = {(item.role, item.ordinal) for item in proposition.bindings}
+            if declared != actual or len(actual) != len(proposition.bindings):
+                raise LanguageGenerationConnectorError("connector 角色组未完整覆盖当前命题")
         return tuple(result)
 
     def stable_key(self) -> tuple[int, ...]:
@@ -1573,8 +1587,16 @@ class LanguageConnectorSyntaxMapper:
                 for binding, value in zip(template.bindings, values)
                 if binding.source == self.registry.value_protocol.proposition_source
             )
-            if len(proposition_values) != 1:
+            if len(proposition_values) > 1:
                 raise RuntimeError("connector 命题本体槽位预检失效")
+            if proposition_values:
+                filler = PropositionSlotFiller(key, candidate.proposition, proposition_values[0])
+            else:
+                protocol = self.registry.value_protocol
+                filler = PropositionRoleSlotFiller(key, candidate.proposition, tuple(
+                    PropositionRoleSlotBinding(binding.role, protocol.ordinal_value(binding.ordinal), value)
+                    for binding, value in zip(template.bindings, values, strict=True)
+                    if binding.source == protocol.role_filler_source))
             instance = GenerationSentenceInstance(
                 template.sentence,
                 key,
@@ -1589,11 +1611,7 @@ class LanguageConnectorSyntaxMapper:
                 (key,),
                 template.slots,
                 values,
-                (PropositionSlotFiller(
-                    key,
-                    candidate.proposition,
-                    proposition_values[0],
-                ),),
+                (filler,),
                 template.boundary,
                 candidate.source,
                 candidate.scope,

@@ -34,7 +34,22 @@ from pure_integer_ai.cognition.understanding.span_index import (
     SpanProtocol,
 )
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
+from pure_integer_ai.crosscut.determinism.hasher import Hasher
 from pure_integer_ai.storage.node_store import TIER_SHADOW
+
+
+_LANGUAGE_QUALIFIER_HASHER = Hasher("boundary_span.language_qualifier.v1")
+
+
+def _language_qualifier(language_key: tuple[int, ...]) -> tuple[int, ...]:
+    """用长度和整数哈希标识语言竞争键，完整键由 Hypothesis 保留。"""
+    if not isinstance(language_key, tuple) or not language_key:
+        raise ValueError("language_key 必须是非空整数 tuple")
+    assert_int(*language_key, _where="boundary language qualifier")
+    if any(type(value) is not int for value in language_key):
+        raise ValueError("language_key 必须使用严格整数")
+    digest = _LANGUAGE_QUALIFIER_HASHER.h63(language_key)
+    return (len(language_key), digest)
 
 def _strict_key(value, *, where: str) -> tuple[int, ...]:
     """校验结构和关系使用的开放整数键。"""
@@ -443,7 +458,7 @@ class BoundarySpanMaterializer:
             scope=result.scope,
             provenance_kind=result.observation.source_kind,
             content_version=result.observation.versions.parser.value,
-            qualifiers=(len(result.language_key), *result.language_key),
+            qualifiers=_language_qualifier(result.language_key),
         )
         self.spans.scoped_identities.supersede(
             old_statement.assertion,
@@ -470,20 +485,21 @@ class BoundarySpanMaterializer:
             scope=result.scope,
             provenance_kind=result.observation.source_kind,
             content_version=result.observation.versions.parser.value,
-            qualifiers=(len(result.language_key), *result.language_key),
+            qualifiers=_language_qualifier(result.language_key),
         )
 
     def _active_selection(
             self, result: BoundaryResult, document: TypedRef,
             ) -> GraphStatement | None:
         """读取当前语言竞争键下唯一未被替代的选择断言。"""
-        qualifiers = (len(result.language_key), *result.language_key)
+        qualifiers = _language_qualifier(result.language_key)
         statements = tuple(
             statement for statement in self.spans.ontology.statements(
                 predicate=self._selection_predicate(),
                 subject=document,
             )
-            if (statement.assertion.qualifiers == qualifiers
+            if (statement.assertion.qualifiers in {
+                    qualifiers, (len(result.language_key), *result.language_key)}
                 and not self.spans.scoped_identities.assertion_is_superseded(
                     statement.assertion_hash))
         )

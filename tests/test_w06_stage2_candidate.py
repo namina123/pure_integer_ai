@@ -129,9 +129,9 @@ def test_w06_candidate_formal_run_sets_started_only_after_guard(
     assert guard.is_file() and host.is_file()
     assert outcome.execution_state == W06_FORMAL_EXECUTION_STATE
     assert readback.execution_state == W06_FORMAL_EXECUTION_STATE
-    assert outcome.candidate_count == 50
-    assert outcome.active_candidate_count == 17
-    assert dict(outcome.artifact_counts)["EVIDENCE_ACCOUNT"] == 64
+    assert outcome.candidate_count == 40
+    assert outcome.active_candidate_count == 14
+    assert dict(outcome.artifact_counts)["EVIDENCE_ACCOUNT"] == 65
     assert outcome.transaction_event_count == 5
     assert outcome.payload_gets_this_call > 0
     assert readback.payload_gets_this_call == 0

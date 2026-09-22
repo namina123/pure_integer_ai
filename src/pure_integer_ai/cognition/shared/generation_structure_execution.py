@@ -351,10 +351,10 @@ class GenerationStructureExecutionPlanner:
         budgets = {item.sentence: item.budget for item in request.budgets}
         obligations = {item.address: item for item in syntax.linearization}
         executions: list[SentenceStructureExecution] = []
-        ontology = self._lifecycle.order_graph.ontology
         for sentence in syntax.sentences:
             obligation = obligations[sentence.address]
-            structure_ref = ontology.resolve(obligation.structure)
+            structure_ref = self._lifecycle.order_graph.resolve_structure(
+                obligation.structure)
             if structure_ref is None:
                 raise ValueError("G-02 structure 尚未在 S-07 图中定义")
             schema = self._lifecycle.order_graph.read_structure(structure_ref)

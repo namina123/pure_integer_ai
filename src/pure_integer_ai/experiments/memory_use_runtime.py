@@ -67,6 +67,54 @@ def _session_ancestor(scope: ScopeIdentity) -> ScopeIdentity:
     raise ValueError("query scope 缺少 session 祖先")
 
 
+def append_memory_use(event_log: MemoryEventLog, scope: ScopeIdentity,
+                      payload: UsePayload) -> MaterializedMemoryEvent:
+    """共用持久化合同；消费者须先证明实际采用，不把命中自动记为 Use。"""
+    ref = memory_object_ref(
+        event_log.memory_space_identity, MEMORY_OBJECT_USE, payload.identity_key(),
+        owner=scope.owner, versions=scope.versions)
+    return event_log.append(MemoryEvent(MEMORY_EVENT_USE, ref, scope, payload))
+
+
+def declared_use_payload(event_log: MemoryEventLog, ref: MemoryObjectRef) -> UsePayload:
+    """恢复唯一带 decision/query/context 的 Use，不依赖 A-10 的装配方式。"""
+    if not isinstance(ref, MemoryObjectRef) or ref.object_kind != MEMORY_OBJECT_USE:
+        raise ValueError("use_ref 必须指向 Use")
+    events = event_log.query(access=_access_for(ref), event_kind=MEMORY_EVENT_USE, object_ref=ref)
+    if len(events) != 1 or not isinstance(events[0].event.payload, UsePayload):
+        raise ValueError("use_ref 没有唯一 Use 声明")
+    payload = events[0].event.payload
+    if not payload.decision_trace_key or payload.query_kind is None or not payload.context_key:
+        raise ValueError("use_ref 只指向兼容 Use，不能接收精确 outcome")
+    return payload
+
+
+def append_memory_use_outcome(
+        event_log: MemoryEventLog, use_ref: MemoryObjectRef, *, scope: ScopeIdentity,
+        outcome_kind: MemoryLinkedRef, outcome_ref: MemoryLinkedRef | None,
+        observed_at: LogicalTimestamp, outcome_trace_key: tuple[int, ...] = (),
+        ) -> MaterializedMemoryEvent:
+    """共用精确结果归因，不改变原 A-10 消费者的采用资格校验。"""
+    use = declared_use_payload(event_log, use_ref)
+    if not isinstance(scope, ScopeIdentity):
+        raise TypeError("scope 必须是 ScopeIdentity")
+    if scope.owner != use_ref.owner or scope.versions != use_ref.versions:
+        raise ValueError("outcome scope 与 Use owner/version 不一致")
+    if not isinstance(outcome_kind, MemoryLinkedRef):
+        raise TypeError("outcome_kind 必须是一等引用")
+    if outcome_ref is not None and not isinstance(outcome_ref, MemoryLinkedRef):
+        raise TypeError("outcome_ref 必须是一等引用或 None")
+    if not isinstance(observed_at, LogicalTimestamp):
+        raise TypeError("observed_at 必须是 LogicalTimestamp")
+    if (observed_at.clock.scope.owner != scope.owner
+            or observed_at.clock.scope.versions != scope.versions):
+        raise ValueError("outcome 时钟与 scope owner/version 不一致")
+    payload = UseOutcomePayload(
+        use_ref, use.decision_trace_key, use.query_kind, use.context_key,
+        outcome_kind, outcome_ref, observed_at, outcome_trace_key)
+    return event_log.append(MemoryEvent(MEMORY_EVENT_USE_OUTCOME, use_ref, scope, payload))
+
+
 @dataclass(frozen=True)
 class MemoryUseAttributionResult:
     """一个真实 selection Use 的 Episode、Use 和 A-10 处理链接。"""
@@ -240,8 +288,7 @@ class MemoryUseRuntime:
         self._reject_competing_use(use_ref, use_payload)
         episode = self.event_log.append(MemoryEvent(
             MEMORY_EVENT_EPISODE, episode_ref, state.scope, episode_payload))
-        use = self.event_log.append(MemoryEvent(
-            MEMORY_EVENT_USE, use_ref, state.scope, use_payload))
+        use = append_memory_use(self.event_log, state.scope, use_payload)
         if cross_runtime is not None:
             cross_runtime.record(use)
         return MemoryUseAttributionResult(processing, episode, use)
@@ -257,34 +304,9 @@ class MemoryUseRuntime:
             outcome_trace_key: tuple[int, ...] = (),
             ) -> MaterializedMemoryEvent:
         """把延迟结果追加到一个精确 Use，不向同 query 的其他候选扩散。"""
-        use = self._use_payload(use_ref)
-        if not isinstance(scope, ScopeIdentity):
-            raise TypeError("scope 必须是 ScopeIdentity")
-        if (scope.owner != use_ref.owner
-                or scope.versions != use_ref.versions):
-            raise ValueError("outcome scope 与 Use owner/version 不一致")
-        if not isinstance(outcome_kind, MemoryLinkedRef):
-            raise TypeError("outcome_kind 必须是一等引用")
-        if outcome_ref is not None and not isinstance(
-                outcome_ref, MemoryLinkedRef):
-            raise TypeError("outcome_ref 必须是一等引用或 None")
-        if not isinstance(observed_at, LogicalTimestamp):
-            raise TypeError("observed_at 必须是 LogicalTimestamp")
-        if (observed_at.clock.scope.owner != scope.owner
-                or observed_at.clock.scope.versions != scope.versions):
-            raise ValueError("outcome 时钟与 scope owner/version 不一致")
-        payload = UseOutcomePayload(
-            use_ref,
-            use.decision_trace_key,
-            use.query_kind,
-            use.context_key,
-            outcome_kind,
-            outcome_ref,
-            observed_at,
-            outcome_trace_key,
-        )
-        return self.event_log.append(MemoryEvent(
-            MEMORY_EVENT_USE_OUTCOME, use_ref, scope, payload))
+        return append_memory_use_outcome(
+            self.event_log, use_ref, scope=scope, outcome_kind=outcome_kind,
+            outcome_ref=outcome_ref, observed_at=observed_at, outcome_trace_key=outcome_trace_key)
 
     def _observation(self, ref: MemoryObjectRef) -> ObservationPayload:
         """恢复唯一可见 Observation 声明并核验对象种类。"""
@@ -317,23 +339,7 @@ class MemoryUseRuntime:
 
     def _use_payload(self, ref: MemoryObjectRef) -> UsePayload:
         """恢复一个带完整 M-08 trace 的唯一 Use 声明。"""
-        if (not isinstance(ref, MemoryObjectRef)
-                or ref.object_kind != MEMORY_OBJECT_USE):
-            raise ValueError("use_ref 必须指向 Use")
-        events = self.event_log.query(
-            access=_access_for(ref),
-            event_kind=MEMORY_EVENT_USE,
-            object_ref=ref,
-        )
-        if len(events) != 1 or not isinstance(
-                events[0].event.payload, UsePayload):
-            raise ValueError("use_ref 没有唯一 Use 声明")
-        payload = events[0].event.payload
-        if (not payload.decision_trace_key
-                or payload.query_kind is None
-                or not payload.context_key):
-            raise ValueError("use_ref 只指向兼容 Use，不能接收 M-08 outcome")
-        return payload
+        return declared_use_payload(self.event_log, ref)
 
     def _reject_competing_use(
             self,
@@ -409,6 +415,9 @@ def install_memory_use_runtime(ctx: TrainContext) -> MemoryUseRuntime:
 
 
 __all__ = [
+    "append_memory_use",
+    "append_memory_use_outcome",
+    "declared_use_payload",
     "MemoryUseAttributionResult",
     "MemoryUseRuntime",
     "install_memory_use_runtime",

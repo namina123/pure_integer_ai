@@ -193,6 +193,9 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raise SystemExit(
+        "legacy public_model_release 对话入口已隔离；请使用 "
+        "portable_trained_graph.py strict 三图入口")
     if sys.version_info < MINIMUM_PYTHON:
         raise SystemExit("需要 CPython 3.11 或更高版本")
     root = _bundle_root()

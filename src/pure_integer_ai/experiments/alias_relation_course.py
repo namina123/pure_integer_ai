@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+from pathlib import Path
 
 from pure_integer_ai.cognition.shared.alias_resolution import (
     AliasResolutionProtocol,
@@ -58,7 +59,7 @@ from pure_integer_ai.experiments.train_context import (
     TrainContext,
     make_train_context,
 )
-from pure_integer_ai.storage.backend import DictBackend
+from pure_integer_ai.storage.backend import DictBackend, SQLiteBackend
 from pure_integer_ai.cognition.shared.training_hypothesis import (
     TrainingHypothesisEventSink,
     TrainingHypothesisHistoryProtocol,
@@ -745,13 +746,17 @@ class AliasRelationCourseLoader:
             ctx: TrainContext,
             *,
             preflight_cache: AliasRelationPreflightCache | None = None,
+            isolated_preflight_database: str | Path | None = None,
             ) -> LoadedAliasRelationCourse:
-        """核验内容锁并幂等装配 Core；命中时仅跳过已证明的隔离预演。"""
+        """核验内容锁并幂等装配 Core；可把超长整数图预演放入显式 SQLite。"""
         if not isinstance(ctx, TrainContext):
             raise TypeError("relation course ctx 类型错误")
         if (preflight_cache is not None
                 and not isinstance(preflight_cache, AliasRelationPreflightCache)):
             raise TypeError("relation course preflight cache 类型错误")
+        if (isolated_preflight_database is not None
+                and preflight_cache is not None):
+            raise ValueError("显式隔离预检库和 preflight cache 不得同时使用")
         self._validate_manifest()
         prepared = self._preflight_host(ctx)
         certificate = (
@@ -759,7 +764,7 @@ class AliasRelationCourseLoader:
             else preflight_cache.get(self.expected_sha256)
         )
         if certificate is None:
-            report = self._preflight_isolated()
+            report = self._preflight_isolated(isolated_preflight_database)
             if preflight_cache is not None:
                 if report is None:
                     raise AliasRelationCourseError(
@@ -1002,9 +1007,19 @@ class AliasRelationCourseLoader:
             for source in definition.forming_sources
         )
 
-    def _preflight_isolated(self) -> AliasRelationCourseReport:
-        """在独立 DictBackend 真实预演 S-00、forming、reveal、投影和 owner 恢复。"""
-        backend = DictBackend()
+    def _preflight_isolated(
+            self,
+            database: str | Path | None = None,
+            ) -> AliasRelationCourseReport:
+        """在独立后端真实预演；超长整数键可使用调用方显式 SQLite。"""
+        path = None if database is None else Path(database).resolve()
+        if path is not None:
+            if not path.parent.is_dir() or path.exists():
+                raise AliasRelationCourseError(
+                    "显式 relation 预检 SQLite 必须位于既有目录且尚不存在")
+            backend = SQLiteBackend(str(path))
+        else:
+            backend = DictBackend()
         try:
             ctx = make_train_context(backend)
             prepared = _PreflightCourseState(None, None, None, None)
@@ -1018,6 +1033,8 @@ class AliasRelationCourseLoader:
             return report
         finally:
             backend.close()
+            if path is not None and path.exists():
+                path.unlink()
 
     def _apply(
             self,
@@ -1082,20 +1099,27 @@ class AliasRelationCourseLoader:
                 scope=entry.statement_scope,
                 **manifest.statement_metadata.kwargs(),
             )
-        closure.form_many(tuple(
-            (entry.spec, entry.timestamp_base)
-            for entry in manifest.entries
-        ))
-        closure.recognize_many_at(tuple(
-            (
-                recognition.input,
-                recognition.timestamp_seq,
-                recognition.resolve_timestamp_seq,
-                recognition.projection_timestamp_seq,
-            )
-            for entry in manifest.entries
-            for recognition in entry.recognitions
-        ))
+        # 与 recognition 相同，forming 也按课程顺序逐条提交，避免
+        # DictBackend 在隔离预检中同时持有整批候选定义及其整数组件。
+        # 每次调用仍走既有 form_many 合同，候选身份和 timestamp_base
+        # 完全不变，只限制单次临时 batch 的大小。
+        for entry in manifest.entries:
+            closure.form_many(((entry.spec, entry.timestamp_base),))
+        # 课程 manifest 可能携带大量整数 recognition；一次性把所有
+        # CandidateRecognitionRequest 和 projection 结果放入 tuple 会把
+        # 训练图的临时内存推到不可控。forming 已完整建立，逐条提交仍
+        # 保持 manifest 顺序、逻辑时间和既有 closure/candidate 路由，
+        # 只把批量边界收窄为一个 recognition。
+        for entry in manifest.entries:
+            for recognition in entry.recognitions:
+                closure.recognize_many_at((
+                    (
+                        recognition.input,
+                        recognition.timestamp_seq,
+                        recognition.resolve_timestamp_seq,
+                        recognition.projection_timestamp_seq,
+                    ),
+                ))
         active = tuple(
             entry for entry in manifest.entries
             if consumer.lookup_proposition(
