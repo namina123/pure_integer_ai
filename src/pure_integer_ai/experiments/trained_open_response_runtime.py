@@ -669,6 +669,68 @@ def _graph_identity(value: tuple[int, ...]) -> ObjectIdentity | None:
         return None
 
 
+def _generic_explicit_root_assignment(
+        state: QueryState,
+        contract: _GenericResponseContract,
+        explicit_graph_input_keys: tuple[tuple[int, ...], ...],
+        by_category: dict[int, dict[ObjectIdentity, list[BindingEntry]]],
+        kind_for_category: dict[int, int],
+        ) -> dict[ObjectIdentity, tuple[ObjectIdentity, list[BindingEntry]]] | None:
+    """Bind ordinal-one slots only from unique, evidenced explicit roots."""
+    if (len(contract.graph_slots) < 2 or not explicit_graph_input_keys
+            or any(item.ordinal != 1 for item in contract.graph_slots)):
+        return None
+    categories = tuple(item.category for item in contract.graph_slots)
+    if len(set(categories)) != len(categories):
+        return None
+
+    explicit_roots = {
+        identity
+        for key in explicit_graph_input_keys
+        if (identity := _graph_identity(key)) is not None
+    }
+    query_bindings = frozenset(state.bindings)
+    assignment = {}
+    for graph_slot in contract.graph_slots:
+        expected_kind = kind_for_category.get(graph_slot.category)
+        if graph_slot.category == GENERIC_RESPONSE_GRAPH_TOPIC:
+            expected_kind = OBJECT_PROPOSITION
+        if expected_kind is None:
+            return None
+        roots = {
+            identity for identity in explicit_roots
+            if identity.object_kind == expected_kind
+        }
+        if len(roots) != 1:
+            return None
+        root = next(iter(roots))
+        bindings = tuple(dict.fromkeys(
+            binding for binding in by_category[graph_slot.category].get(root, ())
+            if (not binding.conflict_kept
+                and binding in query_bindings
+                and binding.filler_key == root.stable_key()
+                and binding.scope_key
+                and any(evidence.space == binding.space
+                        and evidence.scope_key == binding.scope_key
+                        for evidence in state.evidence))))
+        if not bindings:
+            return None
+        assignment[graph_slot.binding.slot] = (root, list(bindings))
+    return assignment
+
+
+def _select_generic_graph_assignment(
+        relation_assignments: dict,
+        explicit_root_assignment: dict | None,
+        ) -> dict | None:
+    """Keep explicit-root fallback below, never above, relation evidence."""
+    if len(relation_assignments) == 1:
+        return next(iter(relation_assignments.values()))
+    if not relation_assignments:
+        return explicit_root_assignment
+    return None
+
+
 def _generic_graph_values(
         state: QueryState,
         contract: _GenericResponseContract,
@@ -1033,9 +1095,18 @@ def _generic_graph_values(
                         if old_filler != filler:
                             raise ValueError("Core hop graph assignment drifted")
                         prior[slot] = (filler, list({*old_bindings, *bindings}))
-            if len(hop_assignments) != 1:
+            explicit_assignment = None
+            if not hop_assignments:
+                # Independent explicitly supplied graph roots may close only
+                # first-ordinal typed slots. Higher ordinals and text-derived
+                # contracts remain relation-qualified above.
+                explicit_assignment = _generic_explicit_root_assignment(
+                    state, contract, explicit_graph_input_keys, by_category,
+                    kind_for_category)
+            selected_by_slot = _select_generic_graph_assignment(
+                hop_assignments, explicit_assignment)
+            if selected_by_slot is None:
                 return None
-            selected_by_slot = next(iter(hop_assignments.values()))
         else:
             selected_by_slot = next(iter(assignments.values()))
 
