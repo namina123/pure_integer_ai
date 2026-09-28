@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 from pure_integer_ai.cognition.shared.identity import (
-    concept_identity,
+    OBJECT_PROPOSITION, ObjectIdentity, concept_identity,
     structure_concept_identity,
 )
 from pure_integer_ai.cognition.shared.response_plan import (
@@ -20,6 +20,18 @@ from pure_integer_ai.cognition.shared.response_plan import (
     ResponseSlot,
     response_act_identity,
 )
+from pure_integer_ai.cognition.shared.query_state import (
+    BindingEntry,
+    EvidenceEntry,
+    QueryRoot,
+    QueryState,
+    ROOT_EXPANDED,
+    SPACE_CORE,
+    SPACE_DIALOGUE,
+    SPACE_MEMORY,
+    TERMINATION_ANSWER_CLOSED,
+    TERMINATION_NO_FRONTIER,
+)
 from pure_integer_ai.experiments.conversation_typed_relation_bridge import (
     build_authored_w06_learning_runtime,
 )
@@ -27,7 +39,14 @@ from pure_integer_ai.experiments.language_protocol_runtime import (
     install_language_graph_protocols,
 )
 from pure_integer_ai.experiments.generation_organization import (
+    ClosedGenerationEvidence,
+    bind_query_evidence,
+    build_multi_response_plan,
     plan_from_active_fact,
+)
+from pure_integer_ai.experiments.trained_relation_graph_runtime import (
+    GraphRelationGeneration,
+    RelationSurfaceBinding,
 )
 from pure_integer_ai.experiments.run_conversation_training import (
     dialogue_semantic_protocols,
@@ -95,25 +114,17 @@ def test_every_active_fact_forms_verifiable_response_plan(tmp_path):
             assert plan.stable_key()
 
 
-def test_bridge_closed_query_carries_response_plan(tmp_path):
-    """桥闭合查询的 trace 携带可验证 ResponsePlan（含 slot 顺序 + realization）。"""
+def test_bridge_without_generation_connector_fails_closed(tmp_path):
+    """Core candidate 无 trained generation connector 时不得伪造 ResponsePlan。"""
     database = _trained_database(tmp_path)
     with TrainedGraphQueryBridge(database) as bridge:
+        assert bridge.surface_generator is None
         result = bridge.query(
             "麻雀集合包含于鸟类集合", minimum_depth=1, max_depth=3)
-        rp = result.get("response_plan")
-        assert rp is not None
-        assert rp["response_act"]
-        assert rp["slot_sequence"]
-        assert rp["realization_candidates"]
-        # 槽位表层按 Span 顺序出现；realization 表层完整（token postcheck 已验）。
-        assert all(
-            s["filler_surface_values"] for s in rp["slot_sequence"])
-        assert all(
-            type(s["required"]) is int for s in rp["slot_sequence"])
-        assert all(
-            item["surface_values"]
-            for item in rp["realization_candidates"])
+    assert result["termination"] == TERMINATION_NO_FRONTIER
+    assert result["termination_state"]["generation_ready"] == 0
+    assert result["response_plan"] is None
+    assert result["response_surface"] == ""
 
 
 def test_response_plan_token_postcheck_rejects_missing_required_slot():
@@ -146,6 +157,114 @@ def test_response_plan_token_postcheck_rejects_missing_required_slot():
         raise AssertionError("缺失必填槽的 ResponsePlan 不应通过 token postcheck")
     except ValueError:
         pass
+
+
+def _multi_claim_evidence():
+    """Synthetic graph-only claims used to exercise the new audit contract."""
+    roles = (structure_concept_identity((990, 1)),
+             structure_concept_identity((990, 2)))
+    fillers = (concept_identity((991, 1)), concept_identity((991, 2)),
+               concept_identity((991, 3)), concept_identity((991, 4)))
+    claim_identities = (
+        ObjectIdentity(OBJECT_PROPOSITION, (992, 1)),
+        ObjectIdentity(OBJECT_PROPOSITION, (992, 2)),
+    )
+    claims = tuple(item.stable_key() for item in claim_identities)
+    evidences = []
+    for ordinal, claim in enumerate(claims):
+        bindings = (
+            RelationSurfaceBinding(roles[0], fillers[ordinal * 2],
+                                   ("甲" if ordinal == 0 else "乙"),
+                                   100 + ordinal, 0, 1),
+            RelationSurfaceBinding(roles[1], fillers[ordinal * 2 + 1],
+                                   ("一" if ordinal == 0 else "二"),
+                                   100 + ordinal, 1, 2),
+        )
+        proposition = ObjectIdentity.from_stable_key(claim)
+        evidences.append(ClosedGenerationEvidence(
+            bindings,
+            GraphRelationGeneration(
+                "甲包含一；乙包含二" if ordinal == 0
+                else "甲包含一；乙包含二",
+                proposition, 200 + ordinal, 4,
+                connector=structure_concept_identity((993, ordinal + 1)),
+                representations=(concept_identity((994, ordinal + 1)),),
+            ),
+            claim,
+            (995, ordinal + 1),
+            300 + ordinal,
+        ))
+    # The composition generation is the only source of the realized join.
+    generation = GraphRelationGeneration(
+        "甲包含一；乙包含二；丙包含三；丁包含四",
+        structure_concept_identity((996, 1)), 401, 4,
+        connector=structure_concept_identity((996, 2)),
+        representations=(concept_identity((997, 1)),),
+    )
+    return tuple(evidences), generation
+
+
+def test_multi_claim_plan_keeps_claim_evidence_and_slot_ranges():
+    evidences, generation = _multi_claim_evidence()
+    plan = build_multi_response_plan(evidences, generation)
+    assert plan is not None
+    assert len(plan.claim_refs) == 2
+    assert len(plan.claim_evidence_refs) == 2
+    assert len(plan.claim_slot_ranges) == 2
+    assert plan.claim_slot_ranges[0][1:] == (0, 2)
+    assert plan.claim_slot_ranges[1][1:] == (2, 4)
+    trace = plan.to_dict()
+    assert len(trace["claim_evidence_refs"]) == 2
+    assert len(trace["claim_slot_ranges"]) == 2
+    assert plan.surface()
+
+
+def test_multi_claim_plan_rejects_duplicate_claims():
+    evidences, generation = _multi_claim_evidence()
+    duplicate = (evidences[0], evidences[0])
+    assert build_multi_response_plan(duplicate, generation) is None
+
+
+def test_multi_claim_plan_rejects_realization_missing_any_claim_slots():
+    evidences, _generation = _multi_claim_evidence()
+    bad = GraphRelationGeneration(
+        "甲包含一", structure_concept_identity((996, 3)),
+        402, 2, connector=structure_concept_identity((996, 4)),
+        representations=(concept_identity((997, 2)),),
+    )
+    assert build_multi_response_plan(evidences, bad) is None
+
+
+def test_multi_claim_binding_replaces_placeholders_with_state_core_evidence():
+    evidences, generation = _multi_claim_evidence()
+    plan = build_multi_response_plan(evidences, generation)
+    assert plan is not None
+    claims = tuple(item.stable_key() for item in plan.claim_refs)
+    bindings = tuple(
+        BindingEntry(slot.role.stable_key(), slot.filler.stable_key(),
+                     space=SPACE_CORE)
+        for slot in plan.slot_sequence)
+    state_evidence = tuple(
+        EvidenceEntry((700 + index,), claim, space=SPACE_CORE, polarity=1,
+                      evidence_key=(701 + index,))
+        for index, claim in enumerate(claims))
+    state = QueryState(
+        (800,),
+        roots=tuple(QueryRoot(space, (900 + space,), ROOT_EXPANDED, 1)
+                    for space in (SPACE_CORE, SPACE_MEMORY, SPACE_DIALOGUE)),
+        bindings=bindings,
+        evidence=state_evidence,
+        evidence_closed=1,
+        best_candidate_key=claims[0],
+        termination=TERMINATION_ANSWER_CLOSED,
+    )
+    bound = bind_query_evidence(plan, state)
+    assert all(ref in bound.evidence_refs
+               for _claim, refs in bound.claim_evidence_refs for ref in refs)
+    assert all(ref == item.stable_key()
+               for item, (_claim, refs) in zip(state_evidence,
+                                               bound.claim_evidence_refs)
+               for ref in refs)
 
 
 def test_response_plan_stable_key_roundtrip_is_pure_integer():

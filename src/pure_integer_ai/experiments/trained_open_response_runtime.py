@@ -1957,6 +1957,20 @@ def generate_generic_responses(
     memory_refs = _active_memory_refs(
         state, hypotheses,
         selected_hypothesis_keys={hypotheses[0].hypothesis_key})
+    # A compound input can contain several independently closed proposition
+    # candidates while the factual route remains ineligible (the enclosing
+    # discourse composition deliberately keeps evidence_closed=0). Preserve
+    # those trained proposition identities as auditable discourse links in the
+    # non-claim UNKNOWN plan. They are context links, never claim_refs, so
+    # structural input evidence cannot become a factual answer.
+    compound_proposition_links = ()
+    if (input_structure.discourse_compositions
+            or input_structure.discourse_gaps):
+        compound_proposition_links = tuple(
+            ObjectIdentity.from_stable_key(item.proposition_key)
+            for item in input_structure.relation_candidates
+            if item.state == STRUCTURE_CLOSED
+        )
     response = ResponsePlan(
         selection.stance,
         (),
@@ -1972,7 +1986,8 @@ def generate_generic_responses(
         # consumed the requested graph input in the same QueryState and lets
         # delivery attribution account for the root without replaying it.
         discourse_links=tuple(sorted(
-            {template.connector, *(item.filler for item in graph_values),
+            {template.connector, *compound_proposition_links,
+             *(item.filler for item in graph_values),
              *(ObjectIdentity.from_stable_key(key)
                for key in explicit_graph_input_keys)},
             key=lambda item: item.stable_key(),

@@ -11,7 +11,7 @@
   实现协议注入·系统定义契约·外包件填实现（§7.3 接口归系统）。源解析是数据摄入非系统设计核心。
 
 **E10 local_dir 首选**：LocalDirSource 读 PURE_INTEGER_AI_LOCAL_DIR 本地裸文本文件（用户第三方下载器
-  下到 K:\\数据集）·纯本地读 = 确定性 + 离线可复现·免 SDK 版本漂移/网络限流/镜像坑。优先序：
+  下载到配置的数据集目录）·纯本地读 = 确定性 + 离线可复现·免 SDK 版本漂移/网络限流/镜像坑。优先序：
   local_dir > SDK > 跳过（记失败源）。LocalDirSource 是首选源·SDK 源作兜底。
 
 **E5 graceful 降级**：单源失败不破坏训练——available()=False 跳过非崩·collect() 异常降级·

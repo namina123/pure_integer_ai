@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
+import re
 import shutil
 
 
@@ -44,6 +45,13 @@ _STATE_FIELDS = (
     "weaning_ready",
     "weaning_blockers",
 )
+
+_WINDOWS_ABSOLUTE_PATH = re.compile(
+    rb"(?i)(?<![a-z0-9_])[a-z]:(?:\\|/(?!/))")
+
+
+def _contains_windows_absolute_path(payload: bytes) -> bool:
+    return _WINDOWS_ABSOLUTE_PATH.search(payload) is not None
 
 
 class TrainedGraphReleaseError(ValueError):
@@ -1204,8 +1212,7 @@ def load_trained_graph_release(
             raise TrainedGraphReleaseError(f"release payload 漂移: {relative}")
         if path.suffix in {".json", ".txt"}:
             raw = path.read_bytes()
-            if any(marker in raw for marker in (
-                    b"D:\\", b"D:/", b"K:\\", b"K:/")):
+            if _contains_windows_absolute_path(raw):
                 raise TrainedGraphReleaseError(
                     f"release payload 含本机绝对路径: {relative}")
         declared.add(relative.as_posix())
@@ -1219,8 +1226,7 @@ def load_trained_graph_release(
            or "qa" in Path(path).name.lower() for path in actual):
         raise TrainedGraphReleaseError("trained graph release 不得携带课程或 QA")
     raw_manifest = manifest_path.read_bytes()
-    if any(marker in raw_manifest for marker in (
-            b"D:\\", b"D:/", b"K:\\", b"K:/")):
+    if _contains_windows_absolute_path(raw_manifest):
         raise TrainedGraphReleaseError("release manifest 含本机绝对路径")
 
     def entry_path(field: str) -> Path:

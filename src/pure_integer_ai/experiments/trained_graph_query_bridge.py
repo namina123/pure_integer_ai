@@ -73,10 +73,12 @@ from pure_integer_ai.cognition.understanding.query_input_structure import (
     STRUCTURE_CLOSED,
     STRUCTURE_OPEN,
     STRUCTURE_ORDER_CONFLICT,
+    TrainedInputDiscourseOperator,
     InputRelationCandidate,
     QueryInputStructure,
     TrainedInputStructureProjector,
     graph_query_input_structure,
+    scope_local_conjunction_members,
 )
 from pure_integer_ai.cognition.understanding.artifact_query_input import (
     ArtifactQueryInput,
@@ -117,6 +119,12 @@ from pure_integer_ai.experiments.trained_query_evidence import (
     dialogue_query_evidence,
 )
 from pure_integer_ai.experiments.trained_input_concept_links import restore_input_concept_links
+from pure_integer_ai.experiments.trained_input_discourse_graph import (
+    read_input_discourse_operator_graph,
+)
+from pure_integer_ai.experiments.trained_input_discourse_conjunction_graph import (
+    read_input_discourse_conjunction_graph,
+)
 from pure_integer_ai.experiments.trained_open_role_frames import restore_open_role_frames
 from pure_integer_ai.experiments.trained_open_response_runtime import (
     GenericResponseConnectorQueryNode,
@@ -264,6 +272,52 @@ _INPUT_SEMANTIC_PROJECTION_EVIDENCE = (91569, 1)
 _INPUT_RELATION_PROJECTION_EVIDENCE = (91569, 2)
 _DISCOURSE_TOPIC_GRAPH_EVIDENCE = (91569, 3)
 _MEMORY_DELIVERED_GRAPH_SURFACE_EVIDENCE = (91572, 2)
+_INPUT_DISCOURSE_CONJUNCTION_ROLE = (91599, 4)
+_INPUT_DISCOURSE_CONJUNCTION_EVIDENCE = (91599, 5)
+
+
+def _closed_scope_conjunction_components(
+        bindings: tuple[tuple[tuple[int, ...], tuple[int, ...],
+                                tuple[tuple[int, ...], ...]], ...],
+        generation_ready: set[tuple[int, ...]],
+        ) -> tuple[tuple[int, ...], ...]:
+    """Return one verified connected claim component, if one exists.
+
+    Each trained conjunction is binary.  A chain of adjacent conjunctions can
+    authorize a larger composition only when every edge is closed and every
+    member was generated in this QueryState.  Disconnected edges, duplicate
+    members, or an edge with an unready proposition remain fail-closed.
+    """
+    edges = tuple(sorted({
+        tuple(sorted(set(members)))
+        for _composition, _relation, members in bindings
+        if len(set(members)) == 2 and set(members) <= generation_ready
+    }))
+    if not edges:
+        return ()
+    parent = {member: member for edge in edges for member in edge}
+
+    def find(item):
+        root = item
+        while parent[root] != root:
+            root = parent[root]
+        while parent[item] != item:
+            next_item = parent[item]
+            parent[item] = root
+            item = next_item
+        return root
+
+    for left, right in edges:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+    components = {}
+    for member in parent:
+        components.setdefault(find(member), set()).add(member)
+    if len(components) != 1:
+        return ()
+    component = tuple(sorted(next(iter(components.values()))))
+    return (component,) if len(component) >= 2 else ()
 
 
 def _contains_integer(haystack: tuple[int, ...], needle: tuple[int, ...]) -> bool:
@@ -402,15 +456,16 @@ class _IntegerQueryTrace(QueryTracer):
         # 由消费者无损恢复；这避免把结构化 trace 误当作重复数据写入。
         self._key_ids: dict[tuple[int, ...], int] = {}
         self._key_table: list[tuple[int, ...]] = []
-        self._legacy_item_keys: dict[object, tuple[int, ...]] = {}
-        self._item_refs: dict[int, tuple[object, int]] = {}
+        # Cache only stable integer keys.  The previous implementation kept a
+        # strong reference to every immutable frontier/binding/evidence object
+        # ever seen so CPython ``id`` reuse could not occur.  A query creates
+        # thousands of short-lived states; retaining those objects made a
+        # single ordinary turn grow to gigabytes.  The output is keyed by
+        # stable integers, so deriving the key on each lookup preserves the
+        # trace contract without retaining query-state history.
 
     def _legacy_key(self, item) -> tuple[int, ...]:
-        key = self._legacy_item_keys.get(item)
-        if key is None:
-            key = item.stable_key()
-            self._legacy_item_keys[item] = key
-        return key
+        return item.stable_key()
 
     def _ref(self, key: tuple[int, ...]) -> int:
         if type(key) is not tuple or any(type(item) is not int for item in key):
@@ -423,15 +478,7 @@ class _IntegerQueryTrace(QueryTracer):
         return ref
 
     def _item_ref(self, item) -> int:
-        identity = id(item)
-        cached = self._item_refs.get(identity)
-        if cached is not None and cached[0] is item:
-            return cached[1]
-        value = self._ref(item.stable_key())
-        # 保留对象强引用直到本次 trace 结束，避免 CPython id 复用；对象
-        # identity 只用于运行期缓存，输出引用仍完全由稳定整数键决定。
-        self._item_refs[identity] = (item, value)
-        return value
+        return self._ref(item.stable_key())
 
     def record(self, state: QueryState, reason: int) -> None:
         if not self.reference_mode:
@@ -545,6 +592,10 @@ class TrainedGraphQueryBridge:
             space_weights: tuple[int, int, int] = _DEFAULT_SPACE_WEIGHTS,
             surface_generator: RelationGraphSurfaceGenerator | None = None,
             semantic_input_views: tuple[SemanticCandidateInputView, ...] = (),
+            input_discourse_operators: tuple[
+                TrainedInputDiscourseOperator, ...] = (),
+            input_discourse_graph_database: str | Path | None = None,
+            input_discourse_conjunction_graph_database: str | Path | None = None,
             # Successor occurrence evidence is diagnostic/training-only and
             # is rejected here so it cannot enter a production QueryState.
             successor_evidence: bool = False,
@@ -559,6 +610,36 @@ class TrainedGraphQueryBridge:
                 "space_weights 必须是 Core>Memory>Dialogue 的三个正整数")
         self.space_weights = space_weights
         self.surface_generator = surface_generator
+        if (type(input_discourse_operators) is not tuple
+                or any(not isinstance(item, TrainedInputDiscourseOperator)
+                       for item in input_discourse_operators)):
+            raise TypeError("input_discourse_operators must be trained integer records")
+        if input_discourse_graph_database is not None and input_discourse_operators:
+            raise ValueError(
+                "production operator graph 与外部 operator 注入不能同时使用")
+        self.input_discourse_graph_metadata = None
+        if input_discourse_graph_database is None:
+            self.input_discourse_operators = tuple(sorted(
+                set(input_discourse_operators), key=lambda item: item.stable_key()))
+        else:
+            (self.input_discourse_operators,
+             self.input_discourse_graph_metadata) = (
+                read_input_discourse_operator_graph(
+                    input_discourse_graph_database))
+        if input_discourse_conjunction_graph_database is None:
+            self.input_discourse_conjunctions = ()
+            self.input_discourse_conjunction_graph_metadata = None
+        else:
+            (self.input_discourse_conjunctions,
+             self.input_discourse_conjunction_graph_metadata) = (
+                read_input_discourse_conjunction_graph(
+                    input_discourse_conjunction_graph_database))
+        known_operator_keys = {item.operation_key
+                               for item in self.input_discourse_operators}
+        if any(item.operation_key not in known_operator_keys
+               for item in self.input_discourse_conjunctions):
+            raise ValueError(
+                "conjunction graph references an operator absent from the operator graph")
         self.core_runtime = TrainedRelationGraphRuntime(database)
         if type(successor_evidence) is not bool:
             raise ValueError("successor_evidence 必须是 bool")
@@ -632,7 +713,8 @@ class TrainedGraphQueryBridge:
             key=lambda item: item.stable_key(),
         )), concept_links=restore_input_concept_links(self.core_runtime),
             open_role_frames=restore_open_role_frames(
-                self.core_runtime.active_surface_frames(), facts))
+                self.core_runtime.active_surface_frames(), facts),
+            discourse_operators=self.input_discourse_operators)
         # Memory 写入和查询共享同一个训练后输入投影器。这样 O/H/E 的候选键
         # 只来自已训练图拓扑，而不是历史原文、posting 或字符特征。
         self.memory = None
@@ -785,7 +867,8 @@ class TrainedGraphQueryBridge:
         self.input_projector = TrainedInputStructureProjector(tuple(sorted(
             set((*graph_structures, *semantic_structures, *kdconv_structures)),
             key=lambda item: item.stable_key(),
-        )), concept_links=concept_links, open_role_frames=open_frames)
+        )), concept_links=concept_links, open_role_frames=open_frames,
+            discourse_operators=self.input_discourse_operators)
         if self.memory is not None:
             self.memory.input_projector = self.input_projector
         if self._reference_runtime is not None:
@@ -1071,7 +1154,13 @@ class TrainedGraphQueryBridge:
         }))
         selected = self.memory.active_structures(
             candidate_keys=candidate_keys,
-            observation_refs=(() if self._input_observation_ref is None else (self._input_observation_ref,)))
+            observation_refs=(() if self._input_observation_ref is None else (self._input_observation_ref,)),
+            # Production QueryState restores the current turn plus the
+            # immediately linked delivered response.  The graph candidate
+            # routes still select any directly evidenced prior hypothesis;
+            # unrelated historical context edges must not expand recursively.
+            context_depth_limit=1,
+        )
         self._response_contexts = restore_response_contexts(self.memory, selected)
         self._delivered_graph_slot_projections = (
             delivered_graph_slot_projections(self._response_contexts))
@@ -1262,7 +1351,10 @@ class TrainedGraphQueryBridge:
         # the projector emitted an open/partial relation shape.  Only a
         # relation whose trained predicate and all required fillers are closed
         # is a current-input graph signal for connector priority.
-        complete_relation = bool(input_structure and any(
+        complete_relation = bool(input_structure
+                                 and not (input_structure.discourse_compositions
+                                          or input_structure.discourse_gaps)
+                                 and any(
             item.state == STRUCTURE_CLOSED
             and item.required_count >= 2
             and item.required_count == item.support_count
@@ -1289,6 +1381,10 @@ class TrainedGraphQueryBridge:
         if self._reference_candidate_sets:
             mask |= RESPONSE_FEATURE_REFERENCE_OPEN
         if len(tuple(hypotheses)) > 1:
+            mask |= RESPONSE_FEATURE_MULTI_HYPOTHESIS
+        if (input_structure is not None
+                and (input_structure.discourse_compositions
+                     or input_structure.discourse_gaps)):
             mask |= RESPONSE_FEATURE_MULTI_HYPOTHESIS
         relation_state = self._discourse_relation_feature_state(input_structure)
         if not complete_relation and not self._discourse_graph_input_keys:
@@ -1889,6 +1985,26 @@ class TrainedGraphQueryBridge:
                         by_semantic[semantic_key] = candidate
                 canonical_closed = tuple(sorted(
                     by_semantic.values(), key=lambda item: item.stable_key()))
+                # A conjunction is a trained relation over the exact
+                # candidate identities emitted by the projector.  KdConv
+                # semantic deduplication must not discard one of those
+                # identities before QueryInputStructure validates the
+                # composition references.  Preserve every candidate named by
+                # a discourse composition; later scope/conjunction checks
+                # still decide whether it is authorized and closed.
+                referenced_relation_keys = {
+                    relation_key
+                    for composition in input_structure.discourse_compositions
+                    for group in composition.operand_relation_keys
+                    for relation_key in group
+                }
+                canonical_by_key = {
+                    item.stable_key(): item for item in canonical_closed}
+                for item in input_structure.relation_candidates:
+                    if item.stable_key() in referenced_relation_keys:
+                        canonical_by_key[item.stable_key()] = item
+                canonical_closed = tuple(sorted(
+                    canonical_by_key.values(), key=lambda item: item.stable_key()))
                 selected = frozenset(item.proposition_key
                                      for item in canonical_closed)
                 return replace(
@@ -1968,7 +2084,8 @@ class TrainedGraphQueryBridge:
         else:
             observation_refs = (self._input_observation_ref,)
         structures = self.memory.active_structures(
-            candidate_keys=(), observation_refs=observation_refs)
+            candidate_keys=(), observation_refs=observation_refs,
+            context_depth_limit=0)
         contexts = tuple(
             item for item in restore_response_contexts(self.memory, structures)
             if isinstance(item, DeliveredFactualResponseContext)
@@ -2402,11 +2519,38 @@ class TrainedGraphQueryBridge:
         # factual ResponsePlan topic, which is an explicit Episode edge and
         # must be recovered before the shared roots/frontier are seeded.
         input_structure = self._restore_factual_topic_input(input_structure)
-        concept_anchors = self.anchor_concepts(input_structure)
+        composition_present = bool(
+            input_structure.discourse_compositions
+            or input_structure.discourse_gaps)
+        conjunction_by_operation = {
+            item.operation_key: item
+            for item in self.input_discourse_conjunctions
+        }
+        local_conjunctions = scope_local_conjunction_members(
+            input_structure, frozenset(conjunction_by_operation))
+        composition_by_key = {
+            item.stable_key(): item
+            for item in input_structure.discourse_compositions
+        }
+        scope_conjunction_bindings = tuple(sorted(
+            (composition_key,
+             conjunction_by_operation[
+                 composition_by_key[composition_key].operation_key].relation_key,
+             members)
+            for composition_key, members in local_conjunctions
+            if composition_key in composition_by_key))
+        # A verified scope conjunction is the only composition route allowed
+        # to seed Core relation roots.  Unverified/ambiguous compositions keep
+        # the historical empty-anchor UNKNOWN path.
+        concept_anchors = (
+            self.anchor_concepts(input_structure)
+            if (not composition_present or scope_conjunction_bindings)
+            else ())
         # The input projector can only close a relation when its trained
         # predicate span is present.  For an unseen inverse expression, use
         # the exact graph pair route above before ranking Dialogue roots.
-        pair_inverse = self._pair_inverse_candidates(input_structure, self.facts)
+        pair_inverse = (() if composition_present else
+                        self._pair_inverse_candidates(input_structure, self.facts))
         if pair_inverse:
             replacements = {
                 relation.proposition_key: replace(
@@ -2431,7 +2575,7 @@ class TrainedGraphQueryBridge:
         # Otherwise every unmatched sentence expands dozens of one-slot
         # concept guesses until the shared budget is exhausted before the
         # generic Dialogue act can consume the same QueryState.
-        complete_relation = any(
+        complete_relation = not composition_present and any(
             item.state == STRUCTURE_CLOSED
             and item.required_count >= 2
             and item.required_count == item.support_count
@@ -2967,6 +3111,25 @@ class TrainedGraphQueryBridge:
             )
             initial_bindings[binding.stable_key()] = binding
             initial_evidence[evidence.stable_key()] = evidence
+        for composition_key, relation_key, members in scope_conjunction_bindings:
+            proof_key = (
+                *_INPUT_DISCOURSE_CONJUNCTION_EVIDENCE,
+                len(composition_key), *composition_key,
+                len(relation_key), *relation_key,
+                len(members),
+                *(value for member in members
+                  for value in (len(member), *member)),
+            )
+            binding = BindingEntry(
+                _INPUT_DISCOURSE_CONJUNCTION_ROLE, proof_key,
+                space=_DIALOGUE, scope_key=query_key)
+            evidence = EvidenceEntry(
+                input_structure.source_ref, proof_key,
+                space=_DIALOGUE, polarity=3, trust=1,
+                evidence_key=proof_key, scope_key=query_key,
+                payload_key=proof_key)
+            initial_bindings[binding.stable_key()] = binding
+            initial_evidence[evidence.stable_key()] = evidence
 
         initial = seed_query(
             query_key,
@@ -2995,6 +3158,7 @@ class TrainedGraphQueryBridge:
             artifact_bridge_matches=self._artifact_bridge_matches,
             input_order_conflict=input_order_conflict,
             input_required_slots_open=selected_required_open,
+            scope_conjunction_bindings=scope_conjunction_bindings,
             response_nodes=response_nodes,
             generic_response_nodes=generic_response_nodes,
             generic_hypotheses=generic_hypotheses,
@@ -3027,6 +3191,27 @@ class TrainedGraphQueryBridge:
             if final_reason != TERMINATION_OPEN:
                 state = state.with_(termination=final_reason)
                 tracer.record(state, final_reason)
+        # The ordinary termination predicate intentionally rejects a tied
+        # best/second candidate.  A verified scope conjunction is the one
+        # graph relation that authorizes that tie to remain multi-claim: both
+        # members are independently Core/Dialogue-supported and generated in
+        # this same QueryState.  Promote only that unique closed relation;
+        # unrelated ties stay UNKNOWN/CLARIFY.
+        conjunction_claim_sets = _closed_scope_conjunction_components(
+            scope_conjunction_bindings,
+            self.generation_ready_propositions,
+        )
+        if (
+                composition_present
+                and len(conjunction_claim_sets) == 1
+                and state.evidence_closed
+                and not state.conflict_open
+                and state.required_slots_open == 0
+                and not unvisited_frontier(state.frontier, state.visited)
+                and all(root.status != ROOT_PENDING for root in state.roots)
+                and state.termination != TERMINATION_ANSWER_CLOSED):
+            state = state.with_(termination=TERMINATION_ANSWER_CLOSED)
+            tracer.record(state, TERMINATION_ANSWER_CLOSED)
         self._discourse_topic_query_projection = validate_discourse_topic_query_state(
             state,
             self._discourse_topic_candidates,
@@ -3038,7 +3223,8 @@ class TrainedGraphQueryBridge:
         # 结构生成：若 Core 侧证据闭合，把已绑定命题交给槽位重填，产出
         # 新表层（非整句回放）。生成失败/无闭合命题时返回 None，不猜。
         generation = None
-        if hops and state.termination == TERMINATION_ANSWER_CLOSED:
+        if (not composition_present and hops
+                and state.termination == TERMINATION_ANSWER_CLOSED):
             generation = self._generate_from_closed(
                 hops, concept_anchors, state.best_candidate_key)
         # 阶段 C：把闭合命题经 ResponsePlan 组织并执行 token postcheck。生成
@@ -3048,9 +3234,26 @@ class TrainedGraphQueryBridge:
         response_plan = (
             self._response_plan_from_closed(
                 hops, concept_anchors, state.best_candidate_key, state)
-            if state.termination == TERMINATION_ANSWER_CLOSED
+            if (not composition_present
+                and state.termination == TERMINATION_ANSWER_CLOSED)
             else None
         )
+        if (composition_present
+                and state.termination == TERMINATION_ANSWER_CLOSED):
+            response_plan = self._multi_response_plan_from_closed(
+                hops, state, scope_conjunction_bindings=scope_conjunction_bindings)
+            if response_plan is not None and len(response_plan.claim_refs) >= 2:
+                generation = {
+                    "kind": 4,
+                    "claim_keys": [list(item.stable_key())
+                                   for item in response_plan.claim_refs],
+                    "surface_values": list(map(ord, response_plan.surface())),
+                    "scope_conjunction_bindings": [
+                        [list(composition), list(relation),
+                         [list(member) for member in members]]
+                        for composition, relation, members
+                        in scope_conjunction_bindings],
+                }
         # 终止字段与可发布计划必须一致：闭合状态若无法构造并通过
         # ResponsePlan/token postcheck，立即降级为 NO_FRONTIER，绝不暴露
         # 空表层或伪造的 ANSWER_CLOSED。
@@ -3077,6 +3280,8 @@ class TrainedGraphQueryBridge:
                         state.read_count,
                     ),
                     tuple(map(ord, response_plan.surface())),
+                    tuple(item.stable_key() for item in response_plan.claim_refs)
+                    if len(response_plan.claim_refs) > 1 else (),
                 ),
             )
         if (state.termination in {TERMINATION_CLARIFY_MISSING_BINDING, TERMINATION_NO_FRONTIER}
@@ -3247,7 +3452,7 @@ class TrainedGraphQueryBridge:
             and not any(
                 item.space == _CORE and item.polarity in {1, 2}
                 for item in state.evidence))
-        if (generic_adoption_ready
+        if (not composition_present and generic_adoption_ready
                 and (not state.conflict_open or generic_only_conflict
                      or generic_structural_closed
                      or generic_structural_unknown
@@ -3286,6 +3491,57 @@ class TrainedGraphQueryBridge:
                     "trace": list(generic.trace),
                     "surface_values": list(map(ord, unknown_surface)),
                 }
+        if composition_present:
+            factual_conjunction = bool(
+                state.termination == TERMINATION_ANSWER_CLOSED
+                and response_plan is not None
+                and len(response_plan.claim_refs) >= 2)
+            if factual_conjunction:
+                pass
+            else:
+                self._pending_response_delivery = None
+                generation = None
+                response_plan = None
+            generic = (expander.generic_response_generations[0]
+                       if len(expander.generic_response_generations) == 1
+                       else None)
+            if factual_conjunction:
+                pass
+            elif generic is not None and not generic.response_plan.claim_refs:
+                response_plan = generic.response_plan
+                unknown_surface = response_plan.surface()
+                state = state.with_(
+                    termination=TERMINATION_DIALOGUE_UNKNOWN,
+                    evidence_closed=0,
+                    generation_ready=1,
+                    required_slots_open=max(1, state.required_slots_open),
+                )
+                tracer.record(state, TERMINATION_DIALOGUE_UNKNOWN)
+                if self._input_observation_ref is not None:
+                    self._pending_response_delivery = (
+                        state,
+                        GenericResponseGeneration(
+                            response_plan, self._input_observation_ref,
+                            generic.trace, tuple(map(ord, unknown_surface)),
+                            generic.graph_surfaces),
+                    )
+                generation = {
+                    "kind": 3,
+                    "response_act": list(response_plan.response_act.stable_key()),
+                    "connector": list(_response_plan_connector_key(response_plan)),
+                    "representations": [
+                        list(item.stable_key()) for item in generic.representations],
+                    "trace": list(generic.trace),
+                    "surface_values": list(map(ord, unknown_surface)),
+                }
+            else:
+                state = state.with_(
+                    termination=TERMINATION_NO_FRONTIER,
+                    evidence_closed=0,
+                    generation_ready=0,
+                    required_slots_open=max(1, state.required_slots_open),
+                )
+                tracer.record(state, TERMINATION_NO_FRONTIER)
         return self._finalize(
             state, hops, termination=state.termination,
             reason=_TERMINATION_NAMES.get(state.termination, "OPEN"),
@@ -3427,6 +3683,17 @@ class TrainedGraphQueryBridge:
                 list(item.stable_key()) for item in plan.discourse_links],
             "scope_and_time": list(plan.scope_and_time),
             "evidence_refs": [list(item) for item in plan.evidence_refs],
+            "claim_evidence_refs": [
+                {
+                    "claim": list(claim),
+                    "evidence": [list(ref) for ref in refs],
+                }
+                for claim, refs in plan.claim_evidence_refs
+            ],
+            "claim_slot_ranges": [
+                {"claim": list(claim), "start": start, "end": end}
+                for claim, start, end in plan.claim_slot_ranges
+            ],
             "style_ref": (
                 [] if plan.style_ref is None
                 else list(plan.style_ref.stable_key())),
@@ -3568,6 +3835,76 @@ class TrainedGraphQueryBridge:
             return self._bind_event_time_response_plan(
                 plan, proposition_key, generated)
         except (TypeError, ValueError):
+            return None
+
+    def _multi_response_plan_from_closed(
+            self,
+            hops: tuple[QueryHop, ...],
+            state: QueryState,
+            *,
+            scope_conjunction_bindings: tuple[tuple[tuple[int, ...], tuple[int, ...],
+                                                       tuple[tuple[int, ...], ...]], ...] = (),
+            ) -> object | None:
+        """Build a multi-claim plan only through an explicit trained composer.
+
+        The composer owns the learned literal intervals and connector.  The
+        bridge supplies only the current Core facts and QueryState; it never
+        concatenates component surfaces or infers a conjunction in Python.
+        """
+        if (state.termination != TERMINATION_ANSWER_CLOSED
+                or state.conflict_open or state.required_slots_open
+                or not state.evidence_closed):
+            return None
+        composer = getattr(self.surface_generator, "generate_composition", None)
+        if not callable(composer):
+            return None
+        # A compound input may traverse many Core edges while only one
+        # explicitly trained conjunction authorizes a multi-claim answer.
+        # Select claims from that graph relation, never from hop count or
+        # stable-key ordering.  Without one unique two-member binding the
+        # composition remains UNKNOWN/CLARIFY.
+        candidate_components = _closed_scope_conjunction_components(
+            scope_conjunction_bindings,
+            self.generation_ready_propositions,
+        )
+        if len(candidate_components) != 1:
+            return None
+        proposition_keys = candidate_components[0]
+        if len(proposition_keys) < 2:
+            return None
+        from pure_integer_ai.experiments.generation_organization import (
+            ClosedGenerationEvidence,
+            bind_query_evidence,
+            build_multi_response_plan,
+        )
+        evidences = []
+        components = []
+        for key in proposition_keys:
+            fact = self.core_fact_index.get(key)
+            generated = self.generation_by_proposition.get(key)
+            if fact is None or generated is None:
+                return None
+            evidences.append(ClosedGenerationEvidence(
+                fact.bindings,
+                generated,
+                key,
+                fact.predicate.stable_key(),
+                fact.source_hash,
+                anchor_surface=fact.evidence_surface,
+                connector=generated.connector,
+            ))
+            components.append((
+                self.core_runtime.generation_input(fact.proposition),
+                fact,
+                generated,
+            ))
+        try:
+            composed = composer(tuple(components), state)
+            plan = build_multi_response_plan(tuple(evidences), composed)
+            if plan is None:
+                return None
+            return bind_query_evidence(plan, state)
+        except (RuntimeError, TypeError, ValueError):
             return None
 
     def _generate_from_closed(
@@ -4074,6 +4411,8 @@ class _CrossSpaceExpander(QueryExpander):
             artifact_bridge_matches: tuple[object, ...] = (),
             input_order_conflict: int = 0,
             input_required_slots_open: int = 1,
+            scope_conjunction_bindings: tuple[tuple[tuple[int, ...], tuple[int, ...],
+                                                    tuple[tuple[int, ...], ...]], ...] = (),
             response_nodes: tuple = (),
             generic_response_nodes: tuple = (),
             generic_hypotheses: tuple = (),
@@ -4090,6 +4429,7 @@ class _CrossSpaceExpander(QueryExpander):
         self.artifact_bridge_matches = tuple(artifact_bridge_matches)
         self.input_order_conflict = input_order_conflict
         self.input_required_slots_open = input_required_slots_open
+        self.scope_conjunction_bindings = tuple(scope_conjunction_bindings)
         self.hops: list[QueryHop] = []
         self.expanded_edges: list[tuple[int, ...]] = []
         self.open_nodes = {(node.space, node.key): node
@@ -4220,6 +4560,18 @@ class _CrossSpaceExpander(QueryExpander):
         second_key = state.second_candidate_key
         if not best_key or not second_key or best_key == second_key:
             return False
+        # A three-claim QueryState may rank the two endpoints of a verified
+        # chain (A-C, C-B) as best/second even though they are not one direct
+        # conjunction edge.  Treat the unique closed, generation-ready
+        # component as the authorization boundary; unrelated ties remain
+        # fail-closed.
+        connected_components = _closed_scope_conjunction_components(
+            self.scope_conjunction_bindings,
+            self.owner.generation_ready_propositions,
+        )
+        if any({best_key, second_key} <= set(component)
+               for component in connected_components):
+            return False
         relations = tuple(
             item for item in self.input_structure.relation_candidates
             if item.proposition_key in {best_key, second_key})
@@ -4314,6 +4666,33 @@ class _CrossSpaceExpander(QueryExpander):
             }))
             if dialogue_roots:
                 self.owner._prepare_generation_plans(dialogue_roots, state)
+                # A tied conjunction cannot generate during the first
+                # Dialogue-root visit because margin closure is intentionally
+                # false.  Once all roots have converged, materialize the
+                # trained Dialogue evidence for every successfully generated
+                # claim into this same QueryState.  This is graph evidence,
+                # not a source-surface replay.
+                dialogue_evidence = []
+                for proposition in dialogue_roots:
+                    generated = self.owner.generation_by_proposition.get(
+                        proposition)
+                    fact = self.owner.core_fact_index.get(proposition)
+                    frame = self.owner.dialogue_frame_index.get(proposition)
+                    if generated is None or fact is None or frame is None:
+                        continue
+                    if proposition in self.owner.kdconv_fact_index:
+                        source = (fact.source_hash,)
+                    else:
+                        source = self.owner.core_runtime.generation_input(
+                            frame.proposition)
+                    try:
+                        dialogue_evidence.append(dialogue_query_evidence(
+                            fact.proposition, frame, source, generated))
+                    except (RuntimeError, TypeError, ValueError):
+                        continue
+                if dialogue_evidence:
+                    state = state.with_(evidence=self._unique_evidence([
+                        *state.evidence, *dialogue_evidence]))
         current_evidence = current_query_evidence(state.evidence)
         core_support = {
             item.hypothesis_key for item in current_evidence
@@ -4349,6 +4728,20 @@ class _CrossSpaceExpander(QueryExpander):
                  or self.input_structure.concept_evidence_closed(
                      selected, frozenset(core_support)))
         )
+        conjunction_claim_sets = {
+            tuple(sorted(set(members)))
+            for _composition, _relation, members
+            in self.scope_conjunction_bindings
+            if (len(set(members)) == 2
+                and set(members) == {
+                    state.best_candidate_key, state.second_candidate_key}
+                and set(members) <= core_support
+                and set(members) <= dialogue_support
+                and set(members) <= self.owner.generation_ready_propositions
+                )
+        }
+        conjunction_closed = len(conjunction_claim_sets) == 1
+        closed = closed or conjunction_closed
         reference_open = any(
             item.requires_resolution and item.status != REFERENCE_RESOLVED
             for item in self.owner._reference_resolutions)
@@ -4391,16 +4784,15 @@ class _CrossSpaceExpander(QueryExpander):
                 or reference_conflict
             or any(item.conflict_kept == 1 for item in state.bindings)
             or evidence_conflict
-            or (
-                bool(state.second_candidate_key)
+            or (bool(state.second_candidate_key)
                 and state.best_score > 0
                 and state.best_score == state.second_score
-                and self._distinct_relation_tie(state)
-            )
+                and self._distinct_relation_tie(state))
         )
         return state.with_(
             required_slots_open=int(
-                self.input_required_slots_open or not core_support or reference_open),
+                (self.input_required_slots_open and not conjunction_closed)
+                or not core_support or reference_open),
             evidence_closed=1 if closed else 0,
             conflict_open=conflict_open,
             best_score=state.best_score,
@@ -5161,6 +5553,27 @@ class _CrossSpaceExpander(QueryExpander):
                 depth,
                 observation.source_hash,
             )
+            # Observation relation_occurrences also contain delivery/role
+            # occurrence and other materialization scaffolding.  Those edges
+            # remain persisted and are seeded independently when they are
+            # semantically active, but walking every one here makes a single
+            # input Observation fan out into the whole session graph.  Keep
+            # this frontier limited to the O/H/E objects admitted by the
+            # current bounded restore; unrelated historical edges never enter
+            # this QueryState.
+            active_memory_keys = {
+                (MEMORY_OBJECT_OBSERVATION, item.observation_key)
+                for item in self.owner._memory_observations
+            }
+            active_memory_keys.update(
+                (MEMORY_OBJECT_HYPOTHESIS, item.hypothesis_key)
+                for item in self.owner._memory_hypotheses
+            )
+            active_memory_keys.update(
+                (MEMORY_OBJECT_EVIDENCE, item.evidence_key)
+                for item in self.owner._memory_evidence
+            )
+            queued_memory_targets = set()
             for link in observation.relation_refs:
                 new_bindings.append(BindingEntry((91533, 1), link.stable_key(), space=_MEMORY,
                                                   scope_key=observation.scope_key))
@@ -5169,8 +5582,10 @@ class _CrossSpaceExpander(QueryExpander):
                     self.hops.append(QueryHop(_MEMORY, observation.observation_key, (91533, 1),
                                               observation.observation_key, target.stable_key(), (), depth,
                                               observation.source_hash))
-                    if target.object_kind in {MEMORY_OBJECT_OBSERVATION, MEMORY_OBJECT_HYPOTHESIS,
-                                               MEMORY_OBJECT_EVIDENCE}:
+                    target_identity = (target.object_kind, target.stable_key())
+                    if (target_identity in active_memory_keys
+                            and target_identity not in queued_memory_targets):
+                        queued_memory_targets.add(target_identity)
                         next_edges.append(FrontierEntry(
                             (_MEMORY, *target.stable_key()), _MEMORY, target_key=target.stable_key(),
                             root_key=edge.root_key, source_ref=observation.source_ref,

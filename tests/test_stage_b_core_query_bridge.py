@@ -15,7 +15,7 @@ from pure_integer_ai.cognition.shared.query_state import (
     SPACE_CORE,
     SPACE_DIALOGUE,
     SPACE_MEMORY,
-    TERMINATION_ANSWER_CLOSED,
+    TERMINATION_NO_FRONTIER,
 )
 from pure_integer_ai.cognition.shared.graph_ontology import (
     relation_concept_identity,
@@ -207,7 +207,7 @@ def _semantic_input_view() -> SemanticCandidateInputView:
 
 
 def test_three_space_roots_share_one_query_state(tmp_path):
-    """三类结构根共同扩展；权重只改变次序且不屏蔽低权重图。"""
+    """三类结构根共同扩展；缺少生成 connector 时仍 fail-closed。"""
     database = _trained_database(tmp_path)
     memory_db = tmp_path / "session_memory.sqlite3"
     semantic_view = _semantic_input_view()
@@ -221,13 +221,17 @@ def test_three_space_roots_share_one_query_state(tmp_path):
             semantic_input_views=(semantic_view,),
     ) as bridge:
         assert bridge.memory is not None
+        assert bridge.surface_generator is None
         result = bridge.query(
             "麻雀集合包含于鸟类集合", minimum_depth=2, max_depth=3)
         core_surfaces = {
             "".join(chr(value) for value in item["surface_values"])
             for item in result["hops"] if item["space"] == SPACE_CORE}
         assert "小麻雀" in core_surfaces
-        assert "鸟类集合" in result["response_surface"]
+        assert result["termination"] == TERMINATION_NO_FRONTIER
+        assert result["response_plan"] is None
+        assert result["response_surface"] == ""
+        assert result["termination_state"]["generation_ready"] == 0
         assert result["format"] == "PURE_INTEGER_TRAINED_GRAPH_QUERY_TRACE_V3"
         assert result["active_spaces"] == [
             SPACE_CORE, SPACE_MEMORY, SPACE_DIALOGUE]
@@ -249,14 +253,13 @@ def test_three_space_roots_share_one_query_state(tmp_path):
             SPACE_CORE)
         assert set(expanded_spaces) == {
             SPACE_CORE, SPACE_DIALOGUE}
-        assert result["termination"] == TERMINATION_ANSWER_CLOSED
         assert result["depth"] >= 2
         assert result["termination_state"]["required_slots_open"] == 0
-        assert result["termination_state"]["evidence_closed"] == 1
+        assert result["termination_state"]["evidence_closed"] == 0
         assert result["termination_state"]["conflict_open"] == 0
         assert result["termination_state"]["marginal_gain"] > 0
         assert result["termination_state"]["cycle_hit"] == 0
-        assert result["termination_state"]["generation_ready"] == 1
+        assert result["termination_state"]["generation_ready"] == 0
         assert (result["termination_state"]["best_score"]
                 > result["termination_state"]["second_score"])
         assert result["frontier_trace"]
@@ -295,20 +298,22 @@ def test_three_space_roots_share_one_query_state(tmp_path):
         assert all(not projected.concept_evidence_closed(key, frozenset()) for key in closed)
         bridge.memory.append(rewritten, speaker_kind=1)
         linked = bridge.query(rewritten, minimum_depth=2, max_depth=8)
-        assert linked["termination"] == TERMINATION_ANSWER_CLOSED
+        assert linked["termination"] == TERMINATION_NO_FRONTIER
         assert linked["input_structure"]["concept_routes"]
         assert {item["space"] for item in linked["evidence"]} == {
             SPACE_CORE, SPACE_MEMORY, SPACE_DIALOGUE}
-        assert linked["response_plan"]["claim_refs"] == [
-            linked["termination_state"]["best_candidate"]]
+        assert linked["response_plan"] is None
+        assert linked["response_surface"] == ""
+        assert linked["termination_state"]["generation_ready"] == 0
 
 
-def test_bridge_replayable_and_evidence_closed(tmp_path):
-    """同一输入在同一训练库上的 trace 与 stable key 可重放。"""
+def test_bridge_replayable_without_connector_and_fails_closed(tmp_path):
+    """无 generation connector 时可重放证据 trace，但不能生成回答。"""
     database = _trained_database(tmp_path)
     first = None
     for _ in range(2):
         with TrainedGraphQueryBridge(database) as bridge:
+            assert bridge.surface_generator is None
             result = bridge.query(
                 "麻雀集合包含于鸟类集合",
                 minimum_depth=1,
@@ -320,20 +325,31 @@ def test_bridge_replayable_and_evidence_closed(tmp_path):
             assert first["hops"] == result["hops"]
             assert first["state_key"] == result["state_key"]
     assert all(item["source_hash"] > 0 for item in first["evidence"])
-    assert first["termination"] == TERMINATION_ANSWER_CLOSED
+    assert first["termination"] == TERMINATION_NO_FRONTIER
+    assert first["response_plan"] is None
+    assert first["response_surface"] == ""
+    assert first["termination_state"]["generation_ready"] == 0
 
 
 def test_equal_relation_candidates_do_not_select_by_stable_key(tmp_path):
-    """仅有共享概念且两个关系同分时保留路径但不任取表层回答。"""
+    """两个完整共享端点关系同分时保留冲突而不任取表层回答。"""
     database = _trained_database(tmp_path)
     with TrainedGraphQueryBridge(database) as bridge:
-        result = bridge.query("麻雀集合", minimum_depth=1, max_depth=3)
+        assert bridge.surface_generator is None
+        result = bridge.query(
+            "小麻雀属于麻雀集合；麻雀集合包含于鸟类集合。",
+            minimum_depth=1,
+            max_depth=4,
+        )
     assert result["hops"]
-    assert result["termination"] != TERMINATION_ANSWER_CLOSED
+    assert result["termination"] == TERMINATION_NO_FRONTIER
     assert result["response_plan"] is None
     assert result["response_surface"] == ""
-    assert (result["termination_state"]["best_score"]
-            == result["termination_state"]["second_score"])
+    state = result["termination_state"]
+    assert state["best_candidate"] != state["second_candidate"]
+    assert state["best_score"] == state["second_score"] > 0
+    assert state["conflict_open"] == 1
+    assert state["generation_ready"] == 0
 
 
 def test_no_anchor_returns_clarify_missing_binding(tmp_path):

@@ -102,30 +102,27 @@ def _copy_code(project: Path, target: Path) -> int:
 
 
 def _copy_release_file(source: str, destination: str) -> str:
-    """Avoid another physical copy of the multi-gigabyte model on one volume."""
+    """Copy release payloads so the portable tree never shares model inodes."""
     source_path = Path(source)
     destination_path = Path(destination)
+    copied = Path(shutil.copy2(source_path, destination_path))
     if source_path.name == "training.sqlite3":
-        try:
-            os.link(source_path, destination_path)
-        except OSError as error:
-            raise RuntimeError(
-                "portable model hardlink failed; refusing a silent large copy"
-            ) from error
-        return str(destination_path)
-    return shutil.copy2(source_path, destination_path)
+        source_stat = source_path.stat()
+        copied_stat = copied.stat()
+        if (copied_stat.st_size != source_stat.st_size
+                or copied_stat.st_ino == source_stat.st_ino
+                or copied_stat.st_nlink != 1):
+            copied.unlink(missing_ok=True)
+            raise RuntimeError("portable model copy is not physically independent")
+    return str(copied)
 
 
 def _write_launchers(target: Path) -> None:
     (target / "启动终端.cmd").write_text(
         "@echo off\r\nsetlocal\r\nchcp 65001 >nul\r\n"
-        "python \"%~dp0run.py\" terminal %*\r\n",
+        "python -I -S \"%~dp0run.py\" terminal %*\r\n",
         encoding="utf-8-sig", newline="")
-    (target / "启动JSONL.cmd").write_text(
-        "@echo off\r\nsetlocal\r\nchcp 65001 >nul\r\n"
-        "python \"%~dp0run.py\" jsonl %*\r\n",
-        encoding="utf-8-sig", newline="")
-    shell = "#!/bin/sh\nset -eu\nROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nexec python3 \"$ROOT/run.py\" terminal \"$@\"\n"
+    shell = "#!/bin/sh\nset -eu\nROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nexec python3 -I -S \"$ROOT/run.py\" terminal \"$@\"\n"
     path = target / "run_terminal.sh"
     path.write_text(shell, encoding="utf-8", newline="\n")
     path.chmod(0o755)
@@ -147,6 +144,8 @@ def _inventory(root: Path) -> list[dict[str, object]]:
     for base in (root / "app", root / "run.py", root / "LICENSE",
                  root / "README_中文.md", root / "启动终端.cmd",
                  root / "启动JSONL.cmd", root / "run_terminal.sh",
+                 root / "THIRD_PARTY_NOTICES.md",
+                 root / "THIRD_PARTY_LICENSES", root / "conformance",
                  root / "model"):
         if base.is_file():
             paths.append(base)
@@ -160,7 +159,9 @@ def _inventory(root: Path) -> list[dict[str, object]]:
 
 
 def build(project_root: str | Path, release_root: str | Path,
-          output_root: str | Path, *, package_id: str) -> dict[str, object]:
+          output_root: str | Path, *, package_id: str,
+          additional_files: tuple[tuple[str | Path, str], ...] = (),
+          ) -> dict[str, object]:
     project = Path(project_root).resolve()
     release = Path(release_root).resolve()
     output = Path(output_root).resolve()
@@ -185,9 +186,19 @@ def build(project_root: str | Path, release_root: str | Path,
             "需要显式消费模型内 Concept/Entity/Event、Event-Time 或 Dialogue 命题图时，可在 turn 中增加 `graph_object_keys` 二维整数数组；这些一等对象与文字、Memory 和 Dialogue 在同一次 QueryState 中计算。\n"
             "输入 `\u007b\"op\":\"quit\"\u007d` 结束。\n\n"
             "模型目录只读；需要持久会话时使用 `--session` 指向模型目录之外的 SQLite 文件。\n"
-            "本包不携带课程、外部 QA、论文、密钥或 OpenCC。它是当前训练结果的独立测试包。\n",
+            "本包不携带训练课程、外部 QA、论文、密钥或 OpenCC；只包含一份 MIT 整数 held-out 验收课程。模型保留已核验许可的来源文本，因为运行时 Span/Role 校验依赖它。\n"
+            "它证明的是有限的四根 QueryState witness，不代表自由对话完成。\n",
             encoding="utf-8", newline="\n")
         _write_launchers(temporary)
+        for source_value, relative_value in additional_files:
+            source = Path(source_value).resolve(strict=True)
+            relative = Path(relative_value)
+            if (relative.is_absolute() or ".." in relative.parts
+                    or not relative.parts):
+                raise ValueError("additional package path must stay relative")
+            destination = temporary / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
         shutil.copytree(release, temporary / "model" / release.name,
                         copy_function=_copy_release_file)
         files = _inventory(temporary)
@@ -200,6 +211,11 @@ def build(project_root: str | Path, release_root: str | Path,
                       "release_manifest": "trained_graph_release.json"},
             "python_requires": ">=3.11",
             "runtime_dependencies": [],
+            "offline_conformance": {
+                "command": "python -I -S run.py conformance --session <external.sqlite3> --output <external.json>",
+                "claim": "bounded four-root QueryState witness only",
+                "free_dialogue_complete": 0,
+            },
             "files": files,
         }
         manifest_path = temporary / "portable_bundle_manifest.json"

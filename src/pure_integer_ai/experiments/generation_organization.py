@@ -159,6 +159,98 @@ def build_response_plan(
     return plan
 
 
+def build_multi_response_plan(
+        evidences: tuple[ClosedGenerationEvidence, ...],
+        generation: GraphRelationGeneration,
+        *,
+        required_node_kinds: tuple[int, ...] | None = None,
+        ) -> ResponsePlan | None:
+    """Build one graph-trained plan for multiple independent closed claims.
+
+    ``generation`` is the composition connector's realization.  It must be
+    supplied by the trained graph; this function never joins component
+    surfaces or invents a conjunction.  Every claim keeps its own evidence
+    refs and contiguous slot range so delivery can audit the whole set.
+    """
+    if (type(evidences) is not tuple or len(evidences) < 2
+            or any(not isinstance(item, ClosedGenerationEvidence)
+                   for item in evidences)
+            or not isinstance(generation, GraphRelationGeneration)):
+        raise TypeError("multi response plan requires closed claim evidence")
+    if len({item.proposition_key for item in evidences}) != len(evidences):
+        return None
+    if required_node_kinds is None:
+        required_node_kinds = tuple(sorted(FILLER_NODE_KINDS))
+    if (type(required_node_kinds) is not tuple or not required_node_kinds
+            or any(type(item) is not int or item <= 0
+                   for item in required_node_kinds)):
+        raise ValueError("required_node_kinds 必须是非空正整数 tuple")
+
+    claims = []
+    slots = []
+    claim_evidence_refs = []
+    claim_slot_ranges = []
+    seen_slots = set()
+    for evidence in evidences:
+        if not evidence.bindings:
+            return None
+        claim = ObjectIdentity.from_stable_key(evidence.proposition_key)
+        if claim.object_kind != OBJECT_PROPOSITION:
+            return None
+        start = len(slots)
+        for binding in evidence.bindings:
+            role = _role_for_binding(binding)
+            slot_key = (role.stable_key(), binding.filler.stable_key())
+            # A shared role/filler needs a dedicated learned shared-slot
+            # contract; silently duplicating it would corrupt per-claim audit.
+            if slot_key in seen_slots:
+                return None
+            seen_slots.add(slot_key)
+            slots.append(ResponseSlot(
+                role,
+                binding.filler,
+                binding.surface,
+                True,
+                binding.source_hash,
+                allowed_node_kinds=(binding.filler.object_kind,),
+            ))
+        end = len(slots)
+        refs = ((evidence.source_hash,),)
+        claims.append(claim)
+        claim_evidence_refs.append((claim.stable_key(), refs))
+        claim_slot_ranges.append((claim.stable_key(), start, end))
+
+    realization = ResponseRealization(
+        generation.surface,
+        generation.frame_proposition,
+        generation.frame_source_hash,
+        generation.slot_count,
+    )
+    try:
+        return ResponsePlan(
+            _RESPONSE_ACT_ANSWER,
+            tuple(claims),
+            tuple(slots),
+            (realization,),
+            tuple(sorted({ref for _claim, refs in claim_evidence_refs
+                          for ref in refs})),
+            claim_evidence_refs=tuple(claim_evidence_refs),
+            claim_slot_ranges=tuple(claim_slot_ranges),
+            discourse_links=tuple(sorted({
+                *(item.generation.frame_proposition for item in evidences),
+                generation.frame_proposition,
+            }, key=ObjectIdentity.stable_key)),
+            carrier_ref=generation.connector,
+            event_refs=tuple(sorted({
+                binding.filler
+                for item in evidences for binding in item.bindings
+                if binding.filler.object_kind == OBJECT_EVENT
+            }, key=ObjectIdentity.stable_key)),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 def plan_from_active_fact(
         fact: ActiveRelationSurface,
         generation: GraphRelationGeneration,
@@ -192,6 +284,29 @@ def bind_query_evidence(plan: ResponsePlan, state: QueryState) -> ResponsePlan:
         raise ValueError("只有完成证据裁决的 QueryState 可以绑定输出计划")
     if state.best_candidate_key not in {item.stable_key() for item in plan.claim_refs}:
         raise ValueError("输出计划未引用 QueryState 实际选中的命题")
+    if len(plan.claim_refs) > 1:
+        claim_keys = {item.stable_key() for item in plan.claim_refs}
+        if (set(claim for claim, _refs in plan.claim_evidence_refs)
+                != claim_keys
+                or set(claim for claim, _start, _end in plan.claim_slot_ranges)
+                != claim_keys):
+            raise ValueError("多命题输出计划缺少逐 claim 审计绑定")
+        # Core query evidence uses the proposition identity as its
+        # hypothesis_key.  Replace the builder's source-hash placeholders
+        # with the exact entries that entered this QueryState; delivery can
+        # then audit each claim without guessing from source text.
+        claim_evidence = []
+        for claim_key in sorted(claim_keys):
+            refs = tuple(sorted({
+                item.stable_key() for item in state.evidence
+                if (item.space == SPACE_CORE
+                    and item.hypothesis_key == claim_key
+                    and item.polarity == 1)
+            }))
+            if not refs:
+                raise ValueError("多命题 claim 缺少同一 QueryState 的 Core evidence")
+            claim_evidence.append((claim_key, refs))
+        plan = replace(plan, claim_evidence_refs=tuple(claim_evidence))
     bound_slots = {(item.role_key, item.filler_key) for item in state.bindings
                    if item.space == SPACE_CORE}
     if any((slot.role.stable_key(), slot.filler.stable_key()) not in bound_slots
@@ -241,6 +356,7 @@ __all__ = [
     "ClosedGenerationEvidence",
     "answer_response_act",
     "build_response_plan",
+    "build_multi_response_plan",
     "bind_query_evidence",
     "clarify_response_act",
     "plan_from_active_fact",

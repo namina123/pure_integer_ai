@@ -84,7 +84,8 @@ def break_back_edges(nodes: set[NodeRef], adj: dict[NodeRef, list[NodeRef]]
 
     用途：数据 prep（ChineseSemanticKB 抽象 raw 含环噪声 → 干净 DAG·#1133·``scratch/clean_abstract_cycles`` 调）。
     **为何在 graph_algebra**：纯图变换（adj→删除集·无 I/O·无语义判定）·同 ``_tarjan_scc`` 为图原语·
-    在包内可单测（``tests/test_abstract_cycle_clean`` 锁算法）·数据 prep pipeline（读 K:/·写 data_llm/）留 scratch。
+    在包内可单测（``tests/test_abstract_cycle_clean`` 锁算法）·数据 prep pipeline
+    （读外部数据目录并写入 scratch）留在项目侧。
 
     保证：删 back-edge 破所有环（任一有向环含 ≥1 DFS back-edge·CLRS）·corpus-relevant 子集（#1142）of DAG is DAG。
     诚实边界：删除集非最小 feedback arc set（NP-hard）·是确定性启发式（保 DAG·非最少删边·§六已认）。

@@ -226,6 +226,12 @@ class ResponsePlan:
     memory_refs: tuple[MemoryObjectRef, ...] = ()
     style_ref: ObjectIdentity | None = None
     carrier_ref: ObjectIdentity | None = None
+    # Optional per-claim audit records.  Legacy single-claim plans may leave
+    # these empty; a multi-claim plan must bind every claim exactly once.
+    claim_evidence_refs: tuple[
+        tuple[tuple[int, ...], tuple[tuple[int, ...], ...]], ...] = ()
+    claim_slot_ranges: tuple[
+        tuple[tuple[int, ...], int, int], ...] = ()
     _stable_key_cache: tuple[int, ...] = field(init=False, repr=False, default=())
 
     def __post_init__(self) -> None:
@@ -250,12 +256,59 @@ class ResponsePlan:
                 or any(type(v) is not int for v in item)
                 for item in self.evidence_refs):
             raise TypeError("response plan evidence_refs 必须是非空整数 tuple 集合")
+        claim_keys = {item.stable_key() for item in self.claim_refs}
+        if (not isinstance(self.claim_evidence_refs, tuple)
+                or any(type(item) is not tuple or len(item) != 2
+                       for item in self.claim_evidence_refs)):
+            raise TypeError("response plan claim_evidence_refs 结构非法")
+        evidence_by_claim = {}
+        for claim_key, refs in self.claim_evidence_refs:
+            if (not isinstance(claim_key, tuple)
+                    or any(type(value) is not int for value in claim_key)
+                    or claim_key not in claim_keys
+                    or claim_key in evidence_by_claim
+                    or not isinstance(refs, tuple) or not refs
+                    or any(type(ref) is not tuple or not ref
+                           or any(type(value) is not int for value in ref)
+                           for ref in refs)
+                    or refs != tuple(sorted(set(refs)))):
+                raise ValueError("response plan claim evidence binding 非法")
+            evidence_by_claim[claim_key] = refs
+        if self.claim_evidence_refs and set(evidence_by_claim) != claim_keys:
+            raise ValueError("多命题计划必须覆盖每个 claim 的 evidence")
+        if (not isinstance(self.claim_slot_ranges, tuple)
+                or any(type(item) is not tuple or len(item) != 3
+                       for item in self.claim_slot_ranges)):
+            raise TypeError("response plan claim_slot_ranges 结构非法")
+        slot_ranges = {}
+        for claim_key, start, end in self.claim_slot_ranges:
+            if (not isinstance(claim_key, tuple)
+                    or any(type(value) is not int for value in claim_key)
+                    or claim_key not in claim_keys
+                    or claim_key in slot_ranges
+                    or type(start) is not int or type(end) is not int
+                    or start < 0 or end <= start or end > len(self.slot_sequence)):
+                raise ValueError("response plan claim slot range 非法")
+            slot_ranges[claim_key] = (start, end)
+        if self.claim_slot_ranges:
+            if set(slot_ranges) != claim_keys:
+                raise ValueError("多命题计划必须覆盖每个 claim 的 slot range")
+            ordered_ranges = sorted(slot_ranges.values())
+            if ordered_ranges[0][0] != 0 or any(
+                    prior[1] != current[0]
+                    for prior, current in zip(ordered_ranges, ordered_ranges[1:])) \
+                    or ordered_ranges[-1][1] != len(self.slot_sequence):
+                raise ValueError("claim slot ranges 必须连续覆盖全部槽位")
         if len(set(item.stable_key() for item in self.slot_sequence)) != len(
                 self.slot_sequence):
             raise ValueError("response plan slot 序列不得重复同一角色")
         self._validate_required_slots()
         object.__setattr__(self, "claim_refs", tuple(sorted(
             self.claim_refs, key=ObjectIdentity.stable_key)))
+        object.__setattr__(self, "claim_evidence_refs", tuple(sorted(
+            self.claim_evidence_refs, key=lambda item: item[0])))
+        object.__setattr__(self, "claim_slot_ranges", tuple(sorted(
+            self.claim_slot_ranges, key=lambda item: item[0])))
         object.__setattr__(self, "realization_candidates", tuple(sorted(
             self.realization_candidates,
             key=lambda item: item.stable_key())))
@@ -318,6 +371,15 @@ class ResponsePlan:
             *_memory_refs_key(self.memory_refs),
             *_packed(self.scope_and_time),
         ]
+        out.append(len(self.claim_evidence_refs))
+        for claim_key, refs in self.claim_evidence_refs:
+            out.extend(_packed(claim_key))
+            out.append(len(refs))
+            for ref in refs:
+                out.extend(_packed(ref))
+        out.append(len(self.claim_slot_ranges))
+        for claim_key, start, end in self.claim_slot_ranges:
+            out.extend((*_packed(claim_key), start, end))
         out.append(len(self.slot_sequence))
         for slot in self.slot_sequence:
             out.extend(_packed(slot.stable_key()))
@@ -363,6 +425,17 @@ class ResponsePlan:
                                 for item in self.discourse_links],
             "scope_and_time": list(self.scope_and_time),
             "evidence_refs": [list(item) for item in self.evidence_refs],
+            "claim_evidence_refs": [
+                {
+                    "claim": list(claim),
+                    "evidence": [list(ref) for ref in refs],
+                }
+                for claim, refs in self.claim_evidence_refs
+            ],
+            "claim_slot_ranges": [
+                {"claim": list(claim), "start": start, "end": end}
+                for claim, start, end in self.claim_slot_ranges
+            ],
             "style_ref": (list(self.style_ref.stable_key())
                           if self.style_ref is not None else []),
             "carrier_ref": (list(self.carrier_ref.stable_key())

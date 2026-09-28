@@ -177,12 +177,29 @@ class FactualResponseGeneration:
     proposition_key: tuple[int, ...]
     trace: tuple[int, ...]
     emitted_units: tuple[int, ...]
+    # The legacy proposition_key remains the first selected claim.  New
+    # composition generations provide the complete ordered claim set here.
+    claim_keys: tuple[tuple[int, ...], ...] = ()
 
     def __post_init__(self) -> None:
         response = self.response_plan
         if (not isinstance(response, ResponsePlan) or not response.claim_refs
                 or not response.memory_refs or not response.evidence_refs):
             raise ValueError("factual delivery requires a fully bound claim plan")
+        claim_keys = self.claim_keys or (self.proposition_key,)
+        if (type(claim_keys) is not tuple or not claim_keys
+                or any(type(key) is not tuple or not key
+                       or any(type(value) is not int for value in key)
+                       for key in claim_keys)
+                or len(set(claim_keys)) != len(claim_keys)
+                or set(claim_keys) != {
+                    item.stable_key() for item in response.claim_refs}
+                or self.proposition_key not in claim_keys):
+            raise ValueError("factual delivery claim set differs from ResponsePlan")
+        if len(claim_keys) > 1 and (
+                not response.claim_evidence_refs
+                or not response.claim_slot_ranges):
+            raise ValueError("multi-claim delivery lacks per-claim audit records")
         if (not isinstance(self.input_observation, MemoryObjectRef)
                 or self.input_observation.object_kind != MEMORY_OBJECT_OBSERVATION):
             raise ValueError("factual delivery input must be an Observation")
@@ -206,6 +223,9 @@ class FactualResponseGeneration:
         return frame_key(
             DELIVERY_PROOF_IDENTITY, (4,),
             self.input_observation.stable_key(), self.proposition_key,
+            frame_key(5, *(frame_key(ordinal + 1, key)
+                          for ordinal, key in enumerate(
+                              self.claim_keys or (self.proposition_key,)))),
             self.response_plan.response_act.stable_key(), slots, self.trace)
 
 
@@ -313,13 +333,23 @@ def record_factual_response_delivery(
             or not isinstance(generation, FactualResponseGeneration)):
         raise TypeError("factual delivery requires typed Memory/query/generation")
     response = generation.response_plan
+    claim_keys = generation.claim_keys or (generation.proposition_key,)
+    claim_ref_keys = {item.stable_key() for item in response.claim_refs}
+    claim_audit = {
+        claim: refs for claim, refs in response.claim_evidence_refs}
     if (state.termination != 1
             or any(root.status == ROOT_PENDING for root in state.roots)
             or {root.owner_space for root in state.roots} != {1, 2, 3}
-            or state.best_candidate_key != generation.proposition_key
+            or state.best_candidate_key not in claim_keys
+            or set(claim_keys) != claim_ref_keys
             or not response.claim_refs
             or not {item.stable_key() for item in state.evidence}.issubset(
-                set(response.evidence_refs))):
+                set(response.evidence_refs))
+            or (len(claim_keys) > 1 and (
+                set(claim_audit) != claim_ref_keys
+                or any(ref not in response.evidence_refs
+                       for refs in claim_audit.values() for ref in refs)
+                or len(response.claim_slot_ranges) != len(claim_keys)))):
         raise ValueError("factual delivery is not the closed current three-graph result")
 
     events = memory.intake.event_log
@@ -371,6 +401,13 @@ def record_factual_response_delivery(
 
     claim_record = frame_key(
         1, *(item.stable_key() for item in response.claim_refs))
+    claim_audit_record = frame_key(
+        5,
+        *(frame_key(
+            1,
+            claim,
+            frame_key(1, *claim_audit.get(claim, ())),
+        ) for claim in sorted(claim_audit)))
     slot_record = frame_key(2, *(frame_key(
         ordinal + 1,
         slot.role.stable_key(),
@@ -390,7 +427,10 @@ def record_factual_response_delivery(
         frame_key(
             4,
             generation.proposition_key,
+            frame_key(5, *(frame_key(ordinal + 1, key)
+                          for ordinal, key in enumerate(claim_keys))),
             claim_record,
+            claim_audit_record,
             slot_record,
             evidence_record,
         ),

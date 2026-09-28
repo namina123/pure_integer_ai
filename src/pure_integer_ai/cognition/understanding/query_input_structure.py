@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from pure_integer_ai.cognition.understanding.query_open_roles import (
@@ -25,8 +26,9 @@ from pure_integer_ai.crosscut.determinism.hasher import Hasher
 
 
 INPUT_STRUCTURE_VERSION = 1
-QUERY_INPUT_TRACE_VERSION = 3
+QUERY_INPUT_TRACE_VERSION = 4
 QUERY_GRAPH_INPUT_VERSION = 91580
+INPUT_DISCOURSE_OPERATION_VERSION = 1
 
 SPAN_SOURCE = 1
 SPAN_TRAINED = 2
@@ -428,6 +430,188 @@ class InputRelationCandidate:
 
 
 @dataclass(frozen=True, slots=True)
+class TrainedInputDiscourseOperator:
+    """An integer surface relation for a trained discourse operation."""
+
+    operation_key: tuple[int, ...]
+    surface_values: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        _strict_key(self.operation_key, where="discourse operator key")
+        _strict_key(self.surface_values, where="discourse operator surface")
+
+    def stable_key(self) -> tuple[int, ...]:
+        return (
+            INPUT_DISCOURSE_OPERATION_VERSION,
+            *_pack(self.operation_key),
+            *_pack(self.surface_values),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class InputDiscourseComposition:
+    """A trained operator joining two input scopes and their relation candidates."""
+
+    operation_key: tuple[int, ...]
+    operation_span_ref: tuple[int, ...]
+    operand_scope_refs: tuple[tuple[int, ...], tuple[int, ...]]
+    operand_relation_keys: tuple[
+        tuple[tuple[int, ...], ...], tuple[tuple[int, ...], ...]]
+    operand_states: tuple[int, int]
+    state: int
+
+    def __post_init__(self) -> None:
+        _strict_key(self.operation_key, where="composition operation key")
+        _strict_key(self.operation_span_ref, where="composition operator span")
+        if (type(self.operand_scope_refs) is not tuple
+                or len(self.operand_scope_refs) != 2
+                or any(type(item) is not tuple for item in self.operand_scope_refs)):
+            raise TypeError("composition requires two operand scopes")
+        for item in self.operand_scope_refs:
+            _strict_key(item, where="composition operand scope", allow_empty=True)
+        if (type(self.operand_relation_keys) is not tuple
+                or len(self.operand_relation_keys) != 2):
+            raise TypeError("composition requires two relation-candidate groups")
+        for group in self.operand_relation_keys:
+            if (type(group) is not tuple
+                    or group != tuple(sorted(set(group)))):
+                raise ValueError("composition relation groups must be canonical")
+            for item in group:
+                _strict_key(item, where="composition relation candidate key")
+        if (type(self.operand_states) is not tuple or len(self.operand_states) != 2
+                or any(type(item) is not int or item not in {
+                    STRUCTURE_OPEN, STRUCTURE_CLOSED, STRUCTURE_ORDER_CONFLICT}
+                       for item in self.operand_states)):
+            raise ValueError("composition operand state is invalid")
+        if self.state not in {
+                STRUCTURE_OPEN, STRUCTURE_CLOSED, STRUCTURE_ORDER_CONFLICT}:
+            raise ValueError("composition state is invalid")
+
+    def stable_key(self) -> tuple[int, ...]:
+        result = [
+            INPUT_DISCOURSE_OPERATION_VERSION,
+            *_pack(self.operation_key),
+            *_pack(self.operation_span_ref),
+        ]
+        for scope, relations, state in zip(
+                self.operand_scope_refs, self.operand_relation_keys,
+                self.operand_states):
+            result.extend((*_pack(scope), state, len(relations)))
+            for relation in relations:
+                result.extend(_pack(relation))
+        result.append(self.state)
+        return tuple(result)
+
+
+@dataclass(frozen=True, slots=True)
+class InputDiscourseGap:
+    """An integer-only unresolved boundary between complete clause scopes."""
+
+    gap_span_ref: tuple[int, ...]
+    left_relation_keys: tuple[tuple[int, ...], ...]
+    right_relation_keys: tuple[tuple[int, ...], ...]
+    state: int = STRUCTURE_OPEN
+
+    def __post_init__(self) -> None:
+        _strict_key(self.gap_span_ref, where="discourse gap span")
+        for name in ("left_relation_keys", "right_relation_keys"):
+            values = getattr(self, name)
+            if (type(values) is not tuple
+                    or values != tuple(sorted(set(values)))):
+                raise ValueError("discourse gap relation keys must be canonical")
+            for value in values:
+                _strict_key(value, where="discourse gap relation key")
+        if self.state not in {
+                STRUCTURE_OPEN, STRUCTURE_CLOSED, STRUCTURE_ORDER_CONFLICT}:
+            raise ValueError("discourse gap state is invalid")
+
+    def stable_key(self) -> tuple[int, ...]:
+        result = [INPUT_DISCOURSE_OPERATION_VERSION, *_pack(self.gap_span_ref)]
+        for group in (self.left_relation_keys, self.right_relation_keys):
+            result.append(len(group))
+            for relation in group:
+                result.extend(_pack(relation))
+        result.append(self.state)
+        return tuple(result)
+
+
+def scope_local_conjunction_members(
+        structure: "QueryInputStructure",
+        authorized_operation_keys: frozenset[tuple[int, ...]],
+        ) -> tuple[tuple[tuple[int, ...], tuple[tuple[int, ...], ...]], ...]:
+    """Return graph-authorized, scope-local two-member conjunctions.
+
+    The projector deliberately retains every competing relation candidate.
+    This helper consumes that integer record only when each operand scope has
+    exactly one locally closed proposition.  It never chooses by proposition
+    key, score, surface order, or character similarity.
+    """
+    if not authorized_operation_keys:
+        return ()
+    spans = {item.ref_key: item for item in structure.spans}
+    candidates = {item.stable_key(): item for item in structure.relation_candidates}
+    semantic = structure.semantic_candidates
+
+    def local_closed(candidate: InputRelationCandidate,
+                     scope_ref: tuple[int, ...]) -> bool:
+        scope = spans.get(scope_ref)
+        if scope is None:
+            return False
+        local_refs = {
+            ref for ref in candidate.span_refs
+            if (ref in spans and scope.start <= spans[ref].start
+                and spans[ref].end <= scope.end)
+        }
+        ordinals: dict[int, set[tuple[int, ...]]] = {}
+        for item in semantic:
+            if (item.proposition_key == candidate.proposition_key
+                    and item.source_ref == candidate.source_ref
+                    and item.span_ref in local_refs):
+                ordinals.setdefault(item.member_ordinal, set()).add(item.span_ref)
+        if candidate.required_count == 2 and candidate.predicate_coverage == 0:
+            return len(ordinals) == 2
+        if len(ordinals) < candidate.required_count:
+            return False
+        cursor = scope.start
+        for ordinal in sorted(ordinals):
+            choices = sorted(
+                (spans[ref] for ref in ordinals[ordinal]),
+                key=lambda item: (item.end, item.start, item.ref_key),
+            )
+            choices = [item for item in choices if item.start >= cursor]
+            if not choices:
+                return False
+            cursor = choices[0].end
+        return len(ordinals) == candidate.required_count
+
+    bindings = []
+    for composition in structure.discourse_compositions:
+        if (composition.state != STRUCTURE_CLOSED
+                or composition.operation_key not in authorized_operation_keys
+                or any(state != STRUCTURE_CLOSED
+                       for state in composition.operand_states)):
+            continue
+        members = []
+        for scope_ref, relation_keys in zip(
+                composition.operand_scope_refs,
+                composition.operand_relation_keys):
+            local = {
+                candidates[key].proposition_key
+                for key in relation_keys
+                if key in candidates
+                and candidates[key].state == STRUCTURE_CLOSED
+                and local_closed(candidates[key], scope_ref)
+            }
+            if len(local) != 1:
+                members = []
+                break
+            members.append(next(iter(local)))
+        if len(members) == 2 and members[0] != members[1]:
+            bindings.append((composition.stable_key(), tuple(members)))
+    return tuple(sorted(set(bindings)))
+
+
+@dataclass(frozen=True, slots=True)
 class InputCarrierCandidate:
     """由命中的训练结构提供的 carrier 候选，而非宿主格式猜测。"""
 
@@ -473,6 +657,8 @@ class QueryInputStructure:
     concept_routes: tuple[InputConceptRoute, ...] = ()
     open_relations: tuple[OpenRelationCandidate, ...] = ()
     graph_object_keys: tuple[tuple[int, ...], ...] = ()
+    discourse_compositions: tuple[InputDiscourseComposition, ...] = ()
+    discourse_gaps: tuple[InputDiscourseGap, ...] = ()
 
     def __post_init__(self) -> None:
         _strict_key(self.source_ref, where="QueryInputStructure.source_ref")
@@ -489,6 +675,8 @@ class QueryInputStructure:
             ("concept_links", TrainedConceptLink),
             ("concept_routes", InputConceptRoute),
             ("open_relations", OpenRelationCandidate),
+            ("discourse_compositions", InputDiscourseComposition),
+            ("discourse_gaps", InputDiscourseGap),
         )
         for name, expected in specifications:
             values = getattr(self, name)
@@ -510,7 +698,8 @@ class QueryInputStructure:
                     or any((self.precedes, self.contains, self.carrier_candidates,
                             self.semantic_candidates, self.relation_candidates,
                             self.concept_links, self.concept_routes,
-                            self.open_relations))
+                            self.open_relations, self.discourse_compositions,
+                            self.discourse_gaps))
                     or self.source_span_ref != self.source_ref):
                 raise ValueError("无 token/span 输入必须是完整 graph-only 结构")
         elif not self.tokens or not self.spans:
@@ -535,6 +724,26 @@ class QueryInputStructure:
         routes = {item.stable_key(): item for item in self.concept_routes}
         if any(item.span_ref not in span_refs for item in self.concept_routes):
             raise ValueError("concept route 引用了未知输入 span")
+        relation_keys = {item.stable_key() for item in self.relation_candidates}
+        for composition in self.discourse_compositions:
+            referenced_spans = {
+                composition.operation_span_ref,
+                *(item for item in composition.operand_scope_refs if item),
+            }
+            if not referenced_spans <= span_refs:
+                raise ValueError("discourse composition 引用了未知输入 span")
+            if any(key not in relation_keys
+                   for group in composition.operand_relation_keys
+                   for key in group):
+                raise ValueError(
+                    "discourse composition 引用了未知 relation candidate")
+        for gap in self.discourse_gaps:
+            if gap.gap_span_ref not in span_refs:
+                raise ValueError("discourse gap 引用了未知输入 span")
+            if any(key not in relation_keys
+                   for key in (*gap.left_relation_keys,
+                               *gap.right_relation_keys)):
+                raise ValueError("discourse gap 引用了未知 relation candidate")
         for item in self.semantic_candidates:
             if item.concept_route_key:
                 route = routes.get(item.concept_route_key)
@@ -548,7 +757,8 @@ class QueryInputStructure:
 
     def stable_key(self) -> tuple[int, ...]:
         result = [
-            QUERY_INPUT_TRACE_VERSION,
+            (QUERY_INPUT_TRACE_VERSION
+             if (self.discourse_compositions or self.discourse_gaps) else 3),
             *_pack(self.source_ref),
             *_pack(self.source_span_ref),
         ]
@@ -560,6 +770,16 @@ class QueryInputStructure:
             result.append(len(collection))
             for item in collection:
                 result.extend(_pack(item.stable_key()))
+        if self.discourse_compositions:
+            result.extend((INPUT_DISCOURSE_OPERATION_VERSION,
+                           len(self.discourse_compositions)))
+            for item in self.discourse_compositions:
+                result.extend(_pack(item.stable_key()))
+        if self.discourse_gaps:
+            result.extend((INPUT_DISCOURSE_OPERATION_VERSION,
+                           len(self.discourse_gaps)))
+            for item in self.discourse_gaps:
+                result.extend(_pack(item.stable_key()))
         if self.graph_object_keys:
             result.append(len(self.graph_object_keys))
             for key in self.graph_object_keys:
@@ -569,7 +789,9 @@ class QueryInputStructure:
     def integer_trace(self) -> dict[str, object]:
         """投影为仅含整数值的 JSON 兼容 trace。"""
         return {
-            "schema_version": QUERY_INPUT_TRACE_VERSION,
+            "schema_version": (
+                QUERY_INPUT_TRACE_VERSION
+                if (self.discourse_compositions or self.discourse_gaps) else 3),
             "source_ref": list(self.source_ref),
             "token_values": list(self.token_values),
             "token_order": [item.ordinal for item in self.tokens],
@@ -634,6 +856,10 @@ class QueryInputStructure:
             "concept_links": [list(item.stable_key()) for item in self.concept_links],
             "concept_routes": [list(item.stable_key()) for item in self.concept_routes],
             "open_relations": [list(item.stable_key()) for item in self.open_relations],
+            "discourse_compositions": [
+                list(item.stable_key()) for item in self.discourse_compositions],
+            "discourse_gaps": [
+                list(item.stable_key()) for item in self.discourse_gaps],
             "graph_object_keys": [list(key) for key in self.graph_object_keys],
         }
 
@@ -722,7 +948,9 @@ class TrainedInputStructureProjector:
 
     def __init__(self, structures: tuple[TrainedInputStructure, ...], *,
                  concept_links: tuple[TrainedConceptLink, ...] = (),
-                 open_role_frames: tuple[OpenRoleFrame, ...] = ()) -> None:
+                 open_role_frames: tuple[OpenRoleFrame, ...] = (),
+                 discourse_operators: tuple[
+                     TrainedInputDiscourseOperator, ...] = ()) -> None:
         if (type(structures) is not tuple
                 or any(not isinstance(item, TrainedInputStructure)
                        for item in structures)):
@@ -735,6 +963,12 @@ class TrainedInputStructureProjector:
             raise TypeError("open_role_frames 必须是 OpenRoleFrame tuple")
         self.open_role_frames = tuple(sorted(set(open_role_frames),
                                             key=lambda item: item.stable_key()))
+        if (type(discourse_operators) is not tuple
+                or any(not isinstance(item, TrainedInputDiscourseOperator)
+                       for item in discourse_operators)):
+            raise TypeError("discourse_operators must be trained integer records")
+        self.discourse_operators = tuple(sorted(
+            set(discourse_operators), key=lambda item: item.stable_key()))
         generic_frames = []
         for structure in self.structures:
             fillers = tuple(sorted(
@@ -752,21 +986,30 @@ class TrainedInputStructureProjector:
             break
         self._generic_open_role_frames = tuple(sorted(
             set(generic_frames), key=lambda item: item.stable_key()))
-        postings: dict[int, list[TrainedInputMember]] = {}
+        single_postings: dict[int, list[TrainedInputMember]] = {}
+        prefix_postings: dict[tuple[int, int], list[TrainedInputMember]] = {}
         fillers: dict[tuple[int, ...], list[TrainedInputMember]] = {}
         structures_by_first: dict[int, list[TrainedInputStructure]] = {}
         for structure in self.structures:
             for first in {item.values[0] for item in structure.members}:
                 structures_by_first.setdefault(first, []).append(structure)
             for member in structure.members:
-                postings.setdefault(member.values[0], []).append(member)
+                if len(member.values) == 1:
+                    single_postings.setdefault(member.values[0], []).append(member)
+                else:
+                    prefix_postings.setdefault(
+                        (member.values[0], member.values[1]), []).append(member)
                 if member.projection_kind == PROJECTION_FILLER:
                     fillers.setdefault(member.candidate_key, []).append(member)
         self._fillers = {key: tuple(sorted(set(items), key=lambda item: item.stable_key()))
                          for key, items in fillers.items()}
-        self._postings = {
+        self._single_postings = {
             value: tuple(sorted(items, key=lambda item: item.stable_key()))
-            for value, items in postings.items()
+            for value, items in single_postings.items()
+        }
+        self._prefix_postings = {
+            prefix: tuple(sorted(items, key=lambda item: item.stable_key()))
+            for prefix, items in prefix_postings.items()
         }
         self._structures_by_first = {
             value: tuple(sorted(set(items), key=lambda item: item.stable_key()))
@@ -797,6 +1040,21 @@ class TrainedInputStructureProjector:
             cursor = selected.end
         return True
 
+    def _matching_members(
+            self, values: tuple[int, ...],
+            ) -> Iterator[tuple[int, TrainedInputMember]]:
+        """Yield all exact member spans using a two-codepoint prefix index."""
+        for start, value in enumerate(values):
+            for member in self._single_postings.get(value, ()):
+                yield start, member
+            if start + 1 >= len(values):
+                continue
+            prefix = (value, values[start + 1])
+            for member in self._prefix_postings.get(prefix, ()):
+                end = start + len(member.values)
+                if end <= len(values) and values[start:end] == member.values:
+                    yield start, member
+
     def project(self, values: tuple[int, ...]) -> QueryInputStructure:
         """产生全部整数 span/结构候选；空白与语言类别不参与判断。"""
         _strict_key(values, where="query input values")
@@ -808,30 +1066,27 @@ class TrainedInputStructureProjector:
         matches: dict[tuple[int, ...], list[InputSpan]] = {}
         semantic_candidates: list[InputSemanticCandidate] = []
         direct_members: dict[tuple[int, ...], TrainedInputMember] = {}
-        for start, value in enumerate(values):
-            for member in self._postings.get(value, ()):
-                end = start + len(member.values)
-                if end > len(values) or values[start:end] != member.values:
-                    continue
-                interval = (start, end)
-                span = span_by_interval.get(interval)
-                if span is None:
-                    span = InputSpan(
-                        source_ref, start, end, SPAN_TRAINED, member.values)
-                    span_by_interval[interval] = span
-                matches.setdefault(member.stable_key(), []).append(span)
-                direct_members[member.stable_key()] = member
-                semantic_candidates.append(InputSemanticCandidate(
-                    member.candidate_key,
-                    member.object_kind,
-                    member.projection_kind,
-                    span.ref_key,
-                    member.proposition_key,
-                    member.predicate_key,
-                    member.role_key,
-                    member.source_ref,
-                    member.member_ordinal,
-                ))
+        for start, member in self._matching_members(values):
+            end = start + len(member.values)
+            interval = (start, end)
+            span = span_by_interval.get(interval)
+            if span is None:
+                span = InputSpan(
+                    source_ref, start, end, SPAN_TRAINED, member.values)
+                span_by_interval[interval] = span
+            matches.setdefault(member.stable_key(), []).append(span)
+            direct_members[member.stable_key()] = member
+            semantic_candidates.append(InputSemanticCandidate(
+                member.candidate_key,
+                member.object_kind,
+                member.projection_kind,
+                span.ref_key,
+                member.proposition_key,
+                member.predicate_key,
+                member.role_key,
+                member.source_ref,
+                member.member_ordinal,
+            ))
         direct_matches = {key: tuple(value) for key, value in matches.items()}
         concept_routes: set[InputConceptRoute] = set()
         concept_links: set[TrainedConceptLink] = set()
@@ -866,8 +1121,40 @@ class TrainedInputStructureProjector:
         }
         matched_spans = tuple(sorted(
             span_by_interval.values(), key=lambda item: item.stable_key()))
+        operation_matches = []
+        for operator in self.discourse_operators:
+            width = len(operator.surface_values)
+            for start in range(0, len(values) - width + 1):
+                if values[start:start + width] == operator.surface_values:
+                    operation_matches.append((start, start + width, operator))
+        operation_matches.sort(key=lambda item: (
+            item[0], item[1], item[2].stable_key()))
+        operation_spans: set[InputSpan] = set()
+        operand_scopes: dict[tuple[int, ...], InputSpan] = {}
+        operation_scope_rows = []
+        for index, (start, end, operator) in enumerate(operation_matches):
+            left_start = operation_matches[index - 1][1] if index else 0
+            right_end = (operation_matches[index + 1][0]
+                         if index + 1 < len(operation_matches) else len(values))
+            operation_span = InputSpan(
+                source_ref, start, end, SPAN_TRAINED,
+                operator.surface_values)
+            operation_spans.add(operation_span)
+            scope_refs = []
+            for scope_start, scope_end in ((left_start, start), (end, right_end)):
+                if scope_start >= scope_end:
+                    scope_refs.append(())
+                    continue
+                scope = InputSpan(
+                    source_ref, scope_start, scope_end, SPAN_SOURCE,
+                    values[scope_start:scope_end])
+                operand_scopes[scope.ref_key] = scope
+                scope_refs.append(scope.ref_key)
+            operation_scope_rows.append(
+                (operator, operation_span, tuple(scope_refs)))
         spans = tuple(sorted(
-            {source_span, *matched_spans}, key=lambda item: item.stable_key()))
+            {source_span, *matched_spans, *operation_spans,
+             *operand_scopes.values()}, key=lambda item: item.stable_key()))
 
         precedes = []
         contains = []
@@ -1008,11 +1295,196 @@ class TrainedInputStructureProjector:
         # Uncovered input remains a source-local generic Memory Observation;
         # real open relations still come from trained structure frames above.
 
+        span_by_ref = {item.ref_key: item for item in spans}
+        relation_rows = tuple(sorted(
+            set(relation_candidates), key=lambda item: item.stable_key()))
+
+        def local_relation_state(candidate, local_spans):
+            """Recheck ordered member coverage inside one discourse scope."""
+            local_refs = {item.ref_key for item in local_spans}
+            members_by_ordinal: dict[int, set[InputSpan]] = {}
+            for semantic in semantic_candidates:
+                if (semantic.proposition_key == candidate.proposition_key
+                        and semantic.source_ref == candidate.source_ref
+                        and semantic.span_ref in local_refs):
+                    members_by_ordinal.setdefault(
+                        semantic.member_ordinal, set()).add(
+                            span_by_ref[semantic.span_ref])
+            if (candidate.required_count == 2
+                    and candidate.predicate_coverage == 0):
+                return (STRUCTURE_CLOSED
+                        if len(members_by_ordinal) == 2
+                        else STRUCTURE_OPEN)
+            if len(members_by_ordinal) < candidate.required_count:
+                return STRUCTURE_OPEN
+            ordinals = tuple(sorted(members_by_ordinal))
+            cursor = 0
+            for ordinal in ordinals:
+                choices = tuple(sorted(
+                    (span for span in members_by_ordinal[ordinal]
+                     if span.start >= cursor),
+                    key=lambda item: (item.end, item.start, item.ref_key)))
+                if not choices:
+                    return STRUCTURE_ORDER_CONFLICT
+                cursor = choices[0].end
+            return (STRUCTURE_CLOSED
+                    if len(ordinals) == candidate.required_count
+                    else STRUCTURE_OPEN)
+
+        def operand_relations(scope_ref: tuple[int, ...]):
+            if not scope_ref:
+                return (), STRUCTURE_OPEN
+            scope = span_by_ref[scope_ref]
+            selected = []
+            complete = []
+            conflict = False
+            for candidate in relation_rows:
+                candidate_spans = tuple(
+                    span_by_ref[ref] for ref in candidate.span_refs
+                    if ref in span_by_ref)
+                local = tuple(item for item in candidate_spans
+                              if scope.start <= item.start
+                              and item.end <= scope.end)
+                if not local:
+                    continue
+                selected.append(candidate)
+                local_state = local_relation_state(candidate, local)
+                if local_state == STRUCTURE_ORDER_CONFLICT:
+                    conflict = True
+                if local_state == STRUCTURE_CLOSED:
+                    complete.append(candidate)
+            if conflict:
+                state = STRUCTURE_ORDER_CONFLICT
+            elif complete:
+                complete_props = {item.proposition_key for item in complete}
+                # Partial projections from other trained propositions are
+                # retained as UNKNOWN candidates, but must not reopen a scope
+                # when one proposition has the sole complete role chain.  A
+                # second complete proposition remains a real ambiguity.
+                competing_complete = any(
+                    local_relation_state(
+                        item,
+                        tuple(span_by_ref[ref] for ref in item.span_refs
+                              if ref in span_by_ref
+                              and scope.start <= span_by_ref[ref].start
+                              and span_by_ref[ref].end <= scope.end),
+                    ) == STRUCTURE_CLOSED
+                    and item.proposition_key not in complete_props
+                    for item in selected)
+                state = (STRUCTURE_CLOSED
+                         if len(complete_props) == 1 and not competing_complete
+                         else STRUCTURE_OPEN)
+            else:
+                state = STRUCTURE_OPEN
+            return tuple(sorted(
+                (item.stable_key() for item in selected))), state
+
+        compositions = []
+        for operator, operation_span, scope_refs in operation_scope_rows:
+            operand_rows = tuple(operand_relations(item) for item in scope_refs)
+            operand_keys = (operand_rows[0][0], operand_rows[1][0])
+            operand_states = (operand_rows[0][1], operand_rows[1][1])
+            if STRUCTURE_ORDER_CONFLICT in operand_states:
+                state = STRUCTURE_ORDER_CONFLICT
+            elif all(item == STRUCTURE_CLOSED for item in operand_states):
+                state = STRUCTURE_CLOSED
+            else:
+                state = STRUCTURE_OPEN
+            compositions.append(InputDiscourseComposition(
+                operator.operation_key,
+                operation_span.ref_key,
+                scope_refs,
+                operand_keys,
+                operand_states,
+                state,
+            ))
+
+        # A boundary that is not authorized by a trained operator is still
+        # meaningful when graph evidence proves two separate clause scopes.
+        # Materialize it as an unresolved integer gap so the bridge cannot
+        # silently answer only one side.  This does not classify the boundary
+        # by punctuation, character class, or a fixed vocabulary.
+        operator_intervals = {
+            (span.start, span.end) for _start, _end, _operator in operation_matches
+            for span in (
+                InputSpan(source_ref, _start, _end, SPAN_TRAINED,
+                          values[_start:_end]),)
+        }
+        scoped_candidates = []
+        for candidate in relation_rows:
+            if candidate.state not in {
+                    STRUCTURE_CLOSED, STRUCTURE_ORDER_CONFLICT}:
+                continue
+            candidate_spans = tuple(
+                span_by_ref[ref] for ref in candidate.span_refs
+                if ref in span_by_ref)
+            if not candidate_spans:
+                continue
+            ordered = tuple(sorted(candidate_spans,
+                                  key=lambda item: (item.start, item.end)))
+            clusters: list[list[InputSpan]] = [[]]
+            for span in ordered:
+                if clusters[-1] and span.start > clusters[-1][-1].end:
+                    clusters.append([])
+                clusters[-1].append(span)
+            for cluster in clusters:
+                if len(cluster) < candidate.required_count:
+                    continue
+                scoped_candidates.append((
+                    min(item.start for item in cluster),
+                    max(item.end for item in cluster),
+                    candidate,
+                ))
+        gaps_by_interval: dict[tuple[int, int], list[InputDiscourseGap]] = {}
+        gap_spans: set[InputSpan] = set()
+        for left_start, left_end, left in scoped_candidates:
+            for right_start, right_end, right in scoped_candidates:
+                if left_end >= right_start:
+                    continue
+                gap_interval = (left_end, right_start)
+                if gap_interval in operator_intervals:
+                    continue
+                gap_span = InputSpan(
+                    source_ref, gap_interval[0], gap_interval[1], SPAN_SOURCE,
+                    values[gap_interval[0]:gap_interval[1]])
+                gap_spans.add(gap_span)
+                gap_state = (STRUCTURE_ORDER_CONFLICT
+                             if STRUCTURE_ORDER_CONFLICT in {
+                                 left.state, right.state}
+                             else STRUCTURE_OPEN)
+                gap = InputDiscourseGap(
+                    gap_span.ref_key,
+                    (left.stable_key(),),
+                    (right.stable_key(),),
+                    gap_state,
+                )
+                gaps_by_interval.setdefault(gap_interval, []).append(gap)
+        gaps = []
+        for gap_interval, candidates in gaps_by_interval.items():
+            unique = tuple(sorted(set(candidates), key=lambda item: item.stable_key()))
+            # Preserve competing witnesses in the integer key while exposing
+            # one canonical unresolved gap record for QueryState gating.
+            first = unique[0]
+            if len(unique) > 1:
+                first = InputDiscourseGap(
+                    first.gap_span_ref,
+                    tuple(sorted({key for item in unique
+                                  for key in item.left_relation_keys})),
+                    tuple(sorted({key for item in unique
+                                  for key in item.right_relation_keys})),
+                    (STRUCTURE_ORDER_CONFLICT
+                     if any(item.state == STRUCTURE_ORDER_CONFLICT
+                            for item in unique) else STRUCTURE_OPEN),
+                )
+            gaps.append(first)
+
+        final_spans = tuple(sorted(
+            {*spans, *gap_spans}, key=lambda item: item.stable_key()))
         return QueryInputStructure(
             source_ref,
             tuple(sorted(tokens, key=lambda item: item.stable_key())),
             source_span.ref_key,
-            spans,
+            final_spans,
             tuple(sorted(
                 set(precedes), key=lambda item: item.stable_key())),
             tuple(sorted(
@@ -1026,12 +1498,17 @@ class TrainedInputStructureProjector:
             tuple(sorted(concept_links, key=lambda item: item.stable_key())),
             tuple(sorted(concept_routes, key=lambda item: item.stable_key())),
             open_relations,
+            discourse_compositions=tuple(sorted(
+                compositions, key=lambda item: item.stable_key())),
+            discourse_gaps=tuple(sorted(
+                gaps, key=lambda item: item.stable_key())),
         )
 
 
 __all__ = [
     "CARRIER_GRAPH_SOURCE",
     "CARRIER_SEMANTIC_GRAPH",
+    "INPUT_DISCOURSE_OPERATION_VERSION",
     "INPUT_STRUCTURE_VERSION",
     "PROJECTION_FILLER",
     "PROJECTION_PREDICATE",
@@ -1041,6 +1518,9 @@ __all__ = [
     "STRUCTURE_OPEN",
     "STRUCTURE_ORDER_CONFLICT",
     "InputCarrierCandidate",
+    "InputDiscourseComposition",
+    "InputDiscourseGap",
+    "scope_local_conjunction_members",
     "InputRelationCandidate",
     "InputSemanticCandidate",
     "InputSpan",
@@ -1049,6 +1529,7 @@ __all__ = [
     "QUERY_GRAPH_INPUT_VERSION",
     "QueryInputStructure",
     "TrainedInputMember",
+    "TrainedInputDiscourseOperator",
     "TrainedInputStructure",
     "TrainedInputStructureProjector",
     "graph_query_input_structure",
