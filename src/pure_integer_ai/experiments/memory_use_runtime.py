@@ -11,7 +11,6 @@ from pure_integer_ai.cognition.shared.memory_event import (
     MEMORY_EVENT_OBSERVATION,
     MEMORY_EVENT_USE,
     MEMORY_EVENT_USE_OUTCOME,
-    MEMORY_OBJECT_EPISODE,
     MEMORY_OBJECT_USE,
     EpisodePayload,
     MemoryEvent,
@@ -259,13 +258,8 @@ class MemoryUseRuntime:
             _session_ancestor(state.scope),
             used_at,
         )
-        episode_ref = memory_object_ref(
-            self.event_log.memory_space_identity,
-            MEMORY_OBJECT_EPISODE,
-            episode_payload.stable_key(),
-            owner=state.scope.owner,
-            versions=state.scope.versions,
-        )
+        episode_ref = self.event_log.declaration_ref(
+            MEMORY_EVENT_EPISODE, episode_payload, scope=state.scope)
         query_kind = MemoryLinkedRef.object(activation.request.query_kind)
         context_key = _request_context_key(processing)
         use_payload = UsePayload(

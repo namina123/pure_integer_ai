@@ -113,6 +113,7 @@ class SpanIndex:
             scoped_identities: ScopedIdentityStore,
             protocol: SpanProtocol,
             occurrence_index: OccurrenceIndex | None = None,
+            *, source_records: SourceRecordRepository | None = None,
             ) -> None:
         if not isinstance(ontology, GraphOntology):
             raise TypeError("ontology 必须是 GraphOntology")
@@ -123,11 +124,15 @@ class SpanIndex:
         if occurrence_index is not None and not isinstance(
                 occurrence_index, OccurrenceIndex):
             raise TypeError("occurrence_index 必须是 OccurrenceIndex 或 None")
+        if source_records is not None and (
+                not isinstance(source_records, SourceRecordRepository)
+                or source_records.identity_registry is not scoped_identities.registry):
+            raise ValueError("显式来源归档必须使用同一完整身份 registry")
         self.ontology = ontology
         self.scoped_identities = scoped_identities
         self.protocol = protocol
         self.occurrence_index = occurrence_index
-        self._sources = SourceRecordRepository(
+        self._sources = source_records if source_records is not None else SourceRecordRepository(
             ontology.backend, registry=scoped_identities.registry)
         self._spans = SpanStore(ontology.backend)
         self._span_cache: dict[ObjectIdentity, TypedRef] = {}

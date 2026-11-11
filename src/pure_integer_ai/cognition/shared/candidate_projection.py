@@ -265,6 +265,42 @@ class CandidateProjectionGraph:
             raise TypeError("read_only 必须是严格 bool")
         self.ontology = ontology
         self.protocol = protocol
+        # A published training graph is immutable for the lifetime of this
+        # facade.  Candidate history and active projections are therefore safe
+        # to memoize after their full graph validation.  The writable learning
+        # path keeps the old uncached behavior because append-only events may
+        # change the projection between calls.
+        self._read_only = read_only
+        # A backend opened read-only is immutable even when a compatibility
+        # owner was constructed with ``read_only=False``.  The Core restore
+        # path uses that compatibility form, so history links can safely use
+        # the same validated backend index as projection-only facades.
+        self._immutable_backend = bool(
+            getattr(ontology.backend, "read_only", False))
+        self._history_cache: dict[
+            tuple[int, ...], tuple[MaterializedCandidateProjectionEvent, ...]
+        ] = {}
+        self._projection_cache: dict[
+            tuple[int, ...], CandidateGraphProjection
+        ] = {}
+        self._active_binding_cache: dict[
+            tuple[int, ...], tuple[CandidateGraphProjection, ...]
+        ] = {}
+        self._history_link_index: dict[
+            tuple[int, int], tuple[tuple[ObjectIdentity, TypedRef], ...]
+        ] | None = None
+        shared_history_indexes = None
+        if self._immutable_backend:
+            shared_history_indexes = getattr(
+                ontology.backend, "_pi_readonly_candidate_history_indexes", None)
+            if shared_history_indexes is None:
+                shared_history_indexes = {}
+                setattr(
+                    ontology.backend,
+                    "_pi_readonly_candidate_history_indexes",
+                    shared_history_indexes,
+                )
+        self._shared_history_indexes = shared_history_indexes
         identities = (
             *protocol.predicate_identities(),
             *protocol.state_identities(),
@@ -558,17 +594,31 @@ class CandidateProjectionGraph:
             ) -> tuple[MaterializedCandidateProjectionEvent, ...]:
         """读取候选完整 Event 历史并拒绝相同逻辑序的竞争事件。"""
         candidate_identity = self.ontology.identity_of(candidate)
-        links = self.ontology.statements(
-            predicate=self._protocol_refs[self.protocol.event_candidate],
-            object_ref=candidate,
-        )
+        cache_key = candidate.node_ref()
+        if self._immutable_backend:
+            cached = self._history_cache.get(cache_key)
+            if cached is not None:
+                return cached
         event_refs: dict[ObjectIdentity, TypedRef] = {}
-        for link in links:
-            identity = self.ontology.identity_of(link.subject)
-            prior = event_refs.get(identity)
-            if prior is not None and prior != link.subject:
-                raise CandidateProjectionError("同一 Event 身份映射到多个节点")
-            event_refs[identity] = link.subject
+        if self._immutable_backend:
+            for identity, event_ref in self._history_links_for(candidate):
+                prior = event_refs.get(identity)
+                if prior is not None and prior != event_ref:
+                    raise CandidateProjectionError(
+                        "同一 Event 身份映射到多个节点")
+                event_refs[identity] = event_ref
+        else:
+            links = self.ontology.statements(
+                predicate=self._protocol_refs[self.protocol.event_candidate],
+                object_ref=candidate,
+            )
+            for link in links:
+                identity = self.ontology.identity_of(link.subject)
+                prior = event_refs.get(identity)
+                if prior is not None and prior != link.subject:
+                    raise CandidateProjectionError(
+                        "同一 Event 身份映射到多个节点")
+                event_refs[identity] = link.subject
         restored = tuple(
             self.read_event(event_refs[key])
             for key in sorted(event_refs, key=ObjectIdentity.stable_key)
@@ -586,10 +636,65 @@ class CandidateProjectionGraph:
         if any(item.definition.definition.candidate != candidate_identity
                for item in ordered):
             raise CandidateProjectionError("候选 history 混入其他对象 Event")
+        if self._immutable_backend:
+            self._history_cache[cache_key] = ordered
         return ordered
+
+    def _history_links_for(
+            self, candidate: TypedRef
+            ) -> tuple[tuple[ObjectIdentity, TypedRef], ...]:
+        """精确反查当前不可变候选的全部事件，按协议与候选惰性共享。
+
+        缓存缺项表示尚未读取，空 tuple 表示已核验没有历史；不能因为同一
+        协议的其它候选已缓存就认定当前候选没有事件，也不恢复无关历史。
+        """
+        if not self._immutable_backend:
+            raise CandidateProjectionError("可写候选图不能使用只读 history index")
+        if self._history_link_index is None:
+            protocol_key = tuple(
+                value
+                for identity in (
+                    *self.protocol.predicate_identities(),
+                    *self.protocol.state_identities(),
+                    *self.protocol.kind_identities(),
+                )
+                for value in identity.stable_key()
+            ) + self.protocol.event_namespace_key
+            if self._shared_history_indexes is not None:
+                shared = self._shared_history_indexes.get(protocol_key)
+                if shared is not None:
+                    self._history_link_index = shared
+            if self._history_link_index is None:
+                self._history_link_index = {}
+            if self._shared_history_indexes is not None:
+                self._shared_history_indexes[protocol_key] = self._history_link_index
+        candidate_key = candidate.node_ref()
+        cached = self._history_link_index.get(candidate_key)
+        if cached is not None:
+            return cached
+        links = self.ontology.statements(
+            predicate=self._protocol_refs[self.protocol.event_candidate],
+            object_ref=candidate)
+        events: dict[ObjectIdentity, TypedRef] = {}
+        for link in links:
+            if link.object != candidate:
+                raise CandidateProjectionError("候选 history 反向读取混入其它对象")
+            event_identity = self.ontology.identity_of(link.subject)
+            prior = events.get(event_identity)
+            if prior is not None and prior != link.subject:
+                raise CandidateProjectionError("同一 Event 身份映射到多个节点")
+            events[event_identity] = link.subject
+        result = tuple(sorted(events.items(), key=lambda item: item[0].stable_key()))
+        self._history_link_index[candidate_key] = result
+        return result
 
     def project(self, candidate: TypedRef) -> CandidateGraphProjection:
         """顺序执行 Event 链，从图派生候选当前状态和 replacement。"""
+        cache_key = candidate.node_ref()
+        if self._read_only:
+            cached = self._projection_cache.get(cache_key)
+            if cached is not None:
+                return cached
         history = self.history(candidate)
         if not history:
             raise CandidateProjectionError("候选没有 lifecycle Event")
@@ -616,8 +721,11 @@ class CandidateProjectionGraph:
             elif event.replacement is not None:
                 raise CandidateProjectionError("非 supersede Event 带 replacement")
             state = event.to_state
-        return CandidateGraphProjection(
+        projection = CandidateGraphProjection(
             materialized, state, history, replacement)
+        if self._read_only:
+            self._projection_cache[cache_key] = projection
+        return projection
 
     def active_for_binding(
             self, binding: CandidateBinding
@@ -625,6 +733,11 @@ class CandidateProjectionGraph:
         """按一个完整 binding 查询 active 候选，不读取 legacy tier 或计数。"""
         if not isinstance(binding, CandidateBinding):
             raise TypeError("binding 必须是 CandidateBinding")
+        cache_key = binding.stable_key()
+        if self._read_only:
+            cached = self._active_binding_cache.get(cache_key)
+            if cached is not None:
+                return cached
         predicate = self.ontology.resolve(binding.predicate)
         value = self.ontology.resolve(binding.value)
         if predicate is None or value is None:
@@ -662,7 +775,10 @@ class CandidateProjectionGraph:
                     "active 候选出现定义外 binding 拓扑")
             if projection.state == self.protocol.active_state:
                 projections.append(projection)
-        return tuple(projections)
+        result = tuple(projections)
+        if self._read_only:
+            self._active_binding_cache[cache_key] = result
+        return result
 
     def _event_identity(
             self, definition: EvidenceCandidateDefinition, *,

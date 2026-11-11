@@ -549,6 +549,37 @@ class EvidenceCandidateEngine:
             key=lambda item: item.stable_key(),
         ))
 
+    def recognition_for_route(
+            self,
+            hypothesis: HypothesisKey,
+            observation: SourceRef,
+            event_key: tuple[int, ...],
+            ) -> CandidateRecognitionRecord | None:
+        """按完整 prediction route 恢复既有 recognition，保持幂等提交。"""
+        self.definition(hypothesis)
+        route = (hypothesis, observation, event_key)
+        prediction = self._predictions.get(route)
+        if prediction is None:
+            return None
+        formation_sources = self._definitions[hypothesis].forming_sources
+        formation_payloads = {
+            (ordinal, len(formation_sources))
+            for ordinal in range(len(formation_sources))
+        }
+        for evidence in self.ledger.evidence_history(hypothesis):
+            if (evidence.source in formation_sources
+                    and evidence.reason_key == self.protocol.formation_reason_key
+                    and evidence.payload in formation_payloads):
+                continue
+            if evidence.supersedes_evidence_id != 0:
+                continue
+            candidate, verification = self._recognition_from_evidence(evidence)
+            record = CandidateRecognitionRecord(candidate, verification, evidence)
+            if record.prediction == prediction:
+                return record
+        raise EvidenceCandidateError(
+            "prediction 已持久化但对应 recognition Evidence 缺失")
+
     def recognition_history(
             self,
             hypothesis: HypothesisKey,

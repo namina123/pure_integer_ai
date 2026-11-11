@@ -134,6 +134,10 @@ class AliasRelationRuntime:
         self._uses: dict[
             tuple[tuple[int, ...], tuple[int, ...]], AliasResolutionUse
         ] = {}
+        # Projection-only release graphs are immutable for the runtime
+        # lifetime.  Surface preview results can therefore be reused across
+        # repeated open-role parses without affecting the semantic state key.
+        self._preview_surface_cache: dict[tuple, AliasResolutionProposal] = {}
 
     def resolve_reference(
             self,
@@ -197,6 +201,26 @@ class AliasRelationRuntime:
             if (not isinstance(expected_value, ObjectIdentity)
                     or expected_value.object_kind != OBJECT_REPRESENTATION):
                 raise TypeError("expected surface value 必须是 Representation")
+        cache_key = None
+        if (self.closure.candidate_runtime is None
+                and isinstance(origin, ObjectIdentity)
+                and isinstance(branch, ObjectIdentity)
+                and isinstance(budget, AliasRouteSearchBudget)
+                and (allowed_prefix_steps is None
+                     or (isinstance(allowed_prefix_steps, tuple)
+                         and all(isinstance(item, ObjectIdentity)
+                                 for item in allowed_prefix_steps)))):
+            allowed_key = (
+                None if allowed_prefix_steps is None else
+                tuple(item.stable_key() for item in allowed_prefix_steps))
+            expected_key = (
+                None if expected_value is None else expected_value.stable_key())
+            cache_key = (
+                origin.stable_key(), branch.stable_key(), budget.stable_key(),
+                allowed_key, expected_key)
+            cached = self._preview_surface_cache.get(cache_key)
+            if cached is not None:
+                return cached
         discovery = self.route_finder.discover_surface(
             origin, branch, budget, allowed_prefix_steps)
         if expected_value is not None:
@@ -211,8 +235,13 @@ class AliasRelationRuntime:
                       if item.target == expected_value),
                 discovery.allowed_prefix_steps,
             )
-        return AliasResolutionProposal(
+        proposal = AliasResolutionProposal(
             self.selector.select_surface(discovery.query()), discovery)
+        if cache_key is not None:
+            if len(self._preview_surface_cache) >= 256:
+                self._preview_surface_cache.clear()
+            self._preview_surface_cache[cache_key] = proposal
+        return proposal
 
     def commit_many(
             self,

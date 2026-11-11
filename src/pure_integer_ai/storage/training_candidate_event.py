@@ -43,6 +43,7 @@ class TrainingCandidateEventIntegrityError(RuntimeError):
 
 _INTEGER_STREAM_CODEC_VERSION = 1
 _INTEGER_STREAM_WORD_BYTES = 7
+_PAYLOAD_EVENT_PAGE_SIZE = 128
 
 
 def encode_integer_stream(values: tuple[int, ...]) -> tuple[int, ...]:
@@ -62,10 +63,7 @@ def encode_integer_stream(values: tuple[int, ...]) -> tuple[int, ...]:
     words = []
     width = _INTEGER_STREAM_WORD_BYTES
     for start in range(0, len(encoded), width):
-        word = 0
-        for offset, value in enumerate(encoded[start:start + width]):
-            word |= value << (offset * 8)
-        words.append(word)
+        words.append(int.from_bytes(encoded[start:start + width], "little"))
     return (
         _INTEGER_STREAM_CODEC_VERSION,
         len(values),
@@ -100,37 +98,38 @@ def decode_integer_stream(values: tuple[int, ...]) -> tuple[int, ...]:
             _INTEGER_STREAM_WORD_BYTES,
             byte_size - word_index * _INTEGER_STREAM_WORD_BYTES,
         )
-        for offset in range(available):
-            encoded.append((word >> (offset * 8)) & 255)
         if word >> (available * 8):
             raise TrainingCandidateEventIntegrityError(
                 "训练候选整数流尾 word 填充位非零")
+        encoded.extend(word.to_bytes(_INTEGER_STREAM_WORD_BYTES, "little")[:available])
     result = []
-    cursor = 0
-    while cursor < len(encoded):
-        unsigned = 0
-        shift = 0
-        while True:
-            if cursor >= len(encoded):
-                raise TrainingCandidateEventIntegrityError(
-                    "训练候选整数流 varint 被截断")
-            byte = encoded[cursor]
-            cursor += 1
-            unsigned |= (byte & 127) << shift
-            if byte < 128:
-                break
+    unsigned = 0
+    shift = 0
+    canonical = True
+    for byte in encoded:
+        unsigned |= (byte & 127) << shift
+        if byte >= 128:
             shift += 7
+            continue
+        # 多字节 varint 的末组为零，当且仅当存在可删除的高位零组。
+        # 逐项检查与重新编码整个整数流相同，同时保留任意精度整数。
+        if shift and byte == 0:
+            canonical = False
         result.append(
             unsigned // 2 if unsigned % 2 == 0
             else -((unsigned + 1) // 2))
+        unsigned = 0
+        shift = 0
+    if shift:
+        raise TrainingCandidateEventIntegrityError(
+            "训练候选整数流 varint 被截断")
     if len(result) != original_size:
         raise TrainingCandidateEventIntegrityError(
             "训练候选整数流原始长度不一致")
-    restored = tuple(result)
-    if encode_integer_stream(restored) != values:
+    if not canonical:
         raise TrainingCandidateEventIntegrityError(
             "训练候选整数流不是规范编码")
-    return restored
+    return tuple(result)
 
 
 def register_training_candidate_event_tables(backend: StorageBackend) -> None:
@@ -391,9 +390,8 @@ class TrainingCandidateEventRecordStore:
             ) -> dict[int, tuple[int, ...]]:
         """批量恢复 payload，避免对每个事件重复执行 chunk 查询。
 
-        训练历史恢复会一次读取同一协议的数千个事件；统一 page-in
-        保留与 ``read_payload`` 相同的长度、顺序和填充校验，但把物理
-        chunk 表只读一次，避免恢复时间和 SQLite 游标数量随事件平方增长。
+        每页只读本次请求的至多 128 个事件，保留与 ``read_payload``
+        相同的完整长度、空间、顺序及填充校验；无关历史不进入 page-in。
         """
         if not isinstance(records, tuple):
             raise TypeError("records 必须是 tuple")
@@ -406,13 +404,24 @@ class TrainingCandidateEventRecordStore:
         if len(set(expected_hashes)) != len(expected_hashes):
             raise TrainingCandidateEventIntegrityError(
                 "批量训练候选 payload 含重复 event_hash")
-        rows = self.backend.select(TRAINING_CANDIDATE_EVENT_PART_TABLE)
+        result: dict[int, tuple[int, ...]] = {}
+        for start in range(0, len(records), _PAYLOAD_EVENT_PAGE_SIZE):
+            page = records[start:start + _PAYLOAD_EVENT_PAGE_SIZE]
+            result.update(self._read_payload_page(page))
+        return result
+
+    def _read_payload_page(
+            self, records: tuple[TrainingCandidateEventRecord, ...],
+            ) -> dict[int, tuple[int, ...]]:
+        """按当前完整信封页读取 chunk，逐事件独立核验所有原物理边界。"""
+        rows = self.backend.select_in(
+            TRAINING_CANDIDATE_EVENT_PART_TABLE,
+            "event_hash",
+            tuple(record.event_hash for record in records),
+        )
         grouped: dict[int, list[dict[str, Any]]] = {}
-        wanted = set(expected_hashes)
         for row in rows:
-            event_hash = row.get("event_hash")
-            if event_hash in wanted:
-                grouped.setdefault(event_hash, []).append(row)
+            grouped.setdefault(row.get("event_hash"), []).append(row)
         result: dict[int, tuple[int, ...]] = {}
         width = TRAINING_CANDIDATE_EVENT_CHUNK_WIDTH
         for record in records:

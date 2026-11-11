@@ -17,6 +17,11 @@ ENTRY_MODULES = (
     "pure_integer_ai.experiments.run_trained_relation_graph_terminal",
     "pure_integer_ai.experiments.trained_graph_release",
     "pure_integer_ai.experiments.runtime_boundary_validator",
+    # Optional multi-graph release routes are imported lazily by the terminal
+    # and Core runtime; keep their closure in a cold portable package too.
+    "pure_integer_ai.experiments.trained_operation_composition",
+    "pure_integer_ai.experiments.trained_operation_sequence",
+    "pure_integer_ai.experiments.trained_relation_surface_artifact",
 )
 
 
@@ -186,7 +191,7 @@ def build(project_root: str | Path, release_root: str | Path,
             "需要显式消费模型内 Concept/Entity/Event、Event-Time 或 Dialogue 命题图时，可在 turn 中增加 `graph_object_keys` 二维整数数组；这些一等对象与文字、Memory 和 Dialogue 在同一次 QueryState 中计算。\n"
             "输入 `\u007b\"op\":\"quit\"\u007d` 结束。\n\n"
             "模型目录只读；需要持久会话时使用 `--session` 指向模型目录之外的 SQLite 文件。\n"
-            "本包不携带训练课程、外部 QA、论文、密钥或 OpenCC；只包含一份 MIT 整数 held-out 验收课程。模型保留已核验许可的来源文本，因为运行时 Span/Role 校验依赖它。\n"
+            "本包不携带训练课程、外部 QA、论文、密钥或 OpenCC；发布图可使用整数化 surface/frame artifact，运行时不依赖来源正文。\n"
             "它证明的是有限的四根 QueryState witness，不代表自由对话完成。\n",
             encoding="utf-8", newline="\n")
         _write_launchers(temporary)

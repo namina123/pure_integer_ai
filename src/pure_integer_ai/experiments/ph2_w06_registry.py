@@ -268,10 +268,15 @@ def _validate_training_record(
     return entry, relation_family
 
 
-def audit_w06_registry_payload(payload: W06TrainingPayload) -> W06RegistryAuditReport:
-    """审核七子阶段 train 覆盖，要求每条 W-06 observation 恰有一条 Evidence。"""
+def audit_w06_registry_payload(
+        payload: W06TrainingPayload, *,
+        require_full_curriculum: bool = True,
+        ) -> W06RegistryAuditReport:
+    """Audit each train row; optionally require the complete seven-stage course."""
     if not isinstance(payload, W06TrainingPayload):
         raise TypeError("W-06 registry audit 需要 W06TrainingPayload")
+    if type(require_full_curriculum) is not bool:
+        raise TypeError("require_full_curriculum must be bool")
     sources = {item.stable_key: item for item in payload.source_refs}
     observations = {
         item.stable_key: item for item in payload.observations
@@ -304,19 +309,20 @@ def audit_w06_registry_payload(payload: W06TrainingPayload) -> W06RegistryAuditR
         roles[entry.substage_key].add(observation.sample_role)
         perturbations[entry.substage_key].add(observation.perturbation_kind)
 
-    if set(substage_counts) != set(W06_RELATION_SUBSTAGE_ORDER):
-        raise W06RegistryError("W-06 registry 子阶段覆盖漂移")
-    for substage, entry in W06_RELATION_REGISTRY.items():
-        if (roles[substage] != set(W06_REQUIRED_SAMPLE_ROLES)
-                or not set(entry.relation_families).issubset(relation_counts)
-                or not perturbations[substage].issubset(
-                    set(entry.required_perturbations))):
-            raise W06RegistryError("W-06 registry 关系、负例或 lifecycle 覆盖不完整")
+    if require_full_curriculum:
+        if set(substage_counts) != set(W06_RELATION_SUBSTAGE_ORDER):
+            raise W06RegistryError("W-06 registry 子阶段覆盖漂移")
+        for substage, entry in W06_RELATION_REGISTRY.items():
+            if (roles[substage] != set(W06_REQUIRED_SAMPLE_ROLES)
+                    or not set(entry.relation_families).issubset(relation_counts)
+                    or not perturbations[substage].issubset(
+                        set(entry.required_perturbations))):
+                raise W06RegistryError("W-06 registry 关系、负例或 lifecycle 覆盖不完整")
     return W06RegistryAuditReport(
         len(observations),
         sum(len(items) for items in teachers.values()),
         tuple((item, substage_counts[item])
-              for item in W06_RELATION_SUBSTAGE_ORDER),
+              for item in W06_RELATION_SUBSTAGE_ORDER if item in substage_counts),
         tuple(sorted(relation_counts.items())),
         tuple(sorted(source_keys)),
     )

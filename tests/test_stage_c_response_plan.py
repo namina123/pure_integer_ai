@@ -41,6 +41,7 @@ from pure_integer_ai.experiments.language_protocol_runtime import (
 from pure_integer_ai.experiments.generation_organization import (
     ClosedGenerationEvidence,
     bind_query_evidence,
+    build_response_plan,
     build_multi_response_plan,
     plan_from_active_fact,
 )
@@ -125,6 +126,22 @@ def test_bridge_without_generation_connector_fails_closed(tmp_path):
     assert result["termination_state"]["generation_ready"] == 0
     assert result["response_plan"] is None
     assert result["response_surface"] == ""
+
+
+def test_best_closed_fact_accepts_typed_projection_proof(tmp_path):
+    """Typed relation consumption may close without a duplicate proposition hop."""
+    database = _trained_database(tmp_path)
+    with TrainedRelationGraphRuntime(database) as runtime:
+        fact = runtime.active_surface_facts()[0]
+        generation = runtime._generate_surface(fact)
+        with TrainedGraphQueryBridge(database) as bridge:
+            proposition = fact.proposition.stable_key()
+            bridge.generation_by_proposition[proposition] = generation
+            bridge.typed_relation_projections[proposition] = object()
+            result = bridge._best_closed_fact((), proposition)
+            assert result == (fact, generation)
+            bridge.typed_relation_projections.clear()
+            assert bridge._best_closed_fact((), proposition) is None
 
 
 def test_response_plan_token_postcheck_rejects_missing_required_slot():
@@ -265,6 +282,33 @@ def test_multi_claim_binding_replaces_placeholders_with_state_core_evidence():
                for item, (_claim, refs) in zip(state_evidence,
                                                bound.claim_evidence_refs)
                for ref in refs)
+
+
+def test_single_claim_binding_keeps_per_claim_core_evidence():
+    """单 claim 绑定也必须保留 claim -> positive Core evidence 合同。"""
+    evidences, _generation = _multi_claim_evidence()
+    plan = build_response_plan(evidences[0])
+    assert plan is not None
+    claim = plan.claim_refs[0].stable_key()
+    bindings = tuple(
+        BindingEntry(slot.role.stable_key(), slot.filler.stable_key(),
+                     space=SPACE_CORE)
+        for slot in plan.slot_sequence)
+    state_evidence = (EvidenceEntry(
+        (700,), claim, space=SPACE_CORE, polarity=1, evidence_key=(701,),),)
+    state = QueryState(
+        (800,),
+        roots=tuple(QueryRoot(space, (900 + space,), ROOT_EXPANDED, 1)
+                    for space in (SPACE_CORE, SPACE_MEMORY, SPACE_DIALOGUE)),
+        bindings=bindings,
+        evidence=state_evidence,
+        evidence_closed=1,
+        best_candidate_key=claim,
+        termination=TERMINATION_ANSWER_CLOSED,
+    )
+    bound = bind_query_evidence(plan, state)
+    assert bound.claim_evidence_refs == ((claim, (state_evidence[0].stable_key(),)),)
+    assert state_evidence[0].stable_key() in bound.evidence_refs
 
 
 def test_response_plan_stable_key_roundtrip_is_pure_integer():

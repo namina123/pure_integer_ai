@@ -774,6 +774,9 @@ def test_formal_train_materializes_full_lattice_and_restores_span_tables(
     restored_backend = DictBackend()
     try:
         restored_ctx = make_train_context(restored_backend)
+        # 正式训练已创建整数索引；恢复目标须显式注册同一完整依赖 schema。
+        from pure_integer_ai.storage.integer_index_store import register_integer_index_tables
+        register_integer_index_tables(restored_backend)
         load_run(restored_backend, str(tmp_path), "l04_formal")
         restored_occurrences = OccurrenceIndex(
             restored_ctx.graph_ontology,

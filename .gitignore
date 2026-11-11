@@ -62,3 +62,7 @@ scratch/
 
 # --- 施工代理个人分析（非项目本体）---
 _agent_analysis/
+
+# 仓库根的本地探针与诊断；不影响 src/tests 中的正式实现。
+/tmp_*
+/.diag*/

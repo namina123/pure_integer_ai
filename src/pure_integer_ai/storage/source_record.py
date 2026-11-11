@@ -272,6 +272,11 @@ class SourceRecordRepository:
         """返回承载来源记录和身份表的后端。"""
         return self._backend
 
+    @property
+    def identity_registry(self) -> IntegerIdentityRegistry:
+        """返回权威完整来源键的 registry，供显式来源归档装配核对。"""
+        return self._registry
+
     def _cache(self, record: SourceRecordStorage) -> None:
         """缓存已同时核验 registry 完整键和原文 hash 的来源记录。"""
         self._records_by_key[record.source_key] = record

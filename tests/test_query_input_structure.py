@@ -9,29 +9,38 @@ from pure_integer_ai.cognition.understanding.query_input_structure import (
     STRUCTURE_CLOSED,
     STRUCTURE_OPEN,
     STRUCTURE_ORDER_CONFLICT,
+    InputRelationQuestionBinding,
     TrainedInputDiscourseOperator,
     TrainedInputMember,
     TrainedInputStructure,
     TrainedInputStructureProjector,
+    relation_candidate_semantic_groups,
     scope_local_conjunction_members,
+    scope_local_fact_query_candidate_keys,
+    scope_local_general_operation_candidate_keys,
 )
 from pure_integer_ai.cognition.understanding.query_concept_links import (
     TrainedConceptLink,
+)
+from pure_integer_ai.experiments.trained_graph_query_bridge import (
+    _conflicting_input_filler_groups,
+    _has_closed_bound_relation_question,
 )
 
 
 def _structure(
         *,
+        predicate_values: tuple[int, ...] = (33,),
         filler_values: tuple[int, ...] = (11, 22),
         filler_candidates: tuple[tuple[int, ...], ...] = (
             (4, 101), (4, 102)),
         proposition: tuple[int, ...] = (1, 50),
+        source_ref: tuple[int, ...] = (9, 70),
         ) -> TrainedInputStructure:
     predicate = (5, 60)
-    source_ref = (9, 70)
     members = [
         TrainedInputMember(
-            (33,), predicate, 5, PROJECTION_PREDICATE,
+            predicate_values, predicate, 5, PROJECTION_PREDICATE,
             proposition, predicate, source_ref, 0, 1, 0),
     ]
     for ordinal, (value, candidate) in enumerate(
@@ -109,6 +118,47 @@ def test_projector_closes_structure_with_gap_and_integer_trace():
     assert_integer_tree(projected.integer_trace())
 
 
+def test_empty_active_relation_scope_keeps_unscoped_rank_candidates():
+    """Non-composition queries must not turn an empty scope into deny-all."""
+    from pure_integer_ai.experiments.trained_graph_query_bridge import (
+        TrainedGraphQueryBridge,
+    )
+
+    projected = TrainedInputStructureProjector((_structure(),)).project(
+        (33, 11, 22))
+    candidate = projected.relation_candidates[0]
+    bridge = TrainedGraphQueryBridge.__new__(TrainedGraphQueryBridge)
+    best, second = bridge._rank_candidates(
+        projected, (candidate.proposition_key,),
+        active_relation_keys=frozenset())
+    assert best == (candidate.score, candidate.proposition_key)
+    assert second == (0, ())
+
+
+def test_bound_question_keeps_closed_relation_without_predicate_span():
+    """A question operation can close a binary relation with no predicate span."""
+    projected = TrainedInputStructureProjector((_structure(),)).project(
+        (33, 11, 22))
+    relation = projected.relation_candidates[0]
+    relation = replace(relation, predicate_coverage=0)
+    binding = InputRelationQuestionBinding(
+        frame_key=(92020, 1), operation_key=(92004, 1),
+        relation_key=relation.stable_key(), slot_span_refs=relation.span_refs)
+    prepared = replace(
+        projected, relation_candidates=(relation,),
+        relation_question_bindings=(binding,), operation_keys=((92004, 1),),
+        open_relations=())
+    assert _has_closed_bound_relation_question(prepared)
+
+    open_relation = replace(
+        relation, support_count=relation.required_count - 1, required_open=1,
+        state=STRUCTURE_OPEN)
+    open_binding = replace(binding, relation_key=open_relation.stable_key())
+    assert not _has_closed_bound_relation_question(replace(
+        prepared, relation_candidates=(open_relation,),
+        relation_question_bindings=(open_binding,)))
+
+
 def test_projector_keeps_open_candidate_for_missing_member():
     projected = TrainedInputStructureProjector((_structure(),)).project(
         (33, 11))
@@ -133,6 +183,223 @@ def test_projector_materializes_trained_binary_discourse_operation():
         STRUCTURE_OPEN, STRUCTURE_CLOSED, STRUCTURE_ORDER_CONFLICT}
     assert projected.integer_trace()["discourse_compositions"]
     assert projected.stable_key()[0] == 4
+    assert projected.operation_keys == ((91591, 1),)
+
+
+def test_projector_does_not_invent_operation_for_untrained_integer_surface():
+    operator = TrainedInputDiscourseOperator((91591, 1), (99,))
+    projected = TrainedInputStructureProjector(
+        (_structure(),), discourse_operators=(operator,)).project(
+            (33, 11, 22, 100))
+    assert projected.operation_keys == ()
+    assert projected.discourse_compositions == ()
+
+
+def test_projector_prefers_longer_nested_surface_for_same_operation():
+    operator = (91680, 1)
+    projected = TrainedInputStructureProjector(
+        (_structure(),), discourse_operators=(
+            TrainedInputDiscourseOperator(operator, (99,)),
+            TrainedInputDiscourseOperator(operator, (98, 99)),
+        )).project((33, 11, 22, 98, 99))
+
+    assert len(projected.discourse_compositions) == 1
+    composition = projected.discourse_compositions[0]
+    spans = {item.ref_key: item for item in projected.spans}
+    assert spans[composition.operation_span_ref].values == (98, 99)
+
+
+def test_projector_keeps_overlapping_distinct_operations_fail_closed():
+    projected = TrainedInputStructureProjector(
+        (_structure(),), discourse_operators=(
+            TrainedInputDiscourseOperator((91680, 1), (99,)),
+            TrainedInputDiscourseOperator((91680, 2), (98, 99)),
+        )).project((33, 11, 22, 98, 99))
+
+    assert len(projected.discourse_compositions) == 2
+    assert scope_local_fact_query_candidate_keys(
+        projected, frozenset({(91680, 1)})) == ()
+
+
+def test_fact_query_contract_selects_only_closed_left_scope():
+    operator = TrainedInputDiscourseOperator((91680, 1), (99,))
+    projected = TrainedInputStructureProjector(
+        (_structure(),), discourse_operators=(operator,)).project(
+            (33, 11, 22, 99))
+    matches = scope_local_fact_query_candidate_keys(
+        projected, frozenset({operator.operation_key}))
+    assert len(matches) == 1
+    assert matches[0][1] == operator.operation_key
+    assert matches[0][2] == projected.relation_candidates[0].stable_key()
+
+
+def test_fact_query_contract_selects_only_closed_right_scope():
+    operator = TrainedInputDiscourseOperator((91680, 3), (98, 99))
+    projected = TrainedInputStructureProjector(
+        (_structure(),), discourse_operators=(operator,)).project(
+            (98, 99, 33, 11, 22))
+    matches = scope_local_fact_query_candidate_keys(
+        projected, {operator.operation_key: (91672, 2)})
+    assert len(matches) == 1
+    assert matches[0][1] == operator.operation_key
+    assert matches[0][2] == projected.relation_candidates[0].stable_key()
+
+
+def test_fact_query_contract_rejects_right_scope_for_left_mode():
+    operator = TrainedInputDiscourseOperator((91680, 3), (98, 99))
+    projected = TrainedInputStructureProjector(
+        (_structure(),), discourse_operators=(operator,)).project(
+            (98, 99, 33, 11, 22))
+    assert scope_local_fact_query_candidate_keys(
+        projected, {operator.operation_key: (91672, 1)}) == ()
+
+
+def test_fact_query_contract_rejects_right_scope_and_unauthorized_marker():
+    operator = TrainedInputDiscourseOperator((91680, 1), (99,))
+    projected = TrainedInputStructureProjector(
+        (_structure(),), discourse_operators=(operator,)).project(
+            (33, 11, 22, 99, 33, 11, 22))
+    assert scope_local_fact_query_candidate_keys(
+        projected, frozenset({operator.operation_key})) == ()
+    assert scope_local_fact_query_candidate_keys(
+        projected, frozenset({(91680, 99)})) == ()
+
+
+def test_fact_query_contract_rejects_multiple_operations():
+    operator = TrainedInputDiscourseOperator((91680, 1), (99,))
+    projected = TrainedInputStructureProjector(
+        (_structure(),), discourse_operators=(operator,)).project(
+            (33, 11, 22, 99, 33, 11, 22, 99))
+    assert len(projected.discourse_compositions) == 2
+    assert scope_local_fact_query_candidate_keys(
+        projected, frozenset({operator.operation_key})) == ()
+
+
+def test_general_operation_contract_selects_unique_closed_right_scope():
+    operator = TrainedInputDiscourseOperator((91680, 8), (98,))
+    projected = TrainedInputStructureProjector(
+        (_structure(),), discourse_operators=(operator,)).project(
+            (98, 33, 11, 22))
+    matches = scope_local_general_operation_candidate_keys(
+        projected, frozenset({operator.operation_key, (91680, 99)}))
+    assert len(matches) == 1
+    assert matches[0][1] == operator.operation_key
+    assert matches[0][2] == projected.relation_candidates[0].stable_key()
+
+
+def test_general_operation_memory_view_keeps_only_the_closed_scope():
+    from pure_integer_ai.experiments.trained_graph_query_bridge import (
+        TrainedGraphQueryBridge,
+    )
+
+    operator = TrainedInputDiscourseOperator((91680, 12), (98,))
+    projected = TrainedInputStructureProjector(
+        (_structure(),), discourse_operators=(operator,)).project(
+            (98, 33, 11, 22))
+    bridge = object.__new__(TrainedGraphQueryBridge)
+    bridge.input_discourse_operation_modes = {
+        operator.operation_key: (91672, 3)}
+    bridge.input_discourse_fact_query_modes = {}
+    bridge.input_discourse_conjunctions = ()
+    bridge.relation_question_frames = ()
+
+    memory_view = bridge.active_memory_input_structure(projected)
+
+    assert memory_view.discourse_compositions == ()
+    assert len(memory_view.relation_candidates) == 1
+    assert memory_view.relation_candidates[0].state == STRUCTURE_CLOSED
+    assert memory_view.relation_candidates[0].proposition_key == (1, 50)
+
+
+def test_general_operation_contract_rejects_open_right_scope():
+    operator = TrainedInputDiscourseOperator((91680, 9), (98,))
+    projected = TrainedInputStructureProjector(
+        (_structure(),), discourse_operators=(operator,)).project(
+            (98, 33, 11))
+    assert scope_local_general_operation_candidate_keys(
+        projected, frozenset({operator.operation_key})) == ()
+
+
+def test_general_operation_contract_rejects_repeated_marker():
+    operator = TrainedInputDiscourseOperator((91680, 10), (98,))
+    projected = TrainedInputStructureProjector(
+        (_structure(),), discourse_operators=(operator,)).project(
+            (98, 33, 11, 22, 98, 33, 11, 22))
+    assert len(projected.discourse_compositions) == 2
+    assert scope_local_general_operation_candidate_keys(
+        projected, frozenset({operator.operation_key})) == ()
+
+
+def test_general_operation_contract_rejects_conflicting_right_scope():
+    operator = TrainedInputDiscourseOperator((91680, 11), (98,))
+    projected = TrainedInputStructureProjector(
+        (_structure(),), discourse_operators=(operator,)).project(
+            (98, 33, 22, 11))
+    assert projected.discourse_compositions[0].state == STRUCTURE_ORDER_CONFLICT
+    assert scope_local_general_operation_candidate_keys(
+        projected, frozenset({operator.operation_key})) == ()
+
+
+def test_fact_query_and_conjunction_contracts_can_coexist_once_each():
+    left = _structure()
+    right = _structure(
+        predicate_values=(44,), filler_values=(12, 23),
+        filler_candidates=((4, 201), (4, 202)), proposition=(1, 51),
+    )
+    fact = TrainedInputDiscourseOperator((91680, 1), (98,))
+    conjunction = TrainedInputDiscourseOperator((91591, 1), (99,))
+    projected = TrainedInputStructureProjector(
+        (left, right), discourse_operators=(fact, conjunction)).project(
+            (33, 11, 22, 99, 44, 12, 23, 98))
+
+    fact_matches = scope_local_fact_query_candidate_keys(
+        projected, {fact.operation_key: (91672, 1)})
+    conjunction_matches = scope_local_conjunction_members(
+        projected, frozenset({conjunction.operation_key}))
+    assert len(fact_matches) == 1
+    assert len(conjunction_matches) == 1
+    assert fact_matches[0][1] == fact.operation_key
+    assert tuple(item[0] for item in conjunction_matches) == tuple(
+        item.stable_key() for item in projected.discourse_compositions
+        if item.operation_key == conjunction.operation_key)
+
+
+def test_pair_closure_requires_distinct_ordered_filler_spans():
+    left = _structure(predicate_values=(88,))
+    right = _structure(
+        predicate_values=(99,), filler_values=(12, 23),
+        filler_candidates=((4, 201), (4, 202)), proposition=(1, 51),
+    )
+    projected = TrainedInputStructureProjector(
+        (left, right), discourse_operators=(
+            TrainedInputDiscourseOperator((91591, 1), (77,)),
+        )).project((11, 22, 77, 12, 23))
+    target = next(
+        item for item in projected.relation_candidates
+        if item.proposition_key == left.proposition_key)
+    assert target.required_count == 2
+    assert target.predicate_coverage == 0
+    assert scope_local_conjunction_members(
+        projected, frozenset({(91591, 1)}))
+
+    target_semantics = [
+        item for item in projected.semantic_candidates
+        if item.proposition_key == target.proposition_key
+    ]
+    first_span = next(item.span_ref for item in target_semantics
+                      if item.member_ordinal == 1)
+    collapsed = tuple(sorted(
+        (replace(item, span_ref=first_span)
+         if item.proposition_key == target.proposition_key
+         and item.member_ordinal == 2 else item
+         for item in projected.semantic_candidates),
+        key=lambda item: item.stable_key(),
+    ))
+    corrupted = replace(projected, semantic_candidates=collapsed)
+    assert scope_local_conjunction_members(
+        corrupted, frozenset({(91591, 1)})) == ()
+    assert not corrupted.concept_evidence_closed(
+        target.proposition_key, frozenset())
 
 
 def test_discourse_operand_ignores_partial_competing_projection():
@@ -262,6 +529,53 @@ def test_projector_retains_parallel_filler_candidates():
     }
     assert fillers == {(4, 101), (4, 102), (4, 201), (4, 202)}
     assert len(projected.relation_candidates) == 2
+
+
+def test_provenance_duplicate_relation_rows_are_one_scope_candidate():
+    first = _structure(proposition=(1, 501), source_ref=(9, 701))
+    second = _structure(proposition=(1, 502), source_ref=(9, 702))
+    operator = TrainedInputDiscourseOperator((91680, 1), (99,))
+    projected = TrainedInputStructureProjector(
+        (first, second), discourse_operators=(operator,)).project(
+            (33, 11, 22, 99))
+
+    assert len(projected.relation_candidates) == 2
+    groups = relation_candidate_semantic_groups(projected)
+    assert len(groups) == 1
+    assert len(groups[0][1]) == 2
+    matches = scope_local_fact_query_candidate_keys(
+        projected, frozenset({operator.operation_key}))
+    assert len(matches) == 1
+    assert matches[0][2] in {
+        item.stable_key() for item in projected.relation_candidates}
+
+
+def test_input_filler_conflicts_are_scoped_to_proposition_source_and_role():
+    from pure_integer_ai.cognition.understanding.query_input_structure import (
+        InputSemanticCandidate,
+    )
+
+    role = (8, 1)
+    span = (1, 900, 0, 1, 1)
+
+    def candidate(filler, proposition, source):
+        return InputSemanticCandidate(
+            (4, filler), 4, PROJECTION_FILLER, span,
+            (1, proposition), (5, 60), role, (9, source), 1)
+
+    cross_proposition = (
+        candidate(101, 50, 70),
+        candidate(102, 51, 71),
+    )
+    assert _conflicting_input_filler_groups(cross_proposition) == frozenset()
+
+    same_proposition = (
+        candidate(101, 50, 70),
+        candidate(102, 50, 70),
+    )
+    assert _conflicting_input_filler_groups(same_proposition) == frozenset({
+        ((1, 50), (9, 70), role),
+    })
 
 
 def test_prefix_index_matches_legacy_exact_integer_spans():

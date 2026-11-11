@@ -560,8 +560,18 @@ def _generic_graph_contract_bindable(
     return False
 
 
-def _generic_representation_family(runtime, branch: ObjectIdentity) -> tuple[int, ...]:
-    """Recover the single trained R-01 representation family once per branch."""
+def _generic_representation_family(
+        runtime, branch: ObjectIdentity,
+        constants: tuple[ObjectIdentity, ...] | None = None,
+        ) -> tuple[int, ...]:
+    """恢复 generic connector 实际输出所使用的唯一 R-01 表示族。
+
+    发布图的全量 ``realizes`` closure 可能包含数万条候选事实。generic
+    response 只会消费当前分支当前 connector 中的来源化常量，因此调用方可
+    先传入一个已注册常量取得分支 renderer family；真正选中的 connector
+    随后仍由 G-03 surface preview 对每个可见常量逐槽执行完整 R-01 route
+    校验。未传入局部常量时保留发布审计的全分支核验行为。
+    """
     cache = getattr(runtime, "_generic_response_representation_families", None)
     if cache is None:
         cache = {}
@@ -571,13 +581,45 @@ def _generic_representation_family(runtime, branch: ObjectIdentity) -> tuple[int
     if cached is not None:
         return cached
     alias = runtime.alias_runtime(branch)
-    families = {
-        representation_parts(binding.filler)[0]
-        for fact in alias.closure.consumer.lookup_relation(
-            alias.selector.protocol.realizes_relation)
-        for binding in fact.proposition.bindings
-        if binding.filler.object_kind == OBJECT_REPRESENTATION
-    }
+    owner = next(
+        (item for item in runtime._branches if item.branch == branch), None)
+    if constants is None:
+        constants = () if owner is None else tuple(sorted({
+            binding.constant
+            for connector in owner.response_connectors
+            for binding in connector.template.bindings
+            if (binding.constant is not None
+                and binding.constant.object_kind == OBJECT_LANGUAGE_ATOM)
+        }, key=lambda item: item.stable_key()))
+    else:
+        if (not isinstance(constants, tuple)
+                or any(not isinstance(item, ObjectIdentity)
+                       or item.object_kind != OBJECT_LANGUAGE_ATOM
+                       for item in constants)
+                or len(set(constants)) != len(constants)):
+            raise ValueError("generic response constants 局部索引类型错误")
+        constants = tuple(sorted(constants, key=lambda item: item.stable_key()))
+    families = set()
+    for constant in constants:
+        proposal = alias.preview_surface(
+            constant,
+            branch,
+            budget=_ALIAS_BUDGET,
+            allowed_prefix_steps=(),
+        )
+        selected = proposal.result.selected
+        if selected is None:
+            raise ValueError(
+                "generic response connector constant has no unique surface route")
+        families.add(representation_parts(selected.value)[0])
+    if not constants:
+        families = {
+            representation_parts(binding.filler)[0]
+            for fact in alias.closure.consumer.lookup_relation(
+                alias.selector.protocol.realizes_relation)
+            for binding in fact.proposition.bindings
+            if binding.filler.object_kind == OBJECT_REPRESENTATION
+        }
     if len(families) != 1:
         raise ValueError("generic graph surface representation family is ambiguous")
     family = next(iter(families))
@@ -1392,12 +1434,21 @@ def _observation_candidates(runtime, core, state, contexts, hypotheses, protocol
     state_evidence = {item.stable_key(): item for item in state.evidence}
     result = {}
     for context in contexts:
-        fact = facts[context.candidate.frame.proposition]
+        fact = facts.get(context.candidate.frame.proposition)
+        if fact is None:
+            # A restored open-role context may outlive a pruned or superseded
+            # Core surface fact.  It cannot authorize a surface replacement.
+            continue
         original = core.generation_input(fact.proposition)
         template = runtime._role_template(fact)
+        observed = context.observed_spans()
+        if len(observed) != len(fact.bindings):
+            # Open-role spans describe the complete trained frame.  An
+            # incomplete witness cannot authorize current surface generation.
+            continue
         bound = _bound_relation_proposition(original, template, protocols.content.answer)
         bindings = []
-        for span, role in zip(context.observed_spans(), fact.bindings, strict=True):
+        for span, role in zip(observed, fact.bindings, strict=True):
             typed = tuple(item for item in original.proposition.definition.bindings
                           if item.role == role.role and item.filler == role.filler)
             if len(typed) != 1 or span.role != role.role:
@@ -1410,7 +1461,7 @@ def _observation_candidates(runtime, core, state, contexts, hypotheses, protocol
             raise ValueError("开放生成 O/H 竞争身份漂移")
         evidence = ObservedGenerationEvidence(
             bound, context.source, context.scope, context.observation, context.hypothesis,
-            hypothesis.hypothesis_kind, hypothesis.competition_key, context.observed_spans(),
+            hypothesis.hypothesis_kind, hypothesis.competition_key, observed,
             tuple(state_evidence[key] for key in context.evidence), context.stable_key())
         result[context.stable_key()] = GenerationCandidate(
             bound, evidence.state, semantic_source(bound.template), context.scope, (),
@@ -1437,21 +1488,22 @@ def _reference_generation_provenance(state, discourse_contexts, reference_resolu
     memory_refs = set()
     targets = set()
     for resolution in required:
-        winner = resolution.winner
+        supporters = resolution.supporting_candidates
         target = resolution.winner_target
-        context = contexts.get(resolution.winner_context_key)
-        if winner is None or target is None or context is None:
-            raise ValueError("跨轮指代 winner 缺少可恢复的目标或篇章上下文")
-        if winner.occurrence not in context.role_occurrences:
-            raise ValueError("跨轮指代 winner occurrence 不属于其采用上下文")
+        if not supporters or target is None:
+            raise ValueError("跨轮指代缺少完整目标支持")
+        for supporter in supporters:
+            context = contexts.get(supporter.context_key)
+            if context is None or supporter.occurrence not in context.role_occurrences:
+                raise ValueError("跨轮指代支持 occurrence 缺少可恢复的精确上下文")
+            evidence.add(supporter.context_key)
+            memory_refs.update((supporter.occurrence.observation, supporter.occurrence.hypothesis))
         if any(item not in state.bindings for item in resolution.query_bindings()) or any(
                 item not in state.evidence for item in resolution.query_evidence()):
             raise ValueError("跨轮指代 winner 尚未进入同一次 QueryState")
         objects.update(resolution.discourse_objects())
         evidence.add(resolution.stable_key())
-        evidence.add(resolution.winner_context_key)
         evidence.update(item.stable_key() for item in resolution.query_evidence())
-        memory_refs.update((winner.occurrence.observation, winner.occurrence.hypothesis))
         targets.add(target)
     return (
         tuple(sorted(objects, key=lambda item: item.stable_key())),
@@ -1488,11 +1540,39 @@ def _active_memory_refs(state, hypotheses, *, selected_hypothesis_keys=None):
     return active
 
 
+def _discourse_memory_refs(discourse_contexts) -> tuple[MemoryObjectRef, ...]:
+    """提取已送达篇章的 O/H/输入 Observation 身份，不读取表层文本。"""
+    refs = set()
+    for discourse in discourse_contexts:
+        provider = getattr(discourse, "memory_refs", None)
+        if provider is None or not callable(provider):
+            raise TypeError("篇章回应 context 缺少来源化 Memory provenance")
+        values = provider()
+        if (type(values) is not tuple
+                or any(not isinstance(item, MemoryObjectRef) for item in values)):
+            raise TypeError("篇章回应 context 的 Memory provenance 类型错误")
+        refs.update(values)
+    return tuple(sorted(refs, key=lambda item: item.stable_key()))
+
+
 def generate_open_responses(runtime, core, state: QueryState, contexts, hypotheses,
                             proposals_by_hypothesis, nodes, *, discourse_contexts=(),
                             reference_resolutions=()) -> tuple[OpenResponseGeneration, ...]:
     """在共享查询中执行所有闭合生成输入，不按其他图库是否失败启动。"""
     if not contexts or not nodes:
+        return ()
+    # A required cross-turn reference is an authorization boundary for open
+    # response generation.  Missing/ambiguous graph support must remain an
+    # UNKNOWN/CLARIFY outcome; it must never escape as an exception and must
+    # never be bypassed by generating the current open-role surface alone.
+    from pure_integer_ai.experiments.trained_reference_resolution import (
+        REFERENCE_RESOLVED,
+    )
+    required_references = tuple(
+        item for item in reference_resolutions
+        if getattr(item, "requires_resolution", False))
+    if any(getattr(item, "status", None) != REFERENCE_RESOLVED
+           for item in required_references):
         return ()
     if (any(root.status == ROOT_PENDING for root in state.roots)
             or unvisited_frontier(state.frontier, state.visited)):
@@ -1518,7 +1598,11 @@ def generate_open_responses(runtime, core, state: QueryState, contexts, hypothes
     expanded = {(root.owner_space, root.root_key) for root in state.roots if root.status == ROOT_EXPANDED}
     result = []
     for context in contexts:
-        candidate = candidates[context.stable_key()]
+        candidate = candidates.get(context.stable_key())
+        if candidate is None:
+            # Keep an incomplete restored context in Memory for audit, but do
+            # not let it create a response surface or factual claim.
+            continue
         request = GenerationPlanningRequest(AnswerGenerationGoal(
             protocols.content.answer, candidate.proposition, LogicEvidenceState(True, False),
             context.source, context.scope, branch), all_candidates)
@@ -1617,9 +1701,7 @@ def generate_open_responses(runtime, core, state: QueryState, contexts, hypothes
                 allowed_node_kinds=(item.value.filler.object_kind,)) for item in preview.slots)
             memory_refs = {context.observation, context.hypothesis,
                            *reference_memory_refs}
-            for discourse in discourse_contexts:
-                memory_refs.update((discourse.observation, discourse.hypothesis,
-                                    discourse.context.observation, discourse.context.hypothesis))
+            memory_refs.update(_discourse_memory_refs(discourse_contexts))
             memory_refs.update(_active_memory_refs(
                 state, hypotheses,
                 selected_hypothesis_keys={context.hypothesis.stable_key()}))
@@ -1731,8 +1813,11 @@ def generate_generic_responses(
         input_structure: QueryInputStructure,
         explicit_graph_input_keys: tuple[tuple[int, ...], ...] = (),
         graph_hops: tuple[object, ...] = (),
+        *, context_only: bool = False,
         ) -> tuple[TrainedGenericResponseGeneration, ...]:
-    """Execute one graph-prioritized response act through the existing six layers."""
+    """通过原六层生成消费当前 UNKNOWN；未解析角色只允许无可见图槽的合同。"""
+    if type(context_only) is not bool:
+        raise TypeError("context_only 必须是显式布尔模式")
     if runtime is None or not hypotheses or not nodes or observation is None:
         return ()
     if (any(root.status == ROOT_PENDING for root in state.roots)
@@ -1812,7 +1897,18 @@ def generate_generic_responses(
     owner = next(item for item in runtime._branches if item.branch == branch)
     values = owner.definition_graph.value_protocol
     surface_protocol = _surface_protocol(branch)
-    family = _generic_representation_family(runtime, branch)
+    # The selected response's actual constants are surfaced and route-checked
+    # later by GenerationSurfaceRuntime.  One current branch constant is enough
+    # to establish the renderer family needed while matching graph slots; a
+    # cold query must not restore every historical response connector first.
+    representative = tuple(sorted({
+        binding.constant
+        for binding in node.learned.template.bindings
+        if (binding.constant is not None
+            and binding.constant.object_kind == OBJECT_LANGUAGE_ATOM)
+    }, key=lambda item: item.stable_key()))[:1]
+    family = _generic_representation_family(
+        runtime, branch, constants=representative or None)
     expanded = {(root.owner_space, root.root_key) for root in state.roots
                 if root.status == ROOT_EXPANDED}
     contract = None
@@ -1828,6 +1924,8 @@ def generate_generic_responses(
         candidate_contract = _generic_response_contract(
             candidate_node.learned, values, surface_protocol)
         if candidate_contract is None:
+            continue
+        if context_only and candidate_contract.graph_slots:
             continue
         candidate_values = _generic_graph_values(
             state,

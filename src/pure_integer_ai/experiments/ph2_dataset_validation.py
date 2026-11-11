@@ -8,6 +8,7 @@ from pure_integer_ai.experiments.ph2_dataset_contract import (
     JSONL_RECORD_KINDS,
     LOCAL_ONLY_LICENSE_IDS,
     PUBLIC_LICENSE_IDS,
+    RECORD_EVALUATOR_LABEL,
     SPLITS,
     W_STAGES,
     ArtifactManifest,
@@ -247,10 +248,21 @@ def validate_supersede_and_prerequisite_graph(
 def validate_artifact_manifest(
         manifest: ArtifactManifest,
         source_refs: tuple[SourceRefRecord, ...],
-        observations: tuple[ObservationRecord, ...]) -> None:
-    """核对 manifest 的四类文件、来源簇、split、阶段、来源和许可集合。"""
+        observations: tuple[ObservationRecord, ...], *,
+        training_only: bool = False) -> None:
+    """核对默认双 owner 或显式 train-only 文件及来源集合，不互换资格。"""
+    if type(training_only) is not bool:
+        raise DatasetValidationError("training_only 必须是显式布尔合同")
     file_kinds = {item.record_kind for item in manifest.files}
-    if file_kinds != set(JSONL_RECORD_KINDS):
+    if training_only:
+        expected_kinds = set(JSONL_RECORD_KINDS) - {RECORD_EVALUATOR_LABEL}
+        if (manifest.splits != ("train",) or not observations
+                or any(item.split != "train" for item in observations)
+                or file_kinds != expected_kinds
+                or any(item.record_kind == RECORD_EVALUATOR_LABEL
+                       or item.owner_kind == "evaluator" for item in manifest.files)):
+            raise DatasetValidationError("train-only manifest 不得包含 evaluation owner")
+    elif file_kinds != set(JSONL_RECORD_KINDS):
         raise DatasetValidationError("ArtifactManifest 必须覆盖四类 JSONL record")
     if any(item.source_key != manifest.source_key for item in source_refs):
         raise DatasetValidationError("ArtifactManifest.source_key 与 SourceRef 不一致")

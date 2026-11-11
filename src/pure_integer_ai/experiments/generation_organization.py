@@ -164,6 +164,7 @@ def build_multi_response_plan(
         generation: GraphRelationGeneration,
         *,
         required_node_kinds: tuple[int, ...] | None = None,
+        claim_slot_contract: tuple[tuple[tuple[int, ...], tuple[tuple[int, ...], ...]], ...] | None = None,
         ) -> ResponsePlan | None:
     """Build one graph-trained plan for multiple independent closed claims.
 
@@ -172,13 +173,20 @@ def build_multi_response_plan(
     surfaces or invents a conjunction.  Every claim keeps its own evidence
     refs and contiguous slot range so delivery can audit the whole set.
     """
-    if (type(evidences) is not tuple or len(evidences) < 2
+    if (type(evidences) is not tuple or not evidences
             or any(not isinstance(item, ClosedGenerationEvidence)
                    for item in evidences)
             or not isinstance(generation, GraphRelationGeneration)):
-        raise TypeError("multi response plan requires closed claim evidence")
+        raise TypeError("operation response plan requires closed claim evidence")
     if len({item.proposition_key for item in evidences}) != len(evidences):
         return None
+    if claim_slot_contract is not None:
+        # The caller supplies the exact graph-program projection, not an
+        # allow-duplicates flag. Every claim and ordered role remains explicit.
+        expected = tuple((item.proposition_key,
+            tuple(binding.role.stable_key() for binding in item.bindings)) for item in evidences)
+        if claim_slot_contract != expected:
+            return None
     if required_node_kinds is None:
         required_node_kinds = tuple(sorted(FILLER_NODE_KINDS))
     if (type(required_node_kinds) is not tuple or not required_node_kinds
@@ -198,12 +206,16 @@ def build_multi_response_plan(
         if claim.object_kind != OBJECT_PROPOSITION:
             return None
         start = len(slots)
+        seen_claim_roles = set()
         for binding in evidence.bindings:
             role = _role_for_binding(binding)
+            if role in seen_claim_roles:
+                return None
+            seen_claim_roles.add(role)
             slot_key = (role.stable_key(), binding.filler.stable_key())
             # A shared role/filler needs a dedicated learned shared-slot
             # contract; silently duplicating it would corrupt per-claim audit.
-            if slot_key in seen_slots:
+            if slot_key in seen_slots and claim_slot_contract is None:
                 return None
             seen_slots.add(slot_key)
             slots.append(ResponseSlot(
@@ -307,6 +319,27 @@ def bind_query_evidence(plan: ResponsePlan, state: QueryState) -> ResponsePlan:
                 raise ValueError("多命题 claim 缺少同一 QueryState 的 Core evidence")
             claim_evidence.append((claim_key, refs))
         plan = replace(plan, claim_evidence_refs=tuple(claim_evidence))
+    else:
+        claim_key = plan.claim_refs[0].stable_key()
+        refs = tuple(sorted({
+            item.stable_key() for item in state.evidence
+            if (item.space == SPACE_CORE
+                and item.hypothesis_key == claim_key
+                and item.polarity == 1)
+        }))
+        if not refs:
+            raise ValueError("单 claim 缺少同一 QueryState 的 Core evidence")
+        # The builder starts with a source-hash placeholder.  Replace it with
+        # the exact positive Core entries that authorized this claim; the
+        # final union below still preserves the complete shared QueryState.
+        plan = replace(
+            plan,
+            evidence_refs=refs,
+            # A bound single-claim plan has the same per-claim audit contract
+            # as a composed plan.  Keep the claim identity beside the exact
+            # positive Core evidence instead of relying on the shared union.
+            claim_evidence_refs=((claim_key, refs),),
+        )
     bound_slots = {(item.role_key, item.filler_key) for item in state.bindings
                    if item.space == SPACE_CORE}
     if any((slot.role.stable_key(), slot.filler.stable_key()) not in bound_slots

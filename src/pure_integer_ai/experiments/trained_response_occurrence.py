@@ -1,14 +1,15 @@
 """把实际采用的来源角色接入 Memory Occurrence 图，不宣称同指或事实。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pure_integer_ai.cognition.shared.graph_ontology import GraphOntology, relation_concept_identity
 from pure_integer_ai.cognition.shared.identity import (
     ObjectIdentity, SourceRef, occurrence_identity, span_identity,
 )
 from pure_integer_ai.cognition.shared.memory_event import (
-    MEMORY_EVENT_OBSERVATION, MemoryObjectRef, ObservationPayload,
+    MEMORY_EVENT_OBSERVATION, MEMORY_OBJECT_HYPOTHESIS,
+    MemoryObjectRef, ObservationPayload,
 )
 from pure_integer_ai.cognition.shared.scoped_persistence import ScopedIdentityStore
 from pure_integer_ai.cognition.shared.semantic_object import context_scope_identity
@@ -69,14 +70,22 @@ class ResponseRoleOccurrence:
     ordinal: int
     source_ref: tuple[int, ...]
     scope_key: tuple[int, ...]
+    _stable_key_cache: tuple[int, ...] | None = field(
+        default=None, init=False, repr=False, compare=False, hash=False)
 
     def stable_key(self) -> tuple[int, ...]:
         """保留全部端点、角色序、来源和作用域，不以内存引用定义身份。"""
-        return _signed_record(RESPONSE_OCCURRENCE_VERSION, self.occurrence.stable_key(),
-                              self.origin.stable_key(), self.role.stable_key(), self.proof_ref.stable_key(),
-                              self.delivery_context.stable_key(),
-                              self.observation.stable_key(), self.hypothesis.stable_key(),
-                              (self.ordinal,), self.source_ref, self.scope_key)
+        key = self._stable_key_cache
+        if key is None:
+            key = _signed_record(
+                RESPONSE_OCCURRENCE_VERSION,
+                self.occurrence.stable_key(), self.origin.stable_key(),
+                self.role.stable_key(), self.proof_ref.stable_key(),
+                self.delivery_context.stable_key(),
+                self.observation.stable_key(), self.hypothesis.stable_key(),
+                (self.ordinal,), self.source_ref, self.scope_key)
+            object.__setattr__(self, "_stable_key_cache", key)
+        return key
 
     def query_binding(self) -> BindingEntry:
         """把角色发生绑定在对应输出证明中，防止与当前输入角色混同。"""
@@ -129,14 +138,21 @@ class InputRoleOccurrence:
     source_ref: tuple[int, ...]
     scope_key: tuple[int, ...]
     values: tuple[int, ...]
+    _stable_key_cache: tuple[int, ...] | None = field(
+        default=None, init=False, repr=False, compare=False, hash=False)
 
     def stable_key(self) -> tuple[int, ...]:
         """稳定键保留 Observation、Hypothesis、span 和全部来源整数。"""
-        return _signed_record(RESPONSE_OCCURRENCE_VERSION, (7,), self.occurrence.stable_key(),
-                              self.origin.stable_key(), self.role.stable_key(),
-                              self.observation.stable_key(), self.hypothesis.stable_key(),
-                              self.context.stable_key(), (self.ordinal,), self.source_ref,
-                              self.scope_key, self.values)
+        key = self._stable_key_cache
+        if key is None:
+            key = _signed_record(
+                RESPONSE_OCCURRENCE_VERSION, (7,), self.occurrence.stable_key(),
+                self.origin.stable_key(), self.role.stable_key(),
+                self.observation.stable_key(), self.hypothesis.stable_key(),
+                self.context.stable_key(), (self.ordinal,), self.source_ref,
+                self.scope_key, self.values)
+            object.__setattr__(self, "_stable_key_cache", key)
+        return key
 
     def query_binding(self) -> BindingEntry:
         """把输入角色绑定到当前 Memory 假设，保持动态角色与概念分离。"""
@@ -183,6 +199,8 @@ class ReferenceCandidateSet:
     reference: InputRoleOccurrence
     antecedents: tuple[ResponseRoleOccurrence, ...]
     context_depths: tuple[int, ...]
+    _stable_key_cache: tuple[int, ...] | None = field(
+        default=None, init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.reference, InputRoleOccurrence):
@@ -214,12 +232,16 @@ class ReferenceCandidateSet:
 
     def stable_key(self) -> tuple[int, ...]:
         """稳定键保留 reference、候选 Occurrence、scope 与 Role。"""
-        return _signed_record(RESPONSE_OCCURRENCE_VERSION, (8,),
-                              self.reference.stable_key(),
-                              *(pack_record(RESPONSE_OCCURRENCE_VERSION,
-                                            item.stable_key(), (depth,))
-                                for item, depth in zip(self.antecedents, self.context_depths,
-                                                       strict=True)))
+        key = self._stable_key_cache
+        if key is None:
+            key = _signed_record(
+                RESPONSE_OCCURRENCE_VERSION, (8,), self.reference.stable_key(),
+                *(pack_record(RESPONSE_OCCURRENCE_VERSION,
+                              item.stable_key(), (depth,))
+                  for item, depth in zip(self.antecedents, self.context_depths,
+                                         strict=True)))
+            object.__setattr__(self, "_stable_key_cache", key)
+        return key
 
     @property
     def hot_count(self) -> int:
@@ -435,6 +457,203 @@ def read_response_roles(memory, context: OpenRoleGenerationContext, proof_ref: O
     return expected
 
 
+def materialize_factual_response_roles(
+        memory,
+        *,
+        input_observation: MemoryObjectRef,
+        hypothesis: MemoryObjectRef,
+        scope_key: tuple[int, ...],
+        proof_ref: ObjectIdentity,
+        output_observation: MemoryObjectRef,
+        output_source: SourceRef,
+        slots,
+        slot_hypotheses=(),
+        ) -> tuple[ResponseRoleOccurrence, ...]:
+    """Persist role occurrences for a factual ResponsePlan delivery.
+
+    Factual delivery historically recorded only bounded plan slots.  A later
+    discourse turn still needs the emitted role spans as Memory objects, so
+    this path records them from the just-delivered ResponsePlan and output
+    Observation.  It never creates a reference decision or Core fact.
+    """
+    if (not isinstance(input_observation, MemoryObjectRef)
+            or not isinstance(hypothesis, MemoryObjectRef)
+            or not isinstance(output_observation, MemoryObjectRef)
+            or not isinstance(proof_ref, ObjectIdentity)
+            or not isinstance(output_source, SourceRef)
+            or type(scope_key) is not tuple
+            or any(type(value) is not int for value in scope_key)):
+        raise TypeError("factual response role context is invalid")
+    if type(slots) is not tuple or not slots:
+        raise ValueError("factual response roles require non-empty slots")
+    if slot_hypotheses:
+        if (type(slot_hypotheses) is not tuple
+                or len(slot_hypotheses) != len(slots)
+                or any(not isinstance(item, MemoryObjectRef)
+                       or item.object_kind != MEMORY_OBJECT_HYPOTHESIS
+                       for item in slot_hypotheses)):
+            raise ValueError("factual response slot hypotheses are incomplete")
+    else:
+        slot_hypotheses = (hypothesis,) * len(slots)
+    payload = _observation_payload(memory, output_observation)
+    if payload.source != output_source:
+        raise ValueError("factual output Observation source drifted")
+    memory.intake.require_current_manifest(output_source)
+    index = memory.occurrence_index
+    ontology = index.ontology
+    source_record = index.source_repository.find(output_source.stable_key())
+    if source_record is None or source_record.source_key != output_source.stable_key():
+        raise ValueError("factual output source record is missing")
+    scope = document_scope(output_source)
+    speaker = _speaker_context(payload)
+    delivery_context = context_scope_identity(
+        output_source, (RESPONSE_OCCURRENCE_VERSION, 5))
+    ontology.materialize(speaker)
+    delivery_context_ref = ontology.materialize(delivery_context)
+    proof = ontology.materialize(proof_ref)
+    proof_predicate = ontology.materialize(
+        relation_concept_identity(_DELIVERY_PROOF))
+    proof_links = ontology.statements(
+        predicate=proof_predicate, subject=delivery_context_ref)
+    if proof_links:
+        if len(proof_links) != 1 or proof_links[0].object != proof:
+            raise ValueError("factual output context is bound to another proof")
+    else:
+        ontology.relate(
+            proof_predicate, delivery_context_ref, proof, scope=scope,
+            provenance_kind=output_source.source_kind,
+            content_version=output_source.versions.parser.value)
+
+    values = tuple(map(ord, source_record.raw_text))
+    cursor = 0
+    role_predicate = ontology.materialize(
+        relation_concept_identity(_OCCURRENCE_ROLE))
+    delivery_predicate = ontology.materialize(
+        relation_concept_identity(_DELIVERY_ROLE))
+    result = []
+    for ordinal, slot in enumerate(slots):
+        slot_hypothesis = slot_hypotheses[ordinal]
+        filler_values = tuple(map(ord, slot.filler_surface))
+        start = -1
+        for candidate in range(cursor, len(values) - len(filler_values) + 1):
+            if values[candidate:candidate + len(filler_values)] == filler_values:
+                start = candidate
+                break
+        if start < 0:
+            raise ValueError("factual ResponsePlan slot is absent from output")
+        end = start + len(filler_values)
+        cursor = end
+        origin = span_identity(output_source, members=((start, end),))
+        origin_ref = ontology.materialize(origin)
+        record = index.record(
+            source=output_source, raw_text=source_record.raw_text,
+            scope=scope, start=start, end=end, ordinal=0,
+            segment_index=0, local_index=start, document_index=start,
+            speaker=speaker, typed_candidates=(origin_ref,))
+        role = slot.role
+        ontology.materialize(role)
+        ontology.relate(
+            role_predicate, record.occurrence, ontology.materialize(role),
+            scope=scope, provenance_kind=output_source.source_kind,
+            content_version=output_source.versions.parser.value,
+            qualifiers=(ordinal,))
+        ontology.relate(
+            delivery_predicate, delivery_context_ref,
+            record.occurrence, scope=scope,
+            provenance_kind=output_source.source_kind,
+            content_version=output_source.versions.parser.value,
+            qualifiers=_compact_edge_qualifier(ordinal))
+        result.append(ResponseRoleOccurrence(
+            ontology.identity_of(record.occurrence), origin, role, proof_ref,
+            delivery_context, input_observation, slot_hypothesis, ordinal,
+            (source_record.source_hash, *output_source.stable_key()),
+            scope_key))
+    return tuple(sorted(result, key=lambda item: item.stable_key()))
+
+
+def read_factual_response_roles(
+        memory,
+        *,
+        input_observation: MemoryObjectRef,
+        hypothesis: MemoryObjectRef,
+        scope_key: tuple[int, ...],
+        proof_ref: ObjectIdentity,
+        output_observation: MemoryObjectRef,
+        output_source: SourceRef,
+        slots,
+        slot_hypotheses=(),
+        required: bool = False,
+        ) -> tuple[ResponseRoleOccurrence, ...]:
+    """Cold-restore factual role occurrences from the persisted proof graph."""
+    if type(slots) is not tuple or not slots:
+        raise ValueError("factual response roles require non-empty slots")
+    if slot_hypotheses:
+        if (type(slot_hypotheses) is not tuple
+                or len(slot_hypotheses) != len(slots)
+                or any(not isinstance(item, MemoryObjectRef)
+                       or item.object_kind != MEMORY_OBJECT_HYPOTHESIS
+                       for item in slot_hypotheses)):
+            raise ValueError("factual response slot hypotheses are incomplete")
+    else:
+        slot_hypotheses = (hypothesis,) * len(slots)
+    payload = _observation_payload(memory, output_observation)
+    if payload.source != output_source:
+        raise ValueError("factual output Observation source drifted")
+    index = memory.occurrence_index
+    ontology = index.ontology
+    scope = document_scope(output_source)
+    delivery_context = context_scope_identity(
+        output_source, (RESPONSE_OCCURRENCE_VERSION, 5))
+    context_ref = ontology.resolve(delivery_context)
+    predicate = ontology.resolve(relation_concept_identity(_DELIVERY_ROLE))
+    if context_ref is None or predicate is None:
+        if required:
+            raise ValueError("factual response role graph is missing")
+        return ()
+    links = ontology.statements(predicate=predicate, subject=context_ref)
+    if len(links) != len(slots):
+        if required or links:
+            raise ValueError("factual response role graph is incomplete")
+        return ()
+    role_predicate = ontology.resolve(relation_concept_identity(_OCCURRENCE_ROLE))
+    if role_predicate is None:
+        raise ValueError("factual response role graph lacks role predicate")
+    source_record = index.source_repository.find(output_source.stable_key())
+    if source_record is None:
+        raise ValueError("factual output source record is missing")
+    result = []
+    for ordinal, slot in enumerate(slots):
+        slot_hypothesis = slot_hypotheses[ordinal]
+        qualifiers = _compact_edge_qualifier(ordinal)
+        matches = tuple(
+            link for link in links if link.assertion.qualifiers == qualifiers)
+        if len(matches) != 1:
+            raise ValueError("factual response role ordinal is missing or duplicated")
+        occurrence_ref = matches[0].object
+        record = index.read(occurrence_ref)
+        if (record.source != output_source or record.scope != scope
+                or record.ordinal != 0 or record.speaker is None
+                or ontology.identity_of(record.speaker) != _speaker_context(payload)):
+            raise ValueError("factual response occurrence source drifted")
+        role_matches = tuple(
+            item for item in ontology.statements(
+                predicate=role_predicate, subject=occurrence_ref)
+            if item.assertion.qualifiers == (ordinal,))
+        if len(role_matches) != 1 or ontology.identity_of(
+                role_matches[0].object) != slot.role:
+            raise ValueError("factual response occurrence role drifted")
+        origin_values = tuple(ontology.identity_of(value.typed_ref)
+                             for value in record.candidates)
+        if len(origin_values) != 1:
+            raise ValueError("factual response occurrence origin is ambiguous")
+        result.append(ResponseRoleOccurrence(
+            ontology.identity_of(record.occurrence), origin_values[0], slot.role,
+            proof_ref, delivery_context, input_observation, slot_hypothesis, ordinal,
+            (source_record.source_hash, *output_source.stable_key()),
+            scope_key))
+    return tuple(sorted(result, key=lambda item: item.stable_key()))
+
+
 def _observation_payload(memory, observation: MemoryObjectRef) -> ObservationPayload:
     """读取唯一输入 Observation，保留原始来源与会话 context。"""
     events = memory.intake.event_log.query(access=memory.candidate_index.access,
@@ -572,6 +791,7 @@ def read_input_roles(memory, candidate: OpenRelationCandidate, observation: Memo
 __all__ = [
     "InputRoleOccurrence", "RESPONSE_OCCURRENCE_VERSION", "ReferenceCandidateSet",
     "ResponseRoleOccurrence",
-    "build_response_occurrence_index", "materialize_input_roles", "materialize_response_roles",
-    "read_input_roles", "read_response_roles",
+    "build_response_occurrence_index", "materialize_factual_response_roles",
+    "materialize_input_roles", "materialize_response_roles",
+    "read_factual_response_roles", "read_input_roles", "read_response_roles",
 ]

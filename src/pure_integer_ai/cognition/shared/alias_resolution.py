@@ -837,6 +837,36 @@ class ActiveAliasRouteFinder:
             raise TypeError("alias route finder selector 类型错误")
         self.consumer = consumer
         self.selector = selector
+        # A published candidate graph is immutable for the lifetime of its
+        # backend.  Surface discovery is commonly requested for many language
+        # atoms that converge on the same alias/refers nodes; retaining the
+        # already complete, typed adjacency avoids reopening those rows for
+        # every origin.  Writable learning graphs deliberately keep the old
+        # per-discovery cache because their active projection can change.
+        candidate_graph = getattr(consumer, "candidate_graph", None)
+        self._readonly_steps_cache: dict[
+            tuple[tuple[int, ...], int, tuple[tuple[int, ...], ...]],
+            tuple[AliasRouteStep, ...],
+        ] | None = ({ }
+                   if bool(getattr(candidate_graph, "_read_only", False))
+                   else None)
+
+    @staticmethod
+    def _remember_steps(
+            steps: tuple[AliasRouteStep, ...],
+            considered: dict[ObjectIdentity, ActiveRelationClosureFact],
+            budget: AliasRouteSearchBudget,
+            ) -> None:
+        """把复用邻接中的完整 active facts 纳入当前 discovery trace。"""
+        for step in steps:
+            proposition = step.fact.proposition.proposition
+            known = considered.get(proposition)
+            if known is not None and known != step.fact:
+                raise ValueError("同一 Proposition 的 active fact 前后不一致")
+            considered[proposition] = step.fact
+            if len(considered) > budget.max_facts:
+                raise AliasRouteSearchExhausted(
+                    "可达 active alias fact 数超过调用方预算")
 
     def discover_reference(
             self,
@@ -935,6 +965,20 @@ class ActiveAliasRouteFinder:
         cached = cache.get(source)
         if cached is not None:
             return cached
+        shared_key = None
+        if self._readonly_steps_cache is not None:
+            prefix_key = () if allowed_prefix_steps is None else tuple(sorted(
+                (item.stable_key() for item in allowed_prefix_steps)))
+            shared_key = (
+                source.stable_key(),
+                int(include_realizes),
+                prefix_key,
+            )
+            shared = self._readonly_steps_cache.get(shared_key)
+            if shared is not None:
+                self._remember_steps(shared, considered, budget)
+                cache[source] = shared
+                return shared
         protocol = self.selector.protocol
         lookups = [
             (
@@ -989,6 +1033,8 @@ class ActiveAliasRouteFinder:
             if step.source == source
         ), key=AliasRouteStep.stable_key))
         cache[source] = steps
+        if shared_key is not None:
+            self._readonly_steps_cache[shared_key] = steps
         return steps
 
     def _walk_reference(

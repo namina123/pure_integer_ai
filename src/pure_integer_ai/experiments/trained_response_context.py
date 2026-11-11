@@ -11,6 +11,7 @@ from pure_integer_ai.cognition.shared.generation_observed_surface import (
 from pure_integer_ai.cognition.shared.identity import ObjectIdentity, SourceRef
 from pure_integer_ai.cognition.shared.memory_event import (
     MEMORY_EVENT_EPISODE, MEMORY_EVENT_OBSERVATION, MEMORY_OBJECT_OBSERVATION,
+    MEMORY_OBJECT_HYPOTHESIS,
     EpisodePayload, MemoryObjectRef, ObservationPayload,
 )
 from pure_integer_ai.cognition.shared.query_state import (
@@ -35,9 +36,13 @@ from pure_integer_ai.experiments.trained_response_delivery import (
     DELIVERY_PROOF_IDENTITY,
     FACTUAL_EVIDENCE_REF_IDENTITY,
     read_delivery_proof,
-    read_factual_evidence_ref,
+    read_factual_evidence_refs,
 )
-from pure_integer_ai.experiments.trained_response_occurrence import ResponseRoleOccurrence, read_response_roles
+from pure_integer_ai.experiments.trained_response_occurrence import (
+    ResponseRoleOccurrence,
+    read_factual_response_roles,
+    read_response_roles,
+)
 
 
 RESPONSE_CONTEXT_VERSION = 91532
@@ -253,6 +258,15 @@ class DeliveredResponseContext:
         return (self.proof_ref, *(span.origin for span in self.context.observed_spans()),
                 *(item.occurrence for item in self.role_occurrences))
 
+    def memory_refs(self) -> tuple[MemoryObjectRef, ...]:
+        """返回授权该已送达篇章的 O/H 身份。"""
+        return (
+            self.observation,
+            self.hypothesis,
+            self.context.observation,
+            self.context.hypothesis,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class DeliveredGenericResponseContext:
@@ -306,6 +320,10 @@ class DeliveredGenericResponseContext:
             *(proposal.target for _category, proposal in self.graph_surfaces),
         }, key=lambda item: item.stable_key()))
 
+    def memory_refs(self) -> tuple[MemoryObjectRef, ...]:
+        """返回已送达回应及输入 Observation 的来源身份。"""
+        return self.observation, self.hypothesis, self.input_observation
+
 
 @dataclass(frozen=True, slots=True)
 class DeliveredFactualSlot:
@@ -317,9 +335,10 @@ class DeliveredFactualSlot:
     source_hash: int
     token_digest: tuple[int, ...]
     allowed_node_kinds: tuple[int, ...]
+    hypothesis: MemoryObjectRef | None = None
 
     def stable_key(self) -> tuple[int, ...]:
-        return pack_record(
+        original = pack_record(
             RESPONSE_CONTEXT_VERSION,
             (3,),
             self.role.stable_key(),
@@ -328,6 +347,13 @@ class DeliveredFactualSlot:
             self.token_digest,
             self.allowed_node_kinds,
         )
+        if self.hypothesis is None:
+            return original
+        if (not isinstance(self.hypothesis, MemoryObjectRef)
+                or self.hypothesis.object_kind != MEMORY_OBJECT_HYPOTHESIS):
+            raise ValueError("delivered factual slot hypothesis is invalid")
+        return pack_record(RESPONSE_CONTEXT_VERSION, (3,), original,
+                           self.hypothesis.stable_key())
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +427,37 @@ class DeliveredFactualResponseContext:
             *self.evidence_locators,
         }, key=lambda item: item.stable_key()))
 
+    def memory_refs(self) -> tuple[MemoryObjectRef, ...]:
+        """返回事实交付 O/H 及其显式输入 Observation 身份。"""
+        return tuple(sorted({
+            self.observation,
+            self.hypothesis,
+            self.input_observation,
+            *(slot.hypothesis for slot in self.slots
+              if slot.hypothesis is not None),
+        }, key=lambda item: item.stable_key()))
+
+
+def response_context_input_observations(
+        contexts: tuple[object, ...]) -> tuple[MemoryObjectRef, ...]:
+    """Return the user Observations explicitly named by delivered contexts."""
+    if type(contexts) is not tuple:
+        raise TypeError("response contexts must be a tuple")
+    refs = set()
+    for context in contexts:
+        if isinstance(context, DeliveredResponseContext):
+            ref = context.context.observation
+        elif isinstance(context, (DeliveredGenericResponseContext,
+                                  DeliveredFactualResponseContext)):
+            ref = context.input_observation
+        else:
+            raise TypeError("unregistered delivered response context")
+        if (not isinstance(ref, MemoryObjectRef)
+                or ref.object_kind != MEMORY_OBJECT_OBSERVATION):
+            raise ValueError("response context input is not an Observation")
+        refs.add(ref)
+    return tuple(sorted(refs, key=lambda item: item.stable_key()))
+
 
 def restore_response_contexts(memory, structures) -> tuple[
         DeliveredResponseContext | DeliveredGenericResponseContext |
@@ -412,15 +469,6 @@ def restore_response_contexts(memory, structures) -> tuple[
     if not hypotheses:
         return ()
     observations = {item.observation_key: item for item in structures.observations}
-    episodes = {}
-    for event in memory.intake.event_log.query(
-            access=memory.candidate_index.access, event_kind=MEMORY_EVENT_EPISODE):
-        payload = event.event.payload
-        if not isinstance(payload, EpisodePayload) or payload.output_ref is None:
-            continue
-        output = payload.output_ref.value()
-        if isinstance(output, MemoryObjectRef):
-            episodes.setdefault(output.stable_key(), []).append(payload)
     result = []
     for hypothesis in hypotheses:
         observation = observations[hypothesis.observation_key]
@@ -430,23 +478,35 @@ def restore_response_contexts(memory, structures) -> tuple[
         proof_ref = ObjectIdentity.from_stable_key(fields[1])
         response_act = ObjectIdentity.from_stable_key(fields[2])
         proof = unpack_record(read_delivery_proof(memory, proof_ref), DELIVERY_PROOF_IDENTITY)
-        declarations = episodes.get(observation.observation_key, ())
+        declarations = memory.response_episodes_for(
+            MemoryObjectRef.from_stable_key(observation.observation_key))
         if proof[0] == (4,):
             proof_source = SourceRef.from_stable_key(proof[1])
             input_observation = MemoryObjectRef.from_stable_key(proof[2])
             proof_act = ObjectIdentity.from_stable_key(proof[3])
             factual = unpack_record(proof[4], 4)
-            if len(factual) != 4:
+            if len(factual) not in {4, 6}:
                 raise ValueError("Bounded factual response proof is incomplete")
             proposition_key = factual[0]
+            if len(factual) == 4:
+                claim_record, slot_record, evidence_record = factual[1:]
+            else:
+                # Current delivery retains per-claim audit records in
+                # addition to the bounded claim/slot/evidence records used
+                # by the cross-turn context.
+                claim_audit = unpack_record(factual[1], 5)
+                if not claim_audit:
+                    raise ValueError("Bounded factual claim audit is empty")
+                claim_record, slot_record, evidence_record = (
+                    factual[2], factual[4], factual[5])
             claim_refs = tuple(ObjectIdentity.from_stable_key(item)
-                               for item in unpack_record(factual[1], 1))
+                               for item in unpack_record(claim_record, 1))
             slots = []
-            for ordinal, slot_key in enumerate(unpack_record(factual[2], 2), 1):
+            for ordinal, slot_key in enumerate(unpack_record(slot_record, 2), 1):
                 if not slot_key or slot_key[0] != ordinal:
                     raise ValueError("Bounded factual response slots are not ordered")
                 slot = unpack_record(slot_key, ordinal)
-                if (len(slot) != 5 or len(slot[2]) != 2
+                if (len(slot) not in {5, 6} or len(slot[2]) != 2
                         or slot[2][0] not in {0, 1}
                         or slot[2][1] <= 0 or not slot[3] or not slot[4]):
                     raise ValueError("Bounded factual response slot is incomplete")
@@ -454,14 +514,19 @@ def restore_response_contexts(memory, structures) -> tuple[
                 filler = ObjectIdentity.from_stable_key(slot[1])
                 if filler.object_kind not in slot[4]:
                     raise ValueError("Bounded factual filler kind is not allowed")
+                slot_hypothesis = None
+                if len(slot) == 6:
+                    slot_hypothesis = MemoryObjectRef.from_stable_key(slot[5])
+                    if slot_hypothesis.object_kind != MEMORY_OBJECT_HYPOTHESIS:
+                        raise ValueError("Bounded factual slot hypothesis is invalid")
                 slots.append(DeliveredFactualSlot(
-                    role, filler, slot[2][0], slot[2][1], slot[3], slot[4]))
+                    role, filler, slot[2][0], slot[2][1], slot[3], slot[4],
+                    slot_hypothesis))
             evidence_locators = tuple(
                 ObjectIdentity.from_stable_key(item)
-                for item in unpack_record(factual[3], 3))
-            evidence_refs = tuple(
-                read_factual_evidence_ref(memory, item)
-                for item in evidence_locators)
+                for item in unpack_record(evidence_record, 3))
+            evidence_refs = read_factual_evidence_refs(
+                memory, evidence_locators)
             input_events = memory.intake.event_log.query(
                 access=memory.candidate_index.access,
                 event_kind=MEMORY_EVENT_OBSERVATION,
@@ -473,6 +538,8 @@ def restore_response_contexts(memory, structures) -> tuple[
                 proof_ref,
                 input_observation,
                 *claim_refs,
+                *(item.hypothesis for item in slots
+                  if item.hypothesis is not None),
                 *(item.role for item in slots),
                 *(item.filler for item in slots),
                 *evidence_locators,
@@ -494,7 +561,7 @@ def restore_response_contexts(memory, structures) -> tuple[
                     or declarations[0].input_observation_ref != input_observation):
                 raise ValueError(
                     "Bounded factual response context has no complete delivery proof")
-            result.append(DeliveredFactualResponseContext(
+            context = DeliveredFactualResponseContext(
                 MemoryObjectRef.from_stable_key(observation.observation_key),
                 MemoryObjectRef.from_stable_key(hypothesis.hypothesis_key),
                 observation.source_ref,
@@ -509,7 +576,23 @@ def restore_response_contexts(memory, structures) -> tuple[
                 evidence_refs,
                 hypothesis.evidence_keys,
                 observation.context_depth,
-            ))
+            )
+            output_source = SourceRef.from_stable_key(observation.source_ref[1:])
+            roles = read_factual_response_roles(
+                memory,
+                input_observation=context.input_observation,
+                hypothesis=context.hypothesis,
+                scope_key=context.scope_key,
+                proof_ref=context.proof_ref,
+                output_observation=context.observation,
+                output_source=output_source,
+                slots=context.slots,
+                slot_hypotheses=tuple(
+                    item.hypothesis or context.hypothesis
+                    for item in context.slots),
+                required=False,
+            )
+            result.append(replace(context, role_occurrences=roles))
             continue
         if proof[0] in {(2,), (3,)}:
             # Kind 3 is the bounded generic-delivery proof.  Unlike the

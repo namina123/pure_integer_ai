@@ -12,6 +12,12 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SAFE_TMP_ROOT = _REPO_ROOT.parent / ".pure_integer_ai_pytest_tmp_safe"
+_requested_tmp_root = os.environ.get("PURE_INTEGER_TEST_TMP_ROOT")
+if _requested_tmp_root:
+    _SAFE_TMP_ROOT = Path(_requested_tmp_root).resolve()
+    if (_SAFE_TMP_ROOT.drive.upper() != "K:"
+            or _SAFE_TMP_ROOT.parent == Path("K:/")):
+        raise ValueError("explicit test data root must be a named K directory")
 
 
 def _safe_name(value: str) -> str:
@@ -75,11 +81,12 @@ def tmp_path_factory():
     try:
         yield factory
     finally:
-        shutil.rmtree(factory.getbasetemp(), ignore_errors=True)
-        try:
-            _SAFE_TMP_ROOT.rmdir()
-        except OSError:
-            pass
+        if os.environ.get("PURE_INTEGER_TEST_KEEP_TMP") != "1":
+            shutil.rmtree(factory.getbasetemp(), ignore_errors=True)
+            try:
+                _SAFE_TMP_ROOT.rmdir()
+            except OSError:
+                pass
 
 
 @pytest.fixture

@@ -95,9 +95,11 @@ class TypedRelationProjection:
         ) for role_kind, filler in self.fields)
 
     def evidence_entry(self) -> EvidenceEntry:
+        # This is a role/type projection of an existing fact, not another
+        # H-00 support record. The original source evidence carries truth.
         return EvidenceEntry(
             source_ref=self.source_ref, hypothesis_key=self.proposition_key,
-            space=SPACE_CORE, polarity=self.polarity, trust=1,
+            space=SPACE_CORE, polarity=3, trust=1,
             evidence_key=(TYPED_RELATION_NAMESPACE, *self.stable_key()),
             scope_key=self.scope_key, payload_key=self.stable_key(),
         )
@@ -170,7 +172,10 @@ def project_open_typed_relation(candidate: object, route: object) -> TypedRelati
         ((item.role[-1], item.stable_key()) for item in candidate.bindings),
         key=lambda item: item[0]))
     if tuple(item[0] for item in fields) != expected:
-        raise ValueError("open typed relation Role 集合不完整")
+        # Open candidates can come from a different trained relation family
+        # that shares a route frontier. They remain ordinary open evidence;
+        # only an exact schema match may add a typed projection.
+        return None
     return TypedRelationProjection(
         kind, semantic, candidate.stable_key(), candidate.frame.predicate,
         candidate.source_ref, candidate.source_ref, fields,

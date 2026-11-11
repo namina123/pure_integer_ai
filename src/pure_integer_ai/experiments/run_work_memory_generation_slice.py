@@ -203,6 +203,7 @@ def run_session(
         user_id: int = 1,
         session_id: int = 1,
         max_depth: int = 64,
+        event_time_generation_binding_overlay: str | Path | None = None,
         ) -> dict[str, object]:
     """Run several real turns through one compact integer O/H/E session.
 
@@ -232,7 +233,9 @@ def run_session(
             TrainedGraphQueryBridge(
                 model, memory_database=session, tenant_id=tenant_id,
                 user_id=user_id, session_id=session_id,
-                surface_generator=generator) as bridge:
+                surface_generator=generator,
+                event_time_generation_binding_overlay=(
+                    event_time_generation_binding_overlay)) as bridge:
         before = _memory_snapshot(bridge.memory)
         for ordinal, input_surface in enumerate(inputs, 1):
             input_structure = bridge.input_projector.project(tuple(
@@ -357,6 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--session-id", type=int, default=1)
     parser.add_argument("--graph-object-key", action="append", default=[])
     parser.add_argument("--max-depth", type=int, default=64)
+    parser.add_argument("--event-time-generation-binding-overlay", type=Path)
     args = parser.parse_args(argv)
     if args.turn_input:
         graph_object_keys = tuple(
@@ -366,7 +370,9 @@ def main(argv: list[str] | None = None) -> int:
             args.database, args.run_root, tuple(args.turn_input),
             graph_object_keys=graph_object_keys,
             tenant_id=args.tenant_id, user_id=args.user_id,
-            session_id=args.session_id, max_depth=args.max_depth)
+            session_id=args.session_id, max_depth=args.max_depth,
+            event_time_generation_binding_overlay=(
+                args.event_time_generation_binding_overlay))
     elif args.input:
         receipt = run_slice(
             args.database, args.run_root, args.input,

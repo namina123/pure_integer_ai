@@ -147,15 +147,20 @@ def _recovered_constant_bindings(item, owner, values, surface):
 
 
 def _compile(database: Path, course, digest: tuple[int, ...]):
-    """Compile against the parent's one explicit branch and R-01 family."""
+    """按目标图的全部 R-01 profile 编译 generic connector 与路由课程。
+
+    精简发布图可能保留多个 candidate alias profile。每个 profile 都是
+    独立的整数协议域；只为其中一个 profile 写 realizes 路由会让恢复时的
+    ProfiledAliasRelationRuntime 出现缺口，因此这里为同一批 connector
+    生成一份对应 manifest，随后由调用方逐份加载。
+    """
     with TrainedGenerationConnectorRuntime(database) as runtime:
         if len(runtime._branches) != 1:
             raise ValueError("generic response materialization requires one LanguageBranch")
         owner = runtime._branches[0]
         profiles = runtime._discover_alias_protocols()
-        if len(profiles) != 1:
-            raise ValueError("generic response materialization requires one R-01 profile")
-        profile = _profile_from_prefix(*profiles[0])
+        if not profiles:
+            raise ValueError("generic response materialization requires an R-01 profile")
         alias = runtime.alias_runtime(owner.branch)
         families = {
             representation_parts(binding.filler)[0]
@@ -188,8 +193,11 @@ def _compile(database: Path, course, digest: tuple[int, ...]):
             owner.branch,
             tuple(binding for item in courses for binding in item.aliases),
         )
-        manifest = build_alias_relation_manifest(profile, request)
-    return courses, manifest
+        manifests = tuple(
+            build_alias_relation_manifest(_profile_from_prefix(*item), request)
+            for item in profiles
+        )
+    return courses, manifests
 
 
 def materialize(
@@ -280,9 +288,10 @@ def materialize(
         cursor["stage"] = 1
         checkpoint()
     if cursor["stage"] < 3:
-        courses, alias_manifest = _compile(
+        courses, alias_manifests = _compile(
             database, course, tuple(hashlib.sha256(course_payload).digest()))
-        alias_sha = alias_manifest.sha256()
+        alias_sha = hashlib.sha256(_canonical_json(
+            [manifest.sha256() for manifest in alias_manifests])).hexdigest()
         if cursor.get("alias_manifest_sha256") not in (None, alias_sha):
             if not (cursor["stage"] == 1
                     and cursor["connector_cursor"] == 0
@@ -291,7 +300,8 @@ def materialize(
         cursor.update(
             alias_manifest_sha256=alias_sha,
             connector_count=len(courses),
-            realization_count=len(alias_manifest.entries),
+            realization_count=sum(
+                len(manifest.entries) for manifest in alias_manifests),
             semantic_variant_count=len(semantic_variant_keys),
             semantic_variant_identity_kind=IDENTITY_RESPONSE_VARIANT,
             semantic_variant_duplicate_count=0,
@@ -332,7 +342,9 @@ def materialize(
                 checkpoint()
             cursor["stage"] = 2
             checkpoint()
-            AliasRelationCourseLoader(alias_manifest, alias_sha).load(context)
+            for alias_manifest in alias_manifests:
+                AliasRelationCourseLoader(
+                    alias_manifest, alias_manifest.sha256()).load(context)
             backend.commit()
             cursor["stage"] = 3
             checkpoint()

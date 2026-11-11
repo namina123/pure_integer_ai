@@ -1,7 +1,7 @@
 """Source-local Memory span realization alongside trained Core R-01 routes."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pure_integer_ai.cognition.shared.alias_resolution import AliasResolutionProposal
 from pure_integer_ai.cognition.shared.identity import (
@@ -77,6 +77,8 @@ class ObservedGenerationSpan:
     values: tuple[int, ...]
     context_key: tuple[int, ...]
     evidence: tuple[tuple[int, ...], ...]
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, SourceRef) or not isinstance(self.scope, ScopeIdentity):
@@ -102,12 +104,13 @@ class ObservedGenerationSpan:
         _pack(self.values)
         _pack(self.context_key)
         _evidence(self.evidence)
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
 
     @property
     def origin(self) -> ObjectIdentity:
         return span_identity(self.source, members=((self.start, self.end),))
 
-    def stable_key(self) -> tuple[int, ...]:
+    def _build_stable_key(self) -> tuple[int, ...]:
         return (
             91520, *_pack(self.source.stable_key()), *_pack(self.scope.stable_key()),
             *_pack(self.observation.stable_key()), *_pack(self.hypothesis.stable_key()),
@@ -115,6 +118,9 @@ class ObservedGenerationSpan:
             *_pack(self.values), *_pack(self.context_key), len(self.evidence),
             *(v for key in self.evidence for v in _pack(key)),
         )
+
+    def stable_key(self) -> tuple[int, ...]:
+        return self._stable_key_cache
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +135,8 @@ class ObservedSpanRealizationRule:
     example_route: AliasResolutionProposal
     connector_key: tuple[int, ...]
     evidence: tuple[tuple[int, ...], ...]
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         for value, kind in ((self.branch, OBJECT_LANGUAGE_BRANCH), (self.role, OBJECT_ROLE),
@@ -146,14 +154,18 @@ class ObservedSpanRealizationRule:
             raise ValueError("observed surface rule requires the complete trained connector")
         _pack(self.connector_key)
         _evidence(self.evidence)
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
 
-    def stable_key(self) -> tuple[int, ...]:
+    def _build_stable_key(self) -> tuple[int, ...]:
         return (
             91521, *_pack(self.branch.stable_key()), *_pack(self.role.stable_key()), self.ordinal,
             *_pack(self.instruction.stable_key()), *_pack(self.example_span.stable_key()),
             *_pack(self.example_route.stable_key()), *_pack(self.connector_key), len(self.evidence),
             *(v for key in self.evidence for v in _pack(key)),
         )
+
+    def stable_key(self) -> tuple[int, ...]:
+        return self._stable_key_cache
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +174,8 @@ class ObservedSurfaceProposal:
 
     value: ObservedGenerationSpan
     rules: tuple[ObservedSpanRealizationRule, ...]
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.value, ObservedGenerationSpan):
@@ -178,6 +192,7 @@ class ObservedSurfaceProposal:
             raise ValueError("observed surface rules cannot be repeated")
         object.__setattr__(self, "rules", tuple(sorted(self.rules, key=lambda item: item.stable_key())))
         self.representation
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
 
     @property
     def branch(self) -> ObjectIdentity:
@@ -208,10 +223,13 @@ class ObservedSurfaceProposal:
                                        owner=self.value.source.owner,
                                        versions=self.value.source.versions)
 
-    def stable_key(self) -> tuple[int, ...]:
+    def _build_stable_key(self) -> tuple[int, ...]:
         return (91522, *_pack(self.value.stable_key()), len(self.rules),
                 *(v for rule in self.rules for v in _pack(rule.stable_key())),
                 *_pack(self.representation.stable_key()))
+
+    def stable_key(self) -> tuple[int, ...]:
+        return self._stable_key_cache
 
     def use_key(self, use_key: tuple[int, ...], source: SourceRef,
                 scope: ScopeIdentity) -> tuple[int, ...]:

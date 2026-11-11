@@ -299,9 +299,14 @@ class ResponsePlan:
                     for prior, current in zip(ordered_ranges, ordered_ranges[1:])) \
                     or ordered_ranges[-1][1] != len(self.slot_sequence):
                 raise ValueError("claim slot ranges 必须连续覆盖全部槽位")
-        if len(set(item.stable_key() for item in self.slot_sequence)) != len(
-                self.slot_sequence):
-            raise ValueError("response plan slot 序列不得重复同一角色")
+        # Separate claim ranges are separate output occurrences. A shared
+        # role/filler must still be mentioned and checked in each range; only
+        # repetition inside one claim (or an unscoped plan) is ambiguous.
+        ranges = slot_ranges.values() if self.claim_slot_ranges else ((0, len(self.slot_sequence)),)
+        for start, end in ranges:
+            members = self.slot_sequence[start:end]
+            if len({item.stable_key() for item in members}) != len(members):
+                raise ValueError("response plan 同一 claim 的 slot 序列不得重复同一角色")
         self._validate_required_slots()
         object.__setattr__(self, "claim_refs", tuple(sorted(
             self.claim_refs, key=ObjectIdentity.stable_key)))

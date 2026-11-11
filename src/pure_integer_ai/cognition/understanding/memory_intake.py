@@ -633,13 +633,8 @@ class MemorySourceIntake:
             draft.relation_occurrences,
             observed_clock.advance(),
         )
-        observation_ref = memory_object_ref(
-            self.event_log.memory_space_identity,
-            MEMORY_OBJECT_OBSERVATION,
-            observation_payload.stable_key(),
-            owner=source.owner,
-            versions=source.versions,
-        )
+        observation_ref = self.event_log.declaration_ref(
+            MEMORY_EVENT_OBSERVATION, observation_payload, scope=scope)
         self._emit_event(MemoryEvent(
             MEMORY_EVENT_OBSERVATION, observation_ref, scope,
             observation_payload), pending_events)
@@ -681,13 +676,8 @@ class MemorySourceIntake:
                 None,
                 observed_clock.advance(),
             )
-            evidence_ref = memory_object_ref(
-                self.event_log.memory_space_identity,
-                MEMORY_OBJECT_EVIDENCE,
-                evidence_payload.stable_key(),
-                owner=source.owner,
-                versions=source.versions,
-            )
+            evidence_ref = self.event_log.declaration_ref(
+                MEMORY_EVENT_EVIDENCE, evidence_payload, scope=scope)
             self._emit_event(MemoryEvent(
                 MEMORY_EVENT_EVIDENCE, evidence_ref, scope,
                 evidence_payload), pending_events)

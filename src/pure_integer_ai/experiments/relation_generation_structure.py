@@ -25,6 +25,7 @@ from pure_integer_ai.experiments.relation_generation_protocol import (
 from pure_integer_ai.experiments.trained_relation_graph_runtime import (
     ActiveRelationGenerationInput, ActiveRelationSurface, RelationSurfaceFrame,
 )
+from pure_integer_ai.experiments.trained_relation_surface_artifact import validate_language_members
 
 
 _CONNECTOR_NAMESPACE = 20916
@@ -61,6 +62,9 @@ def compile_relation_connector(fact: ActiveRelationSurface, frame: RelationSurfa
             or source.proposition.definition.proposition != fact.proposition
             or tuple(item.role for item in fact.bindings) != frame.roles):
         raise ValueError("角色生成课程与训练后图成员不符")
+    body_free = not fact.evidence_surface
+    if body_free:
+        validate_language_members((fact,), (frame,), require_carrier=True)
     parts = []
     position = frame.envelope_start
     for index, gap in enumerate(frame.gaps):
@@ -85,6 +89,16 @@ def compile_relation_connector(fact: ActiveRelationSurface, frame: RelationSurfa
     full_key = (RELATION_CONNECTOR_PROFILE, 1, *_pack(fact.proposition.stable_key()),
                 *_pack(fact.predicate.stable_key()), frame.source_hash,
                 *(v for item in parts for v in _pack((item[3], item[4], *item[2]))))
+    if body_free:
+        # 动态角色保留完整身份和Span，不在来源qualifier重复保存示例句码点。
+        members = tuple((0, *_pack(filler.stable_key()), start, end, *_pack(tokens))
+            if binding is None else
+            (1, *_pack(binding.role.stable_key()), *_pack(binding.filler.stable_key()),
+             binding.ordinal, start, end)
+            for filler, binding, tokens, start, end in parts)
+        full_key = (RELATION_CONNECTOR_PROFILE, 2, *_pack(fact.proposition.stable_key()),
+            *_pack(fact.predicate.stable_key()), frame.source_hash,
+            *(value for member in members for value in _pack(member)))
     pattern_id = _FRAME_HASHER.h63(full_key) or 1
     pattern = (_CONNECTOR_NAMESPACE, 2, pattern_id, pattern_id)
     structure_key = (_CONNECTOR_NAMESPACE, 3, pattern_id, pattern_id)
@@ -123,7 +137,7 @@ def compile_relation_connector(fact: ActiveRelationSurface, frame: RelationSurfa
     forming = tuple(sorted(item.stable_key() for item in source.evidence))
     for ordinal, (slot, part) in enumerate(zip(slots, parts, strict=True), 1):
         filler, binding, tokens, start, end = part
-        if fact.evidence_surface[start:end] != "".join(map(chr, tokens)):
+        if not body_free and fact.evidence_surface[start:end] != "".join(map(chr, tokens)):
             raise ValueError("角色生成课程表层不在真实训练 Span 中")
         bindings.append(LanguageConnectorSlotBinding(
             owned(30, ordinal), slot.slot,

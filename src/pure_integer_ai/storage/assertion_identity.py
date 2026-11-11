@@ -7,8 +7,10 @@ header 元数据，其余身份仍要求通用 header。碰撞、重复 header�
 """
 from __future__ import annotations
 
+from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterator, Protocol
 
 from pure_integer_ai.crosscut.determinism.hasher import Hasher
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
@@ -20,6 +22,11 @@ from pure_integer_ai.storage.assertion_record import (
     AssertionRecordStore,
 )
 from pure_integer_ai.storage.backend import StorageBackend, TYPE_INT
+from pure_integer_ai.storage.identity_part_codec import (
+    decode_identity_parts,
+    pack_identity_parts,
+)
+from pure_integer_ai.storage.integer_codec import IntegerCodecError
 
 
 IDENTITY_SCOPE = 1
@@ -36,6 +43,8 @@ IDENTITY_SOURCE_TRUST_ASSESSMENT = 11
 IDENTITY_SOURCE_CLUSTER = 12
 IDENTITY_RESPONSE_VARIANT = 13
 _DEFAULT_IDENTITY_HASHER = Hasher("identity_registry.v1")
+_MAX_SCOPED_IDENTITY_KEYS = 4096
+_MAX_SCOPED_IDENTITY_INTS = 1_048_576
 
 IDENTITY_HEADER_TABLE = "identity_header"
 IDENTITY_PART_TABLE = "identity_part"
@@ -196,6 +205,11 @@ class IntegerIdentityRegistry:
         self._identity_hash_cache: dict[
             tuple[int, tuple[int, ...]], int
         ] = {}
+        self._read_scope_depth = 0
+        self._scoped_read_keys: OrderedDict[
+            tuple[int, int], tuple[int, ...]
+        ] = OrderedDict()
+        self._scoped_read_ints = 0
         # 发布 SQLite 由多个 facade/registry 并行消费。首次 read_key 仍
         # 完整核验 header/part 或 assertion 外部记录；之后复用同一不可变
         # backend 上已经核验的完整整数键，避免重复 SQL 扫描。
@@ -236,6 +250,47 @@ class IntegerIdentityRegistry:
         _strict_int(identity_kind, where="identity_kind", positive=True)
         return self._identity_hash(identity_kind, _stable_key(key))
 
+    @contextmanager
+    def read_scope(self) -> Iterator[None]:
+        """复用一次不可变读取中的完整键，并在最外层退出时释放。"""
+        self._read_scope_depth += 1
+        try:
+            yield
+        finally:
+            self._read_scope_depth -= 1
+            if self._read_scope_depth == 0:
+                self.clear_read_scope_cache()
+
+    def clear_read_scope_cache(self) -> None:
+        """丢弃当前读取作用域的 identity key 复用。"""
+        self._scoped_read_keys.clear()
+        self._scoped_read_ints = 0
+
+    def _scoped_read_key(self, cache_key: tuple[int, int]) -> tuple[int, ...] | None:
+        if self._read_scope_depth == 0:
+            return None
+        cached = self._scoped_read_keys.get(cache_key)
+        if cached is not None:
+            self._scoped_read_keys.move_to_end(cache_key)
+        return cached
+
+    def _remember_scoped_read_key(
+            self, cache_key: tuple[int, int], key: tuple[int, ...]) -> None:
+        if (self._read_scope_depth == 0
+                or len(key) > _MAX_SCOPED_IDENTITY_INTS):
+            return
+        previous = self._scoped_read_keys.pop(cache_key, None)
+        if previous is not None:
+            self._scoped_read_ints -= len(previous)
+        while (self._scoped_read_keys
+               and (len(self._scoped_read_keys) >= _MAX_SCOPED_IDENTITY_KEYS
+                    or self._scoped_read_ints + len(key)
+                    > _MAX_SCOPED_IDENTITY_INTS)):
+            _old_key, old_value = self._scoped_read_keys.popitem(last=False)
+            self._scoped_read_ints -= len(old_value)
+        self._scoped_read_keys[cache_key] = key
+        self._scoped_read_ints += len(key)
+
     def register_external_key_resolver(
             self, identity_kind: int, resolver: ExternalKeyResolver, *,
             self_headed: bool = False) -> None:
@@ -260,6 +315,7 @@ class IntegerIdentityRegistry:
     def register(self, identity_kind: int, key: tuple[int, ...], *,
                  parent_hash: int = 0, ordinal: int = 0) -> int:
         """幂等登记完整键；碰撞和任何既有半写状态均拒绝。"""
+        self.clear_read_scope_cache()
         _strict_int(identity_kind, where="identity_kind", positive=True)
         _strict_int(parent_hash, where="parent_hash", nonnegative=True)
         _strict_int(ordinal, where="ordinal", nonnegative=True)
@@ -286,8 +342,8 @@ class IntegerIdentityRegistry:
             raise IdentityIncompleteError(
                 f"identity hash={identity_hash} 存在无 header 的外部记录")
 
-        # 同一身份的 part 没有跨行副作用；一次 insert_many 保持原顺序，
-        # 同时将每个 part 的 Python/SQLite 调用从 O(key_size) 降为一次批写。
+        # 物理编码不改变完整键、hash 或 header；没有收益时仍逐整数批写。
+        packed = pack_identity_parts(key)
         self._backend.insert_many(
             IDENTITY_PART_TABLE,
             ({
@@ -295,7 +351,8 @@ class IntegerIdentityRegistry:
                 "identity_hash": identity_hash,
                 "part_index": index,
                 "part_value": value,
-            } for index, value in enumerate(key)),
+            } for index, value in (
+                packed if packed is not None else enumerate(key))),
         )
         self._backend.insert(IDENTITY_HEADER_TABLE, {
             "identity_kind": identity_kind,
@@ -312,6 +369,7 @@ class IntegerIdentityRegistry:
                           parent_hash: int = 0, ordinal: int = 0,
                           writer: Callable[[int], None]) -> int:
         """登记外部记录承载的完整键，按 kind 配置决定是否另写 header。"""
+        self.clear_read_scope_cache()
         _strict_int(identity_kind, where="identity_kind", positive=True)
         _strict_int(parent_hash, where="parent_hash", nonnegative=True)
         _strict_int(ordinal, where="ordinal", nonnegative=True)
@@ -390,6 +448,7 @@ class IntegerIdentityRegistry:
             parent_hash: int = 0, ordinal: int = 0,
             writer: Callable[[int], None]) -> int:
         """在空命名空间追加外部记录，仅非 self-headed kind 另写 header。"""
+        self.clear_read_scope_cache()
         _strict_int(identity_kind, where="identity_kind", positive=True)
         _strict_int(parent_hash, where="parent_hash", nonnegative=True)
         _strict_int(ordinal, where="ordinal", nonnegative=True)
@@ -448,6 +507,13 @@ class IntegerIdentityRegistry:
         _strict_int(identity_kind, where="identity_kind", positive=True)
         _strict_int(identity_hash, where="identity_hash", positive=True)
         cache_key = (identity_kind, identity_hash)
+        scoped = self._scoped_read_key(cache_key)
+        if scoped is not None:
+            if self._identity_hash(identity_kind, scoped) != identity_hash:
+                raise IdentityCollisionError(
+                    f"identity kind={identity_kind} hash={identity_hash} "
+                    "作用域缓存键重算不一致")
+            return scoped
         if self._shared_read_keys is not None:
             cached = self._shared_read_keys.get(cache_key)
             if cached is not None:
@@ -476,7 +542,95 @@ class IntegerIdentityRegistry:
                 f"identity hash={identity_hash} 与完整键重算结果不一致")
         if self._shared_read_keys is not None:
             self._shared_read_keys[cache_key] = key
+        self._remember_scoped_read_key(cache_key, key)
         return key
+
+    def read_keys(
+            self, identity_kind: int,
+            identity_hashes: tuple[int, ...],
+            ) -> tuple[tuple[int, ...], ...]:
+        """Batch physical reads while fully validating every recovered key."""
+        _strict_int(identity_kind, where="identity_kind", positive=True)
+        if (not isinstance(identity_hashes, tuple)
+                or any(type(value) is not int or value <= 0
+                       for value in identity_hashes)):
+            raise ValueError("identity_hashes must be positive integer tuple")
+        if not identity_hashes:
+            return ()
+        unique = tuple(dict.fromkeys(identity_hashes))
+        recovered: dict[int, tuple[int, ...]] = {}
+        pending = []
+        for identity_hash in unique:
+            cache_key = (identity_kind, identity_hash)
+            scoped = self._scoped_read_key(cache_key)
+            if scoped is not None:
+                if self._identity_hash(identity_kind, scoped) != identity_hash:
+                    raise IdentityCollisionError(
+                        f"identity kind={identity_kind} hash={identity_hash} "
+                        "作用域缓存键重算不一致")
+                recovered[identity_hash] = scoped
+                continue
+            cached = (None if self._shared_read_keys is None else
+                      self._shared_read_keys.get(cache_key))
+            if cached is None:
+                pending.append(identity_hash)
+                continue
+            if self._identity_hash(identity_kind, cached) != identity_hash:
+                raise IdentityCollisionError(
+                    f"identity kind={identity_kind} hash={identity_hash} "
+                    "缓存键重算不一致")
+            recovered[identity_hash] = cached
+
+        if pending:
+            # Assertion identities may be self-headed in an external record;
+            # retain their established per-key resolution and integrity path.
+            if identity_kind in self._external_key_resolvers:
+                for identity_hash in pending:
+                    recovered[identity_hash] = self.read_key(
+                        identity_kind, identity_hash)
+            else:
+                headers = self._backend.select_in(
+                    IDENTITY_HEADER_TABLE, "identity_hash", tuple(pending),
+                    where={"identity_kind": identity_kind},
+                    order_by="identity_hash",
+                )
+                parts = self._backend.select_in(
+                    IDENTITY_PART_TABLE, "identity_hash", tuple(pending),
+                    where={"identity_kind": identity_kind},
+                    order_by="identity_hash",
+                )
+                headers_by_hash: dict[int, list[dict[str, Any]]] = {}
+                parts_by_hash: dict[int, list[dict[str, Any]]] = {}
+                for row in headers:
+                    headers_by_hash.setdefault(row["identity_hash"], []).append(row)
+                for row in parts:
+                    parts_by_hash.setdefault(row["identity_hash"], []).append(row)
+                for rows in parts_by_hash.values():
+                    rows.sort(key=lambda row: row["part_index"])
+                for identity_hash in pending:
+                    matching_headers = headers_by_hash.get(identity_hash, [])
+                    matching_parts = parts_by_hash.get(identity_hash, [])
+                    if not matching_headers:
+                        if matching_parts:
+                            raise IdentityIncompleteError(
+                                f"identity hash={identity_hash} 存在孤儿 part")
+                        raise KeyError(
+                            f"identity kind={identity_kind} hash={identity_hash} 不存在")
+                    key = self._read_existing(
+                        identity_kind, identity_hash,
+                        matching_headers, matching_parts)
+                    if self._identity_hash(identity_kind, key) != identity_hash:
+                        raise IdentityCollisionError(
+                            f"identity kind={identity_kind} hash={identity_hash} "
+                            "与完整键重算结果不一致")
+                    recovered[identity_hash] = key
+                    self._remember_scoped_read_key(
+                        (identity_kind, identity_hash), key)
+                    if self._shared_read_keys is not None:
+                        self._shared_read_keys[(identity_kind, identity_hash)] = key
+
+        return tuple(recovered[identity_hash]
+                     for identity_hash in identity_hashes)
 
     def metadata(self, identity_kind: int,
                  identity_hash: int) -> IdentityMetadata:
@@ -641,7 +795,7 @@ class IntegerIdentityRegistry:
     def _read_existing(self, identity_kind: int, identity_hash: int,
                        headers: list[dict[str, Any]],
                        parts: list[dict[str, Any]]) -> tuple[int, ...]:
-        """从旧 flat parts 或唯一正规化记录重建完整键，禁止静默混读。"""
+        """从旧新 parts 或唯一正规化记录重建完整键，禁止静默混读。"""
         if len(headers) != 1:
             raise IdentityIncompleteError(
                 f"identity hash={identity_hash} header 数量={len(headers)}")
@@ -668,18 +822,13 @@ class IntegerIdentityRegistry:
         if not parts:
             raise IdentityIncompleteError(
                 f"identity hash={identity_hash} header 没有完整键载荷")
-        if len(parts) != metadata.key_size:
+        try:
+            return decode_identity_parts(
+                metadata.key_size,
+                tuple((row["part_index"], row["part_value"]) for row in parts))
+        except IntegerCodecError as exc:
             raise IdentityIncompleteError(
-                f"identity hash={identity_hash} part 数量与 key_size 不一致")
-        values: list[int] = []
-        for expected_index, row in enumerate(parts):
-            if row["part_index"] != expected_index:
-                raise IdentityIncompleteError(
-                    f"identity hash={identity_hash} part_index 不连续")
-            value = row["part_value"]
-            _strict_int(value, where="identity part value")
-            values.append(value)
-        return tuple(values)
+                f"identity hash={identity_hash} part 编码不完整: {exc}") from exc
 
     def _external_key(self, identity_kind: int,
                       identity_hash: int) -> ExternalIdentityKey | None:

@@ -20,6 +20,7 @@ from pure_integer_ai.cognition.shared.evidence_candidate import (
     EvidenceCandidateEngine,
 )
 from pure_integer_ai.cognition.shared.hypothesis import (
+    EVIDENCE_SUPPORT,
     EvidenceRecord,
     HypothesisKey,
     LIFECYCLE_SUPERSEDED,
@@ -591,6 +592,61 @@ class CandidateLearningRuntime:
                 projection,
             ))
         return tuple(outcomes)
+
+    def restored_recognition_outcome(
+            self,
+            hypothesis: HypothesisKey,
+            observation: SourceRef,
+            event_key: tuple[int, ...],
+            ) -> CandidateLearningOutcome | None:
+        """从持久 H-05/H-04 历史恢复一条 recognition，不追加新事件。
+
+        领域 runtime 可能在 SQLite resume 后再次看到同一 route。Evidence
+        payload 是 prediction/verifier 的权威快照；这里只从已有决策链中找出
+        当时包含该 Evidence 的最早决策，绝不用新的逻辑时钟重新 resolve。
+        """
+        record = self.engine.recognition_for_route(
+            hypothesis, observation, event_key)
+        if record is None:
+            return None
+        decisions = self.engine.resolver.decision_history(hypothesis)
+        matching = []
+        for decision in decisions:
+            if hypothesis not in {
+                    item.hypothesis for item in decision.candidates}:
+                # A competition history may predate this candidate's
+                # registration.  Such a decision is valid history, but cannot
+                # describe this recognition route.
+                continue
+            trace = decision.candidate(hypothesis)
+            active_ids = frozenset((
+                *trace.after.support_evidence_ids,
+                *trace.after.refute_evidence_ids,
+                *trace.after.unknown_evidence_ids,
+            ))
+            if record.evidence.evidence_id in active_ids:
+                matching.append(decision)
+        if not matching:
+            raise CandidateHistoryUnavailableError(
+                "recognition Evidence 未出现在任何可恢复 H-04 decision 中")
+        decision = matching[0]
+        projection = None
+        definition = self.engine.definition(hypothesis)
+        candidate_ref = self.graph.ontology.resolve(definition.candidate)
+        if candidate_ref is not None and self.graph.history(candidate_ref):
+            current = self.graph.project(candidate_ref)
+            latest = current.history[-1].definition
+            if (record.evidence.stance == EVIDENCE_SUPPORT
+                    and self.engine.active(hypothesis) is not None
+                    and current.state == self.graph.protocol.active_state):
+                projection = current
+        return CandidateLearningOutcome(
+            record.prediction,
+            record.verification,
+            record.evidence,
+            decision,
+            projection,
+        )
 
     def revise_evidence(
             self,

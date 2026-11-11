@@ -31,6 +31,7 @@ from pure_integer_ai.storage.graph_object_identity import (
     GraphObjectIdentitySpec,
     GraphObjectIdentityStore,
     register_graph_object_identity_tables,
+    validate_graph_object_key,
 )
 
 
@@ -45,6 +46,14 @@ GRAPH_OBJECT_COLUMNS = [
     ("space_name_hash", TYPE_INT),
     *GRAPH_OBJECT_IDENTITY_COLUMNS,
 ]
+
+# A read-only statement batch may contain a few very large generic objects
+# (for example lifecycle Events whose identity embeds a complete evidence
+# declaration).  Materializing all of those overflow rows in one ``IN``
+# result costs more than the established per-object integrity path.  Keep
+# batching for ordinary graph objects and let unusually large objects use
+# ``read_by_ref`` so their codec rows stay bounded to one object at a time.
+GRAPH_OBJECT_PRELOAD_MAX_COMPONENT_SIZE = 4096
 
 
 class GraphObjectIntegrityError(RuntimeError):
@@ -117,6 +126,13 @@ class GraphObjectRepository:
         self._records_by_hash: dict[int, GraphObjectRecord] = {}
         self._records_by_ref: dict[tuple[int, int], GraphObjectRecord] = {}
         self._fresh_identity_namespace: bool | None = None
+        shared = None
+        if bool(getattr(backend, "read_only", False)):
+            shared = getattr(backend, "_pi_readonly_graph_object_records", None)
+            if shared is None:
+                shared = {"by_hash": {}, "by_ref": {}}
+                setattr(backend, "_pi_readonly_graph_object_records", shared)
+        self._shared_records: dict[str, dict] | None = shared
         self._registry.register_external_key_resolver(
             IDENTITY_GRAPH_OBJECT,
             self._resolve_external_key,
@@ -130,7 +146,7 @@ class GraphObjectRepository:
 
     def find_identity(self, key: tuple[int, ...]) -> int | None:
         """只读查找对象完整键对应的可核验 hash。"""
-        GraphObjectIdentitySpec.generic(key)
+        validate_graph_object_key(key)
         if self._fresh_identity_namespace is None:
             self._fresh_identity_namespace = self._namespace_is_empty()
         if self._fresh_identity_namespace:
@@ -220,6 +236,12 @@ class GraphObjectRepository:
         cached = self._records_by_hash.get(identity_hash)
         if cached is not None:
             return cached
+        if self._shared_records is not None:
+            cached = self._shared_records["by_hash"].get(identity_hash)
+            if cached is not None:
+                self._records_by_hash[identity_hash] = cached
+                self._records_by_ref[(cached.space_id, cached.local_id)] = cached
+                return cached
         identity_key = self._registry.read_key(
             IDENTITY_GRAPH_OBJECT, identity_hash)
         rows = self._backend.select(
@@ -240,6 +262,12 @@ class GraphObjectRepository:
         cached = self._records_by_ref.get((space_id, local_id))
         if cached is not None:
             return cached
+        if self._shared_records is not None:
+            cached = self._shared_records["by_ref"].get((space_id, local_id))
+            if cached is not None:
+                self._records_by_ref[(space_id, local_id)] = cached
+                self._records_by_hash[cached.identity_hash] = cached
+                return cached
         rows = self._backend.select(GRAPH_OBJECT_TABLE, where={
             "space_id": space_id,
             "local_id": local_id,
@@ -251,6 +279,111 @@ class GraphObjectRepository:
         self._cache_record(record)
         return record
 
+    def preload_refs(
+            self, refs: tuple[tuple[int, int], ...]
+            ) -> tuple[GraphObjectRecord, ...]:
+        """批量完整核验只读图对象编址并预热 identity key 缓存。
+
+        ``GraphOntology`` 恢复一个 predicate 的大量 statement 时，逐边读取
+        graph_object codec 会重复执行 overflow SQL。该批量入口只在不可变
+        backend 上使用；每个主记录、codec overflow、引用和 identity hash
+        仍执行与 ``read_by_ref`` 相同的完整校验。
+        """
+        if (not isinstance(refs, tuple)
+                or any(not isinstance(ref, tuple) or len(ref) != 2
+                       for ref in refs)):
+            raise TypeError("graph object preload refs 必须是二元 tuple")
+        normalized = tuple(dict.fromkeys(
+            (_strict_positive(ref[0], where="space_id"),
+             _strict_positive(ref[1], where="local_id"))
+            for ref in refs
+        ))
+        if not normalized:
+            return ()
+        missing = tuple(
+            ref for ref in normalized if ref not in self._records_by_ref
+            and (self._shared_records is None
+                 or ref not in self._shared_records["by_ref"])
+        )
+        if missing:
+            rows: list[dict[str, Any]] = []
+            for space_id in sorted({ref[0] for ref in missing}):
+                local_ids = tuple(ref[1] for ref in missing if ref[0] == space_id)
+                rows.extend(self._backend.select_in(
+                    GRAPH_OBJECT_TABLE,
+                    "local_id",
+                    local_ids,
+                    where={"space_id": space_id},
+                ))
+            by_ref: dict[tuple[int, int], dict[str, Any]] = {}
+            for row in rows:
+                ref = (
+                    _strict_positive(row["space_id"], where="space_id"),
+                    _strict_positive(row["local_id"], where="local_id"),
+                )
+                if ref in by_ref:
+                    raise GraphObjectIntegrityError(
+                        "批量 graph object 编址命中重复映射")
+                by_ref[ref] = row
+            if set(by_ref) != set(missing):
+                raise GraphObjectIntegrityError(
+                    "批量 graph object 编址缺少唯一映射")
+            batch_missing: list[tuple[int, int]] = []
+            fallback_missing: list[tuple[int, int]] = []
+            for ref in missing:
+                component_size = by_ref[ref].get("component_size")
+                if (type(component_size) is int
+                        and 0 < component_size
+                        <= GRAPH_OBJECT_PRELOAD_MAX_COMPONENT_SIZE):
+                    batch_missing.append(ref)
+                else:
+                    fallback_missing.append(ref)
+            for ref in fallback_missing:
+                # Preserve the original single-object route for legacy rows
+                # and oversized codecs.  It performs the same full registry,
+                # codec, reference and identity-hash checks without creating
+                # a cross-object overflow result.
+                self.read_by_ref(*ref)
+
+            records = tuple(
+                self._record_from_row(by_ref[ref]) for ref in batch_missing)
+            rows_by_hash: dict[int, dict[str, Any]] = {}
+            records_by_hash: dict[int, GraphObjectRecord] = {}
+            for record, ref in zip(records, batch_missing, strict=True):
+                if record.identity_hash in rows_by_hash:
+                    raise GraphObjectIntegrityError(
+                        "批量 graph object identity hash 重复")
+                rows_by_hash[record.identity_hash] = by_ref[ref]
+                records_by_hash[record.identity_hash] = record
+            if rows_by_hash:
+                identity_hashes = tuple(sorted(rows_by_hash))
+                keys = self._identity_store.read_many(tuple(
+                    rows_by_hash[identity_hash]
+                    for identity_hash in identity_hashes
+                ))
+                shared_keys = getattr(self._registry, "_shared_read_keys", None)
+                for identity_hash in identity_hashes:
+                    key = keys[identity_hash]
+                    if key is None:
+                        raise GraphObjectIntegrityError(
+                            "批量 graph object identity 缺少完整键")
+                    record = records_by_hash[identity_hash]
+                    if key[0] != record.object_kind:
+                        raise GraphObjectIntegrityError(
+                            "批量 graph object object_kind 与完整键不一致")
+                    if self._registry.identity_hash(
+                            IDENTITY_GRAPH_OBJECT, key) != identity_hash:
+                        raise GraphObjectIntegrityError(
+                            "批量 graph object identity hash 重算不一致")
+                    if shared_keys is not None:
+                        shared_keys[(IDENTITY_GRAPH_OBJECT, identity_hash)] = key
+                for record in records:
+                    self._cache_record(record)
+        result = []
+        for ref in normalized:
+            result.append(self.read_by_ref(*ref))
+        return tuple(result)
+
     def clear_runtime_caches(self) -> None:
         """外部 load、迁移或故障注入后清空映射和 codec 运行期缓存。"""
         self._keys_by_hash.clear()
@@ -258,6 +391,9 @@ class GraphObjectRepository:
         self._records_by_ref.clear()
         self._fresh_identity_namespace = None
         self._identity_store.clear_runtime_caches()
+        if self._shared_records is not None:
+            self._shared_records["by_hash"].clear()
+            self._shared_records["by_ref"].clear()
 
     def _namespace_is_empty(self) -> bool:
         """核验新旧 GraphObject identity 主载荷和子载荷均为空。"""
@@ -333,6 +469,9 @@ class GraphObjectRepository:
         """缓存已经完整核验的身份和节点双向映射。"""
         self._records_by_hash[record.identity_hash] = record
         self._records_by_ref[(record.space_id, record.local_id)] = record
+        if self._shared_records is not None:
+            self._shared_records["by_hash"][record.identity_hash] = record
+            self._shared_records["by_ref"][(record.space_id, record.local_id)] = record
 
     @staticmethod
     def _record_from_row(row: dict[str, int]) -> GraphObjectRecord:

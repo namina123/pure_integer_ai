@@ -591,6 +591,8 @@ def run_conversation_training(*, project_root: str | Path,
                               causal_only: bool = False,
                               typed_semantic: bool = True,
                               extra_course_paths: tuple[str | Path, ...] = (),
+                              integer_relation_course_paths: tuple[
+                                  str | Path, ...] = (),
                               portable_source_identity: bool = False,
                               include_default_courses: bool = True,
                               allow_additive_resume_pack: bool = False,
@@ -626,6 +628,12 @@ def run_conversation_training(*, project_root: str | Path,
         Path(item).resolve() for item in extra_course_paths)
     if len(paths) != len(set(paths)):
         raise ValueError("extra course path 与默认课程重复")
+    integer_relation_paths = tuple(
+        Path(item).resolve() for item in integer_relation_course_paths)
+    if len(integer_relation_paths) != len(set(integer_relation_paths)):
+        raise ValueError("integer relation course path 不得重复")
+    if any(not path.is_file() for path in integer_relation_paths):
+        raise ValueError("integer relation course 文件不存在")
     if allow_additive_resume_pack and not extra_course_paths:
         # A default-course addition is a valid additive shard by itself, but
         # only when the parent pack did not already register that file.  Read
@@ -820,6 +828,8 @@ def run_conversation_training(*, project_root: str | Path,
         "causal_only": causal_only,
         "extra_course_paths": tuple(
             manifest_identity(item) for item in extra_course_paths),
+        "integer_relation_course_paths": tuple(
+            str(item) for item in integer_relation_paths),
         "artifact_semantic_bridge_paths": tuple(
             str(Path(item).resolve()) for item in artifact_semantic_bridge_paths),
         "kdconv_structure_course_path": (
@@ -867,10 +877,14 @@ def run_conversation_training(*, project_root: str | Path,
         from pure_integer_ai.experiments.conversation_typed_relation_bridge import (
             _course_builder,
             build_authored_w06_learning_runtime,
+            build_integer_w06_learning_runtime,
         )
         authored_paths = tuple(
             path for path in paths if _course_builder(path) is not None)
-        if authored_paths:
+        if authored_paths and integer_relation_paths:
+            raise ValueError(
+                "authored relation course 与 integer graph-course 不能在同一 W-06 owner 混用")
+        if authored_paths or integer_relation_paths:
             # Authored pack publication is immutable.  It belongs to the
             # concrete run identity, not the shared campaign root, so a new
             # run never overwrites or tries to republish an earlier artifact.
@@ -878,12 +892,16 @@ def run_conversation_training(*, project_root: str | Path,
 
             def _build_typed_relation_runtime(ctx):
                 nonlocal typed_relation_report
-                runtime = build_authored_w06_learning_runtime(
-                    backend,
-                    ctx,
-                    authored_paths,
-                    typed_relation_root,
-                )
+                if integer_relation_paths:
+                    runtime = build_integer_w06_learning_runtime(
+                        backend, ctx, integer_relation_paths)
+                else:
+                    runtime = build_authored_w06_learning_runtime(
+                        backend,
+                        ctx,
+                        authored_paths,
+                        typed_relation_root,
+                    )
                 report = runtime.report()
                 typed_relation_report = {
                     name: int(getattr(report, name))
@@ -1201,6 +1219,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="仅运行旧 observe 图；默认接入 typed S-02 课程")
     parser.add_argument("--extra-course", action="append", default=[],
                         help="可选的公开课程 JSONL；不改变默认 v6 pack")
+    parser.add_argument(
+        "--integer-relation-course", action="append", default=[],
+        help="独立的纯整数 relation graph-course；不经 dialogue pack loader",
+    )
     parser.add_argument("--portable-source-identity", action="store_true",
                         help="用 data/ph2 basename 绑定 pack，允许跨机器恢复")
     parser.add_argument("--no-default-courses", action="store_true",
@@ -1260,6 +1282,7 @@ def main(argv: list[str] | None = None) -> int:
         causal_only=args.causal_only,
         typed_semantic=not args.no_typed_semantic,
         extra_course_paths=tuple(args.extra_course),
+        integer_relation_course_paths=tuple(args.integer_relation_course),
         portable_source_identity=args.portable_source_identity,
         include_default_courses=not args.no_default_courses,
         allow_additive_resume_pack=args.allow_additive_resume_pack,

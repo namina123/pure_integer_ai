@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 
 from pure_integer_ai.cognition.shared.identity import (
     OBJECT_EVENT,
@@ -226,9 +228,57 @@ def read_event_time_generation_bindings(
     return tuple(sorted(set(result), key=lambda item: item.stable_key()))
 
 
+def read_event_time_generation_overlay_edges(
+        path: str | Path,
+        ) -> tuple[EventTimeGraphEdge, ...]:
+    """Read a K39 integer-only generation-frame edge overlay.
+
+    The overlay is deliberately a graph edge ledger, not a second model.  It
+    may refer to identities already present in the parent Core SQLite, but it
+    never carries source text, answer surfaces, or a copied database.
+    """
+    overlay_path = Path(path).resolve(strict=True)
+    payload = json.loads(overlay_path.read_text(encoding="ascii"))
+    if not isinstance(payload, dict) or payload.get("format") != (
+            "PURE_INTEGER_K39_EVENT_TIME_BINDING_GRAPH_V1"):
+        raise ValueError("Event/Time overlay format mismatch")
+    raw_edges = payload.get("edges")
+    if not isinstance(raw_edges, list):
+        raise ValueError("Event/Time overlay edges missing")
+
+    def key(value: object, *, label: str) -> tuple[int, ...]:
+        if (not isinstance(value, list) or not value
+                or any(type(item) is not int or item < 0 for item in value)):
+            raise ValueError(f"Event/Time overlay {label} is not an integer key")
+        return tuple(value)
+
+    result = []
+    for row in raw_edges:
+        if not isinstance(row, dict):
+            raise ValueError("Event/Time overlay edge is not an object")
+        edge_kind = row.get("edge_kind")
+        if type(edge_kind) is not int or edge_kind not in {
+                1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                17, 18, 19, 20, 21, 22, 23, 24}:
+            raise ValueError("Event/Time overlay edge kind is not registered")
+        source_ref = key(row.get("source_ref"), label="source_ref")
+        if len(source_ref) != 11:
+            raise ValueError("Event/Time overlay source_ref is incomplete")
+        result.append(EventTimeGraphEdge(
+            edge_kind,
+            key(row.get("subject"), label="subject"),
+            key(row.get("predicate"), label="predicate"),
+            key(row.get("object"), label="object"),
+            source_ref,
+            key(row.get("scope"), label="scope"),
+        ))
+    return tuple(sorted(set(result), key=lambda item: item.stable_key()))
+
+
 __all__ = [
     "GENERATION_BINDING_NAMESPACE",
     "GENERATION_BINDING_VERSION",
     "TrainedEventTimeGenerationBinding",
+    "read_event_time_generation_overlay_edges",
     "read_event_time_generation_bindings",
 ]

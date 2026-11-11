@@ -1155,6 +1155,33 @@ def test_r01_surface_prefix_policy_is_explicit_and_traceable():
         fixture.close()
 
 
+def test_r01_projection_surface_preview_reuses_immutable_route(monkeypatch):
+    """只读 projection 的重复 surface preview 不重复搜索同一整数 route。"""
+    fixture = _r01_fixture()
+    try:
+        fixture.closure.candidate_runtime = None
+        calls = []
+        original = fixture.alias_runtime.route_finder.discover_surface
+
+        def counted(*args, **kwargs):
+            calls.append((args, kwargs))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(
+            fixture.alias_runtime.route_finder, "discover_surface", counted)
+        budget = AliasRouteSearchBudget(20, 20, 20)
+        first = fixture.alias_runtime.preview_surface(
+            fixture.objects["c"], fixture.objects["branch"],
+            budget=budget, allowed_prefix_steps=())
+        second = fixture.alias_runtime.preview_surface(
+            fixture.objects["c"], fixture.objects["branch"],
+            budget=budget, allowed_prefix_steps=())
+        assert first == second
+        assert len(calls) == 1
+    finally:
+        fixture.close()
+
+
 def test_r01_held_out_clone_surface_use_does_not_mutate_training_owner():
     """held-out route 发现和 use 只写克隆 owner，宿主 backend 与账本保持不变。"""
     fixture = _r01_fixture()

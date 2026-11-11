@@ -356,6 +356,90 @@ class MemoryEventRecordStore:
         self._by_hash[event_hash] = restored
         return restored
 
+    def episode_output_source_key(self, record: MemoryEventRecord) -> tuple[int, ...] | None:
+        """只读 V1/V2 Episode 输出身份中的来源投影；命中仍需完整事件验证。"""
+        if record.event_kind != 2 or self.read(record.event_hash) != record:
+            raise MemoryEventIntegrityError("Episode 来源投影信封漂移")
+        chunks: dict[int, tuple[int, ...]] = {}
+
+        def word(position: int) -> int:
+            """只读所需 marker chunk，逐行核对空间、长度、序和零填充。"""
+            if not 0 <= position < record.payload_size:
+                raise MemoryEventIntegrityError("Episode 来源投影字段越界")
+            chunk_index, offset = divmod(position, MEMORY_EVENT_CHUNK_WIDTH)
+            if chunk_index not in chunks:
+                rows = self.backend.select(MEMORY_EVENT_PART_TABLE, {
+                    "event_hash": record.event_hash, "chunk_index": chunk_index})
+                if len(rows) != 1:
+                    raise MemoryEventIntegrityError("Episode 来源投影 chunk 缺失或重复")
+                row = rows[0]
+                count = min(MEMORY_EVENT_CHUNK_WIDTH,
+                            record.payload_size - chunk_index * MEMORY_EVENT_CHUNK_WIDTH)
+                if row["space_id"] != record.space_id or row["part_size"] != count:
+                    raise MemoryEventIntegrityError("Episode 来源投影 chunk 空间或长度漂移")
+                values = tuple(row[f"part_{index:02d}"] for index in range(MEMORY_EVENT_CHUNK_WIDTH))
+                for value in values:
+                    _strict_int(value, where="Episode 来源投影 chunk")
+                if any(values[count:]):
+                    raise MemoryEventIntegrityError("Episode 来源投影 chunk 填充非零")
+                chunks[chunk_index] = values
+            return chunks[chunk_index][offset]
+
+        def sized(cursor: int, *, optional: bool = False) -> tuple[int, int, int]:
+            """沿长度前缀跳过未消费字段，不恢复其领域对象。"""
+            size = word(cursor)
+            if size < 0 or (not optional and size == 0) or cursor + 1 + size > record.payload_size:
+                raise MemoryEventIntegrityError("Episode 来源投影长度非法")
+            return cursor + 1, size, cursor + 1 + size
+
+        payload_start = 0
+        if word(0) == 91538:
+            if word(1) != 3 or word(2) != 2:
+                raise MemoryEventIntegrityError("Episode 来源投影记录 marker 非法")
+            payload_start = 3
+        if word(payload_start) != 1:
+            raise MemoryEventIntegrityError("Episode 来源投影版本未支持")
+        _start, _size, cursor = sized(payload_start + 1)
+        _start, _size, cursor = sized(cursor, optional=True)
+        count = word(cursor)
+        cursor += 1
+        if count < 0 or count > record.payload_size - cursor:
+            raise MemoryEventIntegrityError("Episode 来源投影候选数量非法")
+        for _ in range(count):
+            _start, _size, cursor = sized(cursor)
+        _start, _size, cursor = sized(cursor, optional=True)
+        start, size, _cursor = sized(cursor, optional=True)
+        if not size:
+            return None
+        if (size < 4 or word(start) != 1 or word(start + 1) not in {1, 2, 3, 4}
+                or word(start + 2) != size - 3):
+            raise MemoryEventIntegrityError("Episode 输出 link 头非法")
+        if word(start + 1) != 2:
+            return None
+        ref, ref_size = start + 3, size - 3
+        if (ref_size < 15 or word(ref) != 1 or word(ref + 1) != 2
+                or word(ref + 13) != ref_size - 14):
+            raise MemoryEventIntegrityError("Episode 输出 Memory 引用头非法")
+        if word(ref + 12) != 1:
+            return None
+        observation = ref + 14
+        source_start = observation + 2
+        if word(observation) == 91574:
+            if (ref_size < 32 or word(observation + 1) != 2
+                    or word(observation + 2) != 1 or word(observation + 3) != 11):
+                raise MemoryEventIntegrityError("Episode 输出 Observation V2 身份头非法")
+            source_start = observation + 4
+            _timestamp_start, _timestamp_size, identity_end = sized(source_start + 11)
+            if identity_end != ref + ref_size:
+                raise MemoryEventIntegrityError("Episode 输出 Observation V2 身份长度漂移")
+        elif ref_size < 27 or word(observation) != 1 or word(observation + 1) != 11:
+            raise MemoryEventIntegrityError("Episode 输出 Observation 来源头非法")
+        source = tuple(word(source_start + index) for index in range(11))
+        if (source[3:7] != tuple(word(ref + index) for index in range(4, 8))
+                or source[7:11] != tuple(word(ref + index) for index in range(8, 12))):
+            raise MemoryEventIntegrityError("Episode 输出来源与引用 owner/version 漂移")
+        return source
+
     def query(self, *, space_id: int,
               event_kind: int | None = None,
               object_kind: int | None = None,

@@ -43,6 +43,10 @@ from pure_integer_ai.cognition.shared.scope_identity import (
     SCOPE_SESSION,
 )
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
+from pure_integer_ai.cognition.shared.memory_record_identity import (
+    MEMORY_RECORD_IDENTITY, MEMORY_RECORD_IDENTITY_VERSION,
+    observation_record_key, episode_record_key, evidence_record_key,
+)
 from pure_integer_ai.storage.spaces.registry import (
     SPACE_TYPE_MEMORY,
     SpaceIdentity,
@@ -140,8 +144,10 @@ def _strict_tuple(value: tuple[int, ...], *, where: str,
     """校验开放整数键，拒绝 bool、浮点、截断空键和整数子类。"""
     if not isinstance(value, tuple) or (not allow_empty and not value):
         raise ValueError(f"{where} 必须是{'可空' if allow_empty else '非空'}整数 tuple")
-    assert_int(*value, _where=where)
-    if any(type(item) is not int for item in value):
+    for item in value:
+        if type(item) is int:
+            continue
+        assert_int(item, _where=where)
         raise ValueError(f"{where} 必须使用严格整数")
     return value
 
@@ -2176,6 +2182,9 @@ class MemoryEvent:
 
     def _declaration_object_key(self) -> tuple[int, ...]:
         """按对象种类返回稳定对象键，创建时间不污染既有本体身份。"""
+        if self.object_ref.object_key[0] == MEMORY_RECORD_IDENTITY:
+            return declaration_object_key(
+                self.event_kind, self.payload, identity_version=MEMORY_RECORD_IDENTITY_VERSION)
         if isinstance(self.payload, HypothesisPayload):
             return self.payload.hypothesis.stable_key()
         if isinstance(self.payload, ArtifactPayload):
@@ -2271,11 +2280,21 @@ def payload_from_stable_key(event_kind: int,
 
 
 def declaration_object_key(event_kind: int,
-                           payload: MemoryPayload) -> tuple[int, ...]:
+                           payload: MemoryPayload, *, identity_version: int = 1) -> tuple[int, ...]:
     """从声明 payload 恢复对象键，状态事件不得调用该函数。"""
     expected_kind = _DECLARATION_OBJECT_KINDS.get(event_kind)
     if expected_kind is None:
         raise ValueError("状态事件没有新的声明对象键")
+    if type(identity_version) is not int or identity_version not in {1, MEMORY_RECORD_IDENTITY_VERSION}:
+        raise ValueError("Memory 声明身份版本未注册")
+    if identity_version == MEMORY_RECORD_IDENTITY_VERSION:
+        if event_kind == MEMORY_EVENT_OBSERVATION and isinstance(payload, ObservationPayload):
+            return observation_record_key(payload.source, payload.observed_at)
+        if event_kind == MEMORY_EVENT_EPISODE and isinstance(payload, EpisodePayload):
+            return episode_record_key(payload.session_ref, payload.round_seq, payload.created_at)
+        if event_kind == MEMORY_EVENT_EVIDENCE and isinstance(payload, EvidencePayload):
+            return evidence_record_key(payload.observed_at, payload.compatibility_record_key)
+        raise ValueError("Memory V2 记录身份只适用于 Observation/Episode/Evidence")
     if isinstance(payload, HypothesisPayload):
         return payload.hypothesis.stable_key()
     if isinstance(payload, ArtifactPayload):

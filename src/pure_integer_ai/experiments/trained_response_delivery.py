@@ -1,6 +1,8 @@
 """Attribute delivered graph responses to session Memory without replay or Core writes."""
 from __future__ import annotations
 
+from pure_integer_ai.experiments.relation_runtime_phase import observed_relation_phase
+
 from dataclasses import dataclass
 
 from pure_integer_ai.cognition.shared.hypothesis import EVIDENCE_UNKNOWN
@@ -15,16 +17,19 @@ from pure_integer_ai.cognition.shared.semantic_object import (
     context_scope_identity, semantic_source,
 )
 from pure_integer_ai.cognition.shared.memory_event import (
-    MEMORY_EVENT_EPISODE, MEMORY_EVENT_OBSERVATION, MEMORY_OBJECT_EPISODE,
-    MEMORY_OBJECT_OBSERVATION,
+    MEMORY_EVENT_EPISODE, MEMORY_EVENT_OBSERVATION,
+    MEMORY_OBJECT_HYPOTHESIS, MEMORY_OBJECT_OBSERVATION,
     EpisodePayload, MemoryEvent, MemoryLinkedRef, MemoryObjectRef, ObservationPayload,
-    UsePayload, memory_object_ref,
+    UsePayload,
 )
 from pure_integer_ai.cognition.shared.memory_event_log import MaterializedMemoryEvent
 from pure_integer_ai.cognition.shared.memory_overlay import MemoryAccessContext
 from pure_integer_ai.cognition.shared.query_driver import unvisited_frontier
 from pure_integer_ai.cognition.shared.query_state import ROOT_PENDING, QueryState
 from pure_integer_ai.cognition.shared.response_plan import ResponsePlan
+from pure_integer_ai.cognition.understanding.query_input_structure import (
+    STRUCTURE_CLOSED,
+)
 from pure_integer_ai.cognition.shared.scope_identity import (
     CLOCK_MEMORY_OBSERVED, CLOCK_MEMORY_USED, LogicalClockIdentity, query_scope, session_scope,
 )
@@ -32,10 +37,13 @@ from pure_integer_ai.cognition.understanding.memory_intake import (
     HypothesisIntakeDraft, ObservationIntakeDraft,
 )
 from pure_integer_ai.cognition.understanding.query_memory_candidates import (
-    MEMORY_CANDIDATE_VERSION, MEMORY_CATEGORY_RESPONSE, _parts, frame_key,
+    MEMORY_CANDIDATE_VERSION, MEMORY_CATEGORY_OPEN_RELATION,
+    MEMORY_CATEGORY_RESPONSE, _parts, frame_key, memory_candidate_category,
 )
 from pure_integer_ai.cognition.understanding.query_open_role_generation import OpenRoleGenerationContext
-from pure_integer_ai.cognition.understanding.query_open_roles import pack_record
+from pure_integer_ai.cognition.understanding.query_open_roles import (
+    OpenRelationCandidate, pack_record,
+)
 from pure_integer_ai.experiments.memory_use_runtime import (
     append_memory_use, append_memory_use_outcome,
 )
@@ -44,13 +52,163 @@ from pure_integer_ai.experiments.trained_dialogue_memory_graph import (
 )
 from pure_integer_ai.experiments.trained_open_response_runtime import OpenResponseGeneration
 from pure_integer_ai.experiments.trained_response_occurrence import (
-    ResponseRoleOccurrence, materialize_response_roles,
+    ResponseRoleOccurrence, materialize_factual_response_roles,
+    materialize_response_roles,
 )
 
 
 DELIVERY_PROOF_IDENTITY = 91530
 _DELIVERY_USE = 91531
 FACTUAL_EVIDENCE_REF_IDENTITY = 91536
+
+
+def _current_open_hypothesis(
+        memory: TrainedDialogueMemoryGraph,
+        observation: MemoryObjectRef,
+        ) -> MemoryObjectRef | None:
+    """Recover the unique current-turn open-role H-00 Memory object.
+
+    QueryState Memory evidence also carries cross-turn H-00 keys, whose
+    ``hypothesis_key`` is a ``HypothesisKey`` record rather than a
+    ``MemoryObjectRef``.  Delivery must select the current input's declared
+    open-role object from its bounded Observation closure instead of relying
+    on evidence ordering.
+    """
+    selected = memory.active_structures(
+        candidate_keys=(), observation_refs=(observation,),
+        context_depth_limit=0,
+    )
+    candidates = []
+    for item in selected.hypotheses:
+        if item.observation_key != observation.stable_key():
+            continue
+        try:
+            if memory_candidate_category(item.candidate_key) != (
+                    MEMORY_CATEGORY_OPEN_RELATION):
+                continue
+            ref = MemoryObjectRef.from_stable_key(item.hypothesis_key)
+        except (TypeError, ValueError):
+            continue
+        if ref.object_kind != MEMORY_OBJECT_HYPOTHESIS:
+            continue
+        candidates.append(ref)
+    unique = {item.stable_key(): item for item in candidates}
+    if len(unique) == 1:
+        return next(iter(unique.values()))
+
+    # Context-only Observations have no role occurrence to materialize.  Keep
+    # a deterministic typed Memory hypothesis only when the bounded closure
+    # contains exactly one recoverable object; ambiguity remains absent rather
+    # than being turned into an arbitrary provenance claim.
+    typed = []
+    for item in selected.hypotheses:
+        try:
+            ref = MemoryObjectRef.from_stable_key(item.hypothesis_key)
+        except (TypeError, ValueError):
+            continue
+        if ref.object_kind == MEMORY_OBJECT_HYPOTHESIS:
+            typed.append(ref)
+    typed_unique = {item.stable_key(): item for item in typed}
+    return next(iter(typed_unique.values())) if len(typed_unique) == 1 else None
+
+
+def resolve_factual_claim_input_hypotheses(
+        memory: TrainedDialogueMemoryGraph,
+        observation: MemoryObjectRef,
+        claim_keys: tuple[tuple[int, ...], ...],
+        ) -> tuple[tuple[tuple[int, ...], MemoryObjectRef], ...]:
+    """Match each closed claim to one current-input relation hypothesis.
+
+    A closed relation question is admitted to Memory as category 5, while an
+    open-role query is admitted as category 8.  Both are source-local
+    hypotheses for the same delivery contract; the proposition identity is
+    read from the candidate key and every claim must still have exactly one
+    matching hypothesis in this Observation closure.
+    """
+    if (not isinstance(memory, TrainedDialogueMemoryGraph)
+            or not isinstance(observation, MemoryObjectRef)
+            or observation.object_kind != MEMORY_OBJECT_OBSERVATION
+            or type(claim_keys) is not tuple or not claim_keys
+            or any(type(key) is not tuple or not key
+                   or any(type(value) is not int for value in key)
+                   for key in claim_keys)
+            or len(set(claim_keys)) != len(claim_keys)):
+        raise TypeError("factual claim/H provenance input is invalid")
+    selected = memory.active_structures(
+        candidate_keys=(), observation_refs=(observation,),
+        context_depth_limit=0,
+    )
+    by_proposition: dict[tuple[int, ...], dict[tuple[int, ...], MemoryObjectRef]] = {}
+    for item in selected.hypotheses:
+        if item.observation_key != observation.stable_key():
+            continue
+        try:
+            category = memory_candidate_category(item.candidate_key)
+            if category == MEMORY_CATEGORY_OPEN_RELATION:
+                fields = _parts(item.candidate_key, MEMORY_CANDIDATE_VERSION)
+                if len(fields) != 2:
+                    continue
+                proposition = OpenRelationCandidate.from_stable_key(
+                    fields[1]).frame.proposition
+            elif category == 5:
+                fields = _parts(item.candidate_key, MEMORY_CANDIDATE_VERSION)
+                if (len(fields) != 6 or not fields[1]
+                        or not fields[2] or not fields[3] or not fields[4]
+                        or len(fields[5]) != 7
+                        or fields[5][0] < 2
+                        or fields[5][0] != fields[5][1]
+                        or fields[5][5] != STRUCTURE_CLOSED):
+                    continue
+                proposition = fields[1]
+            else:
+                continue
+            hypothesis = MemoryObjectRef.from_stable_key(item.hypothesis_key)
+        except (TypeError, ValueError):
+            continue
+        if hypothesis.object_kind != MEMORY_OBJECT_HYPOTHESIS:
+            continue
+        by_proposition.setdefault(proposition, {})[
+            hypothesis.stable_key()] = hypothesis
+    result = []
+    for claim_key in claim_keys:
+        matches = by_proposition.get(claim_key, {})
+        if len(matches) != 1:
+            return ()
+        result.append((claim_key, next(iter(matches.values()))))
+    if len({item[1].stable_key() for item in result}) != len(result):
+        return ()
+    return tuple(result)
+
+
+def _slot_input_hypotheses(
+        response: ResponsePlan,
+        claim_input_hypotheses: tuple[
+            tuple[tuple[int, ...], MemoryObjectRef], ...],
+        ) -> tuple[MemoryObjectRef, ...]:
+    """Expand exact claim provenance through contiguous ResponsePlan ranges."""
+    if not claim_input_hypotheses:
+        return ()
+    claims = {item.stable_key() for item in response.claim_refs}
+    mapping = {claim: hypothesis for claim, hypothesis in claim_input_hypotheses}
+    ranges = {claim: (start, end) for claim, start, end in response.claim_slot_ranges}
+    if not ranges and len(claims) == 1:
+        only_claim = next(iter(claims))
+        ranges = {only_claim: (0, len(response.slot_sequence))}
+    if (set(mapping) != claims or set(ranges) != claims
+            or len(mapping) != len(claim_input_hypotheses)
+            or any(not isinstance(hypothesis, MemoryObjectRef)
+                   or hypothesis.object_kind != MEMORY_OBJECT_HYPOTHESIS
+                   for hypothesis in mapping.values())):
+        raise ValueError("factual claim/H provenance does not cover the plan")
+    slots = [None] * len(response.slot_sequence)
+    for claim, (start, end) in ranges.items():
+        for ordinal in range(start, end):
+            if slots[ordinal] is not None:
+                raise ValueError("factual claim/H slot provenance overlaps")
+            slots[ordinal] = mapping[claim]
+    if any(item is None for item in slots):
+        raise ValueError("factual claim/H slot provenance has a gap")
+    return tuple(slots)
 
 
 def _delivery_proof_identity(source: SourceRef, proof_hash: int) -> ObjectIdentity:
@@ -112,6 +270,9 @@ class ResponseDeliveryReceipt:
             "adopted_slots": self.slot_count,
             "observed_slots": self.observed_slot_count,
             "role_occurrences": [list(item.stable_key()) for item in self.role_occurrences],
+            "role_occurrence_hypotheses": [
+                list(item.hypothesis.stable_key())
+                for item in self.role_occurrences],
             "delivered": 1,
             "fact_claims_added": 0,
         }
@@ -180,6 +341,11 @@ class FactualResponseGeneration:
     # The legacy proposition_key remains the first selected claim.  New
     # composition generations provide the complete ordered claim set here.
     claim_keys: tuple[tuple[int, ...], ...] = ()
+    # Exact current-input category-8 H provenance, keyed by closed claim.
+    # Empty preserves compatibility with legacy single-H callers; production
+    # composition fills this from the current Observation closure.
+    claim_input_hypotheses: tuple[
+        tuple[tuple[int, ...], MemoryObjectRef], ...] = ()
 
     def __post_init__(self) -> None:
         response = self.response_plan
@@ -200,6 +366,23 @@ class FactualResponseGeneration:
                 not response.claim_evidence_refs
                 or not response.claim_slot_ranges):
             raise ValueError("multi-claim delivery lacks per-claim audit records")
+        if (type(self.claim_input_hypotheses) is not tuple
+                or any(type(item) is not tuple or len(item) != 2
+                       or type(item[0]) is not tuple or not item[0]
+                       or any(type(value) is not int for value in item[0])
+                       or not isinstance(item[1], MemoryObjectRef)
+                       or item[1].object_kind != MEMORY_OBJECT_HYPOTHESIS
+                       for item in self.claim_input_hypotheses)):
+            raise TypeError("factual delivery claim/H provenance is invalid")
+        if self.claim_input_hypotheses:
+            if (len({claim for claim, _hypothesis in self.claim_input_hypotheses})
+                    != len(self.claim_input_hypotheses)
+                    or {claim for claim, _hypothesis in self.claim_input_hypotheses}
+                    != set(claim_keys)
+                    or len({hypothesis.stable_key()
+                            for _claim, hypothesis in self.claim_input_hypotheses})
+                    != len(self.claim_input_hypotheses)):
+                raise ValueError("factual delivery claim/H provenance is incomplete")
         if (not isinstance(self.input_observation, MemoryObjectRef)
                 or self.input_observation.object_kind != MEMORY_OBJECT_OBSERVATION):
             raise ValueError("factual delivery input must be an Observation")
@@ -226,6 +409,8 @@ class FactualResponseGeneration:
             frame_key(5, *(frame_key(ordinal + 1, key)
                           for ordinal, key in enumerate(
                               self.claim_keys or (self.proposition_key,)))),
+            frame_key(6, *(frame_key(1, claim, hypothesis.stable_key())
+                          for claim, hypothesis in self.claim_input_hypotheses)),
             self.response_plan.response_act.stable_key(), slots, self.trace)
 
 
@@ -267,6 +452,7 @@ class FactualResponseDeliveryReceipt:
     slot_count: int
     claim_count: int
     evidence_ref_count: int
+    role_occurrences: tuple[ResponseRoleOccurrence, ...] = ()
 
     def summary(self) -> dict[str, object]:
         return {
@@ -279,11 +465,20 @@ class FactualResponseDeliveryReceipt:
             "observed_slots": self.slot_count,
             "claim_count": self.claim_count,
             "evidence_ref_count": self.evidence_ref_count,
-            "role_occurrences": [],
+            "role_occurrences": [list(item.stable_key()) for item in self.role_occurrences],
+            "role_occurrence_hypotheses": [
+                list(item.hypothesis.stable_key())
+                for item in self.role_occurrences],
             "delivered": 1,
             # Delivery observes a selected Core claim; it never creates one.
             "fact_claims_added": 0,
         }
+
+
+@observed_relation_phase("memory_commit")
+def _commit_response_memory(memory: TrainedDialogueMemoryGraph) -> None:
+    """记录实际 delivery 的事务提交边界；日志不替代数据库恢复验收。"""
+    memory.backend.commit()
 
 
 def read_delivery_proof(memory: TrainedDialogueMemoryGraph,
@@ -308,15 +503,37 @@ def read_factual_evidence_ref(
         ref: ObjectIdentity,
         ) -> tuple[int, ...]:
     """Resolve one normalized QueryState Evidence reference exactly."""
+    identity_hash = _factual_evidence_ref_hash(memory, ref)
+    return memory.intake.event_log.scoped_identities.registry.read_key(
+        FACTUAL_EVIDENCE_REF_IDENTITY, identity_hash)
+
+
+def read_factual_evidence_refs(
+        memory: TrainedDialogueMemoryGraph,
+        refs: tuple[ObjectIdentity, ...],
+        ) -> tuple[tuple[int, ...], ...]:
+    """Resolve normalized Evidence references with batched checked reads."""
+    if type(refs) is not tuple:
+        raise TypeError("factual evidence locators must be a tuple")
+    hashes = tuple(_factual_evidence_ref_hash(memory, ref) for ref in refs)
+    return memory.intake.event_log.scoped_identities.registry.read_keys(
+        FACTUAL_EVIDENCE_REF_IDENTITY, hashes)
+
+
+def _factual_evidence_ref_hash(
+        memory: TrainedDialogueMemoryGraph,
+        ref: ObjectIdentity,
+        ) -> int:
+    """Validate the session-owned stable locator before registry access."""
     if (not isinstance(ref, ObjectIdentity)
             or ref.object_kind != OBJECT_CONTEXT_SCOPE
             or ref.owner != memory.owner or len(ref.components) != 2
             or ref.components[0] != FACTUAL_EVIDENCE_REF_IDENTITY):
         raise ValueError("factual evidence locator is not owned by this session")
-    return memory.intake.event_log.scoped_identities.registry.read_key(
-        FACTUAL_EVIDENCE_REF_IDENTITY, ref.components[1])
+    return ref.components[1]
 
 
+@observed_relation_phase("memory_append")
 def record_factual_response_delivery(
         memory: TrainedDialogueMemoryGraph,
         state: QueryState,
@@ -334,6 +551,13 @@ def record_factual_response_delivery(
         raise TypeError("factual delivery requires typed Memory/query/generation")
     response = generation.response_plan
     claim_keys = generation.claim_keys or (generation.proposition_key,)
+    slot_hypotheses = _slot_input_hypotheses(
+        response, generation.claim_input_hypotheses)
+    if not slot_hypotheses:
+        legacy_hypothesis = _current_open_hypothesis(
+            memory, generation.input_observation)
+        if legacy_hypothesis is not None:
+            slot_hypotheses = (legacy_hypothesis,) * len(response.slot_sequence)
     claim_ref_keys = {item.stable_key() for item in response.claim_refs}
     claim_audit = {
         claim: refs for claim, refs in response.claim_evidence_refs}
@@ -366,7 +590,7 @@ def record_factual_response_delivery(
         raise ValueError("factual delivery input belongs to another owner")
     memory.intake.require_current_manifest(source)
 
-    used_refs = tuple(sorted(set(response.memory_refs),
+    used_refs = tuple(sorted(set(response.memory_refs) | set(slot_hypotheses),
                              key=lambda item: item.stable_key()))
     state_memory_keys = {
         key for item in state.evidence if item.space == 2
@@ -415,6 +639,8 @@ def record_factual_response_delivery(
         (1 if slot.required else 0, slot.source_hash),
         slot.token_digest,
         slot.allowed_node_kinds,
+        *(slot_hypotheses[ordinal].stable_key(),)
+        if slot_hypotheses else (),
     ) for ordinal, slot in enumerate(response.slot_sequence)))
     evidence_record = frame_key(
         3, *(item.stable_key() for item in evidence_locators))
@@ -495,6 +721,45 @@ def record_factual_response_delivery(
     output_ref = memory.intake.result_for_source(output.source).observation_ref
     if output_ref is None:
         raise RuntimeError("factual delivery output Observation was not materialized")
+    role_occurrences = ()
+    if not slot_hypotheses:
+        # A closed operation request can deliver a factual claim without a
+        # category-5/8 input relation hypothesis.  Anchor its emitted roles to
+        # the response H just written by this exact proof and response act.
+        # This preserves durable role occurrences without inventing an input
+        # fact or choosing among unrelated input hypotheses.
+        response_hypotheses = tuple(
+            item for item in memory.active_structures(
+                candidate_keys=(candidate_key,),
+                observation_refs=(output_ref,),
+                context_depth_limit=0,
+            ).hypotheses
+            if (item.candidate_key == candidate_key
+                and item.observation_key == output_ref.stable_key())
+        )
+        if len(response_hypotheses) != 1:
+            raise RuntimeError(
+                "factual response roles have no unique proof-bound response hypothesis")
+        response_hypothesis = MemoryObjectRef.from_stable_key(
+            response_hypotheses[0].hypothesis_key)
+        if response_hypothesis.object_kind != MEMORY_OBJECT_HYPOTHESIS:
+            raise RuntimeError("factual response role hypothesis has the wrong kind")
+        slot_hypotheses = (response_hypothesis,) * len(response.slot_sequence)
+    if slot_hypotheses:
+        role_occurrences = materialize_factual_response_roles(
+            memory,
+            input_observation=generation.input_observation,
+            hypothesis=slot_hypotheses[0],
+            slot_hypotheses=slot_hypotheses,
+            scope_key=next(
+                (item.scope_key for item in state.evidence if item.space == 2),
+                source.stable_key(),
+            ),
+            proof_ref=proof_ref,
+            output_observation=output_ref,
+            output_source=output.source,
+            slots=response.slot_sequence,
+        )
 
     session = session_scope(
         memory.session_id, owner=memory.owner, versions=source.versions)
@@ -521,13 +786,7 @@ def record_factual_response_delivery(
         session,
         used_clock.advance(),
     )
-    episode_ref = memory_object_ref(
-        events.memory_space_identity,
-        MEMORY_OBJECT_EPISODE,
-        episode_payload.stable_key(),
-        owner=memory.owner,
-        versions=source.versions,
-    )
+    episode_ref = events.declaration_ref(MEMORY_EVENT_EPISODE, episode_payload, scope=scope)
     episode = events.append(MemoryEvent(
         MEMORY_EVENT_EPISODE, episode_ref, scope, episode_payload))
     uses = []
@@ -560,7 +819,7 @@ def record_factual_response_delivery(
         uses.append(use)
         outcomes.append(outcome)
     memory.candidate_index.synchronize()
-    memory.backend.commit()
+    _commit_response_memory(memory)
     return FactualResponseDeliveryReceipt(
         proof_ref,
         output,
@@ -570,9 +829,11 @@ def record_factual_response_delivery(
         len(response.slot_sequence),
         len(response.claim_refs),
         len(evidence_locators),
+        role_occurrences,
     )
 
 
+@observed_relation_phase("memory_append")
 def record_open_response_delivery(
         memory: TrainedDialogueMemoryGraph, state: QueryState,
         generation: OpenResponseGeneration, emitted_units: tuple[int, ...],
@@ -656,9 +917,7 @@ def record_open_response_delivery(
         context.observation, query_kind, candidate_refs, proof_link,
         MemoryLinkedRef.memory(output_ref), used_refs, (), None,
         output.turn_seq, session, used_clock.advance())
-    episode_ref = memory_object_ref(events.memory_space_identity, MEMORY_OBJECT_EPISODE,
-                                    episode_payload.stable_key(), owner=memory.owner,
-                                    versions=context.source.versions)
+    episode_ref = events.declaration_ref(MEMORY_EVENT_EPISODE, episode_payload, scope=scope)
     episode = events.append(MemoryEvent(MEMORY_EVENT_EPISODE, episode_ref, scope, episode_payload))
     role_occurrences = materialize_response_roles(memory, context, proof_ref, output.source)
     uses = []
@@ -683,12 +942,13 @@ def record_open_response_delivery(
         uses.append(use)
         outcomes.append(outcome)
     memory.candidate_index.synchronize()
-    memory.backend.commit()
+    _commit_response_memory(memory)
     return ResponseDeliveryReceipt(
         proof_ref, output, episode, tuple(uses), tuple(outcomes), len(preview.slots),
         sum(slot.observed_surface is not None for slot in preview.slots), role_occurrences, context)
 
 
+@observed_relation_phase("memory_append")
 def record_generic_response_delivery(
         memory: TrainedDialogueMemoryGraph, state: QueryState,
         generation: GenericResponseGeneration,
@@ -723,6 +983,13 @@ def record_generic_response_delivery(
     state_memory_keys = {
         key for item in state.evidence if item.space == 2
         for key in (item.hypothesis_key, item.evidence_key) if key
+    } | {
+        # A delivered cross-turn context can contribute an Observation or
+        # Hypothesis root without upgrading that structural O/H into a
+        # support EvidenceEntry.  Those roots are nevertheless part of this
+        # completed QueryState and are validated below through their exact
+        # Memory declarations, matching factual delivery's contract.
+        item.root_key for item in state.roots if item.owner_space == 2
     }
     if not used_refs or any(ref.stable_key() not in state_memory_keys for ref in used_refs):
         raise ValueError("generic delivery adopts Memory outside the current QueryState")
@@ -800,9 +1067,7 @@ def record_generic_response_delivery(
         tuple(MemoryLinkedRef.memory(ref) for ref in used_refs), proof_link,
         MemoryLinkedRef.memory(output_ref), used_refs, (), None,
         output.turn_seq, session, used_clock.advance())
-    episode_ref = memory_object_ref(
-        events.memory_space_identity, MEMORY_OBJECT_EPISODE,
-        episode_payload.stable_key(), owner=memory.owner, versions=source.versions)
+    episode_ref = events.declaration_ref(MEMORY_EVENT_EPISODE, episode_payload, scope=scope)
     episode = events.append(MemoryEvent(
         MEMORY_EVENT_EPISODE, episode_ref, scope, episode_payload))
     uses = []
@@ -824,7 +1089,7 @@ def record_generic_response_delivery(
         uses.append(use)
         outcomes.append(outcome)
     memory.candidate_index.synchronize()
-    memory.backend.commit()
+    _commit_response_memory(memory)
     return GenericResponseDeliveryReceipt(
         proof_ref, output, episode, tuple(uses), tuple(outcomes),
         len(response.slot_sequence))

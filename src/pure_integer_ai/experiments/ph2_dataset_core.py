@@ -141,12 +141,17 @@ def _validate_json_value(value: Any, *, where: str) -> None:
         raise DatasetContractError(f"{where} 禁止浮点")
     if isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
+            # 整数叶子已完成原严格类型核验，不为成功叶子反复构造错误路径。
+            if type(item) is int:
+                continue
             _validate_json_value(item, where=f"{where}[{index}]")
         return
     if isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str) or not key:
                 raise DatasetContractError(f"{where} 的 object key 必须是非空字符串")
+            if type(item) is int:
+                continue
             _validate_json_value(item, where=f"{where}.{key}")
         return
     raise DatasetContractError(f"{where} 含 JSON 不支持类型 {type(value).__name__}")

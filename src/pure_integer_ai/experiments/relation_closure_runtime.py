@@ -690,6 +690,55 @@ class RelationClosureRuntime:
             projection_timestamp_seq,
         ),))[0]
 
+    def restore_recognition(
+            self,
+            input_value: RelationClosureRecognitionInput,
+            ) -> RelationClosureRecognitionTrace | None:
+        """只从持久 H-05/H-04 历史恢复一条 recognition route。"""
+        if not isinstance(input_value, RelationClosureRecognitionInput):
+            raise TypeError("input_value 必须是 RelationClosureRecognitionInput")
+        formation = self._formations.get(input_value.proposition)
+        if formation is None:
+            raise RelationClosureIncompleteError(
+                "recognition 恢复前必须完成 relation forming writer")
+        route = input_value.route_key()
+        existing = self._recognitions.get(route)
+        if existing is not None:
+            if existing.input != input_value:
+                raise RelationClosureIncompleteError(
+                    "同一 recognition 路由绑定了不同输入")
+            return existing
+        restored = self.candidate_runtime.restored_recognition_outcome(
+            formation.hypothesis,
+            input_value.observation,
+            input_value.event_key,
+        )
+        if restored is None:
+            return None
+        prediction = restored.prediction
+        if (
+                prediction.observation != input_value.observation
+                or prediction.scope != input_value.scope
+                or prediction.event_key != input_value.event_key
+                or prediction.visible_inputs != input_value.visible_inputs
+                or prediction.predicted != input_value.proposition):
+            raise RelationClosureIncompleteError(
+                "持久 recognition prediction 与当前输入不一致")
+        verification = self.candidate_runtime.verifier.verify(
+            prediction, input_value.revealed)
+        if verification != restored.verification:
+            raise RelationClosureIncompleteError(
+                "持久 recognition verifier 与当前 reveal 不一致")
+        facts = self.consumer.lookup_proposition(input_value.proposition)
+        active_fact = facts[0] if len(facts) == 1 else None
+        trace = RelationClosureRecognitionTrace(
+            input_value,
+            restored,
+            active_fact,
+        )
+        self._recognitions[route] = trace
+        return trace
+
     def recognize_many_at(
             self,
             requests: tuple[
@@ -717,6 +766,10 @@ class RelationClosureRuntime:
                     raise RelationClosureIncompleteError(
                         "同一 recognition 路由绑定了不同输入")
                 normalized.append(existing)
+                continue
+            restored_trace = self.restore_recognition(input_value)
+            if restored_trace is not None:
+                normalized.append(restored_trace)
                 continue
             replacement = None
             if input_value.replacement is not None:

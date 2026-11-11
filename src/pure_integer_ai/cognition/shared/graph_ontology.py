@@ -119,19 +119,63 @@ class GraphOntology:
         )
         if existing:
             backend.advance_id_pool(space_id, existing[0]["local_id"])
-        self._identity_to_ref: dict[ObjectIdentity, TypedRef] = {}
-        self._ref_to_identity: dict[TypedRef, ObjectIdentity] = {}
-        self._records_by_node: dict[tuple[int, int], GraphObjectRecord] = {}
-        self._refs_by_node: dict[tuple[int, int], TypedRef] = {}
-        self._source_hashes: dict[SourceRef, int] = {}
         # 发布 SQLite 是冻结只读图；同一整数端点查询在结构恢复和协议核验
-        # 中会反复出现。缓存完整核验后的结果，不缓存未核验物理行。
+        # 中会反复出现。缓存完整核验后的结果，不缓存未核验物理行。多个
+        # 只读 facade 共享这些不可变结果，避免 generation、query 和 memory
+        # bridge 为同一整数图重复构造巨大 ObjectIdentity。
         self._read_only = bool(getattr(backend, "read_only", False))
+        readonly_cache = None
+        if self._read_only:
+            readonly_cache = getattr(
+                backend, "_pi_readonly_graph_ontology_cache", None)
+            if readonly_cache is None:
+                readonly_cache = {
+                    "identity_to_ref": {},
+                    "ref_to_identity": {},
+                    "records_by_node": {},
+                    "refs_by_node": {},
+                    "source_hashes": {},
+                    "statements": {},
+                    "statement_by_assertion": {},
+                }
+                setattr(
+                    backend, "_pi_readonly_graph_ontology_cache",
+                    readonly_cache,
+                )
+        self._readonly_cache = readonly_cache
+        self._identity_to_ref: dict[ObjectIdentity, TypedRef] = (
+            {} if readonly_cache is None else readonly_cache["identity_to_ref"]
+        )
+        self._ref_to_identity: dict[TypedRef, ObjectIdentity] = (
+            {} if readonly_cache is None else readonly_cache["ref_to_identity"]
+        )
+        self._records_by_node: dict[tuple[int, int], GraphObjectRecord] = (
+            {} if readonly_cache is None else readonly_cache["records_by_node"]
+        )
+        self._refs_by_node: dict[tuple[int, int], TypedRef] = (
+            {} if readonly_cache is None else readonly_cache["refs_by_node"]
+        )
+        self._source_hashes: dict[SourceRef, int] = (
+            {} if readonly_cache is None else readonly_cache["source_hashes"]
+        )
+        node_validation = None
+        if self._read_only:
+            node_validation = getattr(
+                backend, "_pi_readonly_graph_object_nodes", None)
+            if node_validation is None:
+                node_validation = set()
+                setattr(
+                    backend, "_pi_readonly_graph_object_nodes", node_validation)
+        self._validated_node_refs: set[tuple[int, int]] | None = node_validation
         self._statements_cache: dict[
             tuple[int | None, tuple[int, int] | None, tuple[int, int] | None],
             tuple[GraphStatement, ...],
-        ] = {}
-        self._statement_by_assertion: dict[int, GraphStatement] = {}
+        ] = ({} if readonly_cache is None
+             else readonly_cache["statements"])
+        self._statement_by_assertion: dict[int, GraphStatement] = (
+            {} if readonly_cache is None
+            else readonly_cache["statement_by_assertion"]
+        )
 
     def enable_physical_statement_projection(self) -> None:
         """为需要独立物理索引的发布训练上下文开启 statement 行写入。"""
@@ -285,6 +329,8 @@ class GraphOntology:
         self._source_hashes.clear()
         self._statements_cache.clear()
         self._statement_by_assertion.clear()
+        if self._validated_node_refs is not None:
+            self._validated_node_refs.clear()
         self._objects.clear_runtime_caches()
         self._statements.clear_runtime_caches()
         self._scoped_identities.clear_runtime_caches()
@@ -372,6 +418,21 @@ class GraphOntology:
             subject_ref=None if subject is None else subject.node_ref(),
             object_ref=None if object_ref is None else object_ref.node_ref(),
         )
+        if self._read_only and records:
+            # A broad immutable-predicate query can return hundreds of
+            # statements.  Validate all endpoint graph-object codecs in one
+            # integer batch before restoring domains; this preserves every
+            # assertion/scope/provenance check while avoiding one overflow
+            # lookup per endpoint.
+            self._objects.preload_refs(tuple(sorted({
+                ref
+                for record in records
+                for ref in (
+                    record.predicate_ref,
+                    record.subject_ref[1:],
+                    record.object_ref[1:],
+                )
+            })))
         restored = tuple(self._restore_statement(record) for record in records)
         if subject is not None:
             restored = tuple(item for item in restored if item.subject == subject)
@@ -405,12 +466,17 @@ class GraphOntology:
             raise GraphObjectIntegrityError("对象映射到了其他运行时空间")
         if record.space_identity_key != self._space_identity.stable_key():
             raise GraphObjectIntegrityError("对象稳定空间身份不一致")
-        rows = self._backend.select("concept_node", where={
-            "space_id": record.space_id,
-            "local_id": record.local_id,
-        })
-        if len(rows) != 1 or rows[0]["type"] != NODE_CONCEPT:
-            raise GraphObjectIntegrityError("图对象没有唯一一等概念节点")
+        node_key = (record.space_id, record.local_id)
+        if (self._validated_node_refs is None
+                or node_key not in self._validated_node_refs):
+            rows = self._backend.select("concept_node", where={
+                "space_id": record.space_id,
+                "local_id": record.local_id,
+            })
+            if len(rows) != 1 or rows[0]["type"] != NODE_CONCEPT:
+                raise GraphObjectIntegrityError("图对象没有唯一一等概念节点")
+            if self._validated_node_refs is not None:
+                self._validated_node_refs.add(node_key)
         return record
 
     def _cache_object(self, identity: ObjectIdentity,

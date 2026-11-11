@@ -1,8 +1,19 @@
 """把运行时对话表层写入 interaction Memory 图并执行有界跨进程召回。"""
 from __future__ import annotations
 
+from pure_integer_ai.cognition.understanding.query_relation_coverage import (
+    has_uncovered_closed_relation_modifier,
+)
+from pure_integer_ai.cognition.understanding.query_assertion_scope import (
+    assertion_scope_competition, scope_relation_stance,
+)
+
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
+from typing import Callable
+
+from pure_integer_ai.experiments.relation_runtime_phase import observed_relation_phase
 
 from pure_integer_ai.cognition.shared.identity import (
     CorpusVersion,
@@ -23,6 +34,7 @@ from pure_integer_ai.cognition.shared.memory_event import (
     INTAKE_DERIVED_EVIDENCE,
     INTAKE_DERIVED_HYPOTHESIS,
     INTAKE_DERIVED_OBSERVATION,
+    IntakeManifestPayload,
     MEMORY_EVENT_EVIDENCE,
     MEMORY_EVENT_EPISODE,
     MEMORY_EVENT_HYPOTHESIS,
@@ -40,6 +52,7 @@ from pure_integer_ai.cognition.shared.semantic_object import (
     context_scope_identity,
     semantic_source,
 )
+from pure_integer_ai.cognition.shared.memory_record_identity import observation_reference_source
 from pure_integer_ai.cognition.shared.hypothesis import (
     EVIDENCE_REFUTE,
     EVIDENCE_SUPPORT,
@@ -70,9 +83,13 @@ from pure_integer_ai.cognition.understanding.query_input_structure import (
     TrainedInputStructureProjector,
     graph_query_input_structure,
 )
+from pure_integer_ai.cognition.understanding.query_reference_context import (
+    extended_reference_context_required,
+)
 from pure_integer_ai.cognition.understanding.query_memory_candidates import (
     MEMORY_CATEGORY_DISCOURSE as _MEMORY_CATEGORY_DISCOURSE,
     MEMORY_CATEGORY_OPEN_RELATION,
+    MEMORY_CATEGORY_OPERATION_REQUEST,
     MEMORY_CATEGORY_TIME as _MEMORY_CATEGORY_TIME,
     MEMORY_GENERIC_CANDIDATE_VERSION as _MEMORY_GENERIC_CANDIDATE_VERSION,
     frame_key as _frame_key,
@@ -135,12 +152,24 @@ DIALOGUE_MEMORY_POSTING_TABLE = "dialogue_memory_posting"
 _DIALOGUE_MEMORY_NAMESPACE = 91501
 _DIALOGUE_MEMORY_SOURCE_KIND = 91501
 _DIALOGUE_CONTEXT_LINK_NAMESPACE = 91543
+# Ordinary turns keep the latest-response boundary.  An explicitly open
+# relation may request this bounded history window for cross-turn references.
+_RESPONSE_CONTEXT_HISTORY_LIMIT = 8
 _FEATURE_HASHER = Hasher("trained_dialogue_memory.feature.v1")
 _VERSIONS = VersionBundle(
     CorpusVersion(1), ParserVersion(1),
     PrimitiveVersion(1), CurriculumVersion(1))
 _MAX_POSTINGS_PER_FEATURE = 64
 _MAX_CANDIDATES = 32
+
+
+def _scoped_memory_event_reads(operation: Callable) -> Callable:
+    """把一次完整 O/H/E 恢复限制在单次解码复用作用域内。"""
+    @wraps(operation)
+    def scoped(memory, *args, **kwargs):
+        with memory.intake.event_log.read_scope():
+            return operation(memory, *args, **kwargs)
+    return scoped
 
 # Memory hypothesis keys are open, source-scoped candidates.  These integer
 # namespaces describe only the structural role proposed by the input graph;
@@ -418,6 +447,9 @@ class _DialogueObservationParser:
         if input_structure is None and self.input_projector is not None:
             input_structure = self.input_projector.project(tuple(
                 ord(value) for value in source.text))
+        unresolved_input = bool(
+            input_structure is not None
+            and has_uncovered_closed_relation_modifier(input_structure))
         if self.input_structure is not None:
             candidate_rows = tuple(
                 (_memory_candidate_category(candidate), candidate)
@@ -462,6 +494,25 @@ class _DialogueObservationParser:
                         (_MEMORY_CATEGORY_DISCOURSE,),
                         input_structure.source_ref)),
                 )
+        if input_structure is not None and input_structure.assertion_scope_bindings:
+            selected_key = input_structure.assertion_scope_bindings[0].relation_key
+            relation_key = next(memory_relation_candidate_key(item)
+                for item in input_structure.relation_candidates if item.stable_key() == selected_key)
+            # 内层节点和话题已完整保存在关系证明中，不能当作顶层独立断言。
+            candidate_rows = tuple((category, key) for category, key in candidate_rows
+                                   if key == relation_key)
+        if unresolved_input or (input_structure is not None and input_structure.assertion_scope_bindings):
+            # 保留原解释候选及 UNKNOWN 立场，同时给当前输入自己的非事实
+            # 澄清提供 O/H/E 根；不能借历史回答或已知子串补事实资格。
+            candidate_rows = (
+                *candidate_rows,
+                (_MEMORY_CATEGORY_TIME, _frame_key(
+                    _MEMORY_GENERIC_CANDIDATE_VERSION,
+                    (_MEMORY_CATEGORY_TIME,), input_structure.source_ref)),
+                (_MEMORY_CATEGORY_DISCOURSE, _frame_key(
+                    _MEMORY_GENERIC_CANDIDATE_VERSION,
+                    (_MEMORY_CATEGORY_DISCOURSE,), input_structure.source_ref)),
+            )
         # A generic candidate may already be supplied by the input projector;
         # adding the dialogue context must be idempotent for the same source.
         # Deduplicate by its semantic integer identity before assigning a
@@ -475,10 +526,16 @@ class _DialogueObservationParser:
         result = []
         for ordinal, (category, candidate_key) in enumerate(candidate_rows):
             proof = ()
+            scoped_stance = None
+            if input_structure is not None and input_structure.assertion_scope_bindings:
+                # 说话者的否定仅反驳精确内层关系；词项出现、可能及引述均不是正支持。
+                proof = tuple(item.stable_key() for item in input_structure.assertion_scope_bindings)
+                scoped_stance = scope_relation_stance(input_structure, candidate_key,
+                    relation_candidate_key=memory_relation_candidate_key)
             if input_structure is not None:
                 topic_proof = memory_topic_input_proof(candidate_key, input_structure)
                 if topic_proof:
-                    proof = (topic_proof,)
+                    proof += (topic_proof,)
                 if category == 5:
                     relation_rows = tuple(
                         item for item in input_structure.relation_candidates
@@ -519,13 +576,15 @@ class _DialogueObservationParser:
                     candidate_key),
                 (_MEMORY_HYPOTHESIS_NAMESPACE, category),
                 candidate_key,
-                _frame_key(
+                assertion_scope_competition(input_structure, _frame_key(
                     _MEMORY_COMPETITION_NAMESPACE,
                     (category,),
-                    candidate_key),
-                EVIDENCE_UNKNOWN if self.stance == EVIDENCE_SUPPORT and (
-                    category == MEMORY_CATEGORY_OPEN_RELATION
+                    candidate_key)) if input_structure is not None else _frame_key(
+                        _MEMORY_COMPETITION_NAMESPACE, (category,), candidate_key),
+                scoped_stance if scoped_stance is not None else EVIDENCE_UNKNOWN if self.stance == EVIDENCE_SUPPORT and (
+                    category in {MEMORY_CATEGORY_OPEN_RELATION, MEMORY_CATEGORY_OPERATION_REQUEST}
                     or candidate_key[0] == _MEMORY_GENERIC_CANDIDATE_VERSION
+                    or unresolved_input
                 ) else self.stance,
                 reason_key=_frame_key(
                     _MEMORY_EVIDENCE_NAMESPACE,
@@ -588,12 +647,9 @@ class _DialogueObservationParser:
                 raise TypeError("context_refs 必须是一等 Memory 引用")
             if (isinstance(value, MemoryObjectRef)
                     and value.object_kind == MEMORY_OBJECT_OBSERVATION):
-                payload = ObservationPayload.from_stable_key(value.object_key)
-                if (payload.source.owner != value.owner
-                        or payload.source.versions != value.versions):
-                    raise ValueError("上下文 Observation 引用与来源身份不一致")
+                source = observation_reference_source(value)
                 value = context_scope_identity(
-                    payload.source, (_DIALOGUE_CONTEXT_LINK_NAMESPACE,))
+                    source, (_DIALOGUE_CONTEXT_LINK_NAMESPACE,))
                 result.append(MemoryLinkedRef.object(value))
             else:
                 result.append(ref if isinstance(ref, MemoryLinkedRef)
@@ -680,6 +736,7 @@ class TrainedDialogueMemoryGraph:
         "path", "backend", "intake", "owner", "session_id",
         "source_id", "input_projector",
         "_next_turn_seq", "candidate_index", "occurrence_index",
+        "_response_episode_hashes", "_response_episode_watermark",
     )
 
     def __init__(
@@ -723,6 +780,10 @@ class TrainedDialogueMemoryGraph:
                           self.owner, _VERSIONS),
                 memory_candidate_routes,
             )
+            self._response_episode_hashes: dict[tuple[int, ...], list[int]] = {}
+            self._response_episode_watermark = 0
+            # 先提交 owner 的 schema/registry 初始化，再允许进入有界 case 事务。
+            self.backend.commit()
         except BaseException:
             self.backend.close()
             raise
@@ -735,6 +796,13 @@ class TrainedDialogueMemoryGraph:
             backend.close()
             self.backend = None
 
+    def abandon(self) -> None:
+        """失败 case 的事务已回滚时关闭 owner，禁止 close 再提交部分状态。"""
+        backend = getattr(self, "backend", None)
+        if backend is not None:
+            backend.close()
+            self.backend = None
+
     def __enter__(self) -> "TrainedDialogueMemoryGraph":
         """返回当前 session Memory owner。"""
         return self
@@ -743,6 +811,7 @@ class TrainedDialogueMemoryGraph:
         """结束 session Memory owner 生命周期。"""
         self.close()
 
+    @observed_relation_phase("memory_append")
     def append(
             self,
             surface: str,
@@ -766,10 +835,16 @@ class TrainedDialogueMemoryGraph:
             raise TypeError("input_structure 必须是 QueryInputStructure 或 None")
         if observation_draft is not None and input_structure is not None:
             raise ValueError("observation_draft 与 input_structure 不得同时提供")
+        context_history_limit = 1
+        if (speaker_kind == 1 and input_structure is not None
+                and extended_reference_context_required(input_structure, tuple(
+                    getattr(self.input_projector, "slot_question_frames", ())))):
+            context_history_limit = _RESPONSE_CONTEXT_HISTORY_LIMIT
         parser = (_GeneratedObservationParser(observation_draft)
                   if observation_draft is not None else _DialogueObservationParser(
                       self.owner, self.session_id, speaker_kind, self.input_projector, stance,
-                      self._preceding_response_context_links()
+                      self._preceding_response_context_links(
+                          history_limit=context_history_limit)
                       if speaker_kind == 1 else (),
                       input_structure))
         appended, _result = self._append_with_parser(
@@ -877,11 +952,46 @@ class TrainedDialogueMemoryGraph:
             tuple(item.object_key for item in result.evidence_refs),
         ), result
 
-    def _preceding_response_sources(self) -> tuple[SourceRef, ...]:
-        """沿已持久 Episode 的真实输出端点恢复最近回应来源。"""
+    def _preceding_response_sources(
+            self, *, history_limit: int = 1,
+            ) -> tuple[SourceRef, ...]:
+        """沿已持久 Episode 恢复最近若干真实输出来源。
+
+        The default remains the latest delivered source.  A caller handling
+        an explicitly open relation may request a bounded recent window; the
+        sources are still verified through authoritative Episode and
+        Observation records before they are returned.
+        """
+        if (type(history_limit) is not int
+                or not 1 <= history_limit <= _RESPONSE_CONTEXT_HISTORY_LIMIT):
+            raise ValueError("response history limit must be between 1 and 8")
         access = self.candidate_index.access
+        events = self.intake.event_log
         candidates = []
-        for item in self.intake.event_log.query(access=access, event_kind=MEMORY_EVENT_EPISODE):
+        for record in self.candidate_index.records.query(
+                space_id=events.memory_space_id, event_kind=MEMORY_EVENT_EPISODE):
+            if record.owner_key != self.owner.stable_key() or not events._record_visible(record):
+                continue
+            key = self.candidate_index.records.episode_output_source_key(record)
+            if key is None:
+                continue
+            source = SourceRef.from_stable_key(key)
+            if (source.owner != self.owner or source.source_id != self.source_id
+                    or source.source_kind != _DIALOGUE_MEMORY_SOURCE_KIND):
+                raise ValueError("前序回应不属于当前会话来源")
+            candidates.append((source.document_id, source, record.event_hash))
+        if not candidates:
+            return ()
+        selected_sequences = set(sorted(
+            {seq for seq, _source, _event_hash in candidates},
+            reverse=True)[:history_limit])
+        restored_sources = set()
+        for seq, source, event_hash in candidates:
+            if seq not in selected_sequences:
+                continue
+            item = events.read(event_hash, access=access)
+            if item is None:
+                raise RuntimeError("前序回应 Episode 不可见")
             payload = item.event.payload
             if (not isinstance(payload, EpisodePayload) or payload.output_ref is None
                     or item.event.object_ref.owner != self.owner):
@@ -896,34 +1006,97 @@ class TrainedDialogueMemoryGraph:
                     or output.source.source_kind != _DIALOGUE_MEMORY_SOURCE_KIND):
                 raise ValueError("前序回应不属于当前会话来源")
             self.intake.require_current_manifest(output.source)
-            candidates.append((output.source.document_id, output.source))
-        if not candidates:
-            return ()
-        latest = max(seq for seq, _ in candidates)
-        return tuple(sorted({source for seq, source in candidates if seq == latest}))
+            if output.source != source:
+                raise RuntimeError("前序回应 Episode 来源投影与完整输出不一致")
+            restored_sources.add(output.source)
+        return tuple(sorted(restored_sources))
 
-    def _preceding_response_refs(self) -> tuple[MemoryObjectRef, ...]:
+    def _preceding_response_refs(
+            self, *, history_limit: int = 1,
+            ) -> tuple[MemoryObjectRef, ...]:
         """Return actual output Observations for closure-based query recovery."""
         refs = []
-        for source in self._preceding_response_sources():
+        for source in self._preceding_response_sources(
+                history_limit=history_limit):
             ref = self.intake.result_for_source(source).observation_ref
             if ref is None:
                 raise ValueError("前序回应来源没有 Observation")
             refs.append(ref)
         return tuple(sorted(set(refs), key=lambda ref: ref.stable_key()))
 
-    def _preceding_response_context_links(self) -> tuple[MemoryLinkedRef, ...]:
-        """Return bounded source-context edges for the latest delivered turn.
+    def response_episodes_for(
+            self, output_ref: MemoryObjectRef,
+            ) -> tuple[EpisodePayload, ...]:
+        """来源投影只定位输出候选；命中后回读完整 Episode 和实际输出键。"""
+        events = self.intake.event_log
+        if (not isinstance(output_ref, MemoryObjectRef)
+                or output_ref.object_kind != MEMORY_OBJECT_OBSERVATION
+                or output_ref.memory_space != events.memory_space_identity
+                or output_ref.owner != self.owner):
+            raise ValueError("response Episode output Observation owner/space drifted")
+        access = self.candidate_index.access
+        cursor = self._response_episode_watermark
+        while True:
+            records = self.candidate_index.records.timeline_records_after(
+                events.memory_space_id, cursor, limit=256)
+            if not records:
+                break
+            pending: list[tuple[tuple[int, ...], int]] = []
+            for record in records:
+                if (record.event_kind != MEMORY_EVENT_EPISODE
+                        or record.owner_key != self.owner.stable_key()):
+                    continue
+                if not events._record_visible(record):
+                    raise RuntimeError("response Episode became invisible during index advance")
+                source_key = self.candidate_index.records.episode_output_source_key(record)
+                if source_key is None:
+                    continue
+                source = SourceRef.from_stable_key(source_key)
+                if source.owner != self.owner:
+                    raise RuntimeError("response Episode output source owner drifted")
+                pending.append((source.stable_key(), record.event_hash))
+            for source_key, event_hash in pending:
+                self._response_episode_hashes.setdefault(source_key, []).append(event_hash)
+            cursor = records[-1].timeline_seq
+            self._response_episode_watermark = cursor
+        output_source = observation_reference_source(output_ref)
+        if output_source.owner != self.owner or output_source.versions != output_ref.versions:
+            raise RuntimeError("response output Observation source owner/version drifted")
+        matched = []
+        for event_hash in self._response_episode_hashes.get(output_source.stable_key(), ()):
+            item = events.read(event_hash, access=access)
+            if item is None or not isinstance(item.event.payload, EpisodePayload):
+                raise RuntimeError("indexed response Episode is no longer visible")
+            payload = item.event.payload
+            if payload.output_ref is None or payload.output_ref.value() != output_ref:
+                raise RuntimeError("response Episode output identity collided or drifted")
+            matched.append(payload)
+        return tuple(matched)
+
+    def _preceding_response_context_links(
+            self, *, history_limit: int = 1,
+            ) -> tuple[MemoryLinkedRef, ...]:
+        """Return bounded source-context edges for delivered turns.
 
         The edge preserves the prior turn as a graph relation while avoiding a
         full Observation MemoryObjectRef (whose object key contains its whole
-        payload and would recursively copy earlier turns).
+        payload and would recursively copy earlier turns).  ``history_limit``
+        defaults to the latest turn.
         """
-        return tuple(
+        sources = self._preceding_response_sources(history_limit=history_limit)
+        links = tuple(
             MemoryLinkedRef.object(context_scope_identity(
                 source, (_DIALOGUE_CONTEXT_LINK_NAMESPACE,)))
-            for source in self._preceding_response_sources()
+            for source in sources
         )
+        if not sources:
+            return links
+        from pure_integer_ai.experiments.current_reference_scope import CURRENT_REFERENCE_SCOPE
+        # 会话指向在写入前按实际Episode的逻辑序转移；全部窗口边仍保留。
+        sequence = max(source.document_id for source in sources)
+        current, = (source for source in sources if source.document_id == sequence)
+        return (*links, MemoryLinkedRef.object(context_scope_identity(
+            current, (CURRENT_REFERENCE_SCOPE,))))
 
     def retract(self, surface: str, *, speaker_kind: int) -> DialogueMemoryAppend:
         """追加一条反对 Evidence；不删除或覆盖先前 Observation/Hypothesis。"""
@@ -950,30 +1123,65 @@ class TrainedDialogueMemoryGraph:
             raise ValueError("Memory Evidence stance 未注册")
         _integer_key(reason_key, label="Memory Evidence reason_key")
         scope = document_scope(source)
+        supersedes_ref = (
+            MemoryObjectRef.from_stable_key(supersedes_key)
+            if supersedes_key else None)
+        if supersedes_ref is not None:
+            prior = self._event_payload(
+                self.intake.event_log.query(
+                    access=self.candidate_index.access,
+                    event_kind=MEMORY_EVENT_EVIDENCE,
+                    object_ref=supersedes_ref),
+                EvidencePayload,
+                label="superseded Evidence",
+            )
+            if prior.hypothesis_ref != hypothesis_ref:
+                raise ValueError("Memory Evidence 只能替代同一 Hypothesis 的证据")
+            clock_identity = prior.observed_at.clock
+            if clock_identity.clock_kind != CLOCK_MEMORY_OBSERVED:
+                raise ValueError("Memory Evidence supersede 时钟类型不匹配")
+        else:
+            clock_identity = LogicalClockIdentity(scope, CLOCK_MEMORY_OBSERVED)
         clock = self.intake.event_log.scoped_identities.resume_clock(
-            LogicalClockIdentity(scope, CLOCK_MEMORY_OBSERVED))
+            clock_identity)
         payload = EvidencePayload(
             hypothesis_ref, stance, None, reason_key, source, None, detail,
-            MemoryObjectRef.from_stable_key(supersedes_key) if supersedes_key else None,
+            supersedes_ref,
             clock.advance(),
         )
-        ref = memory_object_ref(
-            self.intake.event_log.memory_space_identity, MEMORY_OBJECT_EVIDENCE,
-            payload.stable_key(), owner=source.owner, versions=source.versions)
+        ref = self.intake.event_log.declaration_ref(
+            MEMORY_EVENT_EVIDENCE, payload, scope=scope)
         event = self.intake.event_log.append(MemoryEvent(
             MEMORY_EVENT_EVIDENCE, ref, scope, payload))
         self.candidate_index.synchronize()
         self.backend.commit()
         return self._restore_evidence(event)
 
-    def _restore_evidence(self, event: MaterializedMemoryEvent) -> MemoryEvidenceStructure:
+    def _restore_evidence(
+            self,
+            event: MaterializedMemoryEvent,
+            *,
+            manifest_cache: dict[tuple[int, ...], IntakeManifestPayload] | None = None,
+            source_hash_cache: dict[tuple[int, ...], int] | None = None,
+            ) -> MemoryEvidenceStructure:
         """从证据自身恢复来源、范围、完整载荷和替代引用，不借用假设来源。"""
         payload = event.event.payload
         if not isinstance(payload, EvidencePayload) or payload.source is None:
             raise RuntimeError("当前会话 Evidence 恢复需要显式 SourceRef")
-        self.intake.require_current_manifest(payload.source)
-        source_hash = self.intake.event_log.scoped_identities.registry.find(
-            IDENTITY_SOURCE_RECORD, payload.source.stable_key())
+        source_key = payload.source.stable_key()
+        manifest = None if manifest_cache is None else manifest_cache.get(source_key)
+        if manifest is None:
+            manifest = self.intake.require_current_manifest(payload.source)
+            if manifest_cache is not None:
+                manifest_cache[source_key] = manifest
+        elif manifest.source != payload.source:
+            raise RuntimeError("Memory Evidence 当前 manifest 来源漂移")
+        source_hash = None if source_hash_cache is None else source_hash_cache.get(source_key)
+        if source_hash is None:
+            source_hash = self.intake.event_log.scoped_identities.registry.find(
+                IDENTITY_SOURCE_RECORD, source_key)
+            if source_hash is not None and source_hash_cache is not None:
+                source_hash_cache[source_key] = source_hash
         if source_hash is None:
             raise RuntimeError("Memory Evidence 来源身份缺失")
         return MemoryEvidenceStructure(
@@ -1146,11 +1354,13 @@ class TrainedDialogueMemoryGraph:
             raise RuntimeError(f"Memory {label} 声明事件不唯一")
         return payloads[0]
 
+    @_scoped_memory_event_reads
     def active_structures(
             self, *, limit: int | None = None,
             candidate_keys: tuple[tuple[int, ...], ...] | None = None,
             observation_refs: tuple[MemoryObjectRef, ...] = (),
             context_depth_limit: int | None = None,
+            recall_delivered_outputs: bool = False,
             ) -> MemoryActiveStructures:
         """按共同图节点定位 O/H/E。
 
@@ -1171,6 +1381,9 @@ class TrainedDialogueMemoryGraph:
                 or any(not isinstance(ref, MemoryObjectRef)
                        or ref.object_kind != MEMORY_OBJECT_OBSERVATION for ref in observation_refs)):
             raise TypeError("当前输入锚点必须是实际 Observation 引用")
+        if (type(recall_delivered_outputs) is not bool or (recall_delivered_outputs
+                and (candidate_keys is None or len(observation_refs) != 1 or context_depth_limit != 1))):
+            raise ValueError('actual delivered recall requires one current bounded content query')
         access = self.intake._access(SourceRef(
             _DIALOGUE_MEMORY_SOURCE_KIND,
             self.source_id,
@@ -1181,8 +1394,15 @@ class TrainedDialogueMemoryGraph:
         matched = None
         query_routes: dict[tuple[int, ...], set[tuple[int, ...]]] = {}
         if candidate_keys is None:
-            observation_events = self.intake.event_log.query(
-                access=access, event_kind=MEMORY_EVENT_OBSERVATION)
+            # A bounded anchored query starts from its requested Observation
+            # refs; an unbounded diagnostic query retains the historical
+            # enumeration contract used by callers that explicitly request a
+            # complete session view.
+            observation_events = (()
+                                  if observation_refs and context_depth_limit is not None
+                                  else self.intake.event_log.query(
+                                      access=access,
+                                      event_kind=MEMORY_EVENT_OBSERVATION))
         else:
             for candidate in candidate_keys:
                 for route in memory_candidate_routes(candidate):
@@ -1200,11 +1420,24 @@ class TrainedDialogueMemoryGraph:
                         observation_events.extend(self.intake.event_log.query(
                             access=access, event_kind=MEMORY_EVENT_OBSERVATION,
                             object_ref=binding.object_ref))
+        delivered_rows, delivered_routes = (), ()
+        if recall_delivered_outputs:
+            from pure_integer_ai.experiments.memory_delivered_recall import recall_delivered_observations
+            def declarations(ref):
+                """回读原物理声明，索引命中不能代替唯一完整对象。"""
+                return tuple(row for row in self.intake.event_log.query(access=access, object_ref=ref)
+                             if row.event.is_declaration)
+            delivered_rows, delivered_routes = recall_delivered_observations(
+                self, observation_events, observation_refs[0], declaration_reader=declarations)
+            observation_events = (*observation_events, *delivered_rows)
         observation_events, context_depths, context_sources, context_routes = self._observation_closure(
             observation_events, observation_refs, access,
             context_depth_limit=context_depth_limit)
+        context_sources.update(row.event.payload.source for row in delivered_rows)
         rows = []
-        match_routes = set(context_routes)
+        manifest_cache: dict[tuple[int, ...], IntakeManifestPayload] = {}
+        source_hash_cache: dict[tuple[int, ...], int] = {}
+        match_routes = set((*context_routes, *delivered_routes))
         for materialized in observation_events:
             payload = materialized.event.payload
             if not isinstance(payload, ObservationPayload):
@@ -1214,7 +1447,13 @@ class TrainedDialogueMemoryGraph:
                     or source.source_kind != _DIALOGUE_MEMORY_SOURCE_KIND
                     or source.source_id != self.source_id):
                 continue
-            manifest = self.intake.require_current_manifest(source)
+            source_key = source.stable_key()
+            manifest = manifest_cache.get(source_key)
+            if manifest is None:
+                manifest = self.intake.require_current_manifest(source)
+                manifest_cache[source_key] = manifest
+            elif manifest.source != source:
+                raise RuntimeError("Memory Observation manifest 来源漂移")
             by_kind = {
                 kind: tuple(binding.object_ref for binding in manifest.bindings
                             if binding.binding_kind == kind)
@@ -1237,8 +1476,12 @@ class TrainedDialogueMemoryGraph:
                 raise RuntimeError("Memory Observation speaker_kind 非法")
             if manifest.source != source:
                 raise RuntimeError("Memory manifest source 漂移")
-            source_hash = self.intake.event_log.scoped_identities.registry.find(
-                IDENTITY_SOURCE_RECORD, source.stable_key())
+            source_hash = source_hash_cache.get(source_key)
+            if source_hash is None:
+                source_hash = self.intake.event_log.scoped_identities.registry.find(
+                    IDENTITY_SOURCE_RECORD, source_key)
+                if source_hash is not None:
+                    source_hash_cache[source_key] = source_hash
             if source_hash is None:
                 raise RuntimeError("Memory Observation 来源身份缺失")
             source_ref = (source_hash, *source.stable_key())
@@ -1254,7 +1497,8 @@ class TrainedDialogueMemoryGraph:
                 candidate = restored.hypothesis.candidate_key
                 if (matched is None or source in context_sources
                         or ref.stable_key() in matched.get(source, ())
-                        or not memory_candidate_routes(candidate)):
+                        or (context_depth_limit is None
+                            and not memory_candidate_routes(candidate))):
                     hypothesis_payloads[ref] = restored
                     if matched is not None and ref.stable_key() not in matched.get(source, ()):
                         # 先由内容命中 Observation，再沿同来源结构边恢复旧拓扑。
@@ -1265,7 +1509,11 @@ class TrainedDialogueMemoryGraph:
             evidence_by_hypothesis: dict[tuple[int, ...], list[MemoryEvidenceStructure]] = {}
             for event in self.candidate_index.matching_events(tuple(
                     evidence_target_route(ref.stable_key()) for ref in hypothesis_refs)):
-                restored_evidence = self._restore_evidence(event)
+                restored_evidence = self._restore_evidence(
+                    event,
+                    manifest_cache=manifest_cache,
+                    source_hash_cache=source_hash_cache,
+                )
                 evidence_by_hypothesis.setdefault(
                     restored_evidence.hypothesis_key, []).append(restored_evidence)
             selected_lineages = {
@@ -1347,10 +1595,12 @@ class TrainedDialogueMemoryGraph:
         """完整恢复显式观察边的来源闭包；上下文身份不升级为事实匹配。"""
         events = self.intake.event_log
         found = {item.event.object_ref: item for item in matched_events}
+        content_root_refs = frozenset(found)
         depths = {item.event.payload.source: 0 for item in matched_events}
         context_sources = set()
         routes = set()
         queue = []
+        current_turn_anchors = frozenset(observation_refs)
         for ref in observation_refs:
             if ref.owner != self.owner or ref.memory_space != events.memory_space_identity:
                 raise ValueError("输入 Observation 跨会话或跨 Memory 空间")
@@ -1370,7 +1620,16 @@ class TrainedDialogueMemoryGraph:
                 continue
             visited.add(current.event.object_ref)
             payload = current.event.payload
-            for link in payload.relation_occurrences:
+            from pure_integer_ai.experiments.memory_context_lineage import delivered_context_links
+            from pure_integer_ai.experiments.trained_response_delivery import read_delivery_proof
+            context = payload.context.value()
+            episodes = (self.response_episodes_for(current.event.object_ref)
+                        if isinstance(context, ObjectIdentity)
+                        and context.object_kind == OBJECT_CONTEXT_SCOPE
+                        and context.components == (_DIALOGUE_MEMORY_NAMESPACE, self.owner.session_id, 2)
+                        else ())
+            for link in delivered_context_links(current.event.object_ref, payload, episodes,
+                    proof_reader=lambda ref: read_delivery_proof(self, ref)):
                 ref = link.value()
                 is_turn_link = (
                     isinstance(ref, ObjectIdentity)
@@ -1379,6 +1638,11 @@ class TrainedDialogueMemoryGraph:
                     and ref.components[0] == 1
                     and ref.components[-2:] == (1, _DIALOGUE_CONTEXT_LINK_NAMESPACE))
                 if is_turn_link:
+                    # 内容召回不把旧输入当年的前序回应升级为当前话轮语境。
+                    # 完整历史诊断保留旧闭包；所有直接命中的原H/E仍恢复。
+                    if (context_depth_limit is not None
+                            and current.event.object_ref not in current_turn_anchors):
+                        continue
                     source = semantic_source(ref)
                     if (source.owner != self.owner
                             or source.source_id != self.source_id
@@ -1418,7 +1682,11 @@ class TrainedDialogueMemoryGraph:
                     # The edge itself remains a graph route for diagnostics,
                     # but its target cannot enter this bounded QueryState.
                     continue
-                context_sources.add(target_payload.source)
+                # 实际输出回到已内容命中的输入只核验来源，不扩授输入兄弟假设。
+                # 当前锚点及首次由显式语境到达的输入仍保留完整资格。
+                if (context_depth_limit is None or not episodes
+                        or target not in content_root_refs or target in current_turn_anchors):
+                    context_sources.add(target_payload.source)
                 routes.add(_frame_key(4, current.event.object_ref.stable_key(), ref.stable_key(), target.stable_key()))
                 depths[target_payload.source] = min(depths.get(target_payload.source, distance), distance)
                 if target not in found:

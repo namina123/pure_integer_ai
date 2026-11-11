@@ -10,7 +10,8 @@ become a recency or stable-order tiebreak.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, field
 
 from pure_integer_ai.cognition.shared.hypothesis import (
     EPISTEMIC_CONFLICTED,
@@ -42,6 +43,9 @@ from pure_integer_ai.cognition.understanding.occurrence_index import OccurrenceI
 from pure_integer_ai.cognition.understanding.query_input_structure import (
     PROJECTION_FILLER,
     TrainedInputStructureProjector,
+)
+from pure_integer_ai.cognition.understanding.query_open_roles import (
+    OpenRelationCandidate,
 )
 from pure_integer_ai.crosscut.determinism.hasher import Hasher
 from pure_integer_ai.experiments.ph2_authored_relation_compile import (
@@ -76,7 +80,12 @@ from pure_integer_ai.experiments.trained_relation_graph_runtime import (
     ActiveRelationSurface,
     TrainedRelationGraphRuntime,
 )
-from pure_integer_ai.experiments.trained_response_context import DeliveredResponseContext
+from pure_integer_ai.experiments.trained_response_context import (
+    DeliveredResponseContext, DeliveredFactualResponseContext,
+)
+from pure_integer_ai.experiments.reference_target_support import (
+    REFERENCE_TARGET_SUPPORT_VERSION, ReferenceTargetSupport, reference_target_support,
+)
 from pure_integer_ai.experiments.trained_response_occurrence import (
     ReferenceCandidateSet,
     ResponseRoleOccurrence,
@@ -84,12 +93,15 @@ from pure_integer_ai.experiments.trained_response_occurrence import (
 
 
 REFERENCE_RESOLUTION_VERSION = 91536
+_MAX_SEMANTIC_OBJECT_CACHE_ENTRIES = 512
+_MAX_SEMANTIC_OBJECT_CACHE_INTS = 131072
 
 REFERENCE_DIMENSION_ENTITY = 1
 REFERENCE_DIMENSION_EVENT = 2
 REFERENCE_DIMENSION_PROPERTY = 3
 REFERENCE_DIMENSION_TIME = 4
 REFERENCE_DIMENSION_REFERS = 5
+REFERENCE_DIMENSION_RELATION = 6
 
 REFERENCE_NOT_APPLICABLE = 1
 REFERENCE_OPEN = 2
@@ -102,6 +114,7 @@ _DIMENSIONS = frozenset({
     REFERENCE_DIMENSION_PROPERTY,
     REFERENCE_DIMENSION_TIME,
     REFERENCE_DIMENSION_REFERS,
+    REFERENCE_DIMENSION_RELATION,
 })
 _STANCES = frozenset({EVIDENCE_SUPPORT, EVIDENCE_REFUTE, EVIDENCE_UNKNOWN})
 _EVIDENCE_HASHER = Hasher("trained_reference_resolution.evidence.v1")
@@ -127,6 +140,8 @@ class _CoreFact:
     bindings: tuple[tuple[ObjectIdentity, ObjectIdentity], ...]
     source: SourceRef
     source_hash: int
+    _stable_key_cache: tuple[int, ...] | None = field(
+        default=None, init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if (not isinstance(self.proposition, ObjectIdentity)
@@ -149,16 +164,21 @@ class _CoreFact:
         return matches[0]
 
     def stable_key(self) -> tuple[int, ...]:
-        return (
-            REFERENCE_RESOLUTION_VERSION,
-            *_pack(self.proposition.stable_key()),
-            *_pack(self.predicate.stable_key()),
-            self.source_hash,
-            *_pack(self.source.stable_key()),
-            len(self.bindings),
-            *(value for role, filler in self.bindings
-              for value in (*_pack(role.stable_key()), *_pack(filler.stable_key()))),
-        )
+        key = self._stable_key_cache
+        if key is None:
+            key = (
+                REFERENCE_RESOLUTION_VERSION,
+                *_pack(self.proposition.stable_key()),
+                *_pack(self.predicate.stable_key()),
+                self.source_hash,
+                *_pack(self.source.stable_key()),
+                len(self.bindings),
+                *(value for role, filler in self.bindings
+                  for value in (*_pack(role.stable_key()),
+                                *_pack(filler.stable_key()))),
+            )
+            object.__setattr__(self, "_stable_key_cache", key)
+        return key
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +195,8 @@ class TrainedReferenceEvidence:
     source: SourceRef
     source_hash: int
     trace: tuple[int, ...]
+    _stable_key_cache: tuple[int, ...] | None = field(
+        default=None, init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         _pack(self.antecedent_key)
@@ -184,9 +206,13 @@ class TrainedReferenceEvidence:
             raise ValueError("reference evidence dimension or stance is not registered")
         if self.decisive not in {0, 1}:
             raise ValueError("reference evidence decisive flag must be 0 or 1")
-        if self.decisive and (self.dimension != REFERENCE_DIMENSION_REFERS
-                              or self.stance != EVIDENCE_SUPPORT):
-            raise ValueError("only a supported REFERS fact can be decisive")
+        if self.decisive and (
+                self.dimension not in {
+                    REFERENCE_DIMENSION_REFERS,
+                    REFERENCE_DIMENSION_RELATION,
+                }
+                or self.stance != EVIDENCE_SUPPORT):
+            raise ValueError("only supported relation evidence can be decisive")
         for name in ("proposition_keys", "predicate_keys"):
             records = getattr(self, name)
             if (type(records) is not tuple or not records
@@ -203,22 +229,26 @@ class TrainedReferenceEvidence:
         _pack(self.trace)
 
     def available(self, core_support: frozenset[tuple[int, ...]]) -> bool:
-        return set(self.proposition_keys) <= core_support
+        return all(key in core_support for key in self.proposition_keys)
 
     def stable_key(self) -> tuple[int, ...]:
-        return (
-            REFERENCE_RESOLUTION_VERSION,
-            *_pack(self.antecedent_key),
-            *_pack(self.target.stable_key()),
-            self.dimension,
-            self.stance,
-            self.decisive,
-            *_pack(_records(1, self.proposition_keys)),
-            *_pack(_records(2, self.predicate_keys)),
-            self.source_hash,
-            *_pack(self.source.stable_key()),
-            *_pack(self.trace),
-        )
+        key = self._stable_key_cache
+        if key is None:
+            key = (
+                REFERENCE_RESOLUTION_VERSION,
+                *_pack(self.antecedent_key),
+                *_pack(self.target.stable_key()),
+                self.dimension,
+                self.stance,
+                self.decisive,
+                *_pack(_records(1, self.proposition_keys)),
+                *_pack(_records(2, self.predicate_keys)),
+                self.source_hash,
+                *_pack(self.source.stable_key()),
+                *_pack(self.trace),
+            )
+            object.__setattr__(self, "_stable_key_cache", key)
+        return key
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +260,8 @@ class CrossTurnReferenceCandidate:
     context_depth: int
     semantic_objects: tuple[ObjectIdentity, ...]
     hypothesis: HypothesisKey
+    _stable_key_cache: tuple[int, ...] | None = field(
+        default=None, init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.occurrence, ResponseRoleOccurrence):
@@ -246,21 +278,25 @@ class CrossTurnReferenceCandidate:
             raise TypeError("reference candidate requires an H-00 key")
 
     def stable_key(self) -> tuple[int, ...]:
-        return (
-            REFERENCE_RESOLUTION_VERSION,
-            *_pack(self.occurrence.stable_key()),
-            *_pack(self.context_key),
-            self.context_depth,
-            len(self.semantic_objects),
-            *(value for item in self.semantic_objects
-              for value in _pack(item.stable_key())),
-            *_pack(self.hypothesis.stable_key()),
-        )
+        key = self._stable_key_cache
+        if key is None:
+            key = (
+                REFERENCE_RESOLUTION_VERSION,
+                *_pack(self.occurrence.stable_key()),
+                *_pack(self.context_key),
+                self.context_depth,
+                len(self.semantic_objects),
+                *(value for item in self.semantic_objects
+                  for value in _pack(item.stable_key())),
+                *_pack(self.hypothesis.stable_key()),
+            )
+            object.__setattr__(self, "_stable_key_cache", key)
+        return key
 
 
 @dataclass(frozen=True, slots=True)
 class CrossTurnReferenceResolution:
-    """H-00/H-04 result with an evidence-qualified singleton winner."""
+    """H-00/H-04 裁决：单历史 winner 或保留全部历史成员的唯一目标支持。"""
 
     candidate_set: ReferenceCandidateSet
     candidates: tuple[CrossTurnReferenceCandidate, ...]
@@ -271,6 +307,9 @@ class CrossTurnReferenceResolution:
     status: int
     winner_hypothesis_key: tuple[int, ...] = ()
     winner_target_key: tuple[int, ...] = ()
+    target_support: ReferenceTargetSupport | None = None
+    _stable_key_cache: tuple[int, ...] | None = field(
+        default=None, init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.candidate_set, ReferenceCandidateSet):
@@ -297,9 +336,18 @@ class CrossTurnReferenceResolution:
             raise ValueError("cross-turn resolution status is not registered")
         _pack(self.winner_hypothesis_key)
         _pack(self.winner_target_key)
-        if (self.status == REFERENCE_RESOLVED) != bool(self.winner_hypothesis_key):
+        if self.target_support is not None:
+            if (not isinstance(self.target_support, ReferenceTargetSupport)
+                    or self.winner_hypothesis_key
+                    or self.target_support.target_key != self.winner_target_key
+                    or self.target_support != reference_target_support(
+                        self.candidate_set, self.candidates, self.evidence,
+                        self.evidence_records, self.decision)):
+                raise ValueError("目标支持与当前完整候选、H-00/H-04 证据不一致")
+        has_support = bool(self.winner_hypothesis_key or self.target_support is not None)
+        if (self.status == REFERENCE_RESOLVED) != has_support:
             raise ValueError("resolved status and winner hypothesis differ")
-        if bool(self.winner_hypothesis_key) != bool(self.winner_target_key):
+        if has_support != bool(self.winner_target_key):
             raise ValueError("winner hypothesis and target must be paired")
         if not self.requires_resolution and self.status != REFERENCE_NOT_APPLICABLE:
             raise ValueError("non-reference role cannot expose a reference decision")
@@ -322,19 +370,39 @@ class CrossTurnReferenceResolution:
                 else ObjectIdentity.from_stable_key(self.winner_target_key))
 
     @property
+    def supporting_candidates(self) -> tuple[CrossTurnReferenceCandidate, ...]:
+        """返回目标的全部采用成员；多个历史出现不伪装成某个单历史 winner。"""
+        if self.target_support is None:
+            winner = self.winner
+            return () if winner is None else (winner,)
+        keys = {item.candidate_key for item in self.target_support.members}
+        return tuple(item for item in self.candidates if item.stable_key() in keys)
+
+    @property
+    def support_context_keys(self) -> tuple[tuple[int, ...], ...]:
+        """生成必须恢复全部支持上下文，不能选择最近或稳定键最小的历史。"""
+        return tuple(sorted({item.context_key for item in self.supporting_candidates}))
+
+    @property
+    def adoption_support_key(self) -> tuple[int, ...]:
+        """目标采用证明绑定单历史 Hypothesis 或整项完整目标支持记录。"""
+        return (self.winner_hypothesis_key if self.target_support is None
+                else self.target_support.stable_key())
+
+    @property
     def winner_context_key(self) -> tuple[int, ...]:
         winner = self.winner
         return () if winner is None else winner.context_key
 
     @property
     def hot_winner(self) -> int:
-        winner = self.winner
-        return int(winner is not None and winner.context_depth <= 1)
+        return int(any(item.context_depth <= 1 for item in self.supporting_candidates))
 
     def query_bindings(self) -> tuple[BindingEntry, ...]:
-        winner = self.winner
+        """把唯一目标、全部历史 occurrence/上下文及完整支持记录送入当前状态。"""
+        supporters = self.supporting_candidates
         target = self.winner_target
-        if winner is None or target is None:
+        if not supporters or target is None:
             if self.status != REFERENCE_CONFLICT:
                 return ()
             return (BindingEntry(
@@ -344,26 +412,32 @@ class CrossTurnReferenceResolution:
                 scope_key=self.candidate_set.reference.scope_key,
                 conflict_kept=1,
             ),)
-        return (
+        bindings = [
             BindingEntry(
                 self.candidate_set.reference.role.stable_key(),
                 target.stable_key(),
                 space=SPACE_MEMORY,
                 scope_key=self.candidate_set.reference.scope_key,
-            ),
-            BindingEntry(
+            )]
+        for supporter in supporters:
+            bindings.extend((BindingEntry(
                 (REFERENCE_RESOLUTION_VERSION, 3),
-                winner.occurrence.occurrence.stable_key(),
+                supporter.occurrence.occurrence.stable_key(),
                 space=SPACE_MEMORY,
                 scope_key=self.candidate_set.reference.scope_key,
             ),
             BindingEntry(
                 (REFERENCE_RESOLUTION_VERSION, 4),
-                winner.context_key,
+                supporter.context_key,
                 space=SPACE_MEMORY,
                 scope_key=self.candidate_set.reference.scope_key,
-            ),
-        )
+            )))
+        if self.target_support is None:
+            return tuple(bindings)
+        bindings.append(BindingEntry(
+            (REFERENCE_TARGET_SUPPORT_VERSION, 1), self.target_support.stable_key(),
+            space=SPACE_MEMORY, scope_key=self.candidate_set.reference.scope_key))
+        return tuple(sorted(set(bindings), key=lambda item: item.stable_key()))
 
     def query_evidence(self) -> tuple[EvidenceEntry, ...]:
         by_key = {item.stable_key(): item for item in self.evidence}
@@ -389,33 +463,40 @@ class CrossTurnReferenceResolution:
         return tuple(sorted(result, key=lambda item: item.stable_key()))
 
     def discourse_objects(self) -> tuple[ObjectIdentity, ...]:
-        winner = self.winner
+        """显式引用全部目标支持历史对象，不能仅保留某个历史 occurrence。"""
+        supporters = self.supporting_candidates
         target = self.winner_target
-        if winner is None or target is None:
+        if not supporters or target is None:
             return ()
         return tuple(sorted({
             target,
-            winner.occurrence.occurrence,
-            winner.occurrence.proof_ref,
-            winner.occurrence.delivery_context,
+            *(obj for item in supporters for obj in (
+                item.occurrence.occurrence, item.occurrence.proof_ref,
+                item.occurrence.delivery_context)),
         }, key=lambda item: item.stable_key()))
 
     def stable_key(self) -> tuple[int, ...]:
-        return (
-            REFERENCE_RESOLUTION_VERSION,
-            *_pack(self.candidate_set.stable_key()),
-            self.requires_resolution,
-            self.status,
-            len(self.candidates),
-            *(value for item in self.candidates
-              for value in _pack(item.stable_key())),
-            len(self.evidence),
-            *(value for item in self.evidence
-              for value in _pack(item.stable_key())),
-            *_pack(self.decision.stable_key()),
-            *_pack(self.winner_hypothesis_key),
-            *_pack(self.winner_target_key),
-        )
+        key = self._stable_key_cache
+        if key is None:
+            key = (
+                REFERENCE_RESOLUTION_VERSION,
+                *_pack(self.candidate_set.stable_key()),
+                self.requires_resolution,
+                self.status,
+                len(self.candidates),
+                *(value for item in self.candidates
+                  for value in _pack(item.stable_key())),
+                len(self.evidence),
+                *(value for item in self.evidence
+                  for value in _pack(item.stable_key())),
+                *_pack(self.decision.stable_key()),
+                *_pack(self.winner_hypothesis_key),
+                *_pack(self.winner_target_key),
+                *((REFERENCE_TARGET_SUPPORT_VERSION, *_pack(self.target_support.stable_key()))
+                  if self.target_support is not None else ()),
+            )
+            object.__setattr__(self, "_stable_key_cache", key)
+        return key
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,6 +505,8 @@ class _PreparedReference:
     candidates: tuple[CrossTurnReferenceCandidate, ...]
     evidence: tuple[TrainedReferenceEvidence, ...]
     requires_resolution: int
+    contexts: tuple[DeliveredResponseContext, ...] = field(
+        repr=False, compare=False, hash=False)
 
 
 class TrainedCrossTurnReferenceRuntime:
@@ -449,7 +532,31 @@ class TrainedCrossTurnReferenceRuntime:
         for fact in self._facts:
             self._by_predicate.setdefault(fact.predicate, ())
             self._by_predicate[fact.predicate] += (fact,)
-        self._prepared: dict[tuple[int, ...], _PreparedReference] = {}
+        # The same unresolved input role can be resolved against different
+        # current-role projections when a caller supplies the relation's
+        # observed fillers.  Keep that projection in the cache key; otherwise
+        # a fallback value-based preparation could silently be reused.
+        self._prepared: OrderedDict[object, _PreparedReference] = OrderedDict()
+        self._resolved: OrderedDict[
+            tuple[int, tuple[int, ...], int],
+            tuple[_PreparedReference, CrossTurnReferenceResolution],
+        ] = OrderedDict()
+        self._semantic_objects_cache: OrderedDict[
+            tuple[int, ...], tuple[tuple[ObjectIdentity, ...], int]
+        ] = OrderedDict()
+        self._semantic_objects_cache_ints = 0
+
+    def clear_context_cache(self) -> None:
+        """Drop all preparations tied to the previous Memory dialogue view."""
+        self._prepared.clear()
+        self._resolved.clear()
+        self._semantic_objects_cache.clear()
+        self._semantic_objects_cache_ints = 0
+
+    @staticmethod
+    def _trim_cache(cache: OrderedDict, limit: int) -> None:
+        while len(cache) > limit:
+            cache.popitem(last=False)
 
     def _fact(self, fact: ActiveRelationSurface) -> _CoreFact:
         source = self.core.generation_input(fact.proposition).proposition.definition.source
@@ -460,6 +567,10 @@ class TrainedCrossTurnReferenceRuntime:
         return _CoreFact(fact.proposition, fact.predicate, bindings, source, fact.source_hash)
 
     def _semantic_objects(self, values: tuple[int, ...]) -> tuple[ObjectIdentity, ...]:
+        cached = self._semantic_objects_cache.get(values)
+        if cached is not None:
+            self._semantic_objects_cache.move_to_end(values)
+            return cached[0]
         projected = self.projector.project(values)
         complete = {
             item.ref_key for item in projected.spans
@@ -470,7 +581,21 @@ class TrainedCrossTurnReferenceRuntime:
             for item in projected.semantic_candidates
             if item.projection_kind == PROJECTION_FILLER and item.span_ref in complete
         }
-        return tuple(sorted(identities, key=lambda item: item.stable_key()))
+        result = tuple(sorted(identities, key=lambda item: item.stable_key()))
+        cache_ints = len(values) + sum(
+            len(item.stable_key()) for item in result)
+        if cache_ints <= _MAX_SEMANTIC_OBJECT_CACHE_INTS:
+            while (self._semantic_objects_cache
+                   and (len(self._semantic_objects_cache)
+                        >= _MAX_SEMANTIC_OBJECT_CACHE_ENTRIES
+                        or self._semantic_objects_cache_ints + cache_ints
+                        > _MAX_SEMANTIC_OBJECT_CACHE_INTS)):
+                _old_values, (_old_result, old_ints) = (
+                    self._semantic_objects_cache.popitem(last=False))
+                self._semantic_objects_cache_ints -= old_ints
+            self._semantic_objects_cache[values] = (result, cache_ints)
+            self._semantic_objects_cache_ints += cache_ints
+        return result
 
     def _occurrence_values(self, occurrence: ResponseRoleOccurrence) -> tuple[int, ...]:
         ref = self.occurrence_index.ontology.resolve(occurrence.occurrence)
@@ -499,6 +624,25 @@ class TrainedCrossTurnReferenceRuntime:
         if len(matches) != 1:
             raise ValueError("cross-turn candidate does not have one delivered context")
         return matches[0]
+
+    def semantic_objects_for(self, occurrence, contexts):
+        """事实角色消费原交付整数槽；通用角色保留原受训词形投影。
+
+        已有事实槽缺失或proof/序/角色/Hypothesis漂移时拒绝，不用表面
+        同名对象集合弥补。完整角色来源仍由原Occurrence及交付图验证。
+        """
+        context = self._context_for(occurrence, contexts)
+        if not isinstance(context, DeliveredFactualResponseContext):
+            return self._semantic_objects(self._occurrence_values(occurrence))
+        if not 0 <= occurrence.ordinal < len(context.slots):
+            raise ValueError('factual antecedent has no original delivery slot')
+        slot = context.slots[occurrence.ordinal]
+        if (slot.role != occurrence.role or context.proof_ref != occurrence.proof_ref
+                or context.source_ref != occurrence.source_ref or context.scope_key != occurrence.scope_key
+                or context.input_observation != occurrence.observation
+                or (slot.hypothesis or context.hypothesis) != occurrence.hypothesis):
+            raise ValueError('factual antecedent differs from its original typed slot')
+        return (slot.filler,)
 
     def _property_evidence(
             self,
@@ -582,15 +726,50 @@ class TrainedCrossTurnReferenceRuntime:
             self,
             candidate_set: ReferenceCandidateSet,
             contexts: tuple[DeliveredResponseContext, ...],
+            current_objects: tuple[ObjectIdentity, ...] | None = None,
+            relation_frame: OpenRelationCandidate | None = None,
+            current_role_fillers: tuple[
+                tuple[tuple[int, ...], ObjectIdentity], ...] = (),
+            relation_answer_role: tuple[int, ...] = (),
+            reference_scope=None,
             ) -> _PreparedReference:
-        key = candidate_set.stable_key()
+        current_key = None if current_objects is None else tuple(
+            item.stable_key() for item in current_objects)
+        if relation_frame is not None and not isinstance(
+                relation_frame, OpenRelationCandidate):
+            raise TypeError("reference relation frame must be an open Core frame")
+        if (type(current_role_fillers) is not tuple
+                or any(type(item) is not tuple or len(item) != 2
+                       or type(item[0]) is not tuple
+                       or not isinstance(item[1], ObjectIdentity)
+                       for item in current_role_fillers)
+                or current_role_fillers != tuple(sorted(
+                    set(current_role_fillers),
+                    key=lambda item: (item[0], item[1].stable_key())))):
+            raise ValueError("reference role fillers must be canonical")
+        relation_key = (None if relation_frame is None
+                        else relation_frame.stable_key())
+        filler_key = tuple((role, filler.stable_key())
+                           for role, filler in current_role_fillers)
+        if (type(relation_answer_role) is not tuple
+                or any(type(value) is not int or value < 0
+                       for value in relation_answer_role)):
+            raise ValueError("reference relation answer role must be an integer key")
+        key = (id(contexts), candidate_set.stable_key(), current_key,
+               relation_key, filler_key, relation_answer_role,
+               None if reference_scope is None else reference_scope.stable_key())
         cached = self._prepared.get(key)
         if cached is not None:
+            self._prepared.move_to_end(key)
             return cached
         reference = candidate_set.reference
         source = SourceRef.from_stable_key(reference.source_ref[1:])
         scope = ScopeIdentity.from_stable_key(reference.scope_key)
-        current_objects = self._semantic_objects(reference.values)
+        if current_objects is None:
+            current_objects = self._semantic_objects(reference.values)
+        else:
+            current_objects = tuple(sorted(set(current_objects),
+                                           key=lambda item: item.stable_key()))
         refers_predicate = authored_relation_identity(RELATION_REFERS)
         from_role = authored_relation_role_identity(ROLE_REFERS_FROM)
         to_role = authored_relation_role_identity(ROLE_REFERS_TO)
@@ -598,12 +777,58 @@ class TrainedCrossTurnReferenceRuntime:
             fact for fact in self._by_predicate.get(refers_predicate, ())
             if fact.filler(from_role) in set(current_objects)
         )
+        relation_role_fillers = dict(current_role_fillers)
+        relation_support = []
+        if relation_frame is not None:
+            relation_predicate = ObjectIdentity.from_stable_key(
+                relation_frame.frame.predicate)
+            relation_roles = set(relation_frame.frame.roles)
+            reference_role = candidate_set.reference.role.stable_key()
+            expected_fact_roles = relation_roles | (
+                {relation_answer_role} if relation_answer_role else set())
+            if (reference_role in relation_roles
+                    and (not relation_answer_role
+                         or relation_answer_role not in relation_roles)
+                    and set(relation_role_fillers) == relation_roles - {reference_role}):
+                for fact in self._by_predicate.get(relation_predicate, ()):
+                    if (fact.proposition.stable_key()
+                            != relation_frame.frame.proposition):
+                        continue
+                    fact_roles = {role.stable_key(): filler
+                                  for role, filler in fact.bindings}
+                    if (set(fact_roles) != expected_fact_roles
+                            or any(fact_roles.get(role) != filler
+                                   for role, filler in relation_role_fillers.items())):
+                        continue
+                    target = fact_roles[reference_role]
+                    predicate_key = fact.predicate.stable_key()
+                    for occurrence, _depth in zip(
+                            candidate_set.antecedents,
+                            candidate_set.context_depths, strict=True):
+                        if reference_scope is not None and not reference_scope.permits(
+                                self._context_for(occurrence, contexts)):
+                            continue
+                        antecedent_objects = set(self.semantic_objects_for(occurrence, contexts))
+                        if target not in antecedent_objects:
+                            continue
+                        relation_support.append(TrainedReferenceEvidence(
+                            occurrence.stable_key(), target,
+                            REFERENCE_DIMENSION_RELATION,
+                            EVIDENCE_SUPPORT, 1,
+                            (fact.proposition.stable_key(),),
+                            (predicate_key,), fact.source, fact.source_hash,
+                            (REFERENCE_RESOLUTION_VERSION, 61,
+                             *_pack(relation_frame.stable_key()),
+                             *_pack(target.stable_key()),
+                             *(() if reference_scope is None else
+                               _pack(reference_scope.stable_key()))),
+                        ))
         candidates = []
         evidence = []
         for occurrence, depth in zip(
                 candidate_set.antecedents, candidate_set.context_depths, strict=True):
             context = self._context_for(occurrence, contexts)
-            objects = self._semantic_objects(self._occurrence_values(occurrence))
+            objects = self.semantic_objects_for(occurrence, contexts)
             hypothesis = HypothesisKey(
                 (REFERENCE_RESOLUTION_VERSION, 1),
                 self._candidate_key(reference.occurrence, occurrence.occurrence),
@@ -616,7 +841,8 @@ class TrainedCrossTurnReferenceRuntime:
             targets = set(objects)
             for fact in outgoing:
                 target = fact.filler(to_role)
-                if target not in targets:
+                if (target not in targets
+                        or occurrence.role != candidate_set.reference.role):
                     continue
                 evidence.append(TrainedReferenceEvidence(
                     occurrence.stable_key(), target, REFERENCE_DIMENSION_REFERS,
@@ -641,13 +867,26 @@ class TrainedCrossTurnReferenceRuntime:
                 source, reference.source_ref[0]))
             evidence.extend(self._time_evidence(
                 occurrence.stable_key(), current_objects, objects))
+        evidence.extend(relation_support)
+        relation_scope_authorized = bool(
+            relation_frame is not None
+            and candidate_set.reference.role.stable_key()
+            in set(relation_frame.frame.roles)
+            and (not relation_answer_role
+                 or relation_answer_role not in relation_frame.frame.roles)
+            and set(relation_role_fillers)
+            == set(relation_frame.frame.roles)
+            - {candidate_set.reference.role.stable_key()})
         prepared = _PreparedReference(
             candidate_set,
             tuple(sorted(candidates, key=lambda item: item.stable_key())),
             tuple(sorted(set(evidence), key=lambda item: item.stable_key())),
-            int(bool(outgoing)),
+            int(bool(outgoing or relation_scope_authorized)),
+            contexts,
         )
         self._prepared[key] = prepared
+        self._prepared.move_to_end(key)
+        self._trim_cache(self._prepared, 32)
         return prepared
 
     @staticmethod
@@ -686,14 +925,32 @@ class TrainedCrossTurnReferenceRuntime:
             *,
             core_support: frozenset[tuple[int, ...]],
             timestamp_seq: int,
+            current_objects: tuple[ObjectIdentity, ...] | None = None,
+            relation_frame: OpenRelationCandidate | None = None,
+            current_role_fillers: tuple[
+                tuple[tuple[int, ...], ObjectIdentity], ...] = (),
+            relation_answer_role: tuple[int, ...] = (),
+            reference_scope=None,
             ) -> CrossTurnReferenceResolution:
         if type(core_support) is not frozenset:
             raise TypeError("cross-turn reference Core support must be a frozenset")
         if type(timestamp_seq) is not int or timestamp_seq < 0:
             raise ValueError("cross-turn reference logical sequence must be nonnegative")
-        prepared = self._prepare(candidate_set, contexts)
-        available = tuple(item for item in prepared.evidence
-                          if item.available(core_support))
+        prepared = self._prepare(
+            candidate_set, contexts, current_objects,
+            relation_frame, current_role_fillers, relation_answer_role,
+            reference_scope)
+        available_indices = tuple(
+            index for index, item in enumerate(prepared.evidence)
+            if item.available(core_support))
+        resolution_key = (id(prepared), available_indices, timestamp_seq)
+        cached_resolution = self._resolved.get(resolution_key)
+        if (cached_resolution is not None
+                and cached_resolution[0] is prepared):
+            self._resolved.move_to_end(resolution_key)
+            return cached_resolution[1]
+        available = tuple(prepared.evidence[index]
+                          for index in available_indices)
         by_antecedent = {item.occurrence.stable_key(): item
                          for item in prepared.candidates}
         ledger = HypothesisLedger()
@@ -727,10 +984,17 @@ class TrainedCrossTurnReferenceRuntime:
             for candidate in prepared.candidates)
         winner_hypothesis = ()
         winner_target = ()
+        target_support = None
         if not prepared.requires_resolution:
             status = REFERENCE_NOT_APPLICABLE
-        elif conflicted or len(supported) > 1:
+        elif conflicted:
             status = REFERENCE_CONFLICT
+        elif len(supported) > 1:
+            target_support = reference_target_support(
+                candidate_set, prepared.candidates, available, tuple(records), decision)
+            status = REFERENCE_CONFLICT if target_support is None else REFERENCE_RESOLVED
+            if target_support is not None:
+                winner_target = target_support.target_key
         elif len(supported) == 1:
             targets = decisive_targets.get(supported[0].hypothesis, set())
             if (len(targets) == 1
@@ -742,7 +1006,7 @@ class TrainedCrossTurnReferenceRuntime:
                 status = REFERENCE_CONFLICT if len(targets) > 1 else REFERENCE_OPEN
         else:
             status = REFERENCE_OPEN
-        return CrossTurnReferenceResolution(
+        resolution = CrossTurnReferenceResolution(
             candidate_set,
             prepared.candidates,
             available,
@@ -752,7 +1016,12 @@ class TrainedCrossTurnReferenceRuntime:
             status,
             winner_hypothesis,
             winner_target,
+            target_support,
         )
+        self._resolved[resolution_key] = (prepared, resolution)
+        self._resolved.move_to_end(resolution_key)
+        self._trim_cache(self._resolved, 64)
+        return resolution
 
 
 __all__ = [
@@ -762,6 +1031,7 @@ __all__ = [
     "REFERENCE_DIMENSION_ENTITY",
     "REFERENCE_DIMENSION_EVENT",
     "REFERENCE_DIMENSION_PROPERTY",
+    "REFERENCE_DIMENSION_RELATION",
     "REFERENCE_DIMENSION_REFERS",
     "REFERENCE_DIMENSION_TIME",
     "REFERENCE_NOT_APPLICABLE",

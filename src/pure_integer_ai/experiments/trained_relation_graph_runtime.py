@@ -106,6 +106,9 @@ class RelationSurfaceFrame:
     source_hash: int
     envelope_start: int
     envelope_end: int
+    # None明确表示旧版本未学习载体边缘，不能视作已登记的空间隔。
+    carrier_prefix: str | None = None
+    carrier_suffix: str | None = None
 
 
 @dataclass(frozen=True)
@@ -173,14 +176,30 @@ class GraphRelationDecision:
 class TrainedRelationGraphRuntime:
     """拥有只读训练库句柄，并提供只从 active 图状态派生的关系查询。"""
 
-    def __init__(self, database: str | Path) -> None:
-        """只读打开一个训练 SQLite，并严格恢复 W-06 图和 H-00/H-04 历史。"""
+    def __init__(
+            self,
+            database: str | Path,
+            *,
+            surface_artifact_database: str | Path | None = None,
+            ) -> None:
+        """只读打开训练 SQLite，并恢复整数化 surface/frame（如已发布）。
+
+        Training callers keep the historical Span/SourceRecord restore.  A
+        release caller supplies the separately bound integer artifact so the
+        Core database may omit source text entirely.
+        """
         path = Path(database).resolve()
         if not path.is_file():
             raise ValueError("训练图 SQLite 不存在")
         self.path = path
         self.backend = SQLiteBackend(str(path), read_only=True)
         try:
+            # The training graph is opened read-only and all active relation
+            # inputs are restored into an immutable snapshot below.  Keep the
+            # complete ledger history beside that snapshot so repeated query
+            # projections do not reopen the same ledger rows.
+            self._evidence_history_cache: dict[
+                ObjectIdentity, tuple[EvidenceRecord, ...]] = {}
             self.context = make_train_context(self.backend)
             self.owner = W06RelationLearningRuntime(
                 self.backend, context=self.context)
@@ -190,8 +209,30 @@ class TrainedRelationGraphRuntime:
                 raise TrainedRelationGraphError(
                     "训练图缺少 W-06 relation anchor 协议")
             self._snapshot = self._restore_active_snapshot()
-            self._surface_facts = self._restore_surface_facts()
-            self._surface_frames = self._restore_surface_frames()
+            if surface_artifact_database is None:
+                self._surface_facts = self._restore_surface_facts()
+                self._surface_frames = self._restore_surface_frames()
+            else:
+                from pure_integer_ai.experiments.trained_relation_surface_artifact import (
+                    read_relation_surface_artifact,
+                    sha256_path,
+                )
+                facts, frames, metadata = read_relation_surface_artifact(
+                    surface_artifact_database)
+                if metadata["core_sha256"] != sha256_path(path):
+                    raise TrainedRelationGraphError(
+                        "surface artifact 与 Core SQLite 身份不一致")
+                expected = {
+                    item.definition.proposition.stable_key()
+                    for item in self._snapshot.propositions
+                }
+                actual = {item.proposition.stable_key() for item in facts}
+                frame_keys = {item.proposition.stable_key() for item in frames}
+                if actual != expected or frame_keys != expected:
+                    raise TrainedRelationGraphError(
+                        "surface artifact 与 active Core 命题集合不一致")
+                self._surface_facts = facts
+                self._surface_frames = frames
             self._surface_start_postings = self._build_surface_start_postings()
         except BaseException:
             self.backend.close()
@@ -377,7 +418,12 @@ class TrainedRelationGraphRuntime:
             ) -> tuple[EvidenceRecord, ...]:
         """恢复已核验 active 命题的完整 H-00 历史；旧证据保留供共同查询裁决。"""
         source = self.generation_input(proposition)
-        return self.owner.learning.engine.ledger.evidence_history(source.hypothesis)
+        history = self._evidence_history_cache.get(proposition)
+        if history is None:
+            history = self.owner.learning.engine.ledger.evidence_history(
+                source.hypothesis)
+            self._evidence_history_cache[proposition] = history
+        return history
 
     def _restore_active_snapshot(self) -> ActiveRelationGraphSnapshot:
         """联合 H-00/H-04、候选 lifecycle 图和 S-00 拓扑恢复 active 集。"""
@@ -432,11 +478,10 @@ class TrainedRelationGraphRuntime:
                 + active_candidate.snapshot.refute_evidence_ids
                 + active_candidate.snapshot.unknown_evidence_ids
             )
+            history = engine.ledger.evidence_history(hypothesis)
+            self._evidence_history_cache[definition.candidate] = history
             evidence = tuple(
-                item
-                for item in engine.ledger.evidence_history(hypothesis)
-                if item.evidence_id in active_ids
-            )
+                item for item in history if item.evidence_id in active_ids)
             if not evidence:
                 raise TrainedRelationGraphError(
                     "active relation 缺少当前未被替代 Evidence")
@@ -489,23 +534,122 @@ class TrainedRelationGraphRuntime:
                 predicate=self._anchor_predicate,
                 object_ref=atomic.proposition,
             )
-            if len(anchor_links) != 1:
-                raise TrainedRelationGraphError(
-                    "active 命题没有唯一 relation anchor Span")
-            cue, source_hash, cue_start, cue_end, evidence = self._span_surface(
-                anchor_links[0].subject, spans, sources)
-            bindings: list[RelationSurfaceBinding] = []
+            anchor_options = tuple(
+                (
+                    link.subject,
+                    self._span_surface(link.subject, spans, sources),
+                )
+                for link in anchor_links
+            )
+            endpoint_options: dict[ObjectIdentity, tuple[tuple[
+                ObjectIdentity,
+                tuple[str, int, int, int, str],
+            ], ...]] = {}
             for binding in atomic.bindings:
                 endpoint_links = ontology.statements(
                     predicate=endpoint_predicate,
                     object_ref=binding.ref,
                 )
-                if len(endpoint_links) != 1:
-                    raise TrainedRelationGraphError(
-                        "active RoleBinding 没有唯一 endpoint Span")
+                endpoint_options[binding.ref] = tuple(
+                    (
+                        link.subject,
+                        self._span_surface(link.subject, spans, sources),
+                    )
+                    for link in endpoint_links
+                )
+
+            # One proposition may have several independently licensed source
+            # frames.  Select one complete source frame deterministically, but
+            # never combine an anchor from one source with endpoints from
+            # another.  A source-local duplicate remains ambiguous and is
+            # rejected below.
+            source_hashes = {
+                restored[1][1] for restored in anchor_options
+            }
+            source_hashes.intersection_update(*(
+                {
+                    restored[1][1]
+                    for restored in options
+                }
+                for options in endpoint_options.values()
+            ))
+            frames: list[tuple[
+                tuple[int, ...],
+                tuple[str, int, int, int, str],
+                tuple[tuple[ObjectIdentity, tuple[str, int, int, int, str]], ...],
+            ]] = []
+            for source_hash in sorted(source_hashes):
+                anchors = tuple(
+                    item for item in anchor_options
+                    if item[1][1] == source_hash
+                )
+                endpoints = tuple(
+                    tuple(
+                        item for item in endpoint_options[binding.ref]
+                        if item[1][1] == source_hash
+                    )
+                    for binding in atomic.bindings
+                )
+                if len(anchors) != 1 or any(
+                        len(options) != 1 for options in endpoints):
+                    continue
+                anchor = anchors[0]
+                selected_endpoints = tuple(options[0] for options in endpoints)
+                frame_key = (
+                    source_hash,
+                    anchor[1][2],
+                    anchor[1][3],
+                    *(
+                        value
+                        for endpoint in selected_endpoints
+                        for value in endpoint[1][2:4]
+                    ),
+                    *(anchor[0].stable_key()),
+                    *(
+                        value
+                        for endpoint in selected_endpoints
+                        for value in endpoint[0].stable_key()
+                    ),
+                )
+                frames.append((
+                    frame_key,
+                    anchor[1],
+                    selected_endpoints,
+                ))
+            if not frames:
+                raise TrainedRelationGraphError(
+                    "active 命题没有唯一共同来源 relation anchor/endpoint Span")
+            frame_signatures = {
+                (
+                    anchor_data[0],
+                    anchor_data[2:4],
+                    tuple(
+                        (
+                            endpoint_data[0],
+                            endpoint_data[2:4],
+                            binding.role.stable_key(),
+                        )
+                        for binding, (_endpoint_ref, endpoint_data) in zip(
+                            atomic.bindings,
+                            selected_endpoints,
+                            strict=True,
+                        )
+                    ),
+                )
+                for _frame_key, anchor_data, selected_endpoints in frames
+            }
+            if len(frame_signatures) != 1:
+                raise TrainedRelationGraphError(
+                    "active 命题存在互相冲突的 relation source frame")
+            _frame_key, anchor_data, selected_endpoints = min(
+                frames, key=lambda item: item[0])
+            cue, source_hash, cue_start, cue_end, evidence = anchor_data
+            bindings: list[RelationSurfaceBinding] = []
+            for binding, endpoint in zip(
+                    atomic.bindings, selected_endpoints, strict=True):
+                _endpoint_ref, endpoint_data = endpoint
                 surface, endpoint_source, start, end, endpoint_evidence = (
-                    self._span_surface(
-                        endpoint_links[0].subject, spans, sources))
+                    endpoint_data)
                 if endpoint_source != source_hash or endpoint_evidence != evidence:
                     raise TrainedRelationGraphError(
                         "relation cue 与 endpoint 没有共同来源")

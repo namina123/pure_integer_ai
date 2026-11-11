@@ -31,7 +31,7 @@ from pure_integer_ai.cognition.shared.identity import (
 )
 from pure_integer_ai.cognition.shared.scope_identity import document_scope
 from pure_integer_ai.experiments.formal_train import make_train_context
-from pure_integer_ai.storage.backend import DictBackend
+from pure_integer_ai.storage.backend import DictBackend, SQLiteBackend
 from pure_integer_ai.storage.edge_store import EPI_STRUCTURED, SOURCE_BARE_TEXT
 from pure_integer_ai.storage.graph_statement import GRAPH_STATEMENT_TABLE
 from pure_integer_ai.training.cursor import DUMP_TABLES, dump_run, load_run
@@ -435,3 +435,74 @@ def test_legacy_like_binding_cannot_activate_without_lifecycle_event():
         assert graph.active_for_binding(definition.bindings[0]) == ()
     finally:
         backend.close()
+
+
+def test_immutable_history_reads_only_requested_candidate_and_shares_sparse_results(tmp_path, monkeypatch):
+    """真实只读 SQLite 保留完整历史，跨 facade 惰性读取不同候选及空历史。"""
+    path = tmp_path / "candidate-history.sqlite3"
+    writer = SQLiteBackend(str(path))
+    try:
+        engine, first, hypothesis, protocol, context, graph, projector = _projector(writer)
+        _support(engine, hypothesis, source_id=3, timestamp_seq=20)
+        projector.promote(hypothesis, timestamp_seq=30,
+                          provenance_kind=SOURCE_BARE_TEXT, epistemic_origin=EPI_STRUCTURED)
+        _support(engine, hypothesis, source_id=4, timestamp_seq=40)
+        projector.promote(hypothesis, timestamp_seq=50,
+                          provenance_kind=SOURCE_BARE_TEXT, epistemic_origin=EPI_STRUCTURED)
+        second = _definition(2, competition=(201, 2))
+        second_hypothesis = engine.register(second, timestamp_base=101)
+        _support(engine, second_hypothesis, source_id=5, timestamp_seq=120)
+        projector.promote(second_hypothesis, timestamp_seq=130,
+                          provenance_kind=SOURCE_BARE_TEXT, epistemic_origin=EPI_STRUCTURED)
+        empty = _definition(3, competition=(201, 3))
+        empty_hypothesis = engine.register(empty, timestamp_base=201)
+        graph.define(empty, empty_hypothesis,
+                     provenance_kind=SOURCE_BARE_TEXT, epistemic_origin=EPI_STRUCTURED)
+        definitions = (first, second, empty)
+        expected = tuple(graph.history(context.graph_ontology.resolve(item.candidate))
+                         for item in definitions)
+        assert tuple(map(len, expected)) == (2, 1, 0)
+        writer.commit()
+    finally:
+        writer.close()
+
+    reader = SQLiteBackend(str(path), read_only=True)
+    try:
+        context = make_train_context(reader)
+        ontology = context.graph_ontology
+        restored = CandidateProjectionGraph(ontology, protocol, read_only=True)
+        refs = tuple(ontology.resolve(item.candidate) for item in definitions)
+        predicate = ontology.resolve(protocol.event_candidate)
+        original = ontology.statements
+        reads = []
+
+        def local_statements(**kwargs):
+            """阻止以无关候选全量恢复代替当前候选的实际反向读取。"""
+            if kwargs.get("predicate") == predicate:
+                # read_event 仍逐事件核验所属候选，允许其精确 subject 读取。
+                assert (kwargs.get("object_ref") is not None
+                        or kwargs.get("subject") is not None), "不得扫描全协议候选历史"
+                if kwargs.get("object_ref") is not None:
+                    reads.append(kwargs["object_ref"])
+            return original(**kwargs)
+
+        monkeypatch.setattr(ontology, "statements", local_statements)
+        assert restored.history(refs[0]) == expected[0]
+        shared = CandidateProjectionGraph(ontology, protocol, read_only=True)
+        assert shared.history(refs[0]) == expected[0]
+        assert shared.history(refs[1]) == expected[1]
+        assert shared.history(refs[2]) == expected[2]
+        third = CandidateProjectionGraph(ontology, protocol, read_only=True)
+        assert third.history(refs[2]) == ()
+        assert reads == list(refs)
+    finally:
+        reader.close()
+
+    cold = SQLiteBackend(str(path), read_only=True)
+    try:
+        context = make_train_context(cold)
+        restored = CandidateProjectionGraph(context.graph_ontology, protocol, read_only=True)
+        assert tuple(restored.history(context.graph_ontology.resolve(item.candidate))
+                     for item in definitions) == expected
+    finally:
+        cold.close()

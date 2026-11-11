@@ -386,6 +386,7 @@ def _entry(
         protocols: _Protocols,
         request_key: tuple[int, ...],
         ordinal: int,
+        timestamp_stride: int,
         relation: ObjectIdentity,
         schema: RelationSchema,
         role_fillers: tuple[tuple[ObjectIdentity, ObjectIdentity], ...],
@@ -439,16 +440,19 @@ def _entry(
             trace=(*_prefix(pack), 35, ordinal),
         ),
     )
-    timestamp_base = ordinal * 10
+    timestamp_base = ordinal * timestamp_stride
+    # Forming emits one Evidence timestamp per independent source. Keep the
+    # reveal/decision/projection sequence strictly after that whole block.
+    recognition_base = timestamp_base + max(3, len(forming_evidence_keys))
     return AliasRelationCourseEntry(
         spec,
         document_scope(statement_source),
         timestamp_base,
         (AliasRelationCourseRecognition(
             recognition,
-            timestamp_base + 3,
-            timestamp_base + 4,
-            timestamp_base + 5,
+            recognition_base,
+            recognition_base + 1,
+            recognition_base + 2,
         ),),
     )
 
@@ -482,6 +486,12 @@ def build_alias_relation_manifest(
         protocols.alias.refers_relation: protocols.schemas[1],
         protocols.alias.realizes_relation: protocols.schemas[2],
     }
+    max_forming_sources = max(
+        (len(item.forming_evidence_keys) for item in (
+            *request.references, *request.realizations)),
+        default=0,
+    )
+    timestamp_stride = max(10, max_forming_sources + 3)
     entries = []
     ordinal = 0
     for item in request.references:
@@ -491,6 +501,7 @@ def build_alias_relation_manifest(
             protocols,
             request_key,
             ordinal,
+            timestamp_stride,
             protocols.alias.refers_relation,
             schema_by_relation[protocols.alias.refers_relation],
             (
@@ -506,6 +517,7 @@ def build_alias_relation_manifest(
             protocols,
             request_key,
             ordinal,
+            timestamp_stride,
             protocols.alias.realizes_relation,
             schema_by_relation[protocols.alias.realizes_relation],
             (

@@ -20,6 +20,10 @@ from pure_integer_ai.experiments.ph2_w06_adapter import (
     W06TypedAdapterOutput,
     adapt_w06_training_payload,
 )
+from pure_integer_ai.experiments.integer_relation_graph_course import (
+    integer_relation_graph_course_to_w06_adapter,
+    read_integer_relation_graph_course,
+)
 from pure_integer_ai.experiments.ph2_w06_learning import (
     W06RelationLearningRuntime,
     build_w06_learning_runtime,
@@ -218,7 +222,49 @@ def build_authored_w06_learning_runtime(
     return runtime
 
 
+def build_integer_w06_adapter(
+        course_paths: Iterable[str | Path],
+        *,
+        require_full_curriculum: bool = True,
+        ) -> W06TypedAdapterOutput:
+    """从纯整数 graph-course 恢复 W-06 adapter，不读取 authored JSONL。"""
+    paths = tuple(sorted(Path(item).resolve() for item in course_paths))
+    if not paths or len(paths) != len(set(paths)):
+        raise ValueError("integer graph-course path 不能为空且不得重复")
+    courses = tuple(read_integer_relation_graph_course(path) for path in paths)
+    source_identity = courses[0].source_identity
+    license_identity = courses[0].license_identity
+    records = []
+    for course in courses:
+        if (course.source_identity != source_identity
+                or course.license_identity != license_identity):
+            raise ValueError("integer graph-course source/license identity 漂移")
+        records.extend(course.records)
+    merged = courses[0].__class__(source_identity, license_identity, tuple(sorted(
+        records, key=lambda item: item.stable_key())))
+    return integer_relation_graph_course_to_w06_adapter(
+        merged, require_full_curriculum=require_full_curriculum)
+
+
+def build_integer_w06_learning_runtime(
+        backend,
+        context,
+        course_paths: Iterable[str | Path],
+        *,
+        require_full_curriculum: bool = True,
+        ) -> W06RelationLearningRuntime:
+    """把整数 graph-course 接入与 authored 相同的 Core/Span 学习链。"""
+    adapter = build_integer_w06_adapter(
+        course_paths, require_full_curriculum=require_full_curriculum)
+    context.graph_ontology.enable_physical_statement_projection()
+    runtime = build_w06_learning_runtime(backend, adapter, context=context)
+    _materialize_relation_spans(context, runtime, adapter)
+    return runtime
+
+
 __all__ = [
     "build_authored_w06_adapter",
     "build_authored_w06_learning_runtime",
+    "build_integer_w06_adapter",
+    "build_integer_w06_learning_runtime",
 ]

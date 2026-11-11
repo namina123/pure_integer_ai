@@ -15,6 +15,12 @@ from pure_integer_ai.experiments.trained_relation_graph_runtime import (
     GRAPH_RELATION_CONFLICT,
     TrainedRelationGraphRuntime,
 )
+from pure_integer_ai.cognition.shared.query_state import (
+    TERMINATION_ANSWER_CLOSED,
+    TERMINATION_CLARIFY_CONFLICT,
+    TERMINATION_CLARIFY_MISSING_BINDING,
+    TERMINATION_DIALOGUE_UNKNOWN,
+)
 from pure_integer_ai.experiments.trained_generation_connector_runtime import (
     TrainedGenerationConnectorRuntime,
 )
@@ -120,6 +126,67 @@ def _response_plan_graph_keys(trace: dict[str, object]) -> set[tuple[int, ...]]:
     return result
 
 
+def _response_contract_fields(trace: dict[str, object]) -> dict[str, object]:
+    """从整数终止状态和 ResponsePlan 派生稳定的对外回答分类。
+
+    调用方不能从表层文本猜测事实回答。只有 ``ANSWER_CLOSED`` 且
+    ResponsePlan 含 claim 才是 factual answer；UNKNOWN、CLARIFY 和其他
+    终止状态分别暴露为非事实分类，并保留零 factual claim 约束。
+    """
+    termination = trace.get("termination")
+    if type(termination) is not int:
+        raise ValueError("parallel trace termination 必须是整数")
+    reason = trace.get("termination_reason")
+    if not isinstance(reason, str) or not reason:
+        raise ValueError("parallel trace termination_reason 必须是非空字符串")
+    plan = trace.get("response_plan")
+    plan = plan if isinstance(plan, dict) else None
+    raw_claims = () if plan is None else plan.get("claim_refs", ())
+    raw_claim_evidence = (
+        () if plan is None else plan.get("claim_evidence_refs", ()))
+    claims = raw_claims if isinstance(raw_claims, list) else []
+    claim_evidence = (
+        raw_claim_evidence if isinstance(raw_claim_evidence, list) else [])
+    factual = termination == TERMINATION_ANSWER_CLOSED
+    if factual:
+        response_class = "FACTUAL_ANSWER"
+    elif termination == TERMINATION_DIALOGUE_UNKNOWN:
+        response_class = "DIALOGUE_UNKNOWN"
+    elif termination in {
+            TERMINATION_CLARIFY_MISSING_BINDING,
+    }:
+        response_class = "CLARIFY"
+    elif termination == TERMINATION_CLARIFY_CONFLICT:
+        response_class = "CLARIFY_CONFLICT"
+    else:
+        response_class = "FAIL_CLOSED"
+    termination_state = trace.get("termination_state")
+    evidence_closed = (
+        termination_state.get("evidence_closed", 0)
+        if isinstance(termination_state, dict) else 0)
+    if type(evidence_closed) is not int or evidence_closed not in {0, 1}:
+        raise ValueError("parallel trace evidence_closed 必须是 0 或 1")
+    factual_claim_count = len(claims) if factual else 0
+    factual_claim_evidence_count = 0
+    if factual:
+        for item in claim_evidence:
+            if not isinstance(item, dict):
+                raise ValueError("claim_evidence_refs 含非法记录")
+            evidence = item.get("evidence", ())
+            if not isinstance(evidence, list):
+                raise ValueError("claim_evidence_refs.evidence 必须是数组")
+            factual_claim_evidence_count += len(evidence)
+    return {
+        "termination_reason": reason,
+        "response_class": response_class,
+        "factual_answer": int(factual),
+        "factual_claim_count": factual_claim_count,
+        "factual_claim_evidence_count": factual_claim_evidence_count,
+        "response_plan_present": int(plan is not None),
+        "evidence_closed": evidence_closed,
+    }
+
+
 def _nearest_rank(values: list[int], percentile: int) -> int:
     """以整数 nearest-rank 返回非空延迟序列的分位数。"""
     if not values or any(type(item) is not int or item < 0 for item in values):
@@ -178,7 +245,26 @@ def run_trained_relation_graph_terminal(
         output_stream: BinaryIO | None = None,
         protocol_stream: bool = False,
         metrics_output: str | Path | None = None,
+        surface_artifact_database: str | Path | None = None,
+        input_discourse_graph_database: str | Path | None = None,
+        input_dialogue_act_graph_database: str | Path | None = None,
+        input_discourse_operation_graph_database: str | Path | None = None,
+        input_discourse_conjunction_graph_database: str | Path | None = None,
+        relation_question_graph_database: str | Path | None = None,
+        assertion_scope_graph_database: str | Path | None = None,
+        relation_composition_graph_database: str | Path | None = None,
+        operation_program_graph_database: str | Path | None = None,
+        operation_request_graph_database: str | Path | None = None,
+        operation_output_graph_database: str | Path | None = None,
+        revision_cue_graph_database: str | Path | None = None,
+        sequence_graph_database: str | Path | None = None,
+        native_composition_graph_database: str | Path | None = None,
         strict_graph: bool = False,
+        minimum_depth: int = 1,
+        max_depth: int = 24,
+        max_nodes: int = 512,
+        max_edges: int = 1024,
+        max_reads: int = 8192,
         ) -> int:
     """运行图优先交互；strict_graph 发布模式只接受三类图路由。
 
@@ -197,6 +283,10 @@ def run_trained_relation_graph_terminal(
         raise ValueError(
             "仅允许 strict graph 三图发布入口；旧 surface/successor/fallback "
             "路径已隔离")
+    budgets = (minimum_depth, max_depth, max_nodes, max_edges, max_reads)
+    if (any(type(value) is not int or value <= 0 for value in budgets)
+            or minimum_depth > max_depth):
+        raise ValueError("strict graph query budgets must be positive integers")
     metrics_path = (
         None if metrics_output is None else Path(metrics_output).resolve())
     if metrics_path is not None and metrics_path.exists():
@@ -265,6 +355,8 @@ def run_trained_relation_graph_terminal(
         "boundary": 0,
     }
     generation_runtime = None
+    composition_runtime = None
+    sequence_runtime = None
     parallel_bridge = None
     try:
         if strict_graph:
@@ -274,22 +366,60 @@ def run_trained_relation_graph_terminal(
                 tenant_id=memory_tenant_id,
                 user_id=memory_user_id,
                 session_id=memory_session_id,
+                surface_artifact_database=surface_artifact_database,
+                input_discourse_graph_database=input_discourse_graph_database,
+                input_dialogue_act_graph_database=(
+                    input_dialogue_act_graph_database),
+                input_discourse_operation_graph_database=(
+                    input_discourse_operation_graph_database),
+                input_discourse_conjunction_graph_database=(
+                    input_discourse_conjunction_graph_database),
+                relation_question_graph_database=relation_question_graph_database,
+                assertion_scope_graph_database=assertion_scope_graph_database,
+                relation_composition_graph_database=relation_composition_graph_database,
+                operation_program_graph_database=operation_program_graph_database,
+                operation_request_graph_database=operation_request_graph_database,
+                operation_output_graph_database=operation_output_graph_database,
+                revision_cue_graph_database=revision_cue_graph_database,
                 successor_evidence=False,
             )
             from pure_integer_ai.cognition.understanding.query_structure_adapter import (
                 RelationSurfaceStructureAdapter,
             )
-            relation_pairs = tuple(sorted({
+            has_native_sequence = (
+                sequence_graph_database is not None
+                and native_composition_graph_database is not None
+                and operation_program_graph_database is not None)
+            relation_pairs = (() if has_native_sequence else tuple(sorted({
                 (RelationSurfaceStructureAdapter.from_facts((fact,))[0]
                  .relation_structure_key(), fact.predicate.stable_key())
                 for fact in parallel_bridge.facts
-            }))
+            })))
             generation_runtime = TrainedGenerationConnectorRuntime(
                 training_database,
                 shared_relation_runtime=parallel_bridge.core_runtime,
                 relation_pairs=relation_pairs,
             )
-            parallel_bridge.surface_generator = generation_runtime
+            surface_generator = generation_runtime
+            if (sequence_graph_database is not None
+                    and native_composition_graph_database is not None
+                    and operation_program_graph_database is not None):
+                from pure_integer_ai.experiments.trained_operation_composition import (
+                    TrainedOperationCompositionRuntime,
+                )
+                from pure_integer_ai.experiments.trained_operation_sequence import (
+                    TrainedOperationSequenceRuntime,
+                )
+                composition_runtime = TrainedOperationCompositionRuntime(
+                    native_composition_graph_database,
+                    generation_runtime,
+                    parallel_bridge.core_runtime,
+                    operation_program_graph_database,
+                )
+                sequence_runtime = TrainedOperationSequenceRuntime(
+                    sequence_graph_database, composition_runtime)
+                surface_generator = sequence_runtime
+            parallel_bridge.surface_generator = surface_generator
             # strict 每轮写入和查询复用桥拥有的唯一 Memory owner，避免同一
             # session SQLite 出现双连接写锁或两个不一致的 Observation 视图。
             memory = parallel_bridge.memory
@@ -371,6 +501,11 @@ def run_trained_relation_graph_terminal(
                         graph_object_keys=request_graph_keys,
                         input_observation_ref=input_observation_ref,
                         compact_trace=True,
+                        minimum_depth=minimum_depth,
+                        max_depth=max_depth,
+                        max_nodes=max_nodes,
+                        max_edges=max_edges,
+                        max_reads=max_reads,
                         input_structure=prepared_input_structure,
                     )
                     if strict_graph and parallel_bridge is not None
@@ -505,10 +640,14 @@ def run_trained_relation_graph_terminal(
                         "text": surface,
                         "type": "turn",
                     }
-                    if parallel_trace is not None and surface.strip():
+                    if parallel_trace is not None:
                         response["source"] = {
                             "kind": "parallel_three_graph",
                             "termination": parallel_trace["termination"],
+                            "generic_response_feature_mask": parallel_trace.get(
+                                "generic_response_feature_mask", 0),
+                            "input_dialogue_act_match": parallel_trace.get(
+                                "input_dialogue_act_match", []),
                             "roots": parallel_trace["roots"],
                             "evidence": parallel_trace["evidence"],
                             # compact V4 traces carry the same integer edge
@@ -531,6 +670,8 @@ def run_trained_relation_graph_terminal(
                                 list(key) for key in sorted(generated_graph_keys)
                                 if key in set(request_graph_keys)],
                         }
+                        response["source"].update(
+                            _response_contract_fields(parallel_trace))
                         if work_memory_projection is not None:
                             response["source"]["work_memory_projection"] = (
                                 work_memory_projection)
@@ -689,6 +830,43 @@ def main(argv: list[str] | None = None) -> int:
         training_database = release.training_database
         # 发布 strict graph 不读取边界表层文件；所有输出只能来自三类图。
         fallback_surfaces = ()
+        entry = release.manifest.get("entry", {})
+        if not isinstance(entry, dict):
+            raise SystemExit("trained graph release entry 非法")
+
+        def optional_entry(name: str) -> Path | None:
+            value = entry.get(name)
+            if value is None:
+                return None
+            if type(value) is not str or not value:
+                raise SystemExit(f"release entry.{name} 非法")
+            path = (release.root / value).resolve()
+            try:
+                path.relative_to(release.root.resolve())
+            except ValueError as error:
+                raise SystemExit(f"release entry.{name} 越界") from error
+            if not path.is_file():
+                raise SystemExit(f"release entry.{name} 缺失")
+            return path
+
+        surface_artifact_database = optional_entry("surface_artifact")
+        input_discourse_graph_database = optional_entry("input_discourse_graph")
+        input_dialogue_act_graph_database = optional_entry(
+            "input_dialogue_act_graph")
+        input_discourse_operation_graph_database = optional_entry(
+            "input_discourse_operation_graph")
+        input_discourse_conjunction_graph_database = optional_entry(
+            "input_discourse_conjunction_graph")
+        relation_question_graph_database = optional_entry("relation_question_graph")
+        relation_composition_graph_database = optional_entry(
+            "relation_composition_graph")
+        operation_program_graph_database = optional_entry("operation_program_graph")
+        operation_request_graph_database = optional_entry("operation_request_graph")
+        operation_output_graph_database = optional_entry("operation_output_graph")
+        revision_cue_graph_database = optional_entry("revision_cue_graph")
+        sequence_graph_database = optional_entry("sequence_graph")
+        native_composition_graph_database = optional_entry(
+            "native_composition_graph")
     else:
         parser.error("必须指定 --release-root；旧训练数据库/表层兼容入口已隔离")
     return run_trained_relation_graph_terminal(
@@ -699,6 +877,19 @@ def main(argv: list[str] | None = None) -> int:
         memory_user_id=args.memory_user_id,
         memory_session_id=args.memory_session_id,
         metrics_output=args.metrics_output,
+        surface_artifact_database=surface_artifact_database,
+        input_discourse_graph_database=input_discourse_graph_database,
+        input_dialogue_act_graph_database=input_dialogue_act_graph_database,
+        input_discourse_operation_graph_database=input_discourse_operation_graph_database,
+        input_discourse_conjunction_graph_database=input_discourse_conjunction_graph_database,
+        relation_question_graph_database=relation_question_graph_database,
+        relation_composition_graph_database=relation_composition_graph_database,
+        operation_program_graph_database=operation_program_graph_database,
+        operation_request_graph_database=operation_request_graph_database,
+        operation_output_graph_database=operation_output_graph_database,
+        revision_cue_graph_database=revision_cue_graph_database,
+        sequence_graph_database=sequence_graph_database,
+        native_composition_graph_database=native_composition_graph_database,
         protocol_stream=args.protocol == "jsonl",
         strict_graph=args.release_root is not None,
     )

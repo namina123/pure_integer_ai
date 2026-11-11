@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
-from pure_integer_ai.cognition.shared.hypothesis import EvidenceRecord
+from pure_integer_ai.cognition.shared.hypothesis import (
+    EVIDENCE_REFUTE,
+)
 from pure_integer_ai.cognition.shared.memory_event import (
     MEMORY_EVENT_EVIDENCE,
     MEMORY_EVENT_HYPOTHESIS,
@@ -16,6 +19,8 @@ from pure_integer_ai.cognition.shared.query_state import (
     SPACE_DIALOGUE,
     SPACE_MEMORY,
     TERMINATION_ANSWER_CLOSED,
+    TERMINATION_NO_FRONTIER,
+    EvidenceEntry,
 )
 from pure_integer_ai.cognition.understanding.query_memory_candidates import (
     MEMORY_CANDIDATE_VERSION,
@@ -24,7 +29,14 @@ from pure_integer_ai.cognition.understanding.query_memory_candidates import (
     frame_key,
     memory_candidate_routes,
     memory_candidate_category,
+    memory_graph_input_candidate_key,
+    memory_relation_candidate_key,
     memory_topic_candidate,
+)
+from pure_integer_ai.cognition.understanding.query_input_structure import (
+    InputRelationCandidate,
+    PROJECTION_FILLER,
+    STRUCTURE_CLOSED,
 )
 from pure_integer_ai.cognition.understanding.query_open_roles import OPEN_SCHEMA_VERSION, OpenRoleFrame
 from pure_integer_ai.experiments.trained_dialogue_memory_graph import (
@@ -35,14 +47,118 @@ from pure_integer_ai.experiments.trained_memory_candidate_index import (
     CANDIDATE_INDEX_TABLE,
 )
 from pure_integer_ai.experiments.trained_graph_query_bridge import (
+    MemoryHypothesisAnchor,
     TrainedGraphQueryBridge,
+    _CrossSpaceExpander,
+)
+from pure_integer_ai.experiments.integer_relation_generation_bridge import (
+    materialize_integer_relation_generation,
+)
+from pure_integer_ai.experiments.trained_generation_connector_runtime import (
+    TrainedGenerationConnectorRuntime,
 )
 
 from test_stage_b_core_query_bridge import _trained_database
 
 
+def _trained_generation_database(tmp_path):
+    """为要求回答闭合的 Memory 测试显式训练全部 active 角色 connector。"""
+    database = _trained_database(tmp_path)
+    materialized = materialize_integer_relation_generation(
+        database,
+        branch_key=(91662, 20261012, 19),
+        family_key=(91663, 20261012, 19),
+        representative_limit=64,
+        require_full_active_coverage=True,
+    )
+    assert materialized.active_proposition_count == materialized.connector_count
+    assert not materialized.uncovered_proposition_keys
+    return database
+
+
+def _cross_space_refute_probe(
+        *, observation_key: tuple[int, ...],
+        proposition_key: tuple[int, ...],
+        core_support: set[tuple[int, ...]],
+        memory_observation_key: tuple[int, ...] | None = None,
+        ) -> bool:
+    """构造最小整数桥状态，探测跨空间反对证据是否只按当前路由连接。"""
+    relation = InputRelationCandidate(
+        proposition_key=proposition_key,
+        predicate_key=(102,),
+        structure_key=(103,),
+        carrier_key=(104,),
+        source_ref=(105,),
+        span_refs=((106,),),
+        required_count=2,
+        support_count=2,
+        role_coverage=1,
+        predicate_coverage=1,
+        required_open=0,
+        state=STRUCTURE_CLOSED,
+        conflict_count=0,
+    )
+    memory_candidate = memory_relation_candidate_key(relation)
+    evidence_key = (301,)
+    hypothesis = MemoryHypothesisAnchor(
+        observation_key=(
+            observation_key if memory_observation_key is None
+            else memory_observation_key),
+        hypothesis_key=(201,),
+        hypothesis_kind=(202,),
+        candidate_key=memory_candidate,
+        competition_key=(203,),
+        source_ref=(204,),
+        scope_key=(205,),
+        evidence_keys=(evidence_key,),
+    )
+    owner = SimpleNamespace(
+        _input_observation_ref=SimpleNamespace(
+            stable_key=lambda: observation_key),
+        _memory_hypotheses=(hypothesis,),
+        _memory_hypotheses_by_observation={
+            hypothesis.observation_key: (hypothesis,)},
+    )
+    expander = object.__new__(_CrossSpaceExpander)
+    expander.owner = owner
+    expander.input_structure = SimpleNamespace(
+        relation_candidates=(relation,))
+    evidence = EvidenceEntry(
+        source_ref=(206,),
+        hypothesis_key=hypothesis.hypothesis_key,
+        space=SPACE_MEMORY,
+        polarity=EVIDENCE_REFUTE,
+        evidence_key=evidence_key,
+        scope_key=(205,),
+        payload_key=(207,),
+    )
+    return expander._current_memory_refutes_core_support(
+        (evidence,), core_support)
+
+
+def test_current_memory_refute_opens_cross_space_conflict_only_for_same_turn():
+    """当前 Observation 的同命题 REFUTE 才能阻止 Core 闭合。"""
+    proposition = (101,)
+    assert _cross_space_refute_probe(
+        observation_key=(700,),
+        proposition_key=proposition,
+        core_support={proposition},
+    )
+    assert not _cross_space_refute_probe(
+        observation_key=(700,),
+        proposition_key=proposition,
+        core_support={proposition},
+        memory_observation_key=(699,),
+    )
+    assert not _cross_space_refute_probe(
+        observation_key=(700,),
+        proposition_key=proposition,
+        core_support={(999,)},
+    )
+
+
 def exercise_topic_switch(bridge, *, capture):
-    """在实际模型 owner 上运行双话题及返回原话题，所有回答仍走生产 bridge。"""
+    """在实际模型 owner 上检查无回答时的双话题隔离与冷恢复。"""
     first = "车轮是汽车的一部分"
     second = "启明星就是晨星"
     projected = [bridge.input_projector.project(tuple(map(ord, text)))
@@ -68,22 +184,25 @@ def exercise_topic_switch(bridge, *, capture):
     first_append = bridge.memory.append(first, speaker_kind=1)
     first_result = bridge.query(first)
     capture("first", first_result)
-    assert first_result["termination"] == TERMINATION_ANSWER_CLOSED
-    assert first_result["response_surface"]
+    assert first_result["termination"] == TERMINATION_NO_FRONTIER
+    assert first_result["response_plan"] is None
+    assert first_result["response_surface"] == ""
     # 未训练内容现可形成开放角色假设，但仍不能把句法解析当作事实闭合。
-    bridge.memory.append("书页是书本的一部分", speaker_kind=1)
+    unbound_append = bridge.memory.append("书页是书本的一部分", speaker_kind=1)
+    assert unbound_append.hypothesis_keys and unbound_append.evidence_keys
     unbound = bridge.query("书页是书本的一部分")
     capture("unbound_content", unbound)
     assert not unbound["response_surface"]
-    assert unbound["input_structure"]["open_relations"]
-    assert all(item["status"] == ROOT_EXPANDED for item in unbound["roots"]
-               if item["space"] == SPACE_MEMORY)
+    assert not unbound["input_structure"]["open_relations"]
+    assert not any(item["state"] == STRUCTURE_CLOSED
+                   for item in unbound["input_structure"]["relation_candidates"])
     assert not unbound["termination_state"]["evidence_closed"]
     bridge.memory.append(second, speaker_kind=1)
     second_result = bridge.query(second)
     capture("second", second_result)
-    assert second_result["termination"] == TERMINATION_ANSWER_CLOSED
-    assert second_result["response_surface"]
+    assert second_result["termination"] == TERMINATION_NO_FRONTIER
+    assert second_result["response_plan"] is None
+    assert second_result["response_surface"] == ""
     refuted = bridge.memory.retract(second, speaker_kind=1)
     conflict = bridge.query(second)
     capture("second_refuted", conflict)
@@ -91,7 +210,7 @@ def exercise_topic_switch(bridge, *, capture):
     assert not conflict["response_surface"]
     returned = bridge.query(first)
     capture("returned_first", returned)
-    assert returned["termination"] == TERMINATION_ANSWER_CLOSED
+    assert returned["termination"] == TERMINATION_NO_FRONTIER
     assert returned["response_surface"] == first_result["response_surface"]
     recalled = bridge.memory.active_structures(candidate_keys=candidates[0])
     assert [item.turn_seq for item in recalled.observations] == [first_append.turn_seq]
@@ -103,9 +222,8 @@ def exercise_topic_switch(bridge, *, capture):
     for result in (first_result, second_result, returned):
         assert {item["space"] for item in result["evidence"]} == {
             SPACE_CORE, SPACE_MEMORY, SPACE_DIALOGUE}
-        assert result["response_plan"]["memory_refs"]
-        assert result["response_plan"]["claim_refs"] == [
-            result["termination_state"]["best_candidate"]]
+        assert result["response_plan"] is None
+        assert result["response_surface"] == ""
         assert result["memory_competitions"]
     path, owner = bridge.memory.path, bridge.memory.owner
     bridge.memory.close()
@@ -130,7 +248,7 @@ def exercise_topic_switch(bridge, *, capture):
 
 
 def test_memory_topics_do_not_equate_shared_syntax(tmp_path):
-    """同句法不同概念的反对证据不跨话题，返回原话题与冷恢复均使用完整图。"""
+    """同句法不同概念的反对证据不跨话题，无回答也保留冷恢复。"""
     database = _trained_database(tmp_path)
     with TrainedGraphQueryBridge(
             database, memory_database=tmp_path / "topic_memory.sqlite3",
@@ -205,12 +323,13 @@ def test_structured_memory_ohe_is_parallel_and_replayable(tmp_path):
 
 def test_memory_refute_stays_in_parallel_trace_and_recency_is_turn_based(tmp_path):
     """跨越旧热区的冲突仍沿三图传播，派生索引重建不改变证据与结构路径。"""
-    database = _trained_database(tmp_path)
+    database = _trained_generation_database(tmp_path)
     memory_db = tmp_path / "conflicting_memory.sqlite3"
     surface = "麻雀集合包含于鸟类集合"
 
-    with TrainedGraphQueryBridge(
-            database, memory_database=memory_db, session_id=23) as bridge:
+    with TrainedGenerationConnectorRuntime(database) as generation, TrainedGraphQueryBridge(
+            database, memory_database=memory_db, surface_generator=generation,
+            session_id=23) as bridge:
         assert bridge.memory is not None
         supported = bridge.memory.append(surface, speaker_kind=1)
         for ordinal in range(65):
@@ -255,12 +374,30 @@ def test_memory_refute_stays_in_parallel_trace_and_recency_is_turn_based(tmp_pat
                 if item.hypothesis_key in open_keys} == {2, 3}
         assert result["memory_routes"]
 
-        # 只出现一个概念时，沿共同命题引用仍能激活该来源的其他结构假设。
+        # 单独出现概念表面没有闭合关系，不得借它召回整条旧事实。
         partial = bridge.input_projector.project(tuple(ord(value) for value in "麻雀集合"))
         partial_candidates = memory_input_candidate_keys(partial)
         related = bridge.memory.active_structures(candidate_keys=partial_candidates)
-        assert any(item.candidate_key not in partial_candidates for item in related.hypotheses)
-        assert related.match_routes
+        assert not related.observations
+        assert not related.hypotheses
+        assert not related.evidence
+        assert not related.match_routes
+
+        # 明确的完整图对象引用可以沿已存 filler 身份定位同来源 O/H/E。
+        # 这验证整数身份路由，不给上述自然输入补 operation 或事实资格。
+        spans = {item.ref_key: item for item in partial.spans}
+        exact_fillers = {
+            item.candidate_key for item in partial.semantic_candidates
+            if (item.projection_kind == PROJECTION_FILLER
+                and spans[item.span_ref].start == 0
+                and spans[item.span_ref].end == len(partial.tokens)
+                and not item.concept_route_key)
+        }
+        assert len(exact_fillers) == 1
+        graph_candidates = (memory_graph_input_candidate_key(exact_fillers.pop()),)
+        anchored = bridge.memory.active_structures(candidate_keys=graph_candidates)
+        assert [item.turn_seq for item in anchored.observations] == [1, 67]
+        assert anchored.hypotheses and anchored.evidence and anchored.match_routes
 
         initial = result["frontier_trace"][0]
         discourse_priorities = [
@@ -301,20 +438,34 @@ def test_memory_refute_stays_in_parallel_trace_and_recency_is_turn_based(tmp_pat
             revised["termination_state"]["best_candidate"]]
         core_evidence = [item for item in revised["evidence"] if item["space"] == SPACE_CORE]
         assert core_evidence
+        history_by_payload = {
+            record.stable_key(): record
+            for fact in bridge.core_runtime.active_surface_facts()
+            for record in bridge.core_runtime.evidence_history(fact.proposition)
+        }
+        history_evidence = 0
         for item in core_evidence:
             if item["hypothesis"][0] == OPEN_SCHEMA_VERSION:
                 frame = OpenRoleFrame.from_stable_key(tuple(item["payload_key"]))
                 assert tuple(item["hypothesis"]) == frame.schema_key()
                 assert item["polarity"] == 1
                 continue
-            restored_record = EvidenceRecord.from_stable_key(tuple(item["payload_key"]))
+            restored_record = history_by_payload.get(tuple(item["payload_key"]))
+            if restored_record is None:
+                assert item["polarity"] == 3
+                assert item["source_ref"] and item["scope"] and item["evidence_key"]
+                continue
+            history_evidence += 1
             assert item["polarity"] == restored_record.stance
             assert tuple(item["scope"]) == restored_record.hypothesis.scope.stable_key()
             assert tuple(item["source_ref"][1:]) == restored_record.source.stable_key()
+        assert history_evidence
         assert {item["polarity"] for item in revised["evidence"]
                 if item["space"] == SPACE_MEMORY} == {1, 2, 3}
         old_keys = {item.evidence_key for item in snapshot.evidence}
-        assert old_keys <= {tuple(item["evidence_key"]) for item in revised["evidence"]}
+        durable_evidence = bridge.memory.active_structures(
+            candidate_keys=candidates).evidence
+        assert old_keys <= {item.evidence_key for item in durable_evidence}
         assert any(item["supersedes"] for item in revised["evidence"])
         snapshot = bridge.memory.active_structures(candidate_keys=candidates)
         result = revised

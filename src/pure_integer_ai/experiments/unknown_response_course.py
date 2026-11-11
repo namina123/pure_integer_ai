@@ -65,6 +65,22 @@ RESPONSE_FEATURE_EVENT_TIME = 16384
 RESPONSE_FEATURE_ENTITY = 32768
 RESPONSE_FEATURE_EVENT = 65536
 RESPONSE_FEATURE_PROPERTY = 131072
+RESPONSE_FEATURE_CONVERSATIONAL_OPENING = 262144
+RESPONSE_FEATURE_GRATITUDE = 524288
+RESPONSE_FEATURE_HELP_REQUEST = 1048576
+RESPONSE_FEATURE_DIALOGUE_CONTINUATION = 2097152
+RESPONSE_FEATURE_FAREWELL = 4194304
+RESPONSE_FEATURE_ASSERTION_NEGATED = 8388608
+RESPONSE_FEATURE_ASSERTION_POSSIBLE = 16777216
+RESPONSE_FEATURE_ASSERTION_QUOTED = 33554432
+RESPONSE_FEATURE_ASSERTION_SCOPES = (RESPONSE_FEATURE_ASSERTION_NEGATED
+    | RESPONSE_FEATURE_ASSERTION_POSSIBLE | RESPONSE_FEATURE_ASSERTION_QUOTED)
+RESPONSE_FEATURE_DIRECT_DIALOGUE_ACTS = (
+    RESPONSE_FEATURE_CONVERSATIONAL_OPENING
+    | RESPONSE_FEATURE_GRATITUDE
+    | RESPONSE_FEATURE_HELP_REQUEST
+    | RESPONSE_FEATURE_DIALOGUE_CONTINUATION
+    | RESPONSE_FEATURE_FAREWELL)
 
 @dataclass(frozen=True, slots=True)
 class UnknownResponseSegment:
@@ -153,9 +169,14 @@ def response_condition_priority(condition: tuple[int, ...], feature_mask: int) -
     if not condition:
         return 1
     required, forbidden, _style = condition[1:]
-    # Specificity dominates the baseline; style is only a deterministic tie
-    # breaker among equally specific graph conditions.
-    return 100 + (required | forbidden).bit_count() * 100
+    # A current-input dialogue act is stronger than incidental Memory
+    # candidate multiplicity when both conditions constrain the same number
+    # of features.  Keep the tie-break in the integer condition scorer so all
+    # matching connectors share one deterministic route.
+    direct_act = int(bool(required & (
+        RESPONSE_FEATURE_DIRECT_DIALOGUE_ACTS | RESPONSE_FEATURE_ASSERTION_SCOPES)))
+    return (100 + (required | forbidden).bit_count() * 100
+            + direct_act * 10_000)
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,6 +532,12 @@ __all__ = [
     "RESPONSE_FEATURE_ENTITY",
     "RESPONSE_FEATURE_EVENT",
     "RESPONSE_FEATURE_PROPERTY",
+    "RESPONSE_FEATURE_CONVERSATIONAL_OPENING",
+    "RESPONSE_FEATURE_GRATITUDE",
+    "RESPONSE_FEATURE_HELP_REQUEST",
+    "RESPONSE_FEATURE_DIALOGUE_CONTINUATION",
+    "RESPONSE_FEATURE_FAREWELL",
+    "RESPONSE_FEATURE_DIRECT_DIALOGUE_ACTS",
     "UNKNOWN_RESPONSE_COURSE_SOURCE",
     "UNKNOWN_RESPONSE_COURSE_VERSION",
     "UnknownResponseCourse",

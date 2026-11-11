@@ -59,13 +59,7 @@ class OpenRoleQueryNode:
             bindings.extend(BindingEntry(item.role, item.stable_key(), space=self.space,
                                          scope_key=self.candidate.source_ref)
                             for item in self.candidate.bindings)
-        evidence = EvidenceEntry(
-            self.source_ref, self.key, space=self.space,
-            polarity=1 if self.candidate is None else 3,
-            evidence_key=self.key,
-            payload_key=self.frame.stable_key() if self.candidate is None else self.key,
-            scope_key=() if self.candidate is None else self.candidate.source_ref,
-        )
+        evidence = self.query_evidence()
         visited = VisitedKey(self.space, self.key, direction=edge.direction)
         return state.with_(
             depth=max(state.depth, edge.depth + 1),
@@ -75,6 +69,16 @@ class OpenRoleQueryNode:
             visited=tuple(sorted({*state.visited, visited}, key=lambda item: item.stable_key())),
             node_count=state.node_count + 1, edge_count=state.edge_count + 1,
             read_count=state.read_count + 1,
+        )
+
+    def query_evidence(self) -> EvidenceEntry:
+        """恢复完整语法存在或当前解析证明，不能将其当成关系内容真值。"""
+        return EvidenceEntry(
+            self.source_ref, self.key, space=self.space,
+            polarity=1 if self.candidate is None else 3,
+            evidence_key=self.key,
+            payload_key=self.frame.stable_key() if self.candidate is None else self.key,
+            scope_key=() if self.candidate is None else self.candidate.source_ref,
         )
 
 

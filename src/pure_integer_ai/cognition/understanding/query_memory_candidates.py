@@ -9,6 +9,7 @@ from pure_integer_ai.cognition.understanding.artifact_query_input import (
     artifact_memory_candidate_routes,
 )
 from pure_integer_ai.cognition.understanding.query_open_roles import OpenRelationCandidate
+from pure_integer_ai.cognition.understanding.query_operation_requests import InputOperationRequestBinding
 from pure_integer_ai.cognition.understanding.query_input_structure import (
     InputRelationCandidate,
     PROJECTION_FILLER,
@@ -28,6 +29,7 @@ MEMORY_CATEGORY_OPEN_RELATION = 8
 MEMORY_CATEGORY_RESPONSE = 9
 MEMORY_CATEGORY_ARTIFACT = ARTIFACT_MEMORY_CATEGORY
 MEMORY_CATEGORY_GRAPH_INPUT = 11
+MEMORY_CATEGORY_OPERATION_REQUEST = 12
 
 
 def frame_key(tag: int, *parts: tuple[int, ...]) -> tuple[int, ...]:
@@ -71,7 +73,7 @@ def memory_candidate_category(key: tuple[int, ...]) -> int:
             raise ValueError("Memory generic candidate category 非法")
         return parts[0][0]
     parts = _parts(key, MEMORY_CANDIDATE_VERSION)
-    if not parts or len(parts[0]) != 1 or parts[0][0] not in range(1, 12):
+    if not parts or len(parts[0]) != 1 or parts[0][0] not in range(1, 13):
         raise ValueError("Memory input candidate category 非法")
     return parts[0][0]
 
@@ -143,6 +145,10 @@ def memory_candidate_routes(key: tuple[int, ...]) -> tuple[tuple[int, ...], ...]
     category = memory_candidate_category(key)
     parts = _parts(key, MEMORY_CANDIDATE_VERSION)
     routes = {frame_key(1, key)}
+    if category == MEMORY_CATEGORY_OPERATION_REQUEST:
+        memory_operation_request_binding(key)
+        # binding 内含当前 input source，结构路由不把历史变量当作当前事实。
+        return tuple(sorted(routes))
     if category == MEMORY_CATEGORY_RESPONSE:
         if len(parts) != 3 or not parts[1] or not parts[2]:
             raise ValueError("Memory 回应候选必须保留输出证明引用和实际动作")
@@ -211,6 +217,8 @@ def memory_input_candidate_keys(input_structure: QueryInputStructure,
             or type(speaker_kind) is not int or speaker_kind <= 0):
         raise ValueError("generic Memory candidate session/speaker 必须是整数")
     result = set()
+    result.update(frame_key(MEMORY_CANDIDATE_VERSION, (MEMORY_CATEGORY_OPERATION_REQUEST,), item.stable_key())
+                  for item in input_structure.operation_request_bindings)
     result.update(
         memory_graph_input_candidate_key(key)
         for key in input_structure.graph_object_keys)
@@ -229,10 +237,11 @@ def memory_input_candidate_keys(input_structure: QueryInputStructure,
     # gets the generic source-local Observation below.
     relation_propositions = {
         item.proposition_key for item in input_structure.relation_candidates
-        if (item.state == STRUCTURE_CLOSED
-            and item.required_count >= 2
-            and item.required_count == item.support_count
-            and item.predicate_coverage == 1)
+        if (item.support_count > 0 and (
+            item.predicate_coverage == 1
+            or (item.state == STRUCTURE_CLOSED
+                and item.required_count >= 2
+                and item.required_count == item.support_count)))
     }
     # Open-role parses are first-class Memory hypotheses.  They retain the
     # complete frame, source-scoped spans and UNKNOWN stance so the same
@@ -264,13 +273,26 @@ def memory_input_candidate_keys(input_structure: QueryInputStructure,
     for item in input_structure.relation_candidates:
         if not (item.state == STRUCTURE_CLOSED
                 and item.required_count >= 2
-                and item.required_count == item.support_count
-                and item.predicate_coverage == 1):
+                and item.required_count == item.support_count):
             continue
         result.add(memory_relation_candidate_key(item))
+    for item in input_structure.relation_candidates:
+        # A predicate-covered open relation may already have exact filler
+        # members. Preserve that bounded content route in Memory, while a
+        # predicate-less partial relation remains syntax-only and cannot
+        # create a topic candidate.
+        members = tuple(sorted(topic_members.get(
+            (item.proposition_key, item.source_ref), ())))
+        closed = (item.state == STRUCTURE_CLOSED
+                  and item.required_count >= 2
+                  and item.required_count == item.support_count)
+        open_with_predicate = (item.predicate_coverage == 1
+                               and item.support_count > 0)
+        if not members or not (closed or open_with_predicate):
+            continue
         topic = MemoryTopicCandidate(
             item.proposition_key, item.predicate_key, item.structure_key, item.carrier_key,
-            tuple(sorted(topic_members.get((item.proposition_key, item.source_ref), ()))))
+            members)
         for category in (MEMORY_CATEGORY_TIME, MEMORY_CATEGORY_DISCOURSE):
             result.add(frame_key(MEMORY_CANDIDATE_VERSION, (category,), topic.stable_key()))
     # Preserve a source-local structural observation for every input, even
@@ -332,6 +354,11 @@ def memory_relation_candidate_key(
 def memory_topic_input_proof(candidate_key: tuple[int, ...],
                              input_structure: QueryInputStructure) -> tuple[int, ...]:
     """把话题成员对应的原始输入 Span/关联候选完整写入 Evidence，而非存正文答案。"""
+    request = memory_operation_request_binding(candidate_key)
+    if request is not None:
+        if request not in input_structure.operation_request_bindings:
+            raise ValueError("operation request Evidence 不属于同一次完整输入")
+        return frame_key(MEMORY_TOPIC_PROOF_VERSION, input_structure.source_ref, request.stable_key())
     if (candidate_key and candidate_key[0] == MEMORY_CANDIDATE_VERSION
             and memory_candidate_category(candidate_key)
             == MEMORY_CATEGORY_GRAPH_INPUT):
@@ -362,3 +389,14 @@ def memory_topic_input_proof(candidate_key: tuple[int, ...],
                       and item.carrier_key == topic.carrier_key)
     return frame_key(MEMORY_TOPIC_PROOF_VERSION, input_structure.source_ref,
                      topic.stable_key(), frame_key(1, *projections), frame_key(2, *relations))
+
+
+def memory_operation_request_binding(candidate_key):
+    """只恢复完整 source-local request；其它 Memory 类别不补造请求。"""
+    if (not candidate_key or candidate_key[0] != MEMORY_CANDIDATE_VERSION
+            or memory_candidate_category(candidate_key) != MEMORY_CATEGORY_OPERATION_REQUEST):
+        return None
+    fields = _parts(candidate_key, MEMORY_CANDIDATE_VERSION)
+    if len(fields) != 2:
+        raise ValueError("Memory operation request candidate 被截断")
+    return InputOperationRequestBinding.from_stable_key(fields[1])

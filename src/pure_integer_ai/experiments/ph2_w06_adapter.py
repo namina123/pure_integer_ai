@@ -254,6 +254,76 @@ class W06RoleTypeViolation:
             raise W06TypedAdapterError("W-06 rejection violation 没有真实类型破坏")
 
 
+@dataclass(frozen=True, slots=True)
+class W06ParsedRelationGraph:
+    """Public, label-free structural parse shared by train and evaluation.
+
+    No teacher/evaluator outcome, sample role, perturbation marker, or expected
+    answer is read into this value. Type violations are structural facts; the
+    caller owns the policy that interprets them as a train rejection or an
+    evaluation graph rejection.
+    """
+
+    observation_key: StableRecordKey
+    source_ref: SourceRef
+    substage_key: str
+    relation_family: str
+    directionality: int
+    surface: str
+    endpoints: tuple[W06RelationEndpoint, ...]
+    schema: RelationSchema
+    proposition: AtomicPropositionDefinition
+    violations: tuple[W06RoleTypeViolation, ...]
+
+
+def parse_w06_relation_graph_structure(
+        observation: ObservationRecord,
+        source_record: SourceRefRecord,
+        ) -> W06ParsedRelationGraph:
+    """Validate W-06 topology without consulting sample or evaluator labels."""
+    if not isinstance(observation, ObservationRecord) or not isinstance(
+            source_record, SourceRefRecord):
+        raise TypeError("W-06 graph parser requires public observation and source")
+    if (observation.w_stage != "W-06"
+            or observation.payload_kind != "TypedRelationQuery"
+            or observation.source_ref_key != source_record.stable_key
+            or observation.license_partition != source_record.license_id):
+        raise W06TypedAdapterError("W-06 graph source, stage, or license drifted")
+    value = _typed_payload(observation)
+    declared_semantic_key = tuple(value["semantic_key"])
+    relation_family = value["relation_family"]
+    if not isinstance(relation_family, str):
+        raise W06TypedAdapterError("W-06 relation_family 非文本")
+    profile = W06_RELATION_PROFILES.get(relation_family)
+    if profile is None or profile.substage_key != observation.substage:
+        raise W06TypedAdapterError("W-06 relation family 与 substage 漂移")
+    directionality = value["directionality"]
+    if type(directionality) is not int or directionality != profile.directionality:
+        raise W06TypedAdapterError("W-06 directionality 与 registry 漂移")
+    endpoints = _adapt_endpoints(value["endpoints"], surface=value["surface"])
+    schema = _adapt_schema(value["relation_schema"])
+    proposition = _adapt_proposition(
+        value["candidate_definition"], schema, endpoints, validate_schema=False)
+    if proposition.source != authored_semantic_source(declared_semantic_key):
+        raise W06TypedAdapterError(
+            "W-06 semantic_key 与 Proposition 来源身份不一致")
+    if (schema.relation != authored_relation_identity(profile.relation_kind)
+            or proposition.predicate != schema.relation):
+        raise W06TypedAdapterError("W-06 relation identity 未匹配冻结 relation kind")
+    violations = _profile_type_violations(profile, schema, proposition)
+    if not violations:
+        try:
+            schema.validate_definition(proposition)
+        except (TypeError, ValueError) as error:
+            raise W06TypedAdapterError("W-06 relation schema validation failed") from error
+    return W06ParsedRelationGraph(
+        observation.stable_key, proposition.source,
+        observation.substage, relation_family, directionality,
+        value["surface"], endpoints, schema, proposition,
+        violations,
+    )
+
+
 @dataclass(frozen=True)
 class W06SchemaRejection:
     """在 relation candidate 形成前被 W-06 schema firewall 拒绝的 proposal。"""
@@ -680,32 +750,14 @@ def _adapt_candidate(
         observations: dict[StableRecordKey, ObservationRecord],
         ) -> W06RelationCandidate | W06SchemaRejection:
     """把合法 proposal 恢复为 candidate，并在形成前分流类型拒绝项。"""
+    parsed = parse_w06_relation_graph_structure(observation, source_record)
     value = _typed_payload(observation)
-    declared_semantic_key = tuple(value["semantic_key"])
-    relation_family = value["relation_family"]
-    if not isinstance(relation_family, str):
-        raise W06TypedAdapterError("W-06 relation_family 非文本")
-    profile = W06_RELATION_PROFILES.get(relation_family)
-    if profile is None or profile.substage_key != observation.substage:
-        raise W06TypedAdapterError("W-06 relation family 与 substage 漂移")
-    directionality = value["directionality"]
-    if type(directionality) is not int or directionality != profile.directionality:
-        raise W06TypedAdapterError("W-06 directionality 与 registry 漂移")
-    endpoints = _adapt_endpoints(value["endpoints"], surface=value["surface"])
-    schema = _adapt_schema(value["relation_schema"])
-    proposition = _adapt_proposition(
-        value["candidate_definition"],
-        schema,
-        endpoints,
-        validate_schema=observation.perturbation_kind != "TYPE_MISMATCH",
-    )
-    if proposition.source != authored_semantic_source(declared_semantic_key):
-        raise W06TypedAdapterError(
-            "W-06 semantic_key 与 Proposition 来源身份不一致")
-    if (schema.relation != authored_relation_identity(profile.relation_kind)
-            or proposition.predicate != schema.relation):
-        raise W06TypedAdapterError("W-06 relation identity 未匹配冻结 relation kind")
-    violations = _profile_type_violations(profile, schema, proposition)
+    relation_family = parsed.relation_family
+    directionality = parsed.directionality
+    endpoints = parsed.endpoints
+    schema = parsed.schema
+    proposition = parsed.proposition
+    violations = parsed.violations
     if violations:
         if (observation.sample_role != "refute"
                 or observation.perturbation_kind != "TYPE_MISMATCH"):
@@ -713,11 +765,11 @@ def _adapt_candidate(
         return W06SchemaRejection(
             observation,
             source_record,
-            proposition.source,
-            observation.substage,
+            parsed.source_ref,
+            parsed.substage_key,
             relation_family,
             directionality,
-            value["surface"],
+            parsed.surface,
             endpoints,
             schema.schema,
             schema.relation,
@@ -759,7 +811,7 @@ def _adapt_candidate(
         observation.substage,
         relation_family,
         directionality,
-        value["surface"],
+        parsed.surface,
         endpoints,
         schema,
         proposition,
@@ -892,12 +944,15 @@ def _rejection_evidence_binding(
 
 def adapt_w06_training_payload(
         payload: W06TrainingPayload,
+        *,
+        require_full_curriculum: bool = True,
         ) -> W06TypedAdapterOutput:
     """只适配 W-06 TypedRelationQuery，保留其他阶段 train pack 不消费。"""
     if not isinstance(payload, W06TrainingPayload):
         raise TypeError("W-06 adapter 只接受 W06TrainingPayload")
     try:
-        audit_w06_registry_payload(payload)
+        audit_w06_registry_payload(
+            payload, require_full_curriculum=require_full_curriculum)
     except W06RegistryError as error:
         raise W06TypedAdapterError(
             f"W-06 registry payload 审计失败：{error}") from error
@@ -1036,6 +1091,7 @@ __all__ = [
     "W06RejectionEvidenceBinding",
     "W06RelationCandidate",
     "W06RelationEndpoint",
+    "W06ParsedRelationGraph",
     "W06RoleTypeViolation",
     "W06SchemaRejection",
     "W06SourceBinding",
@@ -1045,6 +1101,7 @@ __all__ = [
     "W06_NAMESPACE",
     "W06_REJECTION_TYPE_MISMATCH",
     "adapt_w06_training_payload",
+    "parse_w06_relation_graph_structure",
     "w06_directionality_binding_predicate",
     "w06_directionality_value",
     "w06_relation_protocol",

@@ -337,6 +337,33 @@ class SemanticGraph:
             for key in sorted(propositions, key=ObjectIdentity.stable_key)
         )
 
+    def lookup_atomic_by_predicate(
+            self, predicate: ObjectIdentity,
+            ) -> tuple[MaterializedAtomicProposition, ...]:
+        """按完整 predicate 反查全部命题并核验拓扑，保留所有证据状态。"""
+        if not isinstance(predicate, ObjectIdentity):
+            raise TypeError("lookup predicate 必须是 ObjectIdentity")
+        if predicate.object_kind != OBJECT_CONCEPT:
+            raise ValueError("lookup predicate 必须是一等 Concept")
+        predicate_ref = self._ontology.resolve(predicate)
+        if predicate_ref is None:
+            return ()
+        propositions: dict[ObjectIdentity, MaterializedAtomicProposition] = {}
+        for statement in self._ontology.statements(
+                predicate=self._predicates.proposition_predicate,
+                object_ref=predicate_ref):
+            restored = self.read_atomic(statement.subject)
+            if restored.definition.predicate != predicate:
+                raise SemanticTopologyError(
+                    "predicate 反向索引命中的 Proposition 未保留请求 predicate")
+            identity = restored.definition.proposition
+            existing = propositions.get(identity)
+            if existing is not None and existing != restored:
+                raise SemanticTopologyError("同一 Proposition 反向恢复结果不一致")
+            propositions[identity] = restored
+        return tuple(propositions[key] for key in sorted(
+            propositions, key=ObjectIdentity.stable_key))
+
     def lookup_atomic_by_filler(
             self, filler: ObjectIdentity,
             ) -> tuple[MaterializedAtomicProposition, ...]:

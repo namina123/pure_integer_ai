@@ -103,8 +103,7 @@ def derive_discourse_topic_candidates(
         graph_closed = (
             relation.state == STRUCTURE_CLOSED
             and relation.required_count >= 2
-            and relation.required_count == relation.support_count
-            and relation.predicate_coverage == 1)
+            and relation.required_count == relation.support_count)
         if not graph_closed:
             continue
         members = tuple(sorted(set(
@@ -120,6 +119,12 @@ def derive_discourse_topic_candidates(
             and item.source_ref == relation.source_ref
             and item.projection_kind == PROJECTION_FILLER
         )))
+        # A closed relation can survive a scoped composition projection after
+        # its filler spans have been filtered out.  The authoritative Memory
+        # compiler intentionally emits no topic for that syntax-only row;
+        # keep this adapter on the same content-backed boundary.
+        if not members:
+            continue
         topic_key = frame_key(
             MEMORY_CANDIDATE_VERSION,
             (MEMORY_CATEGORY_DISCOURSE,),
@@ -140,11 +145,14 @@ def derive_discourse_topic_candidates(
         if (memory_candidate_category(key) == MEMORY_CATEGORY_DISCOURSE
             and key[0] == MEMORY_CANDIDATE_VERSION)
     }
-    if set(relation_by_key) != compiled:
+    # Open predicate-covered relations may carry a bounded Memory topic route,
+    # but they are not active discourse topics until the relation is closed.
+    compiled_closed = compiled.intersection(relation_by_key)
+    if set(relation_by_key) != compiled_closed:
         raise ValueError("discourse topic compiler output drifted from Memory keys")
 
     result = []
-    for key in sorted(compiled):
+    for key in sorted(compiled_closed):
         topic = memory_topic_candidate(key)
         if topic is None:
             raise ValueError("category-7 candidate is not a complete topic")

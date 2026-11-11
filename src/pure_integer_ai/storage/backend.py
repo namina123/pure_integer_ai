@@ -82,6 +82,11 @@ class StorageBackend(Protocol):
                where_gt: dict[str, int] | None = None,
                order_by: str | None = None, *, descending: bool = False,
                limit: int | None = None) -> list[dict[str, Any]]: ...
+    def select_in(
+            self, table: str, column: str, values: tuple[Any, ...],
+            where: dict[str, Any] | None = None,
+            order_by: str | None = None,
+            ) -> list[dict[str, Any]]: ...
     def count(self, table: str, where: dict[str, Any] | None = None) -> int: ...
     def delete(self, table: str, where: dict[str, Any]) -> int: ...
     def next_id(self, space_id: int) -> int: ...
@@ -456,6 +461,40 @@ class _BaseBackend:
             telemetry.record("select", table, rows=len(rows))
         return rows
 
+    def select_in(
+            self, table: str, column: str, values: tuple[Any, ...],
+            where: dict[str, Any] | None = None,
+            order_by: str | None = None,
+            ) -> list[dict[str, Any]]:
+        """Select rows whose one column belongs to a bound value tuple."""
+        meta = self._meta(table)
+        if (not isinstance(column, str) or column not in meta["columns"]
+                or (order_by is not None
+                    and (not isinstance(order_by, str)
+                         or order_by not in meta["columns"]))):
+            raise ValueError("select_in column must name a table column")
+        if (not isinstance(values, tuple)
+                or any(type(value) not in {int, str} for value in values)):
+            raise TypeError("select_in values must be an integer/text tuple")
+        if not values:
+            return []
+        values = tuple(dict.fromkeys(values))
+        if where is not None and (
+                not isinstance(where, dict)
+                or any(key not in meta["columns"] for key in where)):
+            raise ValueError("select_in filters must name table columns")
+        telemetry = active_backend_telemetry()
+        try:
+            rows = self._do_select_in(
+                table, column, values, where, order_by)
+        except BaseException:
+            if telemetry is not None:
+                telemetry.record("select", table, failed=True)
+            raise
+        if telemetry is not None:
+            telemetry.record("select", table, rows=len(rows))
+        return rows
+
     def count(self, table: str, where: dict[str, Any] | None = None) -> int:
         """计数匹配行（**零 copy**·dedup 存在性检查 / size 函数用·替代 select+len）。
 
@@ -628,6 +667,7 @@ class _BaseBackend:
             self._do_insert(table, row)
     def _do_update(self, table, where, set_): raise NotImplementedError
     def _do_select(self, table, where, where_gt, order_by, descending, limit): raise NotImplementedError
+    def _do_select_in(self, table, column, values, where, order_by): raise NotImplementedError
     def _do_count(self, table, where): raise NotImplementedError
     def _do_delete(self, table, where): raise NotImplementedError
 
@@ -806,6 +846,19 @@ class DictBackend(_BaseBackend):
                      reverse=descending)
         if limit is not None:
             out = out[:limit]
+        return out
+
+    def _do_select_in(self, table, column, values, where, order_by):
+        accepted = set(values)
+        cands = self._covering_candidates(table, where)
+        src = cands if cands is not None else self._data[table]
+        out = [dict(row) for row in src
+               if row.get(column) in accepted
+               and (not where or all(row.get(key) == value
+                                     for key, value in where.items()))]
+        if order_by is not None:
+            out.sort(key=lambda row: (row.get(order_by) is None,
+                                      row.get(order_by)))
         return out
 
     def _do_count(self, table, where):
@@ -1041,6 +1094,35 @@ class SQLiteBackend(_BaseBackend):
         col_names = [d[0] for d in cur.description]
         return [dict(zip(col_names, r)) for r in cur.fetchall()]
 
+    def _do_select_in(self, table, column, values, where, order_by):
+        # Stay below SQLite builds with the traditional 999-variable limit,
+        # accounting for equality filters in each chunk.
+        filter_count = len(where or {})
+        if filter_count >= 999:
+            raise ValueError("select_in filters exceed SQLite bind limit")
+        chunk_size = min(900, 999 - filter_count)
+        result = []
+        for offset in range(0, len(values), chunk_size):
+            chunk = values[offset:offset + chunk_size]
+            clauses, params = self._equality_clauses(where)
+            clauses.append(
+                f"{self._q(column)} IN ({','.join('?' for _ in chunk)})")
+            params.extend(chunk)
+            where_sql = " WHERE " + " AND ".join(clauses)
+            order_sql = ("" if order_by is None else
+                         f" ORDER BY {self._q(order_by)} IS NULL, "
+                         f"{self._q(order_by)}")
+            cur = self._conn.execute(
+                f"SELECT * FROM {self._q(table)}{where_sql}{order_sql}",
+                tuple(params),
+            )
+            columns = [description[0] for description in cur.description]
+            result.extend(dict(zip(columns, row)) for row in cur.fetchall())
+        if order_by is not None and len(values) > chunk_size:
+            result.sort(key=lambda row: (row.get(order_by) is None,
+                                         row.get(order_by)))
+        return result
+
     def _do_count(self, table, where):
         # SELECT COUNT(*)（零行 fetch·镜像 DictBackend._do_count 语义·dedup/size 用）。
         clauses, params = self._equality_clauses(where)
@@ -1073,6 +1155,11 @@ class SQLiteBackend(_BaseBackend):
         """在任何 SQL mutation 之前拒绝只读 owner，避免依赖宿主报错文本。"""
         if self._read_only:
             raise RuntimeError("只读 SQLite owner 禁止写入")
+
+    def bounded_case(self, *, max_database_bytes: int):
+        """提供显式主库硬限与延迟提交作用域；算法由存储资源模块负责。"""
+        from pure_integer_ai.storage.sqlite_case_budget import SQLiteCaseBudget
+        return SQLiteCaseBudget(self, max_database_bytes=max_database_bytes)
 
     def close(self) -> None:
         delete_path = self._delete_on_close_path

@@ -69,6 +69,115 @@ def _write_json_gzip(value: object, target: Path) -> str:
     return digest.hexdigest()
 
 
+def _validate_resolved_reference_generation(
+        trace: dict[str, object],
+        resolutions: tuple[object, ...],
+        ) -> int:
+    """Validate resolved REFERS provenance across all typed generation kinds.
+
+    Open-role generations expose their discourse objects directly.  Factual,
+    generic, and composed generations intentionally expose only their typed
+    integer generation record; their ResponsePlan is the provenance carrier
+    for discourse links and Memory O/H references.  Do not require an
+    open-role-only ``discourse_context`` field for those generation kinds.
+    """
+    generation = trace.get("generation")
+    response_plan = trace.get("response_plan")
+    if not isinstance(generation, dict) or not isinstance(response_plan, dict):
+        raise AssertionError("已解析跨轮指代缺少 generation 或 ResponsePlan")
+
+    def integer_keys(value: object, field: str) -> set[tuple[int, ...]]:
+        if not isinstance(value, (list, tuple)):
+            raise AssertionError(f"{field} 不是整数键集合")
+        result = set()
+        for item in value:
+            if not isinstance(item, (list, tuple)) or not item:
+                raise AssertionError(f"{field} 包含非法整数键")
+            if any(type(part) is not int for part in item):
+                raise AssertionError(f"{field} 包含非整数来源")
+            result.add(tuple(item))
+        return result
+
+    plan_links = integer_keys(response_plan.get("discourse_links", ()),
+                              "ResponsePlan.discourse_links")
+    plan_events = integer_keys(response_plan.get("event_refs", ()),
+                               "ResponsePlan.event_refs")
+    plan_memory = integer_keys(response_plan.get("memory_refs", ()),
+                               "ResponsePlan.memory_refs")
+    generation_context = generation.get("discourse_context")
+    generation_reference = generation.get("reference_provenance")
+    if generation_context is not None:
+        generation_context = integer_keys(generation_context,
+                                          "generation.discourse_context")
+    if generation_reference is not None:
+        if not isinstance(generation_reference, dict):
+            raise AssertionError("generation.reference_provenance 结构非法")
+        reference_objects = integer_keys(
+            generation_reference.get("discourse_objects", ()),
+            "generation.reference_provenance.discourse_objects")
+        reference_memory = integer_keys(
+            generation_reference.get("memory_refs", ()),
+            "generation.reference_provenance.memory_refs")
+        reference_keys = integer_keys(
+            generation_reference.get("resolution_keys", ()),
+            "generation.reference_provenance.resolution_keys")
+        required_objects = {
+            key for item in resolutions for key in
+            (identity.stable_key() for identity in item.discourse_objects())}
+        required_resolution_keys = {item.stable_key() for item in resolutions}
+        required_memory = {
+            key for item in resolutions
+            for supporter in item.supporting_candidates
+            for key in (supporter.occurrence.observation.stable_key(),
+                        supporter.occurrence.hypothesis.stable_key())
+        }
+        if (not required_objects <= reference_objects
+                or not required_memory <= reference_memory
+                or not required_resolution_keys <= reference_keys):
+            raise AssertionError("generation 未携带完整 REFERS 整数 provenance")
+    else:
+        # kind=1 factual, kind=3 generic, and kind=4 composed factual traces
+        # carry typed connector representations instead of open-role context.
+        # An unknown generation schema must remain a diagnostic failure.
+        kind = generation.get("kind")
+        if kind not in {1, 3, 4}:
+            raise AssertionError(
+                "缺少 discourse_context 的 generation kind 未注册")
+        if kind in {1, 3}:
+            representations = generation.get("representations")
+            if (not isinstance(representations, (list, tuple))
+                    or not representations):
+                raise AssertionError("typed generation 缺少图内 representations")
+        elif (not integer_keys(generation.get("claim_keys", ()),
+                               "generation.claim_keys")
+              or not integer_keys((generation.get("surface_values", ()),),
+                                  "generation.surface_values")):
+            raise AssertionError("composed generation 缺少 claim 或表层整数")
+
+    carried_winners = 0
+    for resolution in resolutions:
+        supporters = resolution.supporting_candidates
+        target = resolution.winner_target
+        objects = {item.stable_key() for item in resolution.discourse_objects()}
+        if not supporters or target is None:
+            raise AssertionError("跨轮指代 winner 缺少目标")
+        if generation_context is not None and not objects <= generation_context:
+            raise AssertionError("跨轮指代 winner 未进入 generation 篇章 provenance")
+        if generation_reference is not None and not objects <= reference_objects:
+            raise AssertionError("跨轮指代 winner 未进入 generation.reference_provenance")
+        if not objects <= plan_links:
+            raise AssertionError("跨轮指代 winner 未进入 ResponsePlan discourse_links")
+        if any(supporter.occurrence.observation.stable_key() not in plan_memory
+               or supporter.occurrence.hypothesis.stable_key() not in plan_memory
+               for supporter in supporters):
+            raise AssertionError("跨轮指代 winner O/H 未进入 ResponsePlan memory_refs")
+        if (target.object_kind == OBJECT_EVENT
+                and target.stable_key() not in plan_events):
+            raise AssertionError("跨轮指代 event target 未进入 ResponsePlan event_refs")
+        carried_winners += 1
+    return carried_winners
+
+
 def _snapshot(memory) -> tuple[tuple[tuple[int, ...], ...], ...]:
     """提取全部权威对象引用，确认原始历史没有被覆盖或截断。"""
     state = memory.active_structures()
@@ -218,29 +327,9 @@ def run_slice(database: Path, run_root: Path, inputs: tuple[str, ...],
             carried_winners = 0
             resolved = tuple(item for item in resolutions
                              if item.status == REFERENCE_RESOLVED)
-            if resolved and trace["open_response_generations"]:
-                generation_context = {
-                    tuple(item) for item in trace["generation"]["discourse_context"]}
-                plan_links = {
-                    tuple(item) for item in trace["response_plan"]["discourse_links"]}
-                plan_events = {
-                    tuple(item) for item in trace["response_plan"]["event_refs"]}
-                plan_memory = {
-                    tuple(item) for item in trace["response_plan"]["memory_refs"]}
-                for resolution in resolved:
-                    winner = resolution.winner
-                    target = resolution.winner_target
-                    objects = {item.stable_key()
-                               for item in resolution.discourse_objects()}
-                    if (winner is None or target is None
-                            or not objects <= generation_context
-                            or not objects <= plan_links
-                            or winner.occurrence.observation.stable_key() not in plan_memory
-                            or winner.occurrence.hypothesis.stable_key() not in plan_memory
-                            or (target.object_kind == OBJECT_EVENT
-                                and target.stable_key() not in plan_events)):
-                        raise AssertionError("跨轮指代 winner 未进入 G-02 与 ResponsePlan")
-                    carried_winners += 1
+            if resolved:
+                carried_winners = _validate_resolved_reference_generation(
+                    trace, resolved)
             spaces = {item["space"] for item in trace["evidence"]}
             if spaces != {1, 2, 3} or any(item["status"] == 1 for item in trace["roots"]):
                 raise AssertionError("开放角色没有完成同次三图根和证据参与")

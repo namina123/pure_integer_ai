@@ -1,7 +1,7 @@
 """W-06 typed relation 的 SemanticGraph、H-05、R-00 与 withdrawal 闭环。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from pure_integer_ai.cognition.shared.candidate_projection import (
     CandidateProjectionGraph,
@@ -48,6 +48,7 @@ from pure_integer_ai.cognition.shared.identity import (
 )
 from pure_integer_ai.cognition.shared.relation_closure import (
     ActiveRelationClosureConsumer,
+    RelationClosureCandidateSpec,
 )
 from pure_integer_ai.cognition.shared.scope_identity import document_scope
 from pure_integer_ai.cognition.shared.semantic_graph import (
@@ -367,11 +368,18 @@ class W06RelationLearningRuntime:
             self.consumer,
             self.relation_protocol,
         )
-        requests = tuple(
-            (candidate.spec, ordinal)
-            for ordinal, candidate in enumerate(adapter.candidates)
-        )
+        # Additive SQLite resume can present an existing semantic candidate at
+        # a different position after a new pack inserts a lower-sorting
+        # candidate.  Formation Evidence is append-only and its timestamp is
+        # part of the persisted contract, so reusing the adapter ordinal here
+        # would reinterpret old history.  Keep the old formation base for
+        # restored candidates and allocate a fresh tail for genuinely new
+        # candidates.
+        requests = self._formation_requests(adapter)
         self.closure.preflight_many(requests, ())
+        specs_by_candidate = {
+            spec.proposition.proposition: spec for spec, _timestamp in requests
+        }
         for candidate in adapter.candidates:
             self.semantic_graph.define_atomic(
                 candidate.proposition,
@@ -379,9 +387,108 @@ class W06RelationLearningRuntime:
                 provenance_kind=SOURCE_BARE_TEXT,
                 epistemic_origin=EPI_STRUCTURED,
             )
-            self._candidates[candidate.proposition.proposition] = candidate
+            spec = specs_by_candidate[candidate.proposition.proposition]
+            self._candidates[candidate.proposition.proposition] = (
+                candidate if candidate.spec == spec
+                else replace(candidate, spec=spec)
+            )
         self.closure.form_many(requests)
         self._adapter = adapter
+
+    def _formation_requests(
+            self, adapter: W06TypedAdapterOutput,
+            ) -> tuple[tuple[RelationClosureCandidateSpec, int], ...]:
+        """Build deterministic forming requests across additive resume.
+
+        Existing candidates are matched by their complete H-05 hypothesis and
+        recover the timestamp base from persisted forming Evidence.  New
+        candidates are assigned contiguous timestamps after the restored owner
+        clock; a fresh owner retains the historical zero-based ordinal layout.
+        """
+        protocol = self.learning.engine.protocol
+        requests: list[tuple[RelationClosureCandidateSpec, int | None]] = []
+        new_specs: list[RelationClosureCandidateSpec] = []
+        known_count = 0
+        for candidate in adapter.candidates:
+            spec = candidate.spec
+            definition = spec.candidate_definition(self.relation_protocol)
+            hypothesis = definition.hypothesis(protocol)
+            try:
+                prior = self.learning.hypothesis_for_candidate(
+                    definition.candidate)
+            except KeyError:
+                prior = None
+            if prior is None:
+                new_specs.append(spec)
+                requests.append((spec, None))
+                continue
+            known_count += 1
+            restored_definition = self.learning.engine.definition(prior)
+            if prior != hypothesis:
+                if (
+                    definition.candidate == restored_definition.candidate
+                    and definition.bindings == restored_definition.bindings
+                    and definition.forming_sources
+                    == restored_definition.forming_sources
+                    and definition.competition_key
+                    != restored_definition.competition_key
+                ):
+                    # Additive source identities can change the competition
+                    # root while the complete typed proposition stays fixed.
+                    # Preserve the restored group only for this exact case.
+                    spec = RelationClosureCandidateSpec(
+                        spec.proposition,
+                        spec.schema,
+                        restored_definition.competition_key,
+                        spec.forming_sources,
+                        spec.domain_bindings,
+                    )
+                    definition = spec.candidate_definition(
+                        self.relation_protocol)
+                    hypothesis = definition.hypothesis(protocol)
+                if prior != hypothesis:
+                    raise W06LearningError(
+                        "同一 relation candidate 在恢复 owner 中绑定不同 Hypothesis")
+            forming = tuple(
+                item for item in self.learning.engine.ledger.evidence_history(
+                    prior)
+                if (item.reason_key == protocol.formation_reason_key
+                    and item.source in restored_definition.forming_sources)
+            )
+            if len(forming) != len(restored_definition.forming_sources):
+                raise W06LearningError(
+                    "既有 relation candidate 缺少完整 forming Evidence")
+            timestamps = tuple(sorted(item.timestamp_seq for item in forming))
+            base = timestamps[0]
+            if timestamps != tuple(
+                    range(base, base + len(restored_definition.forming_sources))):
+                raise W06LearningError(
+                    "既有 relation candidate forming 逻辑序不连续")
+            requests.append((spec, base))
+
+        if new_specs:
+            total_slots = sum(
+                len(item.forming_sources)
+                for item in new_specs
+            )
+            if known_count:
+                allocated = self.learning.next_timestamps(total_slots)
+                cursor = 0
+            else:
+                allocated = tuple(range(total_slots))
+                cursor = 0
+            by_spec: dict[RelationClosureCandidateSpec, int] = {}
+            for spec in new_specs:
+                by_spec[spec] = allocated[cursor]
+                cursor += len(spec.forming_sources)
+            requests = [
+                (spec, by_spec[spec] if timestamp is None else timestamp)
+                for spec, timestamp in requests
+            ]
+        return tuple(
+            (spec, timestamp) for spec, timestamp in requests
+            if timestamp is not None
+        )
 
     def _recognize(
             self,
@@ -392,6 +499,7 @@ class W06RelationLearningRuntime:
             stance_ordinal: int,
             derived_supersede: bool,
             replacement: ObjectIdentity | None = None,
+            restore_only: bool = False,
             ) -> W06EvidenceAccount:
         """执行一次来源化 prediction、独立 reveal、H-04 和 relation projection。"""
         if self.closure is None:
@@ -439,7 +547,13 @@ class W06RelationLearningRuntime:
             archive_refuted=False,
             replacement=replacement,
         )
-        trace = self.closure.recognize(input_value)
+        trace = (
+            self.closure.restore_recognition(input_value)
+            if restore_only else self.closure.recognize(input_value)
+        )
+        if trace is None:
+            raise W06LearningError(
+                "持久 relation recognition route 缺失，拒绝伪造恢复")
         return W06EvidenceAccount(
             binding,
             candidate_id,
@@ -448,6 +562,110 @@ class W06RelationLearningRuntime:
             event_key,
             trace,
             derived_supersede,
+        )
+
+    def _restore_application(
+            self, binding: W06EvidenceBinding,
+            ) -> W06EvidenceApplication | None:
+        """从既有 recognition/Revision 历史重建一个 teacher application。"""
+        if self._adapter is None:
+            raise W06LearningError("恢复 Evidence application 前必须登记 adapter")
+        prior_binding = None
+        if binding.supersedes_observation_key is not None:
+            prior_binding = next((item for item in self._adapter.evidence
+                                  if item.observation.stable_key
+                                  == binding.supersedes_observation_key), None)
+            if prior_binding is not None:
+                prior_route = prior_binding.teacher_record.stable_key.stable_key()
+                if prior_route not in self._applications:
+                    restored_prior = self._restore_application(prior_binding)
+                    if restored_prior is not None:
+                        self._applications[prior_route] = restored_prior
+        normal_source = _teacher_source(binding)
+        normal_event = _event_key(
+            binding,
+            binding.candidate,
+            stance=binding.stances[0] if binding.stances else EVIDENCE_UNKNOWN,
+            stance_ordinal=0,
+            derived_supersede=False,
+        )
+        formation = self._candidates.get(binding.candidate)
+        if formation is None:
+            raise W06LearningError("恢复 Evidence 引用了未登记 relation candidate")
+        hypothesis = self.learning.hypothesis_for_candidate(binding.candidate)
+        if self.learning.engine.recognition_for_route(
+                hypothesis, normal_source, normal_event) is None:
+            return None
+        accounts = []
+        for ordinal, stance in enumerate(binding.stances):
+            accounts.append(self._recognize(
+                binding,
+                binding.candidate,
+                stance=stance,
+                stance_ordinal=ordinal,
+                derived_supersede=False,
+                restore_only=True,
+            ))
+        superseded = []
+        prior_application = None
+        same_candidate_revision = False
+        if binding.supersedes_observation_key is not None:
+            targets = tuple(sorted(
+                (
+                    item.candidate.proposition.proposition
+                    for item in self._adapter.observations
+                    if item.observation.stable_key
+                    == binding.supersedes_observation_key
+                ),
+                key=ObjectIdentity.stable_key,
+            ))
+            prior_application = next((item for item in self._applications.values()
+                                      if item.binding.observation.stable_key
+                                      == binding.supersedes_observation_key), None)
+            same_candidate_revision = (
+                prior_application is not None
+                and prior_application.binding.candidate == binding.candidate)
+            distinct_targets = (() if same_candidate_revision else tuple(
+                target for target in targets if target != binding.candidate))
+            for ordinal, target in enumerate(distinct_targets):
+                accounts.append(self._recognize(
+                    binding,
+                    target,
+                    stance=EVIDENCE_REFUTE,
+                    stance_ordinal=ordinal,
+                    derived_supersede=True,
+                    replacement=binding.candidate,
+                    restore_only=True,
+                ))
+                superseded.append(target)
+        revisions = []
+        prior_accounts = (() if prior_application is None
+                          else prior_application.accounts)
+        for ordinal, account in enumerate(prior_accounts):
+            prior = account.trace.outcome.evidence
+            if binding.supersedes_observation_key is None:
+                continue
+            if not same_candidate_revision:
+                continue
+            evidence_id = _SEMANTIC_REVISION_HASHER.h63((
+                prior.stable_key(),
+                binding.teacher_record.stable_key.stable_key(),
+                ordinal,
+            )) or 1
+            history = self.learning.engine.ledger.evidence_history(
+                prior.hypothesis)
+            revision = next((item for item in history
+                             if item.evidence_id == evidence_id), None)
+            if revision is None:
+                raise W06LearningError(
+                    "持久 parser revision Evidence 缺失，拒绝伪造恢复")
+            revisions.append(revision)
+        return W06EvidenceApplication(
+            binding,
+            tuple(accounts),
+            tuple(sorted(set(superseded), key=ObjectIdentity.stable_key)),
+            binding.supersedes_observation_key is not None,
+            tuple(revisions),
         )
 
     def apply_evidence(
@@ -461,6 +679,11 @@ class W06RelationLearningRuntime:
             if existing.binding != binding:
                 raise W06LearningError("同一 teacher route 绑定不同 Evidence")
             return existing
+
+        restored = self._restore_application(binding)
+        if restored is not None:
+            self._applications[route] = restored
+            return restored
 
         accounts = []
         superseded = []

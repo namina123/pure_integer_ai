@@ -88,6 +88,42 @@ def test_w06_owner_restores_h00_h04_from_current_authored_courses(tmp_path):
         backend.close()
 
 
+def test_w06_restored_owner_reuses_recognition_evidence_without_new_clock(
+        tmp_path):
+    """恢复后重放 authored adapter 必须复用 route、Evidence 和原逻辑序。"""
+    adapter = build_authored_w06_adapter(
+        _relation_courses(), tmp_path / "typed-relation-pack")
+    backend = DictBackend()
+    try:
+        first = build_w06_learning_runtime(backend, adapter)
+        before_backend = backend.snapshot()
+        before_state = first.learning.state_key()
+        before_report = first.report()
+
+        restored = W06RelationLearningRuntime(backend)
+        restored.register_adapter_output(adapter)
+        restored.apply_all(adapter)
+
+        assert backend.snapshot() == before_backend
+        assert restored.learning.state_key() == before_state
+        assert restored.report() == before_report
+        assert len(restored.applications()) == len(first.applications())
+        for left, right in zip(
+                first.applications(), restored.applications(), strict=True):
+            assert left.binding == right.binding
+            assert left.superseded_candidates == right.superseded_candidates
+            assert left.reparse == right.reparse
+            assert len(left.accounts) == len(right.accounts)
+            for old_account, new_account in zip(
+                    left.accounts, right.accounts, strict=True):
+                assert old_account.event_key == new_account.event_key
+                assert (old_account.trace.outcome.evidence
+                        == new_account.trace.outcome.evidence)
+            assert left.superseded_evidence == right.superseded_evidence
+    finally:
+        backend.close()
+
+
 def test_trained_relation_graph_reopens_read_only_without_course_or_qa(tmp_path):
     """关闭训练 owner 后只凭 SQLite 恢复 active 命题并执行稀疏 filler 查询。"""
     database = tmp_path / "training.sqlite3"

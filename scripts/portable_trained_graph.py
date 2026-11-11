@@ -126,6 +126,13 @@ def _run(root: Path, model: Path, args: argparse.Namespace) -> int:
     forwarded = ["--release-root", str(model), "--protocol", args.protocol]
     if args.session is not None:
         forwarded.extend(("--memory-database", str(Path(args.session).expanduser().resolve())))
+    for attribute, option in (
+            ("memory_tenant_id", "--memory-tenant-id"),
+            ("memory_user_id", "--memory-user-id"),
+            ("memory_session_id", "--memory-session-id")):
+        value = getattr(args, attribute, None)
+        if value is not None:
+            forwarded.extend((option, str(value)))
     if args.metrics is not None:
         forwarded.extend(("--metrics-output", str(Path(args.metrics).expanduser().resolve())))
     return main(forwarded)
@@ -134,12 +141,18 @@ def _run(root: Path, model: Path, args: argparse.Namespace) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="运行训练后整数关系图便携包")
     sub = parser.add_subparsers(dest="command", required=True)
-    terminal = sub.add_parser("terminal", help="启动终端文本对话")
-    terminal.add_argument("--model", default=None)
-    terminal.add_argument("--session", default=None,
-                          help="可选会话 SQLite 路径，模型目录之外")
-    terminal.add_argument("--metrics", default=None)
-    terminal.set_defaults(protocol="terminal")
+    for name, help_text, protocol in (
+            ("terminal", "启动终端文本对话", "terminal"),
+            ("jsonl", "启动 JSONL 对话协议", "jsonl")):
+        command = sub.add_parser(name, help=help_text)
+        command.add_argument("--model", default=None)
+        command.add_argument("--session", default=None,
+                             help="可选会话 SQLite 路径，模型目录之外")
+        command.add_argument("--memory-tenant-id", type=int, default=1)
+        command.add_argument("--memory-user-id", type=int, default=1)
+        command.add_argument("--memory-session-id", type=int, default=1)
+        command.add_argument("--metrics", default=None)
+        command.set_defaults(protocol=protocol)
     verify = sub.add_parser("verify", help="核验整个便携包及训练后发布根")
     verify.add_argument("--model", default=None)
     return parser

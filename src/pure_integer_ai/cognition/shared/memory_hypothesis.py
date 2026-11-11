@@ -145,13 +145,8 @@ class MemoryHypothesisEventSink(HypothesisEventSink):
             observed_at,
             evidence.stable_key(),
         )
-        ref = memory_object_ref(
-            self.event_log.memory_space_identity,
-            MEMORY_OBJECT_EVIDENCE,
-            payload.stable_key(),
-            owner=evidence.hypothesis.observation.owner,
-            versions=evidence.hypothesis.observation.versions,
-        )
+        ref = self.event_log.declaration_ref(
+            MEMORY_EVENT_EVIDENCE, payload, scope=evidence.hypothesis.scope)
         self.event_log.append(MemoryEvent(
             MEMORY_EVENT_EVIDENCE,
             ref,

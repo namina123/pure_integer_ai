@@ -5,11 +5,14 @@ from typing import Callable, Iterator
 
 from pure_integer_ai.cognition.shared.identity import SourceRef
 from pure_integer_ai.cognition.shared.memory_event import (
+    EpisodePayload,
     EvidencePayload,
     HypothesisPayload,
     MEMORY_EVENT_EVIDENCE,
     MEMORY_EVENT_HYPOTHESIS,
+    MEMORY_EVENT_EPISODE,
 )
+from pure_integer_ai.cognition.shared.memory_record_identity import observation_reference_source
 from pure_integer_ai.cognition.shared.memory_event_log import (
     MaterializedMemoryEvent,
     MemoryEventLog,
@@ -22,8 +25,8 @@ from pure_integer_ai.storage.memory_event import MemoryEventRecordStore
 
 
 # 路由语义升级必须新建投影，旧 cursor 不能跳过历史；权威 O/H/E 与旧表均保留。
-CANDIDATE_INDEX_TABLE = "dialogue_memory_candidate_index_v3"
-CANDIDATE_CURSOR_TABLE = "dialogue_memory_candidate_cursor_v3"
+CANDIDATE_INDEX_TABLE = "dialogue_memory_candidate_index_v4"
+CANDIDATE_CURSOR_TABLE = "dialogue_memory_candidate_cursor_v4"
 _ROUTE_HASHER = Hasher("trained_memory_candidate.route.v1")
 _SELECTOR_COLUMNS = (
     "space_id", "tenant_id", "user_id", "session_id", "source_kind", "source_id",
@@ -36,7 +39,16 @@ def evidence_target_route(hypothesis_key: tuple[int, ...]) -> tuple[int, ...]:
     return 4, len(hypothesis_key), *hypothesis_key
 
 
-# object-model: resource_owner; representation=runtime; interop=memory-candidate-index-v3
+def episode_input_route(observation_key: tuple[int, ...]) -> tuple[int, ...]:
+    """按完整输入引用定位它实际处理后的Episode，不索引旧答案或表面。"""
+    from pure_integer_ai.cognition.shared.memory_event import MemoryObjectRef, MEMORY_OBJECT_OBSERVATION
+    ref = MemoryObjectRef.from_stable_key(observation_key)
+    if ref.object_kind != MEMORY_OBJECT_OBSERVATION:
+        raise ValueError('Episode input route requires an Observation')
+    return 5, len(observation_key), *observation_key
+
+
+# object-model: resource_owner; representation=runtime; interop=memory-candidate-index-v4
 class MemoryCandidateIndex:
     """持有可丢弃物理索引；候选语义始终回读原事件核验。"""
 
@@ -97,6 +109,10 @@ class MemoryCandidateIndex:
     def _event_routes(self, event: MaterializedMemoryEvent) -> tuple[tuple[int, ...], ...]:
         """从候选或 Evidence 的显式目标关系恢复可索引路由。"""
         payload = event.event.payload
+        if isinstance(payload, EpisodePayload):
+            source = observation_reference_source(payload.input_observation_ref)
+            return ((episode_input_route(payload.input_observation_ref.stable_key()),)
+                    if self._owns_source(source) else ())
         if isinstance(payload, HypothesisPayload):
             return (self.route_keys(payload.hypothesis.candidate_key)
                     if self._owns_source(payload.hypothesis.observation) else ())
@@ -124,7 +140,7 @@ class MemoryCandidateIndex:
             if not records:
                 break
             for record in records:
-                if (record.event_kind not in {MEMORY_EVENT_HYPOTHESIS, MEMORY_EVENT_EVIDENCE}
+                if (record.event_kind not in {MEMORY_EVENT_HYPOTHESIS, MEMORY_EVENT_EVIDENCE, MEMORY_EVENT_EPISODE}
                         or record.owner_key != self.source.owner.stable_key()):
                     continue
                 materialized = self.event_log.read(record.event_hash, access=self.access)
@@ -191,4 +207,4 @@ class MemoryCandidateIndex:
                 cursor = rows[-1]["row_seq"]
 
 
-__all__ = ["MemoryCandidateIndex", "evidence_target_route"]
+__all__ = ["MemoryCandidateIndex", "evidence_target_route", "episode_input_route"]

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import sqlite3
 
 import pytest
 
@@ -64,6 +65,7 @@ from pure_integer_ai.cognition.shared.memory_event import (
     RetentionTransitionPayload,
     UsePayload,
     memory_object_ref,
+    _strict_tuple,
 )
 from pure_integer_ai.cognition.shared.memory_hypothesis import (
     MemoryHypothesisEventSink,
@@ -93,6 +95,7 @@ from pure_integer_ai.experiments.evaluation_isolation import (
 from pure_integer_ai.experiments.train_context import make_train_context
 from pure_integer_ai.storage.backend import DictBackend, SQLiteBackend
 from pure_integer_ai.storage.assertion_identity import (
+    IdentityCollisionError,
     IDENTITY_HEADER_TABLE,
     IDENTITY_MEMORY_EVENT,
     IDENTITY_MEMORY_OBJECT,
@@ -104,6 +107,7 @@ from pure_integer_ai.storage.memory_event import (
     MEMORY_EVENT_PART_TABLE,
     MEMORY_EVENT_TABLE,
     MemoryEventIntegrityError,
+    MemoryEventRecordStore,
 )
 from pure_integer_ai.training.cursor import DUMP_TABLES, dump_run, load_run
 
@@ -115,6 +119,17 @@ def _backend(kind: str):
     if kind == "sqlite":
         return SQLiteBackend()
     raise ValueError(kind)
+
+
+@pytest.mark.parametrize("bad, error", [
+    ((True,), ValueError),
+    ((1.0,), AssertionError),
+    ((type("IntSubclass", (int,), {})(1),), ValueError),
+])
+def test_open_memory_integer_key_keeps_strict_type_boundary(bad, error):
+    """大键改为单遍检查后仍拒绝 bool、浮点及整数子类。"""
+    with pytest.raises(error):
+        _strict_tuple(bad, where="memory key")
 
 
 def _versions() -> VersionBundle:
@@ -198,6 +213,78 @@ def _append_observation(ctx, source: SourceRef, refs):
         MEMORY_EVENT_OBSERVATION, ref, episode, payload))
 
 
+@pytest.mark.parametrize("backend_kind", ("dict", "sqlite"))
+def test_read_scope_reuses_old_event_across_append_and_invalidates_external_write(backend_kind):
+    """append-only API 可复用旧事件；物理 chunk 写代次变化会清除缓存。"""
+    backend = _backend(backend_kind)
+    try:
+        ctx = make_train_context(backend)
+        refs = _core_refs(ctx)
+        first = _append_observation(ctx, _source(document_id=11, source_id=10), refs)
+        log = ctx.memory_interact_events
+        codec = log._identity_codec
+        decoded = []
+        original = codec._decode_event
+
+        def count_decode(event_hash):
+            """记录每个稳定事件身份是否需要重新完整解码。"""
+            value = original(event_hash)
+            decoded.append(event_hash)
+            return value
+
+        codec._decode_event = count_decode
+        with log.read_scope():
+            decoded_first = codec.event(first.event_hash)
+            assert decoded_first == first.event
+            first_decode_count = decoded.count(first.event_hash)
+            second = _append_observation(
+                ctx, _source(document_id=12, source_id=11), refs)
+            assert codec.event(first.event_hash) is decoded_first
+            assert codec.event(second.event_hash) == second.event
+            assert decoded.count(first.event_hash) == first_decode_count
+            assert decoded.count(second.event_hash) == 1
+
+            rows = backend.select(
+                MEMORY_EVENT_PART_TABLE,
+                where={"event_hash": first.event_hash},
+                order_by="chunk_index")
+            backend.insert(MEMORY_EVENT_PART_TABLE, dict(rows[-1]) | {
+                "chunk_index": len(rows),
+            })
+            with pytest.raises((MemoryEventIntegrityError, ValueError)):
+                codec.event(first.event_hash)
+    finally:
+        backend.close()
+
+
+def test_read_scope_invalidates_memory_event_cache_after_external_sqlite_revision(tmp_path):
+    """另一 SQLite 连接的提交改变 data_version 后不能读取旧解码或旧 identity。"""
+    database = tmp_path / "memory-event-revision.sqlite3"
+    backend = SQLiteBackend(str(database))
+    try:
+        ctx = make_train_context(backend)
+        first = _append_observation(ctx, _source(), _core_refs(ctx))
+        backend.commit()
+        log = ctx.memory_interact_events
+        codec = log._identity_codec
+        registry = log.scoped_identities.registry
+        with log.read_scope():
+            original = codec.event(first.event_hash)
+            assert registry.read_key(IDENTITY_MEMORY_EVENT, first.event_hash)
+            with sqlite3.connect(database) as external:
+                external.execute(
+                    "UPDATE memory_event_part SET part_03=part_03+1 "
+                    "WHERE event_hash=? AND chunk_index=0",
+                    (first.event_hash,),
+                )
+            changed = codec.event(first.event_hash)
+            assert changed != original
+            with pytest.raises(IdentityCollisionError):
+                registry.read_key(IDENTITY_MEMORY_EVENT, first.event_hash)
+    finally:
+        backend.close()
+
+
 def _append_episode(ctx, source: SourceRef, observation, refs):
     """追加一个带候选、选择、输出、结果和版本身份的 Episode。"""
     session, _, episode = _scopes(source)
@@ -235,6 +322,107 @@ def _hypothesis(source: SourceRef, candidate: int) -> HypothesisKey:
         document_scope(source),
         source,
     )
+
+
+def _append_shared_use(ctx):
+    """创建需要多次引用同一 Observation/Episode 的真实正规化 Use。"""
+    source = _source()
+    refs = _core_refs(ctx)
+    observation = _append_observation(ctx, source, refs)
+    episode = _append_episode(ctx, source, observation, refs)
+    _, _, scope = _scopes(source)
+    payload = UsePayload(
+        observation.event.object_ref, episode.event.object_ref,
+        MemoryLinkedRef.core(refs[0]), MemoryLinkedRef.core(refs[3]),
+        _timestamp(scope, CLOCK_MEMORY_USED, 3))
+    ref = memory_object_ref(
+        ctx.memory_interact_events.memory_space_identity, MEMORY_OBJECT_USE,
+        payload.stable_key(), owner=source.owner, versions=source.versions)
+    return observation, ctx.memory_interact_events.append(MemoryEvent(
+        MEMORY_EVENT_USE, ref, scope, payload))
+
+
+@pytest.mark.parametrize("kind", ["dict", "sqlite"])
+def test_shared_use_recovery_reads_each_payload_once_without_cross_call_reuse(kind, monkeypatch):
+    """单次真实 Use 恢复共享声明一次，下次调用重新完整读取；零预算结果相同。"""
+    import pure_integer_ai.cognition.shared.memory_event_log as memory_module
+
+    backend = _backend(kind)
+    try:
+        ctx = make_train_context(backend)
+        _, use = _append_shared_use(ctx)
+        events = ctx.memory_interact_events
+        codec = events._identity_codec
+        original = codec.records.read_payload
+        calls = {}
+
+        def count_payload(event_hash):
+            """记录实际 chunk 流读取，仍调用原完整物理恢复。"""
+            calls[event_hash] = calls.get(event_hash, 0) + 1
+            return original(event_hash)
+
+        monkeypatch.setattr(codec.records, "read_payload", count_payload)
+        access = MemoryAccessContext(1, 2, 3)
+        restored = events.read(use.event_hash, access=access)
+        assert restored == use
+        assert len(calls) == 3 and set(calls.values()) == {1}
+        assert events.read(use.event_hash, access=access) == restored
+        assert set(calls.values()) == {2}
+        monkeypatch.setattr(memory_module, "_MAX_DECODED_EVENT_INTS", 0)
+        assert events.read(use.event_hash, access=access) == restored
+        assert max(calls.values()) > 3
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("corruption", ["payload", "duplicate_declaration"])
+def test_scoped_use_recovery_does_not_hide_later_declaration_corruption(corruption):
+    """上次完整回读后出现的 payload 或重复声明损坏必须在下一次读取拒绝。"""
+    backend = DictBackend()
+    try:
+        ctx = make_train_context(backend)
+        observation, use = _append_shared_use(ctx)
+        events = ctx.memory_interact_events
+        access = MemoryAccessContext(1, 2, 3)
+        assert events.read(use.event_hash, access=access) == use
+        snapshot = backend.snapshot()
+        if corruption == "payload":
+            chunks = [row for row in snapshot[MEMORY_EVENT_PART_TABLE]
+                      if row["event_hash"] == observation.event_hash]
+            last = max(chunks, key=lambda row: row["chunk_index"])
+            assert last["part_size"] < MEMORY_EVENT_CHUNK_WIDTH
+            last[f"part_{MEMORY_EVENT_CHUNK_WIDTH - 1:02d}"] = 1
+        else:
+            row = next(row for row in snapshot[MEMORY_EVENT_TABLE]
+                       if row["event_hash"] == observation.event_hash)
+            snapshot[MEMORY_EVENT_TABLE].append({**row, "event_hash": use.event_hash + 1})
+        backend.load_snapshot(snapshot)
+        with pytest.raises(MemoryEventIntegrityError):
+            events.read(use.event_hash, access=access)
+    finally:
+        backend.close()
+
+
+def test_normalized_use_locator_cycle_is_rejected_and_failure_scope_is_released():
+    """持久 locator 指向自身时拒绝循环；失败后恢复原数据仍可完整冷读。"""
+    backend = DictBackend()
+    try:
+        ctx = make_train_context(backend)
+        _, use = _append_shared_use(ctx)
+        events = ctx.memory_interact_events
+        pristine = backend.snapshot()
+        corrupted = backend.snapshot()
+        first = next(row for row in corrupted[MEMORY_EVENT_PART_TABLE]
+                     if row["event_hash"] == use.event_hash and row["chunk_index"] == 0)
+        first["part_02"] = use.object_hash
+        backend.load_snapshot(corrupted)
+        access = MemoryAccessContext(1, 2, 3)
+        with pytest.raises(MemoryEventIntegrityError, match="循环"):
+            events.read(use.event_hash, access=access)
+        backend.load_snapshot(pristine)
+        assert events.read(use.event_hash, access=access) == use
+    finally:
+        backend.close()
 
 
 def test_memory_sink_isolates_same_local_event_id_across_candidate_protocols():
@@ -863,5 +1051,124 @@ def test_payload_chunk_corruption_fails_closed(corruption: str):
         with pytest.raises((MemoryEventIntegrityError, ValueError)):
             ctx.memory_interact_events.query(
                 access=MemoryAccessContext(1, 2, 3))
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("corruption", [
+    "missing_chunk", "duplicate_chunk", "space", "size", "marker",
+    "link_kind", "source_owner", "source_version",
+])
+def test_episode_source_projection_rejects_corrupt_consumed_fields(corruption):
+    """真实 Episode 的稀疏来源投影不得接受缺块、坏长度或来源身份漂移。"""
+    backend = DictBackend()
+    try:
+        ctx = make_train_context(backend)
+        source = _source()
+        observation = _append_observation(ctx, source, _core_refs(ctx))
+        session, _, scope = _scopes(source)
+        payload = EpisodePayload(
+            observation.event.object_ref, None, (), None,
+            MemoryLinkedRef.memory(observation.event.object_ref), (), (), None,
+            7, session, _timestamp(scope, CLOCK_MEMORY_CREATED, 2))
+        ref = memory_object_ref(
+            ctx.memory_interact_events.memory_space_identity, MEMORY_OBJECT_EPISODE,
+            payload.stable_key(), owner=source.owner, versions=source.versions)
+        event = ctx.memory_interact_events.append(MemoryEvent(
+            MEMORY_EVENT_EPISODE, ref, scope, payload))
+        records = MemoryEventRecordStore(backend)
+        record = records.read(event.event_hash)
+        assert records.episode_output_source_key(record) == source.stable_key()
+        key = payload.stable_key()
+        link = payload.output_ref.stable_key()
+        output_start = next(index for index in range(len(key))
+                            if key[index:index + len(link)] == link)
+        source_start = output_start + 3 + 14 + 2
+        position = {
+            "marker": 1, "link_kind": output_start + 1,
+            "source_owner": source_start + 3,
+            "source_version": source_start + 7,
+        }.get(corruption, output_start)
+        chunk_index, offset = divmod(position, MEMORY_EVENT_CHUNK_WIDTH)
+        snapshot = backend.snapshot()
+        rows = snapshot[MEMORY_EVENT_PART_TABLE]
+        row = next(item for item in rows if item["event_hash"] == event.event_hash
+                   and item["chunk_index"] == chunk_index)
+        if corruption == "missing_chunk":
+            rows.remove(row)
+        elif corruption == "duplicate_chunk":
+            rows.append(dict(row))
+        elif corruption == "space":
+            row["space_id"] += 1
+        elif corruption == "size":
+            row["part_size"] -= 1
+        elif corruption == "marker":
+            row[f"part_{offset:02d}"] = 0
+        elif corruption == "link_kind":
+            row[f"part_{offset:02d}"] = 99
+        else:
+            row[f"part_{offset:02d}"] += 1
+        backend.load_snapshot(snapshot)
+        with pytest.raises(MemoryEventIntegrityError):
+            records.episode_output_source_key(record)
+    finally:
+        backend.close()
+
+
+def test_episode_source_projection_does_not_replace_full_event_validation():
+    """投影不消费的尾部损坏仍必须在命中后的完整 Episode 回读中失败。"""
+    backend = DictBackend()
+    try:
+        ctx = make_train_context(backend)
+        source = _source()
+        observation = _append_observation(ctx, source, _core_refs(ctx))
+        session, _, scope = _scopes(source)
+        payload = EpisodePayload(
+            observation.event.object_ref, None, (), None,
+            MemoryLinkedRef.memory(observation.event.object_ref), (), (), None,
+            7, session, _timestamp(scope, CLOCK_MEMORY_CREATED, 2))
+        ref = memory_object_ref(
+            ctx.memory_interact_events.memory_space_identity, MEMORY_OBJECT_EPISODE,
+            payload.stable_key(), owner=source.owner, versions=source.versions)
+        event = ctx.memory_interact_events.append(MemoryEvent(
+            MEMORY_EVENT_EPISODE, ref, scope, payload))
+        records = MemoryEventRecordStore(backend)
+        record = records.read(event.event_hash)
+        snapshot = backend.snapshot()
+        chunk_index, offset = divmod(record.payload_size - 1, MEMORY_EVENT_CHUNK_WIDTH)
+        row = next(item for item in snapshot[MEMORY_EVENT_PART_TABLE]
+                   if item["event_hash"] == event.event_hash
+                   and item["chunk_index"] == chunk_index)
+        row[f"part_{offset:02d}"] += 1
+        backend.load_snapshot(snapshot)
+        ctx.memory_interact_events.clear_runtime_caches()
+        assert records.episode_output_source_key(record) == source.stable_key()
+        with pytest.raises((MemoryEventIntegrityError, ValueError)):
+            ctx.memory_interact_events.read(
+                event.event_hash, access=MemoryAccessContext(1, 2, 3))
+    finally:
+        backend.close()
+
+
+def test_memory_reference_locator_collision_still_requires_full_identity(monkeypatch):
+    """定位哈希碰撞不得让另一个完整对象通过声明或存储 locator 校验。"""
+    backend = DictBackend()
+    try:
+        ctx = make_train_context(backend)
+        observation = _append_observation(ctx, _source(), _core_refs(ctx))
+        ref = observation.event.object_ref
+        wrong = replace(ref, object_key=(999,))
+        registry = ctx.memory_interact_events.scoped_identities.registry
+        identity_hash = registry.identity_hash
+        monkeypatch.setattr(registry, "identity_hash", lambda kind, key: (
+            observation.object_hash if kind == IDENTITY_MEMORY_OBJECT
+            else identity_hash(kind, key)))
+        with pytest.raises(MemoryEventIntegrityError, match="完整键"):
+            ctx.memory_interact_events._require_declared_object(wrong)
+        with pytest.raises(MemoryEventIntegrityError, match="完整键"):
+            ctx.memory_interact_events._declaration_event(wrong)
+        codec = ctx.memory_interact_events._identity_codec
+        with pytest.raises(MemoryEventIntegrityError, match="undeclared"):
+            codec._memory_object_hash(wrong)
     finally:
         backend.close()

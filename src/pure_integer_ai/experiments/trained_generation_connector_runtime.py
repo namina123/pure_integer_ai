@@ -120,6 +120,9 @@ from pure_integer_ai.cognition.shared.alias_resolution import (
 from pure_integer_ai.experiments.alias_relation_runtime import (
     AliasRelationRuntime,
 )
+from pure_integer_ai.experiments.trained_generation_alias_runtime import (
+    ProfiledAliasRelationRuntime,
+)
 from pure_integer_ai.experiments.relation_closure_runtime import (
     RelationClosureRuntime,
 )
@@ -813,6 +816,27 @@ class TrainedGenerationConnectorRuntime:
             self.context, template.language_branch)
         bound = _bound_relation_proposition(
             source, template, protocols.content.answer)
+        return self._generate_bound_relation(
+            bound, template, protocols, source.snapshot, source.evidence,
+            source.proposition.scope, fact.source_hash)
+
+    def generate_verified_composition(self, verified, core):
+        """Execute learned role readers for a query-local independently verified claim."""
+        from pure_integer_ai.experiments.verified_composition_generation import (
+            composition_generation_input,
+        )
+        bound, template, protocols, fact, scope = composition_generation_input(
+            self, verified, core)
+        from pure_integer_ai.experiments.relation_runtime_phase import relation_phase
+        with relation_phase("generation", "generate_verified_composition"):
+            generated = self._generate_bound_relation(
+                bound, template, protocols, verified.active.snapshot,
+                verified.history, scope, fact.source_hash)
+        return fact, generated
+
+    def _generate_bound_relation(self, bound, template, protocols, snapshot,
+                                 evidence, scope, frame_source_hash):
+        """Shared G-00--G-03 execution; callers supply independently checked truth."""
         recovered = self.connector_for(
             bound, branch=template.language_branch, connector_identity=template.connector)
         values = recovered.connector.registry.values(template, bound)
@@ -829,14 +853,13 @@ class TrainedGenerationConnectorRuntime:
             if len(options) != 1:
                 raise TrainedGenerationConnectorError("角色或语言原子的 R-01 表示未唯一闭合")
             expected_representations[value.slot] = options[0]
-        state = LogicEvidenceState.from_status(
-            source.snapshot.epistemic_status)
+        state = LogicEvidenceState.from_status(snapshot.epistemic_status)
         candidate = GenerationCandidate(
             bound,
             state,
             semantic_source(bound.template),
-            source.proposition.scope,
-            source.evidence,
+            scope,
+            evidence,
         )
         request = GenerationPlanningRequest(
             AnswerGenerationGoal(
@@ -883,8 +906,8 @@ class TrainedGenerationConnectorRuntime:
         trace = (2, len(trace_parts), *(v for key in trace_parts for v in (len(key), *key)))
         return GraphRelationGeneration(
             surface,
-            source.proposition.definition.proposition,
-            fact.source_hash,
+            bound.template,
+            frame_source_hash,
             len(preview.slots),
             template.connector,
             preview.representations,
@@ -906,16 +929,24 @@ class TrainedGenerationConnectorRuntime:
             self, branch: ObjectIdentity,
             ) -> AliasRelationRuntime:
         """按需恢复单个分支的完整 R-01 active closure。"""
-        matches = tuple(
-            item for item in self._alias_protocols
-            if branch == self._branches[0].branch
-        )
-        if len(matches) != 1:
+        branch_matches = tuple(
+            item for item in self._branches if item.branch == branch)
+        if len(branch_matches) != 1:
             raise TrainedGenerationConnectorError(
-                f"LanguageBranch 没有唯一 R-01 protocol: count={len(matches)}")
-        prefix, source, scope = matches[0]
-        return self._build_alias_runtime(
-            prefix, source, scope, branch, projection_only=True)
+                "LanguageBranch 没有唯一恢复目标: "
+                f"count={len(branch_matches)}")
+        profiles = tuple(
+            self._build_alias_runtime(
+                prefix, source, scope, branch, projection_only=True)
+            for prefix, source, scope in self._alias_protocols
+        )
+        if not profiles:
+            raise TrainedGenerationConnectorError(
+                "LanguageBranch 没有唯一 R-01 protocol: count=0")
+        if len(profiles) == 1:
+            return profiles[0]
+        return ProfiledAliasRelationRuntime(
+            profiles, conflict_error=TrainedGenerationConnectorError)
 
     def _restore_alias_runtimes(
             self,
@@ -925,14 +956,10 @@ class TrainedGenerationConnectorRuntime:
         R-01 的协议稳定键随 candidate manifest 一并写入训练历史；这里仅解码
         整数协议并读取现有 active 投影，不调用课程 loader，也不向 SQLite 写入。
         """
-        protocols = self._discover_alias_protocols()
         result = []
-        for prefix, source, scope in protocols:
-            result.append((self._branches[0].branch,
-                           self._build_alias_runtime(
-                               prefix, source, scope,
-                               self._branches[0].branch,
-                               projection_only=True)))
+        for owner in self._branches:
+            result.append((owner.branch, self._restore_alias_runtime_for(
+                owner.branch)))
         return tuple(result)
 
     def _build_alias_runtime(
@@ -1198,6 +1225,20 @@ class TrainedGenerationConnectorRuntime:
                 )
                 link_roots = tuple(ontology.identity_of(item.subject) for item in links)
                 definitions = tuple(graph.read(root) for root in link_roots)
+            # A filtered runtime is scoped to the active Core relation pairs.
+            # Branches without a matching relation definition cannot contribute
+            # a relation generation route.  In particular, do not restore their
+            # response connector closure: that closure is global and can be
+            # orders of magnitude larger than the active slice.  The unfiltered
+            # publication/audit path still restores responses for every branch.
+            if relation_pairs and not definitions:
+                continue
+            # Dialogue response actions are a small, independently indexed
+            # graph family.  They must remain mounted even when relation_pairs
+            # keeps Core relation templates sparse; otherwise the same
+            # production QueryState silently loses generic Companion acts.
+            # recover_response_connectors() scans only the response predicate
+            # projection and returns immediately for legacy graphs without it.
             responses = recover_response_connectors(graph, branch)
             response_roots = {item.template.connector for item in responses}
             templates = tuple(sorted(
@@ -1207,8 +1248,10 @@ class TrainedGenerationConnectorRuntime:
             frame_templates = []
             for item in definitions:
                 key = item.qualifiers
-                if key[:2] != (RELATION_CONNECTOR_PROFILE, 1):
+                if not key or key[0] != RELATION_CONNECTOR_PROFILE:
                     continue
+                if len(key) < 2 or key[1] not in (1, 2):
+                    raise TrainedGenerationConnectorError("角色级 connector 来源记录版本未注册")
                 if len(key) < 4 or key[2] <= 0 or key[2] + 3 >= len(key):
                     raise TrainedGenerationConnectorError("角色级 connector 来源记录被截断")
                 frame_templates.append((key[3:3 + key[2]], item.definition))

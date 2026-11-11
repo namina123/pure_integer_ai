@@ -12,6 +12,12 @@ from typing import Any
 from pure_integer_ai.crosscut.guards.int_blocker import assert_int
 from pure_integer_ai.storage import discipline as disc
 from pure_integer_ai.storage.backend import StorageBackend, TYPE_INT
+from pure_integer_ai.storage.assertion_qualifier_codec import (
+    INLINE_QUALIFIER_COUNT,
+    decode_assertion_qualifiers,
+    encode_qualifier_overflow,
+)
+from pure_integer_ai.storage.integer_codec import IntegerCodecError
 
 
 ASSERTION_RECORD_TABLE = "assertion_record"
@@ -21,7 +27,6 @@ ASSERTION_ROLE_GENERIC = 0
 ASSERTION_ROLE_GRAPH_STATEMENT = 1
 
 TYPED_REF_KEY_SIZE = 11
-INLINE_QUALIFIER_COUNT = 3
 # A single assertion must not carry an entire request/proof stable key.  The
 # read codec remains open-ended for historical databases, while new writes
 # fail closed above this bound and must use an explicit graph reference.
@@ -167,6 +172,7 @@ class AssertionRecord:
     qualifiers: tuple[int, ...]
 
     def __post_init__(self) -> None:
+        """校验完整记录各字段及限定项的纯整数、范围与固定端点长度。"""
         _strict_int(self.identity_hash, where="identity_hash", positive=True)
         _assertion_role(self.assertion_role)
         _strict_int(self.key_version, where="key_version", positive=True)
@@ -255,6 +261,7 @@ class AssertionRecordStore:
     """幂等写入并完整回读正规化 assertion 物理记录。"""
 
     def __init__(self, backend: StorageBackend) -> None:
+        """绑定后端，初始化本 owner 缓存并复用只读后端的已核验记录。"""
         self._backend = backend
         self._records_by_hash: dict[int, AssertionRecord] = {}
         # 发布 SQLite 是不可变只读图，多个 GraphOntology facade 会各自
@@ -267,6 +274,23 @@ class AssertionRecordStore:
                 shared = {}
                 setattr(backend, "_pi_readonly_assertion_records", shared)
         self._shared_records_by_hash: dict[int, AssertionRecord] | None = shared
+        # 只读发布图的 graph-statement 主记录是冻结整数投影。按查询逐条
+        # 扫描 assertion_record 会把同一 scope 的候选恢复放大成数万次 SQL；
+        # 延迟建立一次完整校验后的三维索引，查询仍逐投影过滤，不能替代
+        # 后续 AssertionRecord qualifier/scope/provenance 完整恢复。
+        projection_index = None
+        if bool(getattr(backend, "read_only", False)):
+            projection_index = getattr(
+                backend, "_pi_readonly_statement_projection_index", None)
+            if projection_index is None:
+                projection_index = {}
+                setattr(
+                    backend,
+                    "_pi_readonly_statement_projection_index",
+                    projection_index,
+                )
+        self._shared_statement_projection_index: dict[str, object] | None = (
+            projection_index)
 
     def register(self, record: AssertionRecord) -> None:
         """追加一条完整记录；碰撞、孤儿限定项和既有半写状态均拒绝。"""
@@ -394,6 +418,8 @@ class AssertionRecordStore:
         self._records_by_hash.clear()
         if self._shared_records_by_hash is not None:
             self._shared_records_by_hash.clear()
+        if self._shared_statement_projection_index is not None:
+            self._shared_statement_projection_index.clear()
 
     def statement_projections(
             self, *, relation_kind: int | None = None,
@@ -401,6 +427,30 @@ class AssertionRecordStore:
             object_ref: tuple[int, int] | None = None,
             ) -> tuple[AssertionStatementProjection, ...]:
         """按图查询字段读取 role=graph-statement 的唯一主记录投影。"""
+        if self._shared_statement_projection_index is not None:
+            if relation_kind is not None:
+                relation_kind = _strict_int(
+                    relation_kind, where="relation_kind", positive=True)
+            if subject_ref is not None:
+                subject_ref = self._statement_ref(
+                    subject_ref, label="subject_ref")
+            if object_ref is not None:
+                object_ref = self._statement_ref(
+                    object_ref, label="object_ref")
+            projections = self._readonly_statement_projection_candidates(
+                relation_kind=relation_kind,
+                subject_ref=subject_ref,
+                object_ref=object_ref,
+            )
+            seen: set[int] = set()
+            for projection in projections:
+                if projection.identity_hash in seen:
+                    raise AssertionRecordIncompleteError(
+                        "graph statement projection 命中重复 assertion")
+                seen.add(projection.identity_hash)
+            return tuple(sorted(
+                projections, key=lambda item: item.identity_hash))
+
         where: dict[str, int] = {
             "assertion_role": ASSERTION_ROLE_GRAPH_STATEMENT,
         }
@@ -432,6 +482,81 @@ class AssertionRecordStore:
             projections,
             key=lambda item: item.identity_hash,
         ))
+
+    @staticmethod
+    def _statement_ref(
+            ref: tuple[int, int], *, label: str) -> tuple[int, int]:
+        """核验 statement 查询使用的二元运行时节点编址。"""
+        if not isinstance(ref, tuple) or len(ref) != 2:
+            raise ValueError(f"{label} 必须是二元节点编址")
+        return tuple(
+            _strict_int(value, where=f"{label}[{index}]", positive=True)
+            for index, value in enumerate(ref))
+
+    def _readonly_statement_projection_candidates(
+            self, *, relation_kind: int | None,
+            subject_ref: tuple[int, int] | None,
+            object_ref: tuple[int, int] | None,
+            ) -> tuple[AssertionStatementProjection, ...]:
+        """惰性恢复只读 graph-statement 固定字段并保留完整行校验。"""
+        index = self._shared_statement_projection_index
+        if index is None:
+            raise RuntimeError("只读 statement projection index 未初始化")
+        if index.get("all") is None:
+            rows = self._backend.select(
+                ASSERTION_RECORD_TABLE,
+                where={"assertion_role": ASSERTION_ROLE_GRAPH_STATEMENT},
+            )
+            projections = tuple(sorted(
+                (self._projection_from_row(row) for row in rows),
+                key=lambda item: item.identity_hash,
+            ))
+            postings: dict[str, dict[object, list[AssertionStatementProjection]]] = {
+                name: {} for name in (
+                    "all", "relation", "subject", "object",
+                    "relation_subject", "relation_object", "subject_object",
+                    "relation_subject_object",
+                )
+            }
+            postings["all"] = {None: list(projections)}
+            for item in projections:
+                relation = item.relation_kind
+                subject = item.subject_key[1:3]
+                object_ref_key = item.object_key[1:3]
+                keys = {
+                    "relation": relation,
+                    "subject": subject,
+                    "object": object_ref_key,
+                    "relation_subject": (relation, subject),
+                    "relation_object": (relation, object_ref_key),
+                    "subject_object": (subject, object_ref_key),
+                    "relation_subject_object":
+                        (relation, subject, object_ref_key),
+                }
+                for name, key in keys.items():
+                    postings[name].setdefault(key, []).append(item)
+            index.clear()
+            for name, values in postings.items():
+                index[name] = {
+                    key: tuple(sorted(items, key=lambda value: value.identity_hash))
+                    for key, items in values.items()
+                }
+        if relation_kind is None and subject_ref is None and object_ref is None:
+            return index["all"][None]
+        if relation_kind is not None and subject_ref is not None and object_ref is not None:
+            key = (relation_kind, subject_ref, object_ref)
+            return index["relation_subject_object"].get(key, ())
+        if relation_kind is not None and subject_ref is not None:
+            return index["relation_subject"].get((relation_kind, subject_ref), ())
+        if relation_kind is not None and object_ref is not None:
+            return index["relation_object"].get((relation_kind, object_ref), ())
+        if subject_ref is not None and object_ref is not None:
+            return index["subject_object"].get((subject_ref, object_ref), ())
+        if relation_kind is not None:
+            return index["relation"].get(relation_kind, ())
+        if subject_ref is not None:
+            return index["subject"].get(subject_ref, ())
+        return index["object"].get(object_ref, ())
 
     def _record_rows(self, identity_hash: int) -> list[dict[str, Any]]:
         """读取同 hash 的全部主记录，不用 limit 掩盖重复。"""
@@ -468,43 +593,17 @@ class AssertionRecordStore:
             row.get(f"qualifier_{index}")
             for index in range(INLINE_QUALIFIER_COUNT)
         )
-        legacy_codec = all(value is None for value in inline_values)
-        if not legacy_codec and any(value is None for value in inline_values):
+        parts = tuple((
+            _strict_int(item["ordinal"], where="assertion_qualifier.ordinal"),
+            _strict_int(item["qualifier_value"],
+                        where="assertion_qualifier.qualifier_value"),
+        ) for item in qualifier_rows)
+        try:
+            qualifiers = decode_assertion_qualifiers(
+                qualifier_size, inline_values, parts)
+        except IntegerCodecError as exc:
             raise AssertionRecordIncompleteError(
-                f"assertion hash={identity_hash} qualifier 内联列不完整")
-
-        qualifiers: list[int] = []
-        if legacy_codec:
-            expected_overflow_size = qualifier_size
-            first_overflow_ordinal = 0
-        else:
-            inline_size = min(qualifier_size, INLINE_QUALIFIER_COUNT)
-            for index, raw_value in enumerate(inline_values):
-                value = _strict_int(
-                    raw_value, where=f"assertion_record.qualifier_{index}")
-                if index < inline_size:
-                    qualifiers.append(value)
-                elif value != 0:
-                    raise AssertionRecordIncompleteError(
-                        f"assertion hash={identity_hash} 未使用 qualifier 内联槽非零")
-            expected_overflow_size = max(
-                qualifier_size - INLINE_QUALIFIER_COUNT, 0)
-            first_overflow_ordinal = INLINE_QUALIFIER_COUNT
-
-        if len(qualifier_rows) != expected_overflow_size:
-            raise AssertionRecordIncompleteError(
-                f"assertion hash={identity_hash} qualifier 数量不一致")
-        for offset, qualifier_row in enumerate(qualifier_rows):
-            expected_ordinal = first_overflow_ordinal + offset
-            ordinal = _strict_int(
-                qualifier_row["ordinal"], where="assertion_qualifier.ordinal",
-                nonnegative=True)
-            if ordinal != expected_ordinal:
-                raise AssertionRecordIncompleteError(
-                    f"assertion hash={identity_hash} qualifier ordinal 不连续")
-            qualifiers.append(_strict_int(
-                qualifier_row["qualifier_value"],
-                where="assertion_qualifier.qualifier_value"))
+                f"assertion hash={identity_hash} qualifier: {exc}") from exc
         return AssertionRecord(
             row_hash,
             _assertion_role(row.get(
@@ -529,17 +628,14 @@ class AssertionRecordStore:
             _strict_int(
                 row["content_version"],
                 where="assertion_record.content_version", nonnegative=True),
-            tuple(qualifiers),
+            qualifiers,
         )
 
     @staticmethod
     def _overflow_qualifiers(
             qualifiers: tuple[int, ...]) -> tuple[tuple[int, int], ...]:
-        """返回保留原 ordinal 的限定项溢出段，前三项由主记录承载。"""
-        return tuple(enumerate(
-            qualifiers[INLINE_QUALIFIER_COUNT:],
-            start=INLINE_QUALIFIER_COUNT,
-        ))
+        """委托纯 codec 选择限定项溢出段表示，前三项仍由主记录承载。"""
+        return encode_qualifier_overflow(qualifiers)
 
     @staticmethod
     def _projection_from_row(row: dict[str, Any]) -> AssertionStatementProjection:

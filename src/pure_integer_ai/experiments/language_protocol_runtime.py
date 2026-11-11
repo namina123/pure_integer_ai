@@ -14,10 +14,13 @@ def install_language_graph_protocols(
         span_protocol: Any = None,
         boundary_protocol: Any = None,
         prediction_protocol: Any = None,
+        source_records: Any = None,
         ) -> None:
     """按依赖顺序安装语言图协议，并拒绝缺少前置设施的部分配置。"""
     if not isinstance(ctx, TrainContext):
         raise TypeError("ctx 必须是 TrainContext")
+    if source_records is not None and occurrence_protocol is None:
+        raise ValueError("显式来源归档必须同时安装 occurrence 来源边界")
 
     if occurrence_protocol is not None:
         from pure_integer_ai.cognition.understanding.occurrence_index import (
@@ -30,6 +33,7 @@ def install_language_graph_protocols(
             ctx.graph_ontology,
             ctx.scoped_identity_store,
             occurrence_protocol,
+            source_records=source_records,
         )
 
     if occurrence_order_protocol is not None:
@@ -75,6 +79,7 @@ def install_language_graph_protocols(
             ctx.scoped_identity_store,
             span_protocol.span_protocol,
             ctx.occurrence_index,
+            source_records=source_records,
         )
         ctx.segmentation_span_materializer = SegmentationSpanMaterializer(
             ctx.span_index,

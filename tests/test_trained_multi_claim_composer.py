@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from pathlib import Path
+import os
 
 import pytest
 
-from pure_integer_ai.cognition.shared.identity import concept_identity, structure_concept_identity
+from pure_integer_ai.cognition.shared.identity import (
+    OBJECT_PROPOSITION,
+    ObjectIdentity,
+    concept_identity,
+    structure_concept_identity,
+)
 from pure_integer_ai.cognition.shared.query_state import (
     ROOT_EXPANDED,
     SPACE_CORE,
@@ -24,7 +30,10 @@ from pure_integer_ai.experiments.trained_multi_claim_composer import (
     materialize_multi_claim_composition_graph,
     read_multi_claim_composition_graph,
 )
-from pure_integer_ai.experiments.trained_relation_graph_runtime import RelationSurfaceBinding
+from pure_integer_ai.experiments.trained_relation_graph_runtime import (
+    GraphRelationGeneration,
+    RelationSurfaceBinding,
+)
 from pure_integer_ai.cognition.understanding.query_structure_adapter import (
     RelationSurfaceStructureAdapter,
 )
@@ -52,16 +61,11 @@ from pure_integer_ai.experiments.trained_response_delivery import DELIVERY_PROOF
 
 ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_RELEASE = Path(
-    r"K:/pure_integer_ai_work/current_runs/"
-    r"discourse-relation-response-graph-20260917b/training.sqlite3")
+    os.environ.get("PIA_TEST_CANONICAL_MODEL", "__optional_canonical_model_unset__"))
 CANONICAL_COMPOSITION_GRAPH = Path(
-    r"K:/pure_integer_ai_work/current_runs/"
-    r"multi-claim-response-training-20260925a/"
-    r"multi_claim_composition_graph.sqlite3")
+    os.environ.get("PIA_TEST_COMPOSITION_GRAPH", "__optional_composition_graph_unset__"))
 SURFACE_VARIANT_GRAPH = Path(
-    r"K:/pure_integer_ai_work/current_runs/"
-    r"multi-claim-surface-variants-20260926b/"
-    r"multi_claim_surface_variants.sqlite3")
+    os.environ.get("PIA_TEST_SURFACE_VARIANT_GRAPH", "__optional_surface_variant_graph_unset__"))
 
 
 def _relation_courses() -> tuple[Path, ...]:
@@ -155,6 +159,98 @@ def test_composition_graph_cold_restore_and_bind(tmp_path):
         ord("乙"), 12290, ord("二"),
     )
     assert result.connector is not None
+
+
+def test_claim_slot_contract_requires_one_complete_coordinate_map(tmp_path):
+    graph = tmp_path / "composition-contract.sqlite3"
+    materialize_multi_claim_composition_graph((_variant(),), graph)
+    composer = TrainedMultiClaimComposer(graph, object())
+    roles = (structure_concept_identity((91643, 1)),
+             structure_concept_identity((91643, 2)))
+    facts = tuple(
+        SimpleNamespace(
+            proposition=ObjectIdentity(OBJECT_PROPOSITION, (91644, ordinal)),
+            bindings=(
+                RelationSurfaceBinding(
+                    roles[0], concept_identity((91645, 1)),
+                    left, 100 + ordinal, 0, 1),
+                RelationSurfaceBinding(
+                    roles[1], concept_identity((91645, ordinal, 2)),
+                    right, 100 + ordinal, 1, 2),
+            ),
+        )
+        for ordinal, (left, right) in enumerate((("甲", "一"), ("甲", "二")), 1)
+    )
+    components = tuple((None, fact, None) for fact in facts)
+    contract = composer.claim_slot_contract(components)
+    assert contract == tuple(
+        (fact.proposition.stable_key(),
+         tuple(binding.role.stable_key() for binding in fact.bindings))
+        for fact in facts)
+    evidences = tuple(
+        ClosedGenerationEvidence(
+            fact.bindings,
+            GraphRelationGeneration(
+                "甲，一，甲。一", structure_concept_identity((91646, ordinal)),
+                700 + ordinal, 4),
+            fact.proposition.stable_key(), (91647, 1), 800 + ordinal)
+        for ordinal, fact in enumerate(facts, 1)
+    )
+    composed = composer.generate_composition(
+        components,
+        SimpleNamespace(evidence_closed=1, conflict_open=0,
+                        required_slots_open=0),
+    )
+    assert build_multi_response_plan(evidences, composed) is None
+    assert build_multi_response_plan(
+        evidences, composed, claim_slot_contract=contract) is not None
+
+    incomplete = MultiClaimCompositionVariant(
+        1,
+        2,
+        (
+            (PART_CLAIM_ROLE, 1, 1),
+            (PART_LITERAL, (65292,)),
+            (PART_CLAIM_ROLE, 2, 1),
+        ),
+        (91641, 1),
+        (91642, 1),
+    )
+    incomplete_graph = tmp_path / "composition-contract-incomplete.sqlite3"
+    materialize_multi_claim_composition_graph((incomplete,), incomplete_graph)
+    incomplete_composer = TrainedMultiClaimComposer(incomplete_graph, object())
+    assert incomplete_composer.claim_slot_contract(components) is None
+
+    duplicate = MultiClaimCompositionVariant(
+        1,
+        2,
+        (
+            (PART_CLAIM_ROLE, 1, 1),
+            (PART_CLAIM_ROLE, 1, 1),
+            (PART_CLAIM_ROLE, 2, 1),
+            (PART_CLAIM_ROLE, 2, 2),
+        ),
+        (91641, 1),
+        (91642, 1),
+    )
+    duplicate_graph = tmp_path / "composition-contract-duplicate.sqlite3"
+    materialize_multi_claim_composition_graph((duplicate,), duplicate_graph)
+    assert TrainedMultiClaimComposer(
+        duplicate_graph, object()).claim_slot_contract(components) is None
+
+    ambiguous_parts = list(_variant().parts)
+    ambiguous_parts[1] = (PART_LITERAL, (124,))
+    ambiguous = MultiClaimCompositionVariant(
+        2,
+        2,
+        tuple(ambiguous_parts),
+        (91641, 1),
+        (91642, 1),
+    )
+    ambiguous_graph = tmp_path / "composition-contract-ambiguous.sqlite3"
+    materialize_multi_claim_composition_graph((_variant(), ambiguous), ambiguous_graph)
+    assert TrainedMultiClaimComposer(
+        ambiguous_graph, object()).claim_slot_contract(components) is None
 
 
 def test_composition_graph_rejects_open_state(tmp_path):
@@ -384,6 +480,7 @@ def test_multi_claim_delivery_keeps_one_query_state_and_memory_proof(tmp_path):
             summary = receipt.summary()
             assert summary["claim_count"] == 2
             assert summary["evidence_ref_count"] >= 2
+            assert len(summary["role_occurrences"]) == len(plan.slot_sequence)
             assert summary["delivered"] == 1
             proof_key = read_delivery_proof(bridge.memory, receipt.proof_ref)
             outer = _parts(proof_key, DELIVERY_PROOF_IDENTITY)

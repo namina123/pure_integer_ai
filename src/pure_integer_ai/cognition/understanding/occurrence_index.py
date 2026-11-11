@@ -112,6 +112,7 @@ class OccurrenceIndex:
             self, ontology: GraphOntology,
             scoped_identities: ScopedIdentityStore,
             protocol: OccurrenceProtocol,
+            *, source_records: SourceRecordRepository | None = None,
             ) -> None:
         if not isinstance(ontology, GraphOntology):
             raise TypeError("ontology 必须是 GraphOntology")
@@ -119,10 +120,14 @@ class OccurrenceIndex:
             raise TypeError("scoped_identities 必须是 ScopedIdentityStore")
         if not isinstance(protocol, OccurrenceProtocol):
             raise TypeError("protocol 必须是 OccurrenceProtocol")
+        if source_records is not None and (
+                not isinstance(source_records, SourceRecordRepository)
+                or source_records.identity_registry is not scoped_identities.registry):
+            raise ValueError("显式来源归档必须使用同一完整身份 registry")
         self.ontology = ontology
         self.scoped_identities = scoped_identities
         self.protocol = protocol
-        self._sources = SourceRecordRepository(
+        self._sources = source_records if source_records is not None else SourceRecordRepository(
             ontology.backend, registry=scoped_identities.registry)
         self._occurrences = OccurrenceStore(ontology.backend)
         self._source_cache: dict[SourceRef, tuple[int, str]] = {}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -190,16 +191,43 @@ class AuthoredCourseBuild:
     validation: DatasetBundleValidationReport
 
 
-def publish_authored_course(
+def build_authored_course_records(
         seeds: tuple[AuthoredCompiledSeed, ...],
         sample_path: str | Path,
-        release_root: str | Path,
-        spec: AuthoredCourseSpec) -> AuthoredCourseBuild:
-    """把核准 seed 分账、校验并原子发布为单来源单许可 PH2 pack。"""
+        spec: AuthoredCourseSpec,
+        *,
+        seed_substages: Mapping[str, tuple[str, str]] | None = None,
+        training_only: bool = False,
+        source_ordinal_offset: int = 0,
+        ) -> tuple[tuple[SourceRefRecord, ...], tuple[ObservationRecord, ...],
+                   tuple[TeacherEvidenceRecord, ...], tuple[EvaluatorLabelRecord, ...],
+                   DatasetBundleValidationReport]:
+    """构造并核验来源化课程记录，不限定课程交换载体，也不写盘。
+
+    来源文件只贡献完整内容 SHA 与逻辑文件名；JSONL pack 与有类型 SQLite
+    训练复用相同身份、owner 分账、修订序和来源验证，不各自实现学习规则。
+    """
+    if type(training_only) is not bool:
+        raise AuthoredCourseCommonError("training_only 必须是显式布尔合同")
+    if type(source_ordinal_offset) is not int or source_ordinal_offset < 0:
+        raise AuthoredCourseCommonError("source ordinal offset必须是显式非负整数")
     if not isinstance(seeds, tuple) or not seeds:
         raise AuthoredCourseCommonError("原创课程 seeds 不能为空")
+    if training_only and any(
+            seed.split != "train" or seed.label_owner != "teacher"
+            for seed in seeds):
+        raise AuthoredCourseCommonError("train-only 来源不得包含 evaluation owner")
     if len({seed.seed_id for seed in seeds}) != len(seeds):
         raise AuthoredCourseCommonError("原创课程 seed_id 重复")
+    if seed_substages is not None:
+        if (not isinstance(seed_substages, Mapping)
+                or set(seed_substages) != {seed.seed_id for seed in seeds}):
+            raise AuthoredCourseCommonError("mixed substage 必须逐 seed 显式闭合")
+        for seed_id, value in seed_substages.items():
+            if not isinstance(value, tuple) or len(value) != 2:
+                raise AuthoredCourseCommonError(f"{seed_id} substage/evidence kind 非法")
+            _text(value[0], where=f"{seed_id}.substage")
+            _text(value[1], where=f"{seed_id}.evidence_kind")
     orders = [seed.logical_order for seed in seeds]
     if orders != sorted(orders) or len(set(orders)) != len(orders):
         raise AuthoredCourseCommonError("原创课程 logical_order 必须严格递增")
@@ -240,7 +268,11 @@ def publish_authored_course(
         "owner", spec.source_key, spec.substage, "teacher")
     evaluator_owner = _stable_key(
         "owner", spec.source_key, spec.substage, "evaluator")
-    for ordinal, seed in enumerate(seeds, start=1):
+    for ordinal, seed in enumerate(seeds, start=source_ordinal_offset+1):
+        substage, evidence_kind = (
+            seed_substages[seed.seed_id] if seed_substages is not None
+            else (spec.substage, spec.evidence_kind)
+        )
         source_cluster = _stable_key(
             "source_cluster", spec.source_key, spec.substage, seed.family)
         source = SourceRefRecord(
@@ -278,10 +310,10 @@ def publish_authored_course(
             artifact_key,
             observation_keys[seed.seed_id],
             spec.stage,
-            spec.substage,
+            substage,
             seed.split,
             "zh",
-            f"typed-{spec.substage.casefold().replace('_', '-')}",
+            f"typed-{substage.casefold().replace('_', '-')}",
             source.stable_key,
             spec.license_id,
             _stable_key("dedup", spec.substage, seed.family, *seed.dedup_parts),
@@ -309,7 +341,7 @@ def publish_authored_course(
                 _stable_key(
                     "teacher_evidence", spec.substage, seed.seed_id),
                 observation.stable_key,
-                spec.evidence_kind,
+                evidence_kind,
                 CanonicalJsonObject.from_value({
                     "expected_payload": seed.expected_payload.to_value(),
                     "expected_state": seed.expected_state,
@@ -354,6 +386,25 @@ def publish_authored_course(
         license_partition=spec.license_id,
         public_release=True,
     )
+    return source_tuple, observation_tuple, teacher_tuple, evaluator_tuple, validation
+
+
+def publish_authored_course(
+        seeds: tuple[AuthoredCompiledSeed, ...],
+        sample_path: str | Path,
+        release_root: str | Path,
+        spec: AuthoredCourseSpec,
+        *,
+        seed_substages: Mapping[str, tuple[str, str]] | None = None,
+        training_only: bool = False,
+        ) -> AuthoredCourseBuild:
+    """复用共用记录构造与校验，再原子发布历史 PH2 交换 pack。"""
+    source_tuple, observation_tuple, teacher_tuple, evaluator_tuple, validation = (
+        build_authored_course_records(
+            seeds, sample_path, spec, seed_substages=seed_substages,
+            training_only=training_only))
+    dataset_key = source_tuple[0].dataset_key
+    artifact_key = source_tuple[0].artifact_key
     pack_root = (
         Path(release_root).resolve() / "packs" / spec.pack_name).resolve()
     if pack_root.exists():
@@ -373,54 +424,32 @@ def publish_authored_course(
     train = tuple(item for item in observation_tuple if item.split == "train")
     held_out = tuple(
         item for item in observation_tuple if item.split == "held_out")
-    if not train or not held_out or not teacher_tuple or not evaluator_tuple:
+    if training_only:
+        if not train or not teacher_tuple or held_out or evaluator_tuple:
+            raise AuthoredCourseCommonError("train-only 来源 owner 不闭合")
+    elif not train or not held_out or not teacher_tuple or not evaluator_tuple:
         raise AuthoredCourseCommonError("原创课程必须同时含 train/held-out 和双 owner")
-    files = (
-        write_record_artifact(
-            source_tuple,
-            pack_root,
-            ArtifactWriteSpec(
-                RECORD_SOURCE_REF, "source", "source_refs.jsonl.gz", None,
-                spec.license_id, source_clusters,
-            ),
-        ),
-        write_record_artifact(
-            train,
-            pack_root,
-            ArtifactWriteSpec(
-                RECORD_OBSERVATION, "observation",
-                "observations/train.jsonl.gz", "train",
-                spec.license_id, clusters_for(train),
-            ),
-        ),
-        write_record_artifact(
-            held_out,
-            pack_root,
-            ArtifactWriteSpec(
-                RECORD_OBSERVATION, "observation",
-                "observations/held_out.jsonl.gz", "held_out",
-                spec.license_id, clusters_for(held_out),
-            ),
-        ),
-        write_record_artifact(
-            teacher_tuple,
-            pack_root,
-            ArtifactWriteSpec(
-                RECORD_TEACHER_EVIDENCE, "teacher",
-                "owners/teacher/train.evidence.jsonl.gz", "train",
-                spec.license_id, clusters_for(train),
-            ),
-        ),
-        write_record_artifact(
-            evaluator_tuple,
-            pack_root,
-            ArtifactWriteSpec(
-                RECORD_EVALUATOR_LABEL, "evaluator",
-                "owners/evaluator/held_out.labels.jsonl.gz", "held_out",
-                spec.license_id, clusters_for(held_out),
-            ),
-        ),
-    )
+    artifacts = [
+        (source_tuple, ArtifactWriteSpec(
+            RECORD_SOURCE_REF, "source", "source_refs.jsonl.gz", None,
+            spec.license_id, source_clusters)),
+        (train, ArtifactWriteSpec(
+            RECORD_OBSERVATION, "observation", "observations/train.jsonl.gz",
+            "train", spec.license_id, clusters_for(train))),
+    ]
+    if not training_only:
+        artifacts.append((held_out, ArtifactWriteSpec(
+            RECORD_OBSERVATION, "observation", "observations/held_out.jsonl.gz",
+            "held_out", spec.license_id, clusters_for(held_out))))
+    artifacts.append((teacher_tuple, ArtifactWriteSpec(
+        RECORD_TEACHER_EVIDENCE, "teacher", "owners/teacher/train.evidence.jsonl.gz",
+        "train", spec.license_id, clusters_for(train))))
+    if not training_only:
+        artifacts.append((evaluator_tuple, ArtifactWriteSpec(
+            RECORD_EVALUATOR_LABEL, "evaluator", "owners/evaluator/held_out.labels.jsonl.gz",
+            "held_out", spec.license_id, clusters_for(held_out))))
+    files = tuple(write_record_artifact(records, pack_root, identity)
+                  for records, identity in artifacts)
     manifest = ArtifactManifest(
         FORMAT_VERSION,
         SCHEMA_VERSION,
@@ -435,13 +464,14 @@ def publish_authored_course(
         spec.generator_version,
         spec.parser_version,
         files,
-        ("train", "held_out"),
+        ("train",) if training_only else ("train", "held_out"),
         (spec.stage,),
         source_clusters,
         (),
         spec.stage,
     )
-    validate_artifact_manifest(manifest, source_tuple, observation_tuple)
+    validate_artifact_manifest(
+        manifest, source_tuple, observation_tuple, training_only=training_only)
     write_artifact_manifest(manifest, pack_root)
     return AuthoredCourseBuild(pack_root, manifest, validation)
 
@@ -451,5 +481,6 @@ __all__ = [
     "AuthoredCourseBuild",
     "AuthoredCourseCommonError",
     "AuthoredCourseSpec",
+    "build_authored_course_records",
     "publish_authored_course",
 ]

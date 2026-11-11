@@ -19,11 +19,16 @@ from pure_integer_ai.cognition.understanding.query_input_structure import (
 from pure_integer_ai.experiments.trained_relation_graph_runtime import (
     GraphRelationGeneration,
 )
+from pure_integer_ai.experiments.multi_claim_composition_provenance import (
+    FORMAT as MULTI_SOURCE_GRAPH_FORMAT, permission_envelopes,
+    read_variant_permissions, write_variant_permissions,
+)
 from pure_integer_ai.storage import discipline as disc
 from pure_integer_ai.storage.backend import TYPE_INT, SQLiteBackend, register_extension_table
 
 
 GRAPH_FORMAT = "PURE_INTEGER_MULTI_CLAIM_COMPOSITION_GRAPH_V1"
+GUARDED_GRAPH_FORMAT = "PURE_INTEGER_MULTI_CLAIM_COMPOSITION_GRAPH_V2"
 GRAPH_KIND = 91640
 META_TABLE = "multi_claim_composition_graph"
 VARIANT_TABLE = "multi_claim_composition_variant"
@@ -32,6 +37,7 @@ IDENTITY_PART_TABLE = "multi_claim_composition_identity_part"
 
 PART_LITERAL = 1
 PART_CLAIM_ROLE = 2
+PART_CLAIM_PREDICATE = 3
 
 
 def _key_hash(*keys: tuple[int, ...]) -> int:
@@ -66,32 +72,44 @@ class MultiClaimCompositionVariant:
     def __post_init__(self) -> None:
         if type(self.variant_id) is not int or self.variant_id <= 0:
             raise ValueError("variant_id 必须为正整数")
-        if type(self.claim_count) is not int or self.claim_count < 2:
-            raise ValueError("multi-claim variant 至少需要两个 claim")
+        if type(self.claim_count) is not int or self.claim_count < 1:
+            raise ValueError("composition variant 至少需要一个 claim")
         if type(self.parts) is not tuple or not self.parts:
             raise ValueError("composition parts 不能为空")
         for part in self.parts:
             if (not isinstance(part, tuple) or not part
-                    or part[0] not in {PART_LITERAL, PART_CLAIM_ROLE}):
+                    or part[0] not in {PART_LITERAL, PART_CLAIM_ROLE, PART_CLAIM_PREDICATE}):
                 raise ValueError("composition part kind 未注册")
             if part[0] == PART_LITERAL:
                 if (len(part) != 2 or not part[1]
                         or any(type(value) is not int or value < 0
                                for value in part[1])):
                     raise ValueError("literal part 必须是非空整数 tuple")
+            elif part[0] == PART_CLAIM_PREDICATE:
+                if (len(part) != 3 or type(part[1]) is not int
+                        or not 1 <= part[1] <= self.claim_count
+                        or type(part[2]) is not tuple):
+                    raise ValueError("claim predicate part coordinate is invalid")
+                _key(part[2], label="claim predicate")
             elif (len(part) != 3
                   or type(part[1]) is not int or not 1 <= part[1] <= self.claim_count
                   or type(part[2]) is not int or part[2] <= 0):
                 raise ValueError("claim role part 坐标非法")
         _key(self.source_identity, label="source_identity")
         _key(self.license_identity, label="license_identity")
+        predicates = tuple(part[1] for part in self.parts if part[0] == PART_CLAIM_PREDICATE)
+        if predicates and tuple(sorted(predicates)) != tuple(range(1, self.claim_count + 1)):
+            raise ValueError("predicate contract must guard every claim exactly once")
 
     def stable_key(self) -> tuple[int, ...]:
         values = [GRAPH_KIND, self.variant_id, self.claim_count, len(self.parts)]
         for part in self.parts:
-            values.extend((part[0], len(part[1]), *part[1])
-                          if part[0] == PART_LITERAL
-                          else (part[0], part[1], part[2]))
+            if part[0] == PART_LITERAL:
+                values.extend((part[0], len(part[1]), *part[1]))
+            elif part[0] == PART_CLAIM_PREDICATE:
+                values.extend((part[0], part[1], len(part[2]), *part[2]))
+            else:
+                values.extend((part[0], part[1], part[2]))
         values.extend((len(self.source_identity), *self.source_identity,
                        len(self.license_identity), *self.license_identity))
         return tuple(values)
@@ -138,30 +156,35 @@ def materialize_multi_claim_composition_graph(
         variants: tuple[MultiClaimCompositionVariant, ...],
         database: str | Path,
         ) -> dict[str, object]:
-    """Materialize a new sidecar graph without opening canonical SQLite."""
+    """新建整数生成索引；各成员保留原来源权限，旧单来源格式保持兼容。"""
     if type(variants) is not tuple or not variants:
         raise ValueError("variants 必须是非空 tuple")
     if any(not isinstance(item, MultiClaimCompositionVariant) for item in variants):
         raise TypeError("composition variant 类型错误")
     variants = tuple(sorted(variants, key=lambda item: item.variant_id))
-    if tuple(item.variant_id for item in variants) != tuple(
-            range(1, len(variants) + 1)):
-        raise ValueError("variant_id 必须从 1 连续")
+    if len({item.variant_id for item in variants}) != len(variants):
+        raise ValueError("variant_id 必须唯一")
     target = Path(database).resolve()
     if target.exists():
         raise FileExistsError(target)
-    backend = SQLiteBackend(str(target), performance_mode="bulk")
     source = variants[0].source_identity
     license_key = variants[0].license_identity
+    permissions = tuple((item.variant_id, item.source_identity, item.license_identity)
+                        for item in variants)
+    format_version = (2 if any(part[0] == PART_CLAIM_PREDICATE
+                              for variant in variants for part in variant.parts) else 1)
     if any(item.source_identity != source or item.license_identity != license_key
            for item in variants):
-        raise ValueError("composition graph source/license 不一致")
+        format_version = 3
+        source, license_key = permission_envelopes(permissions)
     graph_id = _key_hash((GRAPH_KIND,), source, license_key)
+    backend = SQLiteBackend(str(target), performance_mode="bulk")
     try:
         _register_tables(backend)
         backend.insert(META_TABLE, {
             "graph_id": graph_id, "graph_kind": GRAPH_KIND,
-            "format_version": 1, "source_hash": _key_hash(source),
+            "format_version": format_version,
+            "source_hash": _key_hash(source),
             "license_hash": _key_hash(license_key),
             "variant_count": len(variants),
         })
@@ -171,13 +194,15 @@ def materialize_multi_claim_composition_graph(
             for field_code, key in ((1, source), (2, license_key))
             for ordinal, value in enumerate(key)
         ])
+        if format_version == 3:
+            write_variant_permissions(backend, permissions)
         for variant in variants:
             variant_hash = _key_hash(variant.stable_key())
             backend.insert(VARIANT_TABLE, {
                 "variant_id": variant.variant_id,
                 "variant_hash": variant_hash,
-                "source_hash": _key_hash(source),
-                "license_hash": _key_hash(license_key),
+                "source_hash": _key_hash(variant.source_identity),
+                "license_hash": _key_hash(variant.license_identity),
                 "claim_count": variant.claim_count,
                 "part_count": len(variant.parts),
             })
@@ -193,6 +218,13 @@ def materialize_multi_claim_composition_graph(
                         "value_ordinal": index,
                         "part_value": value,
                     } for index, value in enumerate(part[1]))
+                elif part[0] == PART_CLAIM_PREDICATE:
+                    rows.extend({
+                        "variant_id": variant.variant_id, "part_ordinal": ordinal,
+                        "part_kind": PART_CLAIM_PREDICATE, "claim_ordinal": part[1],
+                        "binding_ordinal": 0, "value_ordinal": index,
+                        "part_value": value,
+                    } for index, value in enumerate(part[2]))
                 else:
                     rows.append({
                         "variant_id": variant.variant_id,
@@ -208,7 +240,9 @@ def materialize_multi_claim_composition_graph(
     finally:
         backend.close()
     return {
-        "format": GRAPH_FORMAT,
+        "format": (MULTI_SOURCE_GRAPH_FORMAT if format_version == 3 else
+                   GUARDED_GRAPH_FORMAT if format_version == 2 else GRAPH_FORMAT),
+        "format_version": format_version,
         "graph_id": graph_id,
         "variant_count": len(variants),
         "source_identity": list(source),
@@ -219,6 +253,7 @@ def materialize_multi_claim_composition_graph(
 def read_multi_claim_composition_graph(
         database: str | Path,
         ) -> tuple[tuple[MultiClaimCompositionVariant, ...], dict[str, object]]:
+    """只读恢复全部成员和权限；图级封套不得替代逐variant来源核验。"""
     backend = SQLiteBackend(str(Path(database).resolve()), read_only=True)
     try:
         _register_tables(backend)
@@ -229,19 +264,40 @@ def read_multi_claim_composition_graph(
         if len(rows) != metas[0]["variant_count"]:
             raise ValueError("composition graph variant count 漂移")
         meta = metas[0]
+        if meta["format_version"] not in {1, 2, 3}:
+            raise ValueError("composition graph version is unsupported")
         identity_rows = backend.select(
             IDENTITY_PART_TABLE, where={"graph_id": meta["graph_id"]},
             order_by="field_code,part_ordinal")
         identities = {}
         for item in identity_rows:
-            identities.setdefault(item["field_code"], []).append(item["part_value"])
+            if item["field_code"] not in (1, 2):
+                raise ValueError("composition graph identity field is unknown")
+            members = identities.setdefault(item["field_code"], [])
+            if item["part_ordinal"] != len(members):
+                raise ValueError("composition graph identity ordinal is incomplete")
+            members.append(item["part_value"])
         source_identity = _key(identities.get(1, ()), label="source_identity")
         license_identity = _key(identities.get(2, ()), label="license_identity")
         if (meta["source_hash"] != _key_hash(source_identity)
                 or meta["license_hash"] != _key_hash(license_identity)):
             raise ValueError("composition graph identity hash 漂移")
+        variant_ids = tuple(row["variant_id"] for row in rows)
+        if variant_ids != tuple(sorted(set(variant_ids))) or not variant_ids:
+            raise ValueError("composition graph variant identities are incomplete")
+        permissions = (read_variant_permissions(backend, variant_ids)
+                       if meta["format_version"] == 3 else
+                       tuple((identity, source_identity, license_identity)
+                             for identity in variant_ids))
+        if meta["format_version"] == 3 and (
+                permission_envelopes(permissions) != (source_identity, license_identity)
+                or meta["graph_id"] != _key_hash((GRAPH_KIND,), source_identity, license_identity)):
+            raise ValueError("composition graph full permission envelope drifted")
         result = []
-        for row in rows:
+        for row, (_identity, variant_source, variant_license) in zip(rows, permissions, strict=True):
+            if (row["source_hash"] != _key_hash(variant_source)
+                    or row["license_hash"] != _key_hash(variant_license)):
+                raise ValueError("composition variant source/license hash drifted")
             part_rows = backend.select(PART_TABLE, where={"variant_id": row["variant_id"]},
                                        order_by="part_ordinal,value_ordinal")
             groups = {}
@@ -264,21 +320,34 @@ def read_multi_claim_composition_graph(
                         raise ValueError("claim role part 不唯一")
                     parts.append((PART_CLAIM_ROLE, items[0]["claim_ordinal"],
                                   items[0]["binding_ordinal"]))
+                elif kind == PART_CLAIM_PREDICATE:
+                    if (meta["format_version"] not in (2, 3)
+                            or any(item["value_ordinal"] != index
+                                   or item["claim_ordinal"] != items[0]["claim_ordinal"]
+                                   or item["binding_ordinal"] != 0
+                                   for index, item in enumerate(items))):
+                        raise ValueError("claim predicate contract is incomplete")
+                    parts.append((PART_CLAIM_PREDICATE, items[0]["claim_ordinal"],
+                                  tuple(item["part_value"] for item in items)))
                 else:
                     raise ValueError("composition part kind 未注册")
             variant = MultiClaimCompositionVariant(
                 int(row["variant_id"]), int(row["claim_count"]), tuple(parts),
-                source_identity, license_identity)
+                variant_source, variant_license)
             if row["variant_hash"] != _key_hash(variant.stable_key()):
                 raise ValueError("composition variant hash 漂移")
             result.append(variant)
         metadata = {
-            "format": GRAPH_FORMAT,
+            "format": (MULTI_SOURCE_GRAPH_FORMAT if meta["format_version"] == 3 else
+                       GUARDED_GRAPH_FORMAT if meta["format_version"] == 2 else GRAPH_FORMAT),
             "graph_id": int(metas[0]["graph_id"]),
             "variant_count": int(metas[0]["variant_count"]),
+            "format_version": int(meta["format_version"]),
             "source_identity": source_identity,
             "license_identity": license_identity,
         }
+        if meta["format_version"] == 3:
+            metadata["variant_permissions"] = permissions
         return tuple(result), metadata
     finally:
         backend.close()
@@ -299,6 +368,51 @@ class TrainedMultiClaimComposer:
     def generate_relation(self, source, fact):
         return self._relation_generator.generate_relation(source, fact)
 
+    def _guarded_variants(self, predicates):
+        return tuple(variant for variant in self.variants
+                     if variant.claim_count == len(predicates)
+                     and tuple(part[2] for part in sorted(
+                         (part for part in variant.parts if part[0] == PART_CLAIM_PREDICATE),
+                         key=lambda part: part[1])) == predicates)
+
+    def supports_predicates(self, predicates: tuple[tuple[int, ...], ...]) -> bool:
+        """A scoped language answer needs one exact ordered predicate contract."""
+        return bool(predicates) and len(self._guarded_variants(predicates)) == 1
+
+    def claim_slot_contract(self, components):
+        """Project a unique trained variant's complete claim/role coordinates."""
+        if type(components) is not tuple or not components:
+            return None
+        matches = tuple(
+            item for item in self.variants
+            if item.claim_count == len(components))
+        if any(part[0] == PART_CLAIM_PREDICATE
+               for variant in matches for part in variant.parts):
+            predicates = tuple(
+                item[1].predicate.stable_key() for item in components)
+            guarded = set(self._guarded_variants(predicates))
+            matches = tuple(item for item in matches if item in guarded)
+        if len(matches) != 1:
+            return None
+        variant = matches[0]
+        role_coordinates = tuple(
+            (part[1], part[2]) for part in variant.parts
+            if part[0] == PART_CLAIM_ROLE)
+        expected_coordinates = {
+            (claim_ordinal, binding_ordinal)
+            for claim_ordinal, component in enumerate(components, 1)
+            for binding_ordinal, _binding in enumerate(
+                component[1].bindings, 1)
+        }
+        if (len(role_coordinates) != len(expected_coordinates)
+                or set(role_coordinates) != expected_coordinates):
+            return None
+        return tuple(
+            (item[1].proposition.stable_key(),
+             tuple(binding.role.stable_key()
+                   for binding in item[1].bindings))
+            for item in components)
+
     def generate_composition(self, components, state, *, variant_id=None):
         """Execute a learned part order against current Core role surfaces.
 
@@ -306,7 +420,7 @@ class TrainedMultiClaimComposer:
         sidecar.  When a sidecar contains several surface variants, callers
         must select the integer variant explicitly; no ordering guess is made.
         """
-        if (type(components) is not tuple or len(components) < 2
+        if (type(components) is not tuple or not components
                 or not getattr(state, "evidence_closed", 0)
                 or getattr(state, "conflict_open", 1)
                 or getattr(state, "required_slots_open", 1)):
@@ -317,11 +431,17 @@ class TrainedMultiClaimComposer:
         matches = tuple(item for item in self.variants
                         if item.claim_count == len(components)
                         and (variant_id is None or item.variant_id == variant_id))
+        if any(part[0] == PART_CLAIM_PREDICATE for variant in matches for part in variant.parts):
+            predicates = tuple(item[1].predicate.stable_key() for item in components)
+            guarded = set(self._guarded_variants(predicates))
+            matches = tuple(item for item in matches if item in guarded)
         if len(matches) != 1:
             raise ValueError("composition variant is not unique")
         variant = matches[0]
         units = []
         for part in variant.parts:
+            if part[0] == PART_CLAIM_PREDICATE:
+                continue
             if part[0] == PART_LITERAL:
                 units.extend(part[1])
                 continue
@@ -347,7 +467,7 @@ class TrainedMultiClaimComposer:
 
 
 __all__ = [
-    "GRAPH_FORMAT", "GRAPH_KIND", "PART_LITERAL", "PART_CLAIM_ROLE",
+    "GRAPH_FORMAT", "GRAPH_KIND", "PART_LITERAL", "PART_CLAIM_ROLE", "PART_CLAIM_PREDICATE",
     "MultiClaimCompositionVariant", "TrainedMultiClaimComposer",
     "materialize_multi_claim_composition_graph",
     "read_multi_claim_composition_graph",

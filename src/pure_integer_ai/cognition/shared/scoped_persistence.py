@@ -243,6 +243,7 @@ class ScopedIdentityStore:
 
     def clear_runtime_caches(self) -> None:
         """外部 load 或完整性审计前清空运行期身份缓存。"""
+        self._registry.clear_read_scope_cache()
         self._scope_hashes.clear()
         self._clock_hashes.clear()
         self._timestamp_hashes.clear()

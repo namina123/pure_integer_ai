@@ -1,7 +1,7 @@
 """训练图可变角色的整数匹配；解析假设与 Core 事实身份严格分离。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 OPEN_FRAME_VERSION = 91512
@@ -48,6 +48,10 @@ class OpenRoleFrame:
     roles: tuple[tuple[int, ...], ...]
     gaps: tuple[tuple[int, ...], ...]
     envelope: tuple[int, int]
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, hash=False)
+    _schema_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if not self.proposition or not self.predicate or not self.source_ref:
@@ -62,13 +66,19 @@ class OpenRoleFrame:
         # become a Core fact without independent graph evidence.
         if len(self.envelope) != 2 or self.envelope[1] <= self.envelope[0]:
             raise ValueError("开放框架训练包络非法")
-        self.stable_key()
+        key = self._build_stable_key()
+        object.__setattr__(self, "_stable_key_cache", key)
+        object.__setattr__(
+            self, "_schema_key_cache", pack_record(OPEN_SCHEMA_VERSION, key))
 
-    def stable_key(self) -> tuple[int, ...]:
-        """角色、顺序、间隔和来源全部进入可逆身份，不只保存摘要。"""
+    def _build_stable_key(self) -> tuple[int, ...]:
         return pack_record(OPEN_FRAME_VERSION, self.proposition, self.predicate,
                            self.source_ref, self.envelope,
                            pack_record(1, *self.roles), pack_record(2, *self.gaps))
+
+    def stable_key(self) -> tuple[int, ...]:
+        """角色、顺序、间隔和来源全部进入可逆身份，不只保存摘要。"""
+        return self._stable_key_cache
 
     @classmethod
     def from_stable_key(cls, key: tuple[int, ...]) -> OpenRoleFrame:
@@ -81,7 +91,7 @@ class OpenRoleFrame:
 
     def schema_key(self) -> tuple[int, ...]:
         """框架资格证据使用独立 namespace，不冒充其示例命题的事实证据。"""
-        return pack_record(OPEN_SCHEMA_VERSION, self.stable_key())
+        return self._schema_key_cache
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +104,8 @@ class OpenRoleSpan:
     start: int
     end: int
     values: tuple[int, ...]
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if not self.role or not self.source_ref or not self.values:
@@ -102,12 +114,15 @@ class OpenRoleSpan:
             raise ValueError("开放角色序和区间必须为非负整数")
         if self.end - self.start != len(self.values):
             raise ValueError("开放角色区间与内容长度不符")
-        self.stable_key()
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
+
+    def _build_stable_key(self) -> tuple[int, ...]:
+        return pack_record(OPEN_ROLE_VERSION, self.role, self.source_ref,
+                           (self.ordinal, self.start, self.end), self.values)
 
     def stable_key(self) -> tuple[int, ...]:
         """保留来源、区间和全部 token；同字面不同来源不合并。"""
-        return pack_record(OPEN_ROLE_VERSION, self.role, self.source_ref,
-                           (self.ordinal, self.start, self.end), self.values)
+        return self._stable_key_cache
 
     @classmethod
     def from_stable_key(cls, key: tuple[int, ...]) -> OpenRoleSpan:
@@ -126,6 +141,8 @@ class OpenRelationCandidate:
     source_ref: tuple[int, ...]
     values: tuple[int, ...]
     bindings: tuple[OpenRoleSpan, ...]
+    _stable_key_cache: tuple[int, ...] = field(
+        init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.frame, OpenRoleFrame) or not self.values:
@@ -147,12 +164,15 @@ class OpenRelationCandidate:
                 raise ValueError("开放关系连接结构不符")
         if cursor != len(self.values):
             raise ValueError("开放关系不得丢弃未解析输入")
-        self.stable_key()
+        object.__setattr__(self, "_stable_key_cache", self._build_stable_key())
+
+    def _build_stable_key(self) -> tuple[int, ...]:
+        return pack_record(OPEN_RELATION_VERSION, self.frame.stable_key(), self.source_ref,
+                           self.values, *(item.stable_key() for item in self.bindings))
 
     def stable_key(self) -> tuple[int, ...]:
         """保留完整框架、输入与全部动态角色，作为 Memory 开放候选本体。"""
-        return pack_record(OPEN_RELATION_VERSION, self.frame.stable_key(), self.source_ref,
-                           self.values, *(item.stable_key() for item in self.bindings))
+        return self._stable_key_cache
 
     @classmethod
     def from_stable_key(cls, key: tuple[int, ...]) -> OpenRelationCandidate:

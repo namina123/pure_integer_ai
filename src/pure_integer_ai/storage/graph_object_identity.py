@@ -17,9 +17,15 @@ from pure_integer_ai.storage.assertion_identity import (
     IDENTITY_SOURCE_RECORD,
 )
 from pure_integer_ai.storage.backend import StorageBackend, TYPE_INT
+from pure_integer_ai.storage.graph_object_packed import (
+    GRAPH_OBJECT_CODEC_GENERIC_PACKED_V1,
+    decode_packed_components,
+    encode_packed_components,
+)
 
 
 GRAPH_OBJECT_COMPONENT_TABLE = "graph_object_component"
+GRAPH_OBJECT_COMPONENT_BLOCK_TABLE = "graph_object_component_block"
 GRAPH_HYPOTHESIS_GROUP_TABLE = "graph_hypothesis_group"
 GRAPH_HYPOTHESIS_GROUP_COMPONENT_TABLE = (
     "graph_hypothesis_group_component")
@@ -28,8 +34,13 @@ GRAPH_OBJECT_CODEC_GENERIC_V1 = 1
 GRAPH_OBJECT_CODEC_OCCURRENCE_SOURCE_V1 = 2
 GRAPH_OBJECT_CODEC_SPAN_SOURCE_V1 = 3
 GRAPH_OBJECT_CODEC_HYPOTHESIS_V1 = 4
+GRAPH_OBJECT_CODEC_GENERIC_BLOCK_V1 = 6
 
 GRAPH_OBJECT_CODEC_VALUE_COUNT = 8
+# 超大普通对象（主要是生命周期 Event）的固定整数分块格式。每行仍只保存
+# 纯整数；固定宽度减少 SQLite 行和 Python dict 的放大，同时不把任何值截断。
+GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH = 32
+GRAPH_OBJECT_COMPONENT_BLOCK_MIN_COMPONENTS = 4096
 # 单个图对象必须表达一个局部事实。超过该上限通常意味着把整批课程递归
 # 复制进 Event/Hypothesis 身份；拒绝写入，不截断任何整数信息。
 GRAPH_OBJECT_MAX_COMPONENTS = 262_144
@@ -60,6 +71,13 @@ GRAPH_OBJECT_COMPONENT_COLUMNS = [
     ("identity_hash", TYPE_INT),
     ("component_ordinal", TYPE_INT),
     ("component_value", TYPE_INT),
+]
+GRAPH_OBJECT_COMPONENT_BLOCK_COLUMNS = [
+    ("identity_hash", TYPE_INT),
+    ("block_ordinal", TYPE_INT),
+    ("value_size", TYPE_INT),
+    *[(f"component_value_{index:02d}", TYPE_INT)
+      for index in range(GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH)],
 ]
 GRAPH_HYPOTHESIS_GROUP_COLUMNS = [
     ("group_hash", TYPE_INT),
@@ -104,6 +122,30 @@ def register_graph_object_identity_tables(backend: StorageBackend) -> None:
         ],
         core=True,
     )
+    # r6 及更早的只读模型没有分块表；保留其读取兼容性。新建/可写库和
+    # 已有分块表的只读库必须严格注册完整 schema，缺列仍然 fail closed。
+    if _physical_table_exists(backend, GRAPH_OBJECT_COMPONENT_BLOCK_TABLE):
+        backend.register_table(
+            GRAPH_OBJECT_COMPONENT_BLOCK_TABLE,
+            GRAPH_OBJECT_COMPONENT_BLOCK_COLUMNS,
+            disc.DISC_APPEND_ONLY,
+            [
+                ("identity_hash",),
+                ("identity_hash", "block_ordinal"),
+            ],
+            core=True,
+        )
+    elif not bool(getattr(backend, "read_only", False)):
+        backend.register_table(
+            GRAPH_OBJECT_COMPONENT_BLOCK_TABLE,
+            GRAPH_OBJECT_COMPONENT_BLOCK_COLUMNS,
+            disc.DISC_APPEND_ONLY,
+            [
+                ("identity_hash",),
+                ("identity_hash", "block_ordinal"),
+            ],
+            core=True,
+        )
     backend.register_table(
         GRAPH_HYPOTHESIS_GROUP_TABLE,
         GRAPH_HYPOTHESIS_GROUP_COLUMNS,
@@ -125,6 +167,27 @@ def register_graph_object_identity_tables(backend: StorageBackend) -> None:
         ],
         core=True,
     )
+
+
+def _physical_table_exists(backend: StorageBackend, table: str) -> bool:
+    """判断可选分块表是否已存在，不把旧只读模型误判为损坏。"""
+    registered = getattr(backend, "_tables", None)
+    if isinstance(registered, dict) and table in registered:
+        return True
+    connection = getattr(backend, "_conn", None)
+    if connection is None:
+        return False
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _table_registered(backend: StorageBackend, table: str) -> bool:
+    """返回当前抽象 backend 是否已经注册某表。"""
+    registered = getattr(backend, "_tables", None)
+    return isinstance(registered, dict) and table in registered
 
 
 def _strict_int(value: int, *, where: str,
@@ -202,6 +265,15 @@ def _source_key(value: tuple[int, ...]) -> tuple[int, ...]:
     _strict_int(value[1], where="source_id", positive=True)
     _strict_int(value[2], where="document_id", nonnegative=True)
     return value
+
+
+def validate_graph_object_key(key: tuple[int, ...]) -> None:
+    """只验证完整对象键和既有新写预算，不为查找分配物理编码载荷。"""
+    envelope = _split_object_key(key)
+    if len(envelope.components) > GRAPH_OBJECT_MAX_COMPONENTS:
+        raise GraphObjectIdentityError(
+            "单个 graph object components 超出局部身份预算；"
+            "禁止把整批请求复制进 Event/Hypothesis")
 
 
 def _assert_source_envelope(
@@ -286,18 +358,19 @@ class GraphObjectIdentitySpec:
     codec_values: tuple[int, ...]
     overflow_components: tuple[tuple[int, int], ...] = ()
     hypothesis_group: HypothesisGroupSpec | None = None
+    # block codec 的每项为 (block_ordinal, 完整且未填充的整数 tuple)。
+    overflow_blocks: tuple[tuple[int, tuple[int, ...]], ...] = ()
 
     def __post_init__(self) -> None:
-        envelope = _split_object_key(self.stable_key)
-        if len(envelope.components) > GRAPH_OBJECT_MAX_COMPONENTS:
-            raise GraphObjectIdentityError(
-                "单个 graph object components 超出局部身份预算；"
-                "禁止把整批请求复制进 Event/Hypothesis")
+        """验证新写预算、codec 注册和竞争组配对，保留完整整数键。"""
+        validate_graph_object_key(self.stable_key)
         if self.identity_codec not in {
                 GRAPH_OBJECT_CODEC_GENERIC_V1,
+                GRAPH_OBJECT_CODEC_GENERIC_PACKED_V1,
                 GRAPH_OBJECT_CODEC_OCCURRENCE_SOURCE_V1,
                 GRAPH_OBJECT_CODEC_SPAN_SOURCE_V1,
-                GRAPH_OBJECT_CODEC_HYPOTHESIS_V1}:
+                GRAPH_OBJECT_CODEC_HYPOTHESIS_V1,
+                GRAPH_OBJECT_CODEC_GENERIC_BLOCK_V1}:
             raise ValueError("graph object identity codec 未注册")
         _strict_int(
             self.codec_ref_hash,
@@ -314,14 +387,60 @@ class GraphObjectIdentitySpec:
             if ordinal <= previous:
                 raise ValueError("overflow ordinal 必须严格递增")
             previous = ordinal
+        previous_block = -1
+        for block_ordinal, values in self.overflow_blocks:
+            _strict_int(
+                block_ordinal, where="overflow block ordinal",
+                nonnegative=True)
+            if block_ordinal <= previous_block:
+                raise ValueError("overflow block ordinal 必须严格递增")
+            previous_block = block_ordinal
+            if (not isinstance(values, tuple)
+                    or not 0 < len(values) <= GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH):
+                raise ValueError("overflow block 长度非法")
+            _integer_tuple(values, where="overflow block values")
+        if self.identity_codec == GRAPH_OBJECT_CODEC_GENERIC_BLOCK_V1:
+            if self.overflow_components or self.hypothesis_group is not None:
+                raise ValueError("block codec 不得混用逐整数 overflow 或 group")
+            expected_blocks = max(
+                (len(self.stable_key) - 10 - GRAPH_OBJECT_CODEC_VALUE_COUNT
+                 + GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH - 1)
+                // GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH,
+                0,
+            )
+            if len(self.overflow_blocks) != expected_blocks:
+                raise ValueError("block codec overflow 数量与 component_size 不一致")
+        elif self.overflow_blocks:
+            raise ValueError("非 block codec 不得包含 overflow blocks")
         if ((self.identity_codec == GRAPH_OBJECT_CODEC_HYPOTHESIS_V1)
                 != (self.hypothesis_group is not None)):
             raise ValueError("Hypothesis codec 与竞争组必须同时存在")
 
     @classmethod
     def generic(cls, stable_key: tuple[int, ...]) -> "GraphObjectIdentitySpec":
-        """为任意 ObjectIdentity 建固定前缀加开放 overflow codec。"""
+        """小键保留逐整数格式，大键仅在减少子行时选择可逆整数打包。"""
         envelope = _split_object_key(stable_key)
+        if len(envelope.components) > GRAPH_OBJECT_MAX_COMPONENTS:
+            validate_graph_object_key(stable_key)
+        if len(envelope.components) >= GRAPH_OBJECT_COMPONENT_BLOCK_MIN_COMPONENTS:
+            inline = envelope.components[:GRAPH_OBJECT_CODEC_VALUE_COUNT]
+            payload = envelope.components[GRAPH_OBJECT_CODEC_VALUE_COUNT:]
+            blocks = tuple(
+                (block_ordinal, payload[start:start + GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH])
+                for block_ordinal, start in enumerate(
+                    range(0, len(payload), GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH))
+            )
+            return cls(
+                stable_key,
+                GRAPH_OBJECT_CODEC_GENERIC_BLOCK_V1,
+                0,
+                _padded(inline, GRAPH_OBJECT_CODEC_VALUE_COUNT),
+                overflow_blocks=blocks,
+            )
+        packed = encode_packed_components(envelope.components)
+        if packed is not None:
+            return cls(stable_key, GRAPH_OBJECT_CODEC_GENERIC_PACKED_V1,
+                       0, packed[0], packed[1])
         inline = envelope.components[:GRAPH_OBJECT_CODEC_VALUE_COUNT]
         overflow = tuple(enumerate(
             envelope.components[GRAPH_OBJECT_CODEC_VALUE_COUNT:],
@@ -491,11 +610,25 @@ class GraphObjectIdentityStore:
         self._backend = backend
         self._key_reader = key_reader
         self._groups_by_hash: dict[int, HypothesisGroupSpec] = {}
+        # A read-only graph statement batch can validate all requested
+        # overflow rows in one integer query.  The override is scoped to
+        # read_many() and is never used by writable registration paths.
+        self._batch_component_rows: dict[
+            int, list[dict[str, Any]]
+        ] | None = None
+        self._batch_component_blocks: dict[
+            int, list[dict[str, Any]]
+        ] | None = None
 
     def auxiliary_namespace_is_empty(self) -> bool:
         """检查所有 GraphObject codec 子表为空，供首次批量快路声明。"""
         return (
             self._backend.count(GRAPH_OBJECT_COMPONENT_TABLE) == 0
+            and (
+                not _table_registered(
+                    self._backend, GRAPH_OBJECT_COMPONENT_BLOCK_TABLE)
+                or self._backend.count(
+                    GRAPH_OBJECT_COMPONENT_BLOCK_TABLE) == 0)
             and self._backend.count(GRAPH_HYPOTHESIS_GROUP_TABLE) == 0
             and self._backend.count(
                 GRAPH_HYPOTHESIS_GROUP_COMPONENT_TABLE) == 0
@@ -507,6 +640,7 @@ class GraphObjectIdentityStore:
         _strict_int(identity_hash, where="identity_hash", positive=True)
         self._append_group_new(spec.hypothesis_group)
         self._insert_overflow(identity_hash, spec.overflow_components)
+        self._insert_blocks(identity_hash, spec.overflow_blocks)
 
     def register(self, identity_hash: int,
                  spec: GraphObjectIdentitySpec) -> None:
@@ -518,6 +652,7 @@ class GraphObjectIdentityStore:
                 f"graph object hash={identity_hash} 存在孤儿 component")
         self._ensure_group(spec.hypothesis_group)
         self._insert_overflow(identity_hash, spec.overflow_components)
+        self._insert_blocks(identity_hash, spec.overflow_blocks)
 
     def read_optional(
             self, identity_hash: int, row: dict[str, Any]
@@ -548,12 +683,32 @@ class GraphObjectIdentityStore:
         ref_hash = _strict_int(
             row["codec_ref_hash"],
             where="codec_ref_hash", nonnegative=True)
-        overflow_rows = self._component_rows(identity_hash)
+        if self._batch_component_rows is None:
+            overflow_rows = self._component_rows(identity_hash)
+        else:
+            overflow_rows = self._batch_component_rows.get(identity_hash, [])
+        if self._batch_component_blocks is None:
+            block_rows = self._block_rows(identity_hash)
+        else:
+            block_rows = self._batch_component_blocks.get(identity_hash, [])
 
         if codec == GRAPH_OBJECT_CODEC_GENERIC_V1:
             components = self._decode_generic(
                 identity_hash, component_size, ref_hash,
                 values, overflow_rows)
+        elif codec == GRAPH_OBJECT_CODEC_GENERIC_PACKED_V1:
+            try:
+                components = decode_packed_components(
+                    component_size, ref_hash, values,
+                    tuple((part["component_ordinal"], part["component_value"])
+                          for part in overflow_rows))
+            except ValueError as exc:
+                raise GraphObjectIdentityIncompleteError(
+                    f"graph object hash={identity_hash} packed component 损坏") from exc
+        elif codec == GRAPH_OBJECT_CODEC_GENERIC_BLOCK_V1:
+            components = self._decode_block(
+                identity_hash, component_size, ref_hash, values,
+                overflow_rows, block_rows)
         elif codec == GRAPH_OBJECT_CODEC_OCCURRENCE_SOURCE_V1:
             components = self._decode_occurrence(
                 identity_hash, component_size, ref_hash,
@@ -581,6 +736,102 @@ class GraphObjectIdentityStore:
             group = self._load_group(ref_hash)
             _assert_source_envelope(envelope, group.observation_key)
         return key
+
+    def read_many(
+            self, rows: tuple[dict[str, Any], ...]
+            ) -> dict[int, tuple[int, ...] | None]:
+        """批量完整恢复一组 graph_object codec 键。
+
+        主记录仍逐项执行同一 codec、长度、hash、overflow、引用和规范零值
+        校验；只有物理 overflow 的读取从逐对象 SQL 改为一次 ``IN`` 查询。
+        """
+        if (not isinstance(rows, tuple)
+                or any(not isinstance(row, dict) for row in rows)):
+            raise TypeError("graph object identity rows 必须是 dict tuple")
+        if not rows:
+            return {}
+        hashes = tuple(
+            _strict_int(row["identity_hash"],
+                        where="graph_object.identity_hash", positive=True)
+            for row in rows
+        )
+        if len(set(hashes)) != len(hashes):
+            raise GraphObjectIdentityIncompleteError(
+                "graph object identity batch 命中重复 hash")
+        # The component table is indexed by ``(identity_hash,
+        # component_ordinal)``.  Asking SQLite to order a large multi-hash
+        # result by ordinal alone forces a temporary global sort; a single
+        # event batch can contain millions of overflow rows.  Read through
+        # the identity index and restore each hash's ordinal sequence locally.
+        components = self._backend.select_in(
+            GRAPH_OBJECT_COMPONENT_TABLE,
+            "identity_hash",
+            hashes,
+        )
+        block_rows: list[dict[str, Any]] = []
+        if _table_registered(
+                self._backend, GRAPH_OBJECT_COMPONENT_BLOCK_TABLE):
+            block_rows = self._backend.select_in(
+                GRAPH_OBJECT_COMPONENT_BLOCK_TABLE,
+                "identity_hash",
+                hashes,
+            )
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        monotonic: dict[int, int] = {}
+        unsorted: set[int] = set()
+        for component in components:
+            identity_hash = _strict_int(
+                component["identity_hash"],
+                where="graph_object_component.identity_hash",
+                positive=True,
+            )
+            grouped.setdefault(identity_hash, []).append(component)
+            ordinal = _strict_int(
+                component["component_ordinal"],
+                where="graph_object_component.component_ordinal",
+                nonnegative=True,
+            )
+            previous = monotonic.get(identity_hash)
+            if previous is not None and ordinal <= previous:
+                unsorted.add(identity_hash)
+            monotonic[identity_hash] = ordinal
+        for identity_hash in unsorted:
+            grouped[identity_hash].sort(
+                key=lambda row: row["component_ordinal"])
+        blocks_grouped: dict[int, list[dict[str, Any]]] = {}
+        blocks_monotonic: dict[int, int] = {}
+        blocks_unsorted: set[int] = set()
+        for block in block_rows:
+            identity_hash = _strict_int(
+                block["identity_hash"],
+                where="graph_object_component_block.identity_hash",
+                positive=True,
+            )
+            blocks_grouped.setdefault(identity_hash, []).append(block)
+            ordinal = _strict_int(
+                block["block_ordinal"],
+                where="graph_object_component_block.block_ordinal",
+                nonnegative=True,
+            )
+            previous = blocks_monotonic.get(identity_hash)
+            if previous is not None and ordinal <= previous:
+                blocks_unsorted.add(identity_hash)
+            blocks_monotonic[identity_hash] = ordinal
+        for identity_hash in blocks_unsorted:
+            blocks_grouped[identity_hash].sort(
+                key=lambda row: row["block_ordinal"])
+        previous = self._batch_component_rows
+        previous_blocks = self._batch_component_blocks
+        self._batch_component_rows = grouped
+        self._batch_component_blocks = blocks_grouped
+        try:
+            return {
+                identity_hash: self.read_optional(identity_hash, row)
+                for identity_hash, row in zip(hashes, rows, strict=True)
+            }
+        finally:
+            self._batch_component_rows = previous
+            self._batch_component_blocks = previous_blocks
 
     def clear_runtime_caches(self) -> None:
         """外部 load 或故障注入后清空已核验竞争组缓存。"""
@@ -659,7 +910,7 @@ class GraphObjectIdentityStore:
     def _insert_overflow(
             self, identity_hash: int,
             overflow: tuple[tuple[int, int], ...]) -> None:
-        """按原逻辑 ordinal 追加对象 overflow 组件。"""
+        """按所选 codec 的 ordinal 追加整数组件或打包 word。"""
         batch = []
         for ordinal, value in overflow:
             batch.append({
@@ -673,6 +924,40 @@ class GraphObjectIdentityStore:
                 batch.clear()
         if batch:
             self._backend.insert_many(GRAPH_OBJECT_COMPONENT_TABLE, batch)
+
+    def _insert_blocks(
+            self, identity_hash: int,
+            blocks: tuple[tuple[int, tuple[int, ...]], ...],
+            ) -> None:
+        """按固定整数列写入超大对象的分块 overflow。"""
+        if not blocks:
+            return
+        if not _table_registered(
+                self._backend, GRAPH_OBJECT_COMPONENT_BLOCK_TABLE):
+            raise GraphObjectIdentityIncompleteError(
+                "block codec 缺少 graph object component block 表")
+        batch: list[dict[str, int]] = []
+        for block_ordinal, values in blocks:
+            if (not isinstance(values, tuple)
+                    or not 0 < len(values) <= GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH):
+                raise GraphObjectIdentityIncompleteError(
+                    "graph object component block 长度非法")
+            row: dict[str, int] = {
+                "identity_hash": identity_hash,
+                "block_ordinal": block_ordinal,
+                "value_size": len(values),
+            }
+            for index in range(GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH):
+                row[f"component_value_{index:02d}"] = (
+                    values[index] if index < len(values) else 0)
+            batch.append(row)
+            if len(batch) == _INSERT_BATCH_SIZE:
+                self._backend.insert_many(
+                    GRAPH_OBJECT_COMPONENT_BLOCK_TABLE, batch)
+                batch.clear()
+        if batch:
+            self._backend.insert_many(
+                GRAPH_OBJECT_COMPONENT_BLOCK_TABLE, batch)
 
     def _decode_generic(
             self, identity_hash: int, component_size: int,
@@ -692,6 +977,69 @@ class GraphObjectIdentityStore:
                 component_size - GRAPH_OBJECT_CODEC_VALUE_COUNT, 0),
         )
         return values[:inline_size] + overflow
+
+    def _decode_block(
+            self, identity_hash: int, component_size: int,
+            ref_hash: int, values: tuple[int, ...],
+            rows: list[dict[str, Any]],
+            block_rows: list[dict[str, Any]],
+            ) -> tuple[int, ...]:
+        """恢复固定宽度整数块，并拒绝混合、缺块、填充和断序。"""
+        if ref_hash != 0:
+            raise GraphObjectIdentityIncompleteError(
+                f"graph object hash={identity_hash} block ref 必须为零")
+        if component_size < GRAPH_OBJECT_CODEC_VALUE_COUNT:
+            raise GraphObjectIdentityIncompleteError(
+                f"graph object hash={identity_hash} block component_size 非法")
+        if rows:
+            raise GraphObjectIdentityIncompleteError(
+                f"graph object hash={identity_hash} block 混入逐整数 overflow")
+        inline_size = GRAPH_OBJECT_CODEC_VALUE_COUNT
+        self._require_unused_zero(identity_hash, values, inline_size)
+        expected_payload = component_size - inline_size
+        expected_blocks = (
+            expected_payload + GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH - 1
+        ) // GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH
+        if len(block_rows) != expected_blocks:
+            raise GraphObjectIdentityIncompleteError(
+                f"graph object hash={identity_hash} block 数量不一致")
+        payload: list[int] = []
+        for expected_ordinal, row in enumerate(block_rows):
+            ordinal = _strict_int(
+                row["block_ordinal"],
+                where="graph_object_component_block.block_ordinal",
+                nonnegative=True,
+            )
+            if ordinal != expected_ordinal:
+                raise GraphObjectIdentityIncompleteError(
+                    f"graph object hash={identity_hash} block ordinal 断序")
+            value_size = _strict_int(
+                row["value_size"],
+                where="graph_object_component_block.value_size",
+                positive=True,
+            )
+            expected_size = min(
+                GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH,
+                expected_payload - expected_ordinal * GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH,
+            )
+            if value_size != expected_size:
+                raise GraphObjectIdentityIncompleteError(
+                    f"graph object hash={identity_hash} block 长度不一致")
+            block_values = tuple(
+                _strict_int(
+                    row[f"component_value_{index:02d}"],
+                    where=f"graph_object_component_block.value[{index}]",
+                )
+                for index in range(GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH)
+            )
+            if any(value != 0 for value in block_values[value_size:]):
+                raise GraphObjectIdentityIncompleteError(
+                    f"graph object hash={identity_hash} block 未使用槽非零")
+            payload.extend(block_values[:value_size])
+        if len(payload) != expected_payload:
+            raise GraphObjectIdentityIncompleteError(
+                f"graph object hash={identity_hash} block payload 长度不一致")
+        return values[:inline_size] + tuple(payload)
 
     def _decode_occurrence(
             self, identity_hash: int, component_size: int,
@@ -1000,6 +1348,18 @@ class GraphObjectIdentityStore:
             order_by="component_ordinal",
         )
 
+    def _block_rows(
+            self, identity_hash: int) -> list[dict[str, Any]]:
+        """按块序读取同一 GraphObject 的分块 overflow。"""
+        if not _table_registered(
+                self._backend, GRAPH_OBJECT_COMPONENT_BLOCK_TABLE):
+            return []
+        return self._backend.select(
+            GRAPH_OBJECT_COMPONENT_BLOCK_TABLE,
+            where={"identity_hash": identity_hash},
+            order_by="block_ordinal",
+        )
+
     def _group_component_rows(
             self, group_hash: int) -> list[dict[str, Any]]:
         """读取同一竞争组全部 kind/competition 组件，不用 limit 掩盖重复。"""
@@ -1013,10 +1373,14 @@ __all__ = [
     "GRAPH_HYPOTHESIS_GROUP_COMPONENT_TABLE",
     "GRAPH_HYPOTHESIS_GROUP_TABLE",
     "GRAPH_OBJECT_CODEC_GENERIC_V1",
+    "GRAPH_OBJECT_CODEC_GENERIC_BLOCK_V1",
+    "GRAPH_OBJECT_CODEC_GENERIC_PACKED_V1",
     "GRAPH_OBJECT_CODEC_HYPOTHESIS_V1",
     "GRAPH_OBJECT_CODEC_OCCURRENCE_SOURCE_V1",
     "GRAPH_OBJECT_CODEC_SPAN_SOURCE_V1",
     "GRAPH_OBJECT_COMPONENT_TABLE",
+    "GRAPH_OBJECT_COMPONENT_BLOCK_TABLE",
+    "GRAPH_OBJECT_COMPONENT_BLOCK_WIDTH",
     "GRAPH_OBJECT_IDENTITY_COLUMNS",
     "GraphObjectIdentityCollisionError",
     "GraphObjectIdentityError",
@@ -1025,4 +1389,5 @@ __all__ = [
     "GraphObjectIdentityStore",
     "HypothesisGroupSpec",
     "register_graph_object_identity_tables",
+    "validate_graph_object_key",
 ]
