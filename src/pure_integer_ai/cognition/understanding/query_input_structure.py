@@ -673,7 +673,6 @@ class InputRelationQuestionBinding:
                     where="question binding answer_role_key", allow_empty=True)
         if (type(self.slot_span_refs) is not tuple
                 or len(self.slot_span_refs) < (1 if self.answer_role_key else 2)
-                or (self.answer_role_key and len(self.slot_span_refs) != 1)
                 or len(set(self.slot_span_refs)) != len(self.slot_span_refs)):
             raise ValueError("question binding role slot spans are invalid")
         for ref in self.slot_span_refs:
@@ -1454,6 +1453,7 @@ class TrainedInputStructureProjector:
                  discourse_operators: tuple[
                      TrainedInputDiscourseOperator, ...] = (),
                  slot_question_frames: tuple = (),
+                 complete_question_witness_frames: tuple = (),
                  pair_closure_requires_predicate_keys: frozenset[
                      tuple[int, ...]] = frozenset()) -> None:
         if (type(structures) is not tuple
@@ -1480,6 +1480,13 @@ class TrainedInputStructureProjector:
             raise TypeError("slot_question_frames 必须是已训练 WH 整数帧")
         self.slot_question_frames = tuple(sorted(set(slot_question_frames),
                                                  key=lambda item: item.stable_key()))
+        if (type(complete_question_witness_frames) is not tuple or any(
+                type(item) is not TrainedRelationQuestionFrame or item.is_slot_question
+                for item in complete_question_witness_frames)):
+            raise TypeError("complete_question_witness_frames 必须是完整原始训练问式")
+        # 完整问式只供前缀双见证；WH候选仍由原slot合同筛选，不从完整帧补答案。
+        self.complete_question_witness_frames = tuple(sorted(set(complete_question_witness_frames),
+                                                             key=lambda item: item.stable_key()))
         if (type(discourse_operators) is not tuple
                 or any(not isinstance(item, TrainedInputDiscourseOperator)
                        for item in discourse_operators)):
@@ -1691,7 +1698,7 @@ class TrainedInputStructureProjector:
             for (predicate, _proposition, _source), group in groups.items():
                 role_span_groups.setdefault(predicate, []).append(frozenset(group))
             projection_roles = slot_question_projection_roles(
-                self.slot_question_frames, values, source_ref,
+                (*self.slot_question_frames, *self.complete_question_witness_frames), values, source_ref,
                 role_span_groups={key: tuple(items) for key, items in role_span_groups.items()})
             grounded_roles = {predicate: roles for predicate, roles in projection_roles.items()
                 if any(roles.issubset(group) for group in role_span_groups.get(predicate, ()))}
@@ -1850,7 +1857,7 @@ class TrainedInputStructureProjector:
         if self.slot_question_frames:
             from pure_integer_ai.cognition.understanding.query_slot_question_composition import composed_slot_open_role_frames
             derived = composed_slot_open_role_frames(
-                self.slot_question_frames, open_frames, values)
+                (*self.slot_question_frames, *self.complete_question_witness_frames), open_frames, values)
             open_frames = tuple(sorted(set((*open_frames, *derived)),
                                        key=lambda item: item.stable_key()))
         open_relations = match_open_roles(open_frames, values, source_ref)

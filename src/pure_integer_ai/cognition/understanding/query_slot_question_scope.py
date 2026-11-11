@@ -10,6 +10,18 @@ from pure_integer_ai.cognition.understanding.query_slot_question_composition imp
 _RoleSpan = tuple[tuple[int, ...], int, int]
 
 
+def slot_projection_contract(frame) -> tuple:
+    """普通WH的标注边界不改变角色投影；指代保留完整原子及位置合同。
+
+    这里只构造可重建的位置索引键，不合并训练帧或授权组合。实际parse、
+    绑定及来源继续消费完整原帧；不同操作、谓词、观察序、答案或模式不等价。
+    """
+    if frame.is_reference_slot:
+        return slot_contract(frame)
+    return (frame.operation_key, frame.predicate_key, frame.roles,
+            frame.answer_role_key, frame.slot_mode)
+
+
 def slot_question_projection_roles(
         frames: tuple[TrainedRelationQuestionFrame, ...],
         values: tuple[int, ...],
@@ -35,7 +47,7 @@ def slot_question_projection_roles(
         observed = tuple((item.role, item.start, item.end, item.values)
                          for item in parsed.bindings)
         contracts.setdefault(frame.predicate_key, {}).setdefault(
-            slot_contract(frame), set()).add(observed)
+            slot_projection_contract(frame), set()).add(observed)
     result = {}
     for predicate, choices_by_contract in sorted(contracts.items()):
         if len(choices_by_contract) != 1:

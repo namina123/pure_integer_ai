@@ -228,10 +228,15 @@ def _composed_frames(
         frames: tuple[TrainedRelationQuestionFrame, ...],
         values: tuple[int, ...],
         *, max_combinations: int,
+        combination_counter: list[int] | None = None,
         ) -> tuple[ComposedRelationQuestionFrame | ComposedSlotQuestionFrame, ...]:
     """只枚举当前输入中的训练间隔，完整及 WH 合同分别组合。"""
     if type(max_combinations) is not int or max_combinations <= 0:
         raise ValueError("question composition budget must be positive")
+    if combination_counter is not None and (type(combination_counter) is not list
+            or len(combination_counter) != 1 or type(combination_counter[0]) is not int
+            or combination_counter[0] != 0):
+        raise ValueError("question composition counter must begin at zero")
     grouped: dict[tuple, list[TrainedRelationQuestionFrame]] = {}
     for frame in frames:
         wh_gap_indices = ()
@@ -265,6 +270,8 @@ def _composed_frames(
         base_gaps = {frame.gaps for frame in owners}
         for selection in product(*options):
             searched += 1
+            if combination_counter is not None:
+                combination_counter[0] = searched
             if searched > max_combinations:
                 raise QuestionCompositionBudgetExceeded(
                     "question syntax composition exceeds request budget")

@@ -164,3 +164,63 @@ def test_extension_rejects_unqualified_courses_before_writing(tmp_path, argument
     with pytest.raises(ValueError):
         train(course, parent, SEEDS, output)
     assert not output.exists()
+
+
+@pytest.mark.parametrize("text,answer,wh,role_count", [
+    ("枫叶的颜色是红色，肯定，实然，标准强度吗？", -1, "", 6),
+    ("枫叶的颜色是什么，肯定，实然，标准强度？", 2, "什么", 5),
+])
+def test_property_question_training_preserves_complete_role_contract(
+        tmp_path, text, answer, wh, role_count):
+    """属性完整及单槽问式保留六角色合同，不把教师端点或强度写入间隔。"""
+    from pure_integer_ai.experiments.ph2_authored_property_course import read_authored_property_seeds
+    original = next(item for item in read_authored_property_seeds(
+        SEEDS / "authored_relation_property_seed_v1.jsonl.sample")
+        if item.relation.seed_id == "teacher-maple-red-v1")
+    course, parent, old = _course(tmp_path, family=7,
+        seed=original.relation.seed_id, text=text, answer=answer, wh=wh)
+    output = tmp_path / "property-trained"
+    receipt = train(course, parent, SEEDS, output)
+    frames, _ = read_relation_question_graph(output / "relation_questions.sqlite3")
+    added, = (frame for frame in frames if frame != old)
+    assert len(added.roles) == role_count
+    assert bool(added.answer_role_key) == (answer >= 0)
+    for endpoint in original.relation.endpoints:
+        values = tuple(map(ord, endpoint.surface_fragment))
+        assert all(not any(gap[i:i + len(values)] == values
+                           for i in range(len(gap) - len(values) + 1))
+                   for gap in added.gaps)
+    assert receipt["added_frame_count"] == 1
+    assert receipt["source_text_included"] == receipt["evaluator_read_count"] == 0
+
+
+def test_property_question_does_not_invent_omitted_scope_roles(tmp_path):
+    """日常缩略属性问句缺少极性、模态和强度时不得借适配器自动补全。"""
+    course, parent, _ = _course(tmp_path, family=7, seed="teacher-maple-red-v1",
+                               text="枫叶的颜色是什么？", answer=2)
+    output = tmp_path / "incomplete-property"
+    with pytest.raises(ValueError, match="observed endpoint once"):
+        train(course, parent, SEEDS, output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("mutation", [
+    {"perturbation_kind": "CONTENT_REPLACEMENT"},
+    {"label_owner": "evaluator", "split": "held_out"},
+    {"sample_role": "refute"},
+])
+def test_property_question_rejects_non_support_original_source(tmp_path, monkeypatch, mutation):
+    """注册来源适配后仍拒绝扰动、评测所有者或负例，不创建模型。"""
+    from dataclasses import replace
+    from scripts import train_relation_question_extension as trainer
+    loader = trainer.SEED_LOADERS[7][1]
+    seed = next(item for item in loader(SEEDS / "authored_relation_property_seed_v1.jsonl.sample")
+                if item.seed_id == "teacher-maple-red-v1")
+    monkeypatch.setitem(trainer.SEED_LOADERS, 7,
+                        ("property", lambda _path: (replace(seed, **mutation),)))
+    course, parent, _ = _course(tmp_path, family=7, seed=seed.seed_id,
+        text="枫叶的颜色是红色，肯定，实然，标准强度吗？", answer=-1, wh="")
+    output = tmp_path / "unqualified-property"
+    with pytest.raises(ValueError, match="train teacher support seed"):
+        train(course, parent, SEEDS, output)
+    assert not output.exists()

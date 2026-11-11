@@ -111,9 +111,15 @@ class ComposedSlotQuestionFrame:
 def available_slot_question_frames(frames, values, *, max_combinations=4096):
     """在固定预算内返回原训练帧及只由当前整数间隔构成的组合。"""
     from pure_integer_ai.cognition.understanding.query_relation_questions import _composed_frames
+    from pure_integer_ai.cognition.understanding.query_question_prefix import prefixed_slot_question_frames
 
     slots = tuple(frame for frame in frames if frame.is_slot_question)
-    return (*slots, *_composed_frames(slots, values, max_combinations=max_combinations))
+    counter = [0]
+    composed = _composed_frames(slots, values, max_combinations=max_combinations,
+                                combination_counter=counter)
+    prefixed = prefixed_slot_question_frames(frames, values, covered_frames=composed,
+        max_combinations=max_combinations, initial_combinations=counter[0])
+    return (*slots, *composed, *prefixed)
 
 
 def restore_slot_question_frame(key, *, trained_frames=None):
@@ -124,8 +130,15 @@ def restore_slot_question_frame(key, *, trained_frames=None):
         frame = TrainedRelationQuestionFrame.from_stable_key(key)
         parents = (key,)
     else:
-        frame = ComposedSlotQuestionFrame.from_stable_key(key)
-        parents = tuple(parent for group in frame.gap_sources for parent in group)
+        from pure_integer_ai.cognition.understanding.query_question_prefix import (
+            PREFIXED_SLOT_FRAME, PrefixedSlotQuestionFrame,
+        )
+        if key[0] == PREFIXED_SLOT_FRAME:
+            frame = PrefixedSlotQuestionFrame.from_stable_key(key)
+            parents = tuple(parent.stable_key() for parent in frame.source_frames)
+        else:
+            frame = ComposedSlotQuestionFrame.from_stable_key(key)
+            parents = tuple(parent for group in frame.gap_sources for parent in group)
     if not frame.is_slot_question:
         raise ValueError("slot question frame has no answer role")
     if trained_frames is not None:
@@ -138,12 +151,16 @@ def restore_slot_question_frame(key, *, trained_frames=None):
 def composed_slot_open_role_frames(frames, bound_frames, values):
     """将组合语法绑定到已有 Core 来源框架，保留其命题与物理来源身份。"""
     available = available_slot_question_frames(frames, values)
+    from pure_integer_ai.cognition.understanding.query_question_prefix import PrefixedSlotQuestionFrame
     result = set()
     for frame in available:
-        if not isinstance(frame, ComposedSlotQuestionFrame):
+        if isinstance(frame, PrefixedSlotQuestionFrame):
+            parents = {frame.base}
+        elif isinstance(frame, ComposedSlotQuestionFrame):
+            parents = {TrainedRelationQuestionFrame.from_stable_key(key)
+                       for keys in frame.gap_sources for key in keys}
+        else:
             continue
-        parents = {TrainedRelationQuestionFrame.from_stable_key(key)
-                   for keys in frame.gap_sources for key in keys}
         parent_gaps = {parent.gaps for parent in parents}
         for bound in bound_frames:
             if (bound.predicate != frame.predicate_key or bound.roles != frame.roles

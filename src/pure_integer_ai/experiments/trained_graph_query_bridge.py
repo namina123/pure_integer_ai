@@ -52,7 +52,7 @@ from pure_integer_ai.experiments.trained_relation_composition_graph import (
     read_relation_composition_graph,
 )
 from pure_integer_ai.experiments.trained_question_open_frames import (
-    bound_question_open_frames,
+    bound_question_open_frames, question_observed_role_contract,
 )
 from pure_integer_ai.experiments.verified_composition_query import (
     composition_output_is_current, consume_verified_composition,
@@ -1565,6 +1565,8 @@ class TrainedGraphQueryBridge:
             discourse_operators=self.input_discourse_operators,
             slot_question_frames=tuple(item for item in self.relation_question_frames
                                        if item.is_slot_question),
+            complete_question_witness_frames=tuple(item for item in self.relation_question_frames
+                                                  if not item.is_slot_question),
             pair_closure_requires_predicate_keys=(
                 self._event_time_predicate_keys))
         self._diagnostic_stage("input_projector_ready")
@@ -1766,6 +1768,8 @@ class TrainedGraphQueryBridge:
             discourse_operators=self.input_discourse_operators,
             slot_question_frames=tuple(item for item in self.relation_question_frames
                                        if item.is_slot_question),
+            complete_question_witness_frames=tuple(item for item in self.relation_question_frames
+                                                  if not item.is_slot_question),
             pair_closure_requires_predicate_keys=(
                 self._event_time_predicate_keys))
         if self.memory is not None:
@@ -3814,8 +3818,7 @@ class TrainedGraphQueryBridge:
         fact_roles = tuple(item.role.stable_key() for item in fact.bindings)
         if (len(set(fact_roles)) != len(fact_roles)
                 or binding.answer_role_key not in fact_roles
-                or frame.roles != tuple(role for role in fact_roles
-                                         if role != binding.answer_role_key)
+                or not question_observed_role_contract(frame, fact_roles)
                 or relation.source_ref != (fact.source_hash,)
                 or relation.required_count != len(fact.bindings) + 1):
             return None
@@ -4680,9 +4683,8 @@ class TrainedGraphQueryBridge:
             else:
                 role_contract = any(
                     question_frame.answer_role_key in fact_fillers
-                    and question_frame.roles == tuple(
-                        item.role.stable_key() for item in fact.bindings
-                        if item.role.stable_key() != question_frame.answer_role_key)
+                    and question_observed_role_contract(question_frame, tuple(
+                        item.role.stable_key() for item in fact.bindings))
                     and set(candidate.frame.roles) == set(question_frame.roles)
                     for question_frame in question_frames)
             if not role_contract:
@@ -4714,6 +4716,10 @@ class TrainedGraphQueryBridge:
                                         and len(dynamic_roles) == 1))):
                 selected.append(candidate)
                 selected_props.add(candidate.frame.proposition)
+        from pure_integer_ai.cognition.understanding.query_question_syntax_scope import grounded_question_open_scope
+        selected = grounded_question_open_scope(selected, structure,
+            question_frames_by_shape, self.relation_question_frames)
+        selected_props = {candidate.frame.proposition for candidate in selected}
         if not selected:
             return replace(structure, open_relations=())
         # Keep the exact proposition scope for the subsequent Memory restore;

@@ -25,11 +25,19 @@ from pure_integer_ai.experiments.ph2_authored_mereology_course import read_autho
 from pure_integer_ai.experiments.ph2_authored_subset_member_course import read_authored_subset_member_seeds
 from pure_integer_ai.experiments.ph2_authored_semantic_pair_course import read_authored_semantic_pair_seeds
 from pure_integer_ai.experiments.ph2_authored_precedes_course import read_authored_precedes_seeds
+from pure_integer_ai.experiments.ph2_authored_property_course import read_authored_property_seeds
 from pure_integer_ai.experiments.trained_relation_question_graph import (
     materialize_relation_question_graph, read_relation_question_graph,
 )
 
 COURSE_FORMAT = "PURE_INTEGER_AUTHORED_QUESTION_EXTENSION_COURSE_V1"
+
+
+def _read_property_relation_seeds(path: Path) -> tuple:
+    """仅投影原属性的完整六角色供语法编译，不修改知识强度或补默认角色。"""
+    return tuple(record.relation for record in read_authored_property_seeds(path))
+
+
 SEED_LOADERS = {
     1: ("causes", read_authored_causes_seeds),
     2: ("mereology", read_authored_mereology_seeds),
@@ -37,6 +45,7 @@ SEED_LOADERS = {
     4: ("alias_refers", read_authored_alias_refers_seeds),
     5: ("similar_antonym", read_authored_semantic_pair_seeds),
     6: ("precedes", read_authored_precedes_seeds),
+    7: ("property", _read_property_relation_seeds),
 }
 
 
@@ -91,7 +100,8 @@ def train(course_database: Path, parent_graph: Path, seed_root: Path,
         seed_files[name] = {"path": str(path), "sha256": _sha(path)}
         seeds[code] = {item.seed_id: item for item in loader(path)
                        if item.split == "train" and item.label_owner == "teacher"
-                       and item.sample_role == "support"}
+                       and item.sample_role == "support"
+                       and item.perturbation_kind == "NONE"}
     digest = bytes.fromhex(course_sha)
     source_parts = tuple(int.from_bytes(digest[index:index + 4], "big")
                          for index in range(0, len(digest), 4))

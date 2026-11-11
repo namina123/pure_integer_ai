@@ -19,6 +19,7 @@ from pure_integer_ai.experiments.ph2_authored_relation_schema import (
 from pure_integer_ai.experiments.query_pending_reference import (
     pending_reference_relation_keys,
 )
+from pure_integer_ai.experiments.trained_question_open_frames import question_observed_role_contract
 
 
 def _surface_relation_topology_key(
@@ -308,9 +309,8 @@ def select_equivalent_slot_question_bindings(validated):
             for item in fact.bindings}
         endpoints = core_relation_endpoint_identity(fact)
         if (not endpoints or len(fact.bindings) != len(fact_fillers)
-                or frame.roles != tuple(item.role.stable_key()
-                    for item in fact.bindings
-                    if item.role.stable_key() != binding.answer_role_key)
+                or not question_observed_role_contract(frame, tuple(
+                    item.role.stable_key() for item in fact.bindings))
                 or fact.predicate.stable_key() != frame.predicate_key
                 or fact_fillers.get(binding.answer_role_key) != answer_key):
             return ()
