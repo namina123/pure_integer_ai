@@ -1,6 +1,8 @@
 """完整输入未获事实资格时，在原查询中消费 UNKNOWN 图生成澄清回应。"""
 from __future__ import annotations
 
+from pure_integer_ai.experiments.input_projection_conflict import retained_projection_conflict_allowed
+
 from pure_integer_ai.cognition.shared.query_driver import run_query, unvisited_frontier
 from pure_integer_ai.cognition.shared.query_state import (
     ROOT_EMPTY, ROOT_PENDING, SPACE_CORE, SPACE_DIALOGUE, SPACE_MEMORY,
@@ -12,6 +14,13 @@ from pure_integer_ai.cognition.shared.query_state import (
 
 
 INPUT_CLARIFICATION_VERSION = 92371
+
+
+def clarification_failure_termination(state: QueryState) -> int:
+    """外层保留真实竞争、预算及循环原因，其它未绑定终止映射为缺槽。"""
+    return (state.termination if state.termination in (
+        TERMINATION_CLARIFY_CONFLICT, TERMINATION_BUDGET_EXHAUSTED,
+        TERMINATION_CYCLE_GUARD) else TERMINATION_CLARIFY_MISSING_BINDING)
 
 
 def unanchored_reference_question(parts, candidate_sets) -> bool:
@@ -52,7 +61,7 @@ def unresolved_role_context_allowed(state: QueryState, input_structure=None) -> 
         if item.space == SPACE_CORE and item.polarity in (1, 2))
 
 
-def clarification_query_state(state: QueryState, frontier, hypotheses, nodes, *, input_role_occurrences=()):
+def clarification_query_state(state: QueryState, frontier, hypotheses, nodes, *, input_role_occurrences=(), input_structure=None):
     """只授权当前观察和训练 connector，完整记录被拒绝的原根。
 
     保留原查询身份、输入投影、预算和来源；不把未展开的事实根标成已展开。
@@ -60,7 +69,8 @@ def clarification_query_state(state: QueryState, frontier, hypotheses, nodes, *,
     """
     if (not hypotheses or not nodes or state.read_count or state.visited
             or state.conflict_open
-            or any(item.conflict_kept for item in state.bindings)
+            or (any(item.conflict_kept for item in state.bindings)
+                and not retained_projection_conflict_allowed(state, input_structure))
             or any(item.space == SPACE_CORE and item.polarity in (1, 2)
                    for item in state.evidence)):
         return None
@@ -105,8 +115,10 @@ def run_input_clarification(state, frontier, hypotheses, nodes, *, expander, tra
     """
     if type(input_relation_conflict) is not bool:
         raise TypeError("input_relation_conflict 必须是严格布尔值")
+    structure = getattr(expander, "input_structure", None)
+    projection_conflict = retained_projection_conflict_allowed(state, structure)
     admitted = clarification_query_state(state, frontier, hypotheses, nodes,
-        input_role_occurrences=input_role_occurrences)
+        input_role_occurrences=input_role_occurrences, input_structure=structure)
     if admitted is None:
         return state, None
     tracer.record(admitted, TERMINATION_OPEN)
@@ -119,7 +131,9 @@ def run_input_clarification(state, frontier, hypotheses, nodes, *, expander, tra
     if any(item.space == SPACE_CORE and item.polarity in (1, 2)
            for item in result.evidence) or any(hop.space == SPACE_CORE for hop in expander.hops):
         raise ValueError("未绑定澄清不得消费事实根或获得 Core 真值证据")
-    if result.conflict_open or any(item.conflict_kept for item in result.bindings):
+    if ((result.conflict_open or any(item.conflict_kept for item in result.bindings))
+            and not (projection_conflict and retained_projection_conflict_allowed(
+                result, structure, restricted=True))):
         return result, None
     generated = tuple(expander.generic_response_generations)
     generic = generated[0] if len(generated) == 1 else None
@@ -128,11 +142,12 @@ def run_input_clarification(state, frontier, hypotheses, nodes, *, expander, tra
             or generic.response_plan.claim_evidence_refs
             or generic.graph_surfaces):
         raise ValueError("未绑定澄清只能消费 UNKNOWN 语境，不能交付事实或对象表面")
-    termination = (TERMINATION_CLARIFY_CONFLICT if input_relation_conflict
+    retained_conflict = input_relation_conflict or projection_conflict
+    termination = (TERMINATION_CLARIFY_CONFLICT if retained_conflict
                    else TERMINATION_CLARIFY_MISSING_BINDING)
     result = result.with_(
         termination=termination,
-        conflict_open=int(input_relation_conflict),
+        conflict_open=int(retained_conflict),
         required_slots_open=max(1, result.required_slots_open),
         evidence_closed=0, generation_ready=int(generic is not None),
     ).canonical()

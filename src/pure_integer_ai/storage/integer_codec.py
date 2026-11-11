@@ -175,10 +175,15 @@ def _read_unsigned(data: bytes, cursor: int) -> tuple[int, int]:
         if byte < 128:
             break
         shift += 7
-    canonical = bytearray()
-    _append_unsigned(canonical, value)
-    if bytes(canonical) != data[start:cursor]:
+    # base-128最短表示恰好是单字节或末字节非零；无需逐值重新分配编码。
+    if cursor - start > 1 and byte == 0:
         raise IntegerCodecError("unsigned varint 不是最短编码")
+    if start < 0:
+        # 合法协议游标非负；对既有宿主负索引调用保留原切片比较行为。
+        canonical = bytearray()
+        _append_unsigned(canonical, value)
+        if bytes(canonical) != data[start:cursor]:
+            raise IntegerCodecError("unsigned varint 不是最短编码")
     return value, cursor
 
 

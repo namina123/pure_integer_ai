@@ -15,6 +15,7 @@ def has_uncovered_closed_relation_modifier(structure: QueryInputStructure) -> bo
     一条关系的成员覆盖完整输入，或一个来源一致的全输入开放框架，其每个动态
     角色都精确绑定当前候选的已知 filler。框架的训练间隔可消费未单独投影的
     语言结构；未知区间不能被宽角色吞入后再冒充较短的已知实体。
+    无独立谓词跨度的端点闭合也受同一覆盖合同约束。
     """
     if (structure.assertion_scope_bindings
             or structure.relation_question_bindings
@@ -29,7 +30,6 @@ def has_uncovered_closed_relation_modifier(structure: QueryInputStructure) -> bo
         if (item.state == STRUCTURE_CLOSED
             and item.required_open == 0
             and item.required_count == item.support_count
-            and item.predicate_coverage == 1
             and item.role_coverage > 0
             and item.conflict_count == 0))
     if not closed:

@@ -35,6 +35,12 @@ def _encode_block(raw: bytes) -> bytes:
             cursor += 1
             continue
         end = cursor + 4
+        # 完全相等的有界字节块可整体越过；首个差异仍逐字节定位。
+        while end + 64 <= size - 5:
+            previous_end = previous + end - cursor
+            if raw[end:end + 64] != raw[previous_end:previous_end + 64]:
+                break
+            end += 64
         while end < size - 5 and raw[end] == raw[previous + end - cursor]:
             end += 1
         literal_size, match_size = cursor - anchor, end - cursor - 4
@@ -45,7 +51,10 @@ def _encode_block(raw: bytes) -> bytes:
         output.extend((cursor - previous).to_bytes(2, "little"))
         if match_size >= 15:
             _length(output, match_size - 15)
-        for position in range(cursor + 1, end):
+        # 匹配区间以offset为周期；较早四字节窗口必被后继同窗覆盖。
+        # 末尾三个窗口可能跨出匹配区间，必须按原顺序全部登记。
+        last_period = max(cursor + 1, end - (cursor - previous) - 3)
+        for position in range(last_period, end):
             positions[raw[position:position + 4]] = position
         cursor = anchor = end
     literal_size = size - anchor

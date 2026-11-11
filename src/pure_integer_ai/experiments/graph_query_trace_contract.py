@@ -20,9 +20,12 @@ class GraphQueryTraceContractError(ValueError):
 
 
 def _integer_key(value: object, field: str) -> tuple[int, ...]:
-    if (not isinstance(value, (list, tuple))
-            or any(type(item) is not int or item < 0 for item in value)):
+    """逐项验证完整非负整数键，避免为每个整数创建生成器恢复点。"""
+    if not isinstance(value, (list, tuple)):
         raise GraphQueryTraceContractError(f"{field} must be a nonnegative integer key")
+    for item in value:
+        if type(item) is not int or item < 0:
+            raise GraphQueryTraceContractError(f"{field} must be a nonnegative integer key")
     return tuple(value)
 
 
@@ -33,20 +36,23 @@ def _sequence(value: object, field: str) -> list | tuple:
 
 
 def _integer_artifact_tree(value: object) -> None:
-    """Validate the legacy writer's tree without filling removed fields."""
+    """完整校验整数树；叶子就地核验，遍历栈只持有复合或待拒绝成员。"""
     pending = [value]
     while pending:
         item = pending.pop()
         if item is None or type(item) is int:
             continue
         if isinstance(item, (list, tuple)):
-            pending.extend(item)
+            children = item
         elif isinstance(item, Mapping):
             if any(not isinstance(key, str) or not key for key in item):
                 raise GraphQueryTraceContractError("integer artifact object key is invalid")
-            pending.extend(item.values())
+            children = item.values()
         else:
             raise GraphQueryTraceContractError("integer artifact contains a noninteger value")
+        for child in children:
+            if child is not None and type(child) is not int:
+                pending.append(child)
 
 
 @dataclass(frozen=True, slots=True)

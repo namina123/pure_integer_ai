@@ -68,6 +68,58 @@ def test_foreign_frame_source_does_not_license_an_extra_gap():
     assert has_uncovered_closed_relation_modifier(replace(structure, open_relations=foreign))
 
 
+def test_pair_closure_without_predicate_cannot_ignore_untrained_input():
+    """无谓词的双端点闭合也必须消费完整输入，不能借局部角色读事实。"""
+    projector = _projector()
+    for values in ((11, 77, 22), (77, 11, 22), (11, 22, 77)):
+        structure = projector.project(values)
+        relation, = structure.relation_candidates
+        assert relation.required_open == 0 and relation.predicate_coverage == 0
+        assert relation.role_coverage == 2
+        assert has_uncovered_closed_relation_modifier(structure)
+    assert not has_uncovered_closed_relation_modifier(projector.project((11, 22)))
+    trained = _projector(gap=(77,)).project((11, 77, 22))
+    assert not has_uncovered_closed_relation_modifier(trained)
+
+
+def test_overlapping_pair_fillers_do_not_cover_unknown_suffix():
+    """两个独立角色共用同一表面时，角色数量不能代替区间覆盖。"""
+    base = _projector()
+    original, = base.structures
+    structure = replace(original, members=(
+        *original.members[:-1], replace(original.members[-1], values=(11,))))
+    projector = TrainedInputStructureProjector((structure,))
+    for values in ((11, 77), (77, 11), (77, 11, 88)):
+        projected = projector.project(values)
+        relation, = projected.relation_candidates
+        assert relation.predicate_coverage == 0 and relation.role_coverage == 2
+        assert relation.required_count == relation.support_count == 2
+        assert has_uncovered_closed_relation_modifier(projected)
+    assert not has_uncovered_closed_relation_modifier(projector.project((11,)))
+
+
+def test_pair_closure_uncovered_input_persists_unknown_memory(tmp_path):
+    """共享门在真实Memory写入及冷恢复中保持无谓词局部闭合为UNKNOWN。"""
+    from pure_integer_ai.cognition.shared.hypothesis import EVIDENCE_UNKNOWN
+    from pure_integer_ai.experiments.trained_dialogue_memory_graph import (
+        TrainedDialogueMemoryGraph,
+    )
+    values = (11, 77, 22)
+    structure = _projector().project(values)
+    database = tmp_path / "uncovered-pair-memory.sqlite3"
+    with TrainedDialogueMemoryGraph(database, session_id=51) as memory:
+        appended = memory.append("".join(map(chr, values)), speaker_kind=1,
+                                 input_structure=structure)
+        observation = memory.intake.result_for_source(appended.source).observation_ref
+        active = memory.active_structures(observation_refs=(observation,))
+        assert active.hypotheses and active.evidence
+        assert all(item.stance == EVIDENCE_UNKNOWN for item in active.evidence)
+    with TrainedDialogueMemoryGraph(database, session_id=51) as restored:
+        active = restored.active_structures(observation_refs=(observation,))
+        assert active.hypotheses and active.evidence
+        assert all(item.stance == EVIDENCE_UNKNOWN for item in active.evidence)
+
+
 def test_missing_outer_carrier_keeps_all_trained_inner_gaps():
     """省略来源终止符时，必须仍消费内部训练间隔并精确绑定两个角色。"""
     base = _projector(gap=(77, 33))

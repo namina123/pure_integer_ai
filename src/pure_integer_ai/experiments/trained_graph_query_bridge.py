@@ -51,6 +51,9 @@ from pure_integer_ai.experiments.trained_core_relation_composition import (
 from pure_integer_ai.experiments.trained_relation_composition_graph import (
     read_relation_composition_graph,
 )
+from pure_integer_ai.experiments.trained_question_open_frames import (
+    bound_question_open_frames,
+)
 from pure_integer_ai.experiments.verified_composition_query import (
     composition_output_is_current, consume_verified_composition,
 )
@@ -264,6 +267,10 @@ from pure_integer_ai.experiments.trained_relation_question_graph import (
 )
 from pure_integer_ai.experiments.trained_open_role_frames import restore_open_role_frames
 from pure_integer_ai.experiments.trained_input_clarification import unresolved_role_context_allowed
+from pure_integer_ai.experiments.input_projection_conflict import (
+    conflicting_input_filler_groups as _conflicting_input_filler_groups,
+    retained_projection_conflict_allowed,
+)
 from pure_integer_ai.experiments.trained_open_response_runtime import (
     GenericResponseConnectorQueryNode,
     _discourse_memory_refs,
@@ -382,20 +389,6 @@ def _generic_response_adoption_allowed(
         return True
     return bool(generic_structural_preferred
                 and not resolved_reference_resolutions)
-
-
-def _conflicting_input_filler_groups(semantic_fillers) -> frozenset[
-        tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]]:
-    """Return proposition/source/role groups with multiple input fillers."""
-    fillers_by_group: dict[
-        tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]],
-        set[tuple[int, ...]],
-    ] = {}
-    for item in semantic_fillers:
-        key = (item.proposition_key, item.source_ref, item.role_key)
-        fillers_by_group.setdefault(key, set()).add(item.candidate_key)
-    return frozenset(
-        key for key, fillers in fillers_by_group.items() if len(fillers) > 1)
 
 
 def _merge_memory_active_structures(
@@ -1558,30 +1551,8 @@ class TrainedGraphQueryBridge:
             self.kdconv_facts)
         semantic_structures = SemanticCandidateStructureAdapter.from_views(
             semantic_input_views)
-        relation_question_open_frames = []
-        for question in self.relation_question_frames:
-            for fact in facts:
-                roles = tuple(item.role.stable_key() for item in fact.bindings)
-                if fact.predicate.stable_key() != question.predicate_key:
-                    continue
-                if question.is_slot_question:
-                    if (len(set(roles)) != len(roles)
-                            or question.answer_role_key not in roles
-                            or question.roles != tuple(
-                                role for role in roles
-                                if role != question.answer_role_key)):
-                        continue
-                elif roles != question.roles:
-                    continue
-                open_frame = OpenRoleFrame(
-                    fact.proposition.stable_key(), question.predicate_key,
-                    (fact.source_hash,), question.roles, question.gaps,
-                    (0, len(question.roles) + sum(
-                        map(len, question.gaps))),
-                )
-                relation_question_open_frames.append(open_frame)
-        self._relation_question_open_frames = tuple(sorted(
-            set(relation_question_open_frames), key=lambda item: item.stable_key()))
+        self._relation_question_open_frames = bound_question_open_frames(
+            self.relation_question_frames, facts)
         self.input_projector = TrainedInputStructureProjector(tuple(sorted(
             set((*graph_structures, *semantic_structures, *kdconv_structures)),
             key=lambda item: item.stable_key(),
@@ -6484,7 +6455,7 @@ class TrainedGraphQueryBridge:
             # 缺槽、未绑定问式及完整输入失败共用原非事实资格核验。
             # 当前 O/H/E 保留真实立场；冲突、事实证据和已展开查询仍关闭。
             from pure_integer_ai.experiments.trained_input_clarification import (
-                clarification_generation_payload, run_input_clarification,
+                clarification_failure_termination, clarification_generation_payload, run_input_clarification,
             )
             clarification_state, clarification = run_input_clarification(
                 initial, tuple(frontier), generic_hypotheses,
@@ -6498,10 +6469,7 @@ class TrainedGraphQueryBridge:
             clarification_payload = (None if clarification is None else
                 clarification_generation_payload(
                     clarification, _response_plan_connector_key(clarification_plan)))
-            failure_termination = (clarification_state.termination
-                if clarification_state.termination in {
-                    TERMINATION_BUDGET_EXHAUSTED, 6}
-                else TERMINATION_CLARIFY_MISSING_BINDING)
+            failure_termination = clarification_failure_termination(clarification_state)
             failed = clarification_state.with_(
                 frontier=(),
                 termination=failure_termination,
@@ -9053,8 +9021,11 @@ class _CrossSpaceExpander(QueryExpander):
         # final contract must be CLARIFY/FAIL_CLOSED.  Keep the shared graph
         # evidence and terminate through the ordinary conflict predicate.
         scoped_nonfactual_ready = assertion_scope_response_allowed(self.input_structure, state)
+        projection_conflict_ready = retained_projection_conflict_allowed(
+            state, self.input_structure, restricted=True)
         response_generation_blocked = bool(
-            self.input_order_conflict or (state.conflict_open and not scoped_nonfactual_ready))
+            (self.input_order_conflict and not projection_conflict_ready) or (state.conflict_open
+                and not (scoped_nonfactual_ready or projection_conflict_ready)))
         context_only_dynamic = bool(
             dynamic_slot_blocked and unresolved_role_context_allowed(state, self.input_structure))
         if (not self._response_generation_attempted
@@ -9068,7 +9039,7 @@ class _CrossSpaceExpander(QueryExpander):
                 self.open_response_generations = ()
                 self.generic_response_generations = ()
             elif (not self.input_structure.assertion_scope_bindings
-                  and not dynamic_slot_blocked):
+                  and not dynamic_slot_blocked and not projection_conflict_ready):
                 self.open_response_generations = generate_open_responses(
                     self.owner.surface_generator, self.owner.core_runtime, state,
                     tuple(self.open_generation_contexts[key] for key in sorted(self.open_generation_contexts)),
@@ -9133,7 +9104,7 @@ class _CrossSpaceExpander(QueryExpander):
                     self.input_structure,
                     self.owner._discourse_graph_input_requested_keys,
                     tuple(self.hops),
-                    context_only=(context_only_dynamic or pending_request_context_allowed(
+                    context_only=(projection_conflict_ready or context_only_dynamic or pending_request_context_allowed(
                         state, self.input_structure, self.owner.operation_request_frames)),
                 )
             if self.generic_response_generations:
