@@ -394,7 +394,7 @@ class InputRelationCandidate:
                 "carrier_key", "source_ref"):
             _strict_key(
                 getattr(self, name), where=f"InputRelationCandidate.{name}")
-        if (type(self.span_refs) is not tuple or not self.span_refs
+        if (type(self.span_refs) is not tuple
                 or any(type(item) is not tuple for item in self.span_refs)):
             raise TypeError("relation candidate span_refs 类型非法")
         for item in self.span_refs:
@@ -421,6 +421,13 @@ class InputRelationCandidate:
             raise ValueError("relation candidate conflict/state 不闭合")
         if self.state == STRUCTURE_CLOSED and self.required_open:
             raise ValueError("闭合 relation candidate 不得缺成员")
+        if not self.span_refs and not (
+                self.state == STRUCTURE_OPEN and self.role_coverage == 0
+                and self.predicate_coverage == self.support_count == 1
+                and self.required_count >= 3
+                and self.required_open == self.required_count - 1
+                and self.conflict_count == 0):
+            raise ValueError("无语义跨度仅允许未闭合的纯语法谓词候选")
 
     @property
     def score(self) -> int:

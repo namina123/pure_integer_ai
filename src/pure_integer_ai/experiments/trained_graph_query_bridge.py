@@ -4902,6 +4902,9 @@ class TrainedGraphQueryBridge:
         structure = self._aggregate_input_provenance(structure)
         structure = attach_assertion_scope_frames(self.assertion_scope_frames, structure)
         structure = self._filter_relation_question_open_scope(structure)
+        from pure_integer_ai.cognition.understanding.query_anaphoric_slot_scope import attach_anaphoric_slot_syntax
+        structure = attach_anaphoric_slot_syntax(
+            structure, self.relation_question_frames, self.input_projector.structures)
         structure = self._attach_relation_question_binding(structure)
         structure = self._attach_operation_request_binding(structure)
         if graph_object_keys:
