@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pure_integer_ai.cognition.shared.hypothesis import (
     EVIDENCE_REFUTE,
     EVIDENCE_SUPPORT,
+    EVIDENCE_UNKNOWN,
 )
 from pure_integer_ai.cognition.shared.identity import SourceRef
 from pure_integer_ai.cognition.understanding.query_input_structure import (
@@ -27,6 +28,10 @@ from pure_integer_ai.experiments.trained_dialogue_memory_graph import (
 from pure_integer_ai.experiments.trained_revision_cue_graph import (
     RevisionCueGraphRecord,
 )
+from pure_integer_ai.cognition.understanding.query_assertion_scope import TrainedAssertionScopeFrame
+from pure_integer_ai.experiments.natural_revision_scope import (
+    read_revision_scope, require_mounted_revision_scope, revision_scope_stance,
+)
 
 
 REVISION_REASON_NAMESPACE = (91692, 1)
@@ -34,7 +39,14 @@ REVISION_DETAIL_NAMESPACE = (91692, 2)
 
 
 class NaturalRevisionBindingError(ValueError):
-    """A correction cue cannot be bound to one unambiguous Memory target."""
+    """更正拒绝的规范整数原因：1结构，2缺目标，4不支持的作用域。"""
+
+    def __init__(self, message: str, *, reason_code: int = 1) -> None:
+        """保留原异常接口，以有界整数记录可跨语言恢复的失败类别。"""
+        if type(reason_code) is not int or reason_code not in (1, 2, 4):
+            raise ValueError("invalid revision rejection code")
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 def _pack(key: tuple[int, ...]) -> tuple[int, ...]:
@@ -58,6 +70,8 @@ class NaturalRevisionInputBinding:
     cue_end: int
     source_identity: tuple[int, ...]
     license_identity: tuple[int, ...]
+    replacement_stance: int = EVIDENCE_SUPPORT
+    scope_binding_key: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         for label in (
@@ -67,9 +81,16 @@ class NaturalRevisionInputBinding:
         if (type(self.cue_start) is not int or type(self.cue_end) is not int
                 or self.cue_start < 0 or self.cue_end <= self.cue_start):
             raise ValueError("revision cue interval is invalid")
+        if type(self.replacement_stance) is not int:
+            raise ValueError("revision stance must be a strict integer")
+        if self.replacement_stance == EVIDENCE_REFUTE:
+            read_revision_scope(self.scope_binding_key, relation_key=self.relation_key,
+                                source_ref=self.input_source_ref)
+        elif self.replacement_stance != EVIDENCE_SUPPORT or self.scope_binding_key:
+            raise ValueError("revision stance lacks a supported scope contract")
 
     def stable_key(self) -> tuple[int, ...]:
-        return (
+        original = (
             1,
             *_pack(self.cue_identity),
             *_pack(self.action_key),
@@ -81,6 +102,10 @@ class NaturalRevisionInputBinding:
             *_pack(self.source_identity),
             *_pack(self.license_identity),
         )
+        if self.replacement_stance == EVIDENCE_SUPPORT:
+            return original
+        return (4, *_pack(original), self.replacement_stance,
+                *_pack(self.scope_binding_key))
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +160,8 @@ class NaturalRevisionCommit:
 class NaturalRevisionRuntime:
     """Pure projection plus bounded target resolution over Interaction Memory."""
 
-    def __init__(self, records: tuple[RevisionCueGraphRecord, ...]) -> None:
+    def __init__(self, records: tuple[RevisionCueGraphRecord, ...], *,
+                 scope_frames: tuple[TrainedAssertionScopeFrame, ...] = ()) -> None:
         if (type(records) is not tuple or not records
                 or any(not isinstance(item, RevisionCueGraphRecord)
                        for item in records)
@@ -149,6 +175,11 @@ class NaturalRevisionRuntime:
         self.records = records
         self.source_identity = next(iter(sources))
         self.license_identity = next(iter(licenses))
+        if (type(scope_frames) is not tuple
+                or any(not isinstance(item, TrainedAssertionScopeFrame) for item in scope_frames)
+                or len(set(scope_frames)) != len(scope_frames)):
+            raise ValueError("revision scopes must be unique trained graph records")
+        self.scope_frames = scope_frames
 
     def bind_input(
             self,
@@ -179,7 +210,15 @@ class NaturalRevisionRuntime:
                 "revision input must contain exactly one trained cue")
 
         record, cue_start, cue_end = matches[0]
+        try:
+            stance, scope_key = revision_scope_stance(self.scope_frames, input_structure)
+        except ValueError as error:
+            raise NaturalRevisionBindingError(str(error), reason_code=4) from error
         relations = input_structure.relation_candidates
+        if scope_key:
+            scope = read_revision_scope(scope_key, relation_key=input_structure.assertion_scope_bindings[0].relation_key,
+                                        source_ref=input_structure.source_ref)
+            relations = tuple(item for item in relations if item.stable_key() == scope.relation_key)
         if len(relations) != 1:
             raise NaturalRevisionBindingError(
                 "revision cue must bind exactly one proposition candidate")
@@ -214,6 +253,8 @@ class NaturalRevisionRuntime:
             cue_end,
             record.source_identity,
             record.license_identity,
+            stance,
+            scope_key,
         )
 
     def resolve_target(
@@ -225,6 +266,8 @@ class NaturalRevisionRuntime:
         """Resolve one latest matching user Hypothesis and its active Evidence."""
         if not isinstance(input_binding, NaturalRevisionInputBinding):
             raise TypeError("input_binding must be NaturalRevisionInputBinding")
+        if self.bind_input(input_structure) != input_binding:
+            raise NaturalRevisionBindingError("revision binding differs from its actual input")
         if memory is None or not hasattr(memory, "active_structures"):
             raise NaturalRevisionBindingError("revision requires Interaction Memory")
         candidate_keys = memory_input_candidate_keys(
@@ -259,10 +302,19 @@ class NaturalRevisionRuntime:
             topic = memory_topic_candidate(hypothesis.candidate_key)
             if topic is None or topic.proposition_key != input_binding.proposition_key:
                 continue
+            linked = {item.evidence_key: item for item in snapshot.evidence
+                      if item.hypothesis_key == hypothesis.hypothesis_key}
+            if not linked or set(hypothesis.evidence_keys) != set(linked):
+                raise NaturalRevisionBindingError("revision target Evidence closure is incomplete")
+            # 只有来源一致、从未断言且无替代边的初始UNKNOWN不构成用户断言。
+            # 反驳、竞争或替代后的UNKNOWN仍进入原最新目标裁决，不得跳过。
+            if all(item.stance == EVIDENCE_UNKNOWN and not item.supersedes_key
+                   and item.source_ref == observation.source_ref for item in linked.values()):
+                continue
             matching.append((observation, hypothesis))
         if not matching:
             raise NaturalRevisionBindingError(
-                "revision has no preceding Memory proposition target")
+                "revision has no preceding Memory proposition target", reason_code=2)
         latest_turn = max(item[0].turn_seq for item in matching)
         latest = tuple(item for item in matching
                        if item[0].turn_seq == latest_turn)
@@ -297,8 +349,8 @@ class NaturalRevisionRuntime:
             target_evidence.source_ref,
         )
 
-    @staticmethod
     def commit(
+            self,
             memory,
             target_binding: NaturalRevisionTargetBinding,
             correction_source: SourceRef,
@@ -308,6 +360,13 @@ class NaturalRevisionRuntime:
             raise TypeError("target_binding must be NaturalRevisionTargetBinding")
         if not isinstance(correction_source, SourceRef):
             raise TypeError("correction_source must be SourceRef")
+        binding = target_binding.input_binding
+        if binding.replacement_stance == EVIDENCE_REFUTE:
+            try:
+                require_mounted_revision_scope(self.scope_frames, binding.scope_binding_key,
+                    relation_key=binding.relation_key, source_ref=binding.input_source_ref)
+            except ValueError as error:
+                raise NaturalRevisionBindingError(str(error), reason_code=4) from error
         if correction_source.owner != memory.owner:
             raise NaturalRevisionBindingError(
                 "correction source does not belong to the current Memory owner")
@@ -321,7 +380,7 @@ class NaturalRevisionRuntime:
         evidence = memory.append_evidence(
             target_binding.prior_hypothesis_key,
             source=correction_source,
-            stance=EVIDENCE_SUPPORT,
+            stance=binding.replacement_stance,
             reason_key=(
                 *REVISION_REASON_NAMESPACE,
                 *target_binding.input_binding.cue_identity),

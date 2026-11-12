@@ -78,6 +78,7 @@ def verify_query_memory_ohe(
         response_contexts: tuple = (),
         reference_contexts: tuple | None = None,
         reference_candidate_sets: tuple = (), reference_resolutions: tuple = (),
+        revision_cue_records: tuple = (),
         ) -> dict[str, Any]:
     """Match intake declarations, consumed hops, state members and plan refs.
 
@@ -106,7 +107,8 @@ The caller separately qualifies the delivery proof, split and source license.
         max_ohe_declarations=max_ohe_declarations,
         input_role_occurrences=input_role_occurrences, response_contexts=response_contexts,
         reference_contexts=reference_contexts,
-        reference_candidate_sets=reference_candidate_sets, reference_resolutions=reference_resolutions)
+        reference_candidate_sets=reference_candidate_sets, reference_resolutions=reference_resolutions,
+        revision_cue_records=revision_cue_records)
 
 
 def verify_query_memory_ohe_without_plan(
@@ -120,6 +122,7 @@ def verify_query_memory_ohe_without_plan(
         response_contexts: tuple = (),
         reference_contexts: tuple | None = None,
         reference_candidate_sets: tuple = (), reference_resolutions: tuple = (),
+        revision_cue_records: tuple = (),
         ) -> dict[str, Any]:
     """Cold-join an UNKNOWN call to durable intake without inventing a Plan."""
     trace = GraphQueryTraceEvidence(trace_value)
@@ -142,12 +145,14 @@ def verify_query_memory_ohe_without_plan(
         max_ohe_declarations=max_ohe_declarations,
         input_role_occurrences=input_role_occurrences, response_contexts=response_contexts,
         reference_contexts=reference_contexts,
-        reference_candidate_sets=reference_candidate_sets, reference_resolutions=reference_resolutions)
+        reference_candidate_sets=reference_candidate_sets, reference_resolutions=reference_resolutions,
+        revision_cue_records=revision_cue_records)
 
 
 def verify_query_memory_ohe_nonfactual(trace_value, call_receipt, *, max_state_members=256,
                                       input_structure=None, core_fact_index=None,
-                                      relation_question_frames=(), **readers):
+                                      relation_question_frames=(), assertion_scope_frames=(),
+                                      core_runtime=None, authorized_input=None, **readers):
     """只核对原调用已经保存的非事实 Plan，不从历史或摘要补造新 Plan。"""
     trace = GraphQueryTraceEvidence(trace_value)
     plan = trace.trace.get('response_plan')
@@ -164,7 +169,9 @@ def verify_query_memory_ohe_nonfactual(trace_value, call_receipt, *, max_state_m
     observation = MemoryObjectRef.from_stable_key(_key(call_receipt.get('observation_ref'), 'input Observation'))
     return _verify_query_memory_state(trace, source, observation, plan=plan,
         max_state_members=max_state_members, nonfactual_plan=True,
-        input_conflict_context=(input_structure, core_fact_index, relation_question_frames), **readers)
+        input_conflict_context=(input_structure, core_fact_index, relation_question_frames),
+        assertion_scope_frames=assertion_scope_frames, core_runtime=core_runtime,
+        authorized_input=authorized_input, **readers)
 
 
 def _verify_query_memory_state(
@@ -179,6 +186,8 @@ def _verify_query_memory_state(
         reference_candidate_sets: tuple = (), reference_resolutions: tuple = (),
         nonfactual_plan: bool = False,
         input_conflict_context=None,
+        assertion_scope_frames=(), core_runtime=None, authorized_input=None,
+        revision_cue_records: tuple = (),
         ) -> dict[str, Any]:
     if type(max_state_members) is not int or not 0 < max_state_members <= 4096:
         raise QueryMemoryOheEvidenceError("state member audit budget must be a strict integer from 1 to 4096")
@@ -313,7 +322,8 @@ def _verify_query_memory_state(
                 raise QueryMemoryOheEvidenceError('conflict clarification lacks its cold trained input context')
             conflict_clarification = verify_input_conflict_clarification(
                 trace, *input_conflict_context, roots=roots, evidence=evidence, bindings=bindings,
-                error=QueryMemoryOheEvidenceError)
+                error=QueryMemoryOheEvidenceError, assertion_scope_frames=assertion_scope_frames,
+                core_runtime=core_runtime, authorized_input=authorized_input)
         from pure_integer_ai.experiments.generic_plan_memory_audit import verify_generic_plan_memory
         adopted_hypothesis_keys, generic_adoption = verify_generic_plan_memory(
             trace, input_source, input_ref, evidence, roots, declaration=declaration,
@@ -350,6 +360,7 @@ def _verify_query_memory_state(
         declaration=declaration, observation=observation, source_hash=source_hash,
         error=QueryMemoryOheEvidenceError)
     chains = []
+    appended_chains = []
     for entry in memory_evidence:
         eref = MemoryObjectRef.from_stable_key(entry.evidence_key)
         erow = declaration(eref)
@@ -370,7 +381,13 @@ def _verify_query_memory_state(
                           if binding.binding_kind == INTAKE_DERIVED_EVIDENCE and binding.object_ref == eref)
         if (len(hbindings) != 1 or len(ebindings) != 1 or hsource != epayload.source
                 or hbindings[0].lineage_key != ebindings[0].lineage_key):
-            raise QueryMemoryOheEvidenceError("initial intake O/H/E bindings differ; appended Evidence is unqualified")
+            from pure_integer_ai.experiments.revision_memory_chain_audit import verify_revision_memory_chain
+            length = verify_revision_memory_chain(erow, hrow, declaration=declaration,
+                manifest=manifest, observation=observation, cue_records=revision_cue_records,
+                max_steps=max_ohe_declarations, error=QueryMemoryOheEvidenceError)
+            if not length:
+                raise QueryMemoryOheEvidenceError('initial intake O/H/E bindings differ; appended Evidence is unqualified')
+            appended_chains.append(dict(evidence_event_hash=erow.event_hash, append_count=length))
         hscope = hypothesis.scope.stable_key()
         if hrow.event.scope.stable_key() != hscope or orow.event.scope.stable_key() != hscope:
             raise QueryMemoryOheEvidenceError("Observation/Hypothesis scope differs")
@@ -413,6 +430,7 @@ def _verify_query_memory_state(
         "inspected_ohe_declaration_count": len(declarations),
         "inspected_state_member_counts": {name: len(state[name]) for name in ("bindings", "evidence", "roots")},
         "chains": chains, "independent_evidence_count": len(memory_evidence),
+        "physical_revision_append_chains": appended_chains,
         "delivered_slot_evidence_count": len(delivered_slot_evidence),
         "unknown_input_role_occurrence_count": len(input_role_occurrences),
         "unknown_response_role_occurrence_count": len(response_role_evidence),

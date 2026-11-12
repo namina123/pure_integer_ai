@@ -7,10 +7,17 @@ from pure_integer_ai.experiments.input_projection_conflict import projection_con
 
 
 def verify_input_conflict_clarification(trace, prepared, facts, question_frames, *,
-                                      roots, evidence, bindings, error):
+                                      roots, evidence, bindings, error,
+                                      assertion_scope_frames=(), core_runtime=None,
+                                      authorized_input=None):
     """从冷训练图证明竞争和当前输入，保留冲突并拒绝任何事实消费资格。"""
     from pure_integer_ai.experiments.pending_composition_call_audit import _decode_input
 
+    if prepared is not None and prepared.assertion_scope_bindings:
+        from pure_integer_ai.experiments.assertion_scope_clarification_audit import verify_assertion_scope_clarification
+        return verify_assertion_scope_clarification(trace, prepared, assertion_scope_frames,
+            core_runtime, authorized_input=authorized_input, roots=roots, evidence=evidence,
+            bindings=bindings, error=error)
     state = trace.trace['state_key']['scalars']
     if (prepared is None or facts is None
             or state[7] != 0 or state[8] != 1 or state[15] != 1 or state[16] != 2

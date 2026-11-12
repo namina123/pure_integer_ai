@@ -1288,7 +1288,7 @@ class TrainedGraphQueryBridge:
              self.revision_cue_graph_metadata) = read_revision_cue_graph(
                 revision_cue_graph_database)
             self.natural_revision_runtime = NaturalRevisionRuntime(
-                self.revision_cue_records)
+                self.revision_cue_records, scope_frames=self.assertion_scope_frames)
         if (type(input_discourse_operators) is not tuple
                 or any(not isinstance(item, TrainedInputDiscourseOperator)
                        for item in input_discourse_operators)):

@@ -333,7 +333,8 @@ def select_equivalent_slot_question_bindings(validated):
             relation.required_open, relation.state, relation.conflict_count,
         ))
     if len(contracts) != 1:
-        return ()
+        from pure_integer_ai.experiments.slot_answer_agreement import select_convergent_slot_answer
+        return select_convergent_slot_answer(records)
     return (min((binding for binding, _parts in records),
                 key=lambda item: item.stable_key()),)
 

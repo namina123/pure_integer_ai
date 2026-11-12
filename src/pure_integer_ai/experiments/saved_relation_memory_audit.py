@@ -61,6 +61,8 @@ def audit_saved_relation_memory(database, value, report, prepared, *, captured=N
             source_hash_reader=lambda ref: events.scoped_identities.registry.find(IDENTITY_SOURCE_RECORD, ref.stable_key()),
             input_role_occurrences=occurrences, max_state_members=max_state_members,
             max_ohe_declarations=max_ohe_declarations)
+        if reference_bridge is not None:
+            readers['revision_cue_records'] = reference_bridge.revision_cue_records
         request_memory = {}
         reference_transition = {}
         complete_response_contexts = ()
@@ -107,7 +109,10 @@ def audit_saved_relation_memory(database, value, report, prepared, *, captured=N
                 ohe = verify_query_memory_ohe_nonfactual(value, report, **readers,
                     input_structure=prepared,
                     core_fact_index=None if reference_bridge is None else reference_bridge.core_fact_index,
-                    relation_question_frames=() if reference_bridge is None else reference_bridge.relation_question_frames)
+                    relation_question_frames=() if reference_bridge is None else reference_bridge.relation_question_frames,
+                    assertion_scope_frames=() if reference_bridge is None else reference_bridge.assertion_scope_frames,
+                    core_runtime=None if reference_bridge is None else reference_bridge.core_runtime,
+                    authorized_input=None if reference_bridge is None else reference_bridge.active_memory_input_structure(prepared))
             else:
                 ohe = verify_query_memory_ohe_without_plan(value, report, **readers)
         except QueryMemoryOheEvidenceError as error:
