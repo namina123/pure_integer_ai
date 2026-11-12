@@ -123,6 +123,22 @@ def _optional_key(value: Any, *, where: str) -> tuple[int, ...] | None:
     return _key(value, where=where, positive=True)
 
 
+def _course_source_identity(value) -> tuple[int, ...]:
+    """来源命名空间为正，后续非负分量完整保留摘要中的零字节。"""
+    key = _key(value, where="course.source_identity")
+    if key[0] == 0:
+        raise IntegerRelationGraphCourseError("course.source_identity 命名空间必须为正")
+    return key
+
+
+def _source_revision_key(source_identity: tuple[int, ...]) -> StableRecordKey:
+    """为含零来源构造可逆全正修订键，既有全正来源身份保持逐字节不变。"""
+    if 0 in source_identity:
+        return StableRecordKey((1, 99003, len(source_identity),
+                                *(value + 1 for value in source_identity)))
+    return StableRecordKey((1, 99001, *source_identity))
+
+
 def _identity(value, *, where: str) -> ObjectIdentity:
     """从完整 stable key 恢复一等对象，不按局部 id 猜测。"""
     try:
@@ -510,8 +526,8 @@ class IntegerRelationGraphCourse:
     records: tuple[IntegerRelationGraphRecord, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "source_identity", _key(
-            self.source_identity, where="course.source_identity", positive=True))
+        object.__setattr__(self, "source_identity", _course_source_identity(
+            self.source_identity))
         object.__setattr__(self, "license_identity", _key(
             self.license_identity, where="course.license_identity", positive=True))
         if not isinstance(self.records, (tuple, list)) or not self.records:
@@ -662,7 +678,7 @@ def read_integer_relation_graph_course(path: str | Path) -> IntegerRelationGraph
             or payload.get("free_dialogue_complete") != 0):
         raise IntegerRelationGraphCourseError("graph-course count/gate 漂移")
     return IntegerRelationGraphCourse(
-        _key(payload.get("source_identity"), where="source_identity", positive=True),
+        _course_source_identity(payload.get("source_identity")),
         _key(payload.get("license_identity"), where="license_identity", positive=True),
         records,
     )
@@ -878,7 +894,7 @@ def integer_relation_graph_course_to_w06_adapter(
                 "seed_id": _surface(record.teacher_seed_values),
             }),
             source.stable_key, "W-06", 0,
-            StableRecordKey((1, 99001, *course.source_identity)),
+            _source_revision_key(course.source_identity),
         )
         sources.append(source)
         observations.append(observation)

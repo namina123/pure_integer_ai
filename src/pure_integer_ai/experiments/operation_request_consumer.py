@@ -41,8 +41,8 @@ def validate_operation_input_permissions(witness, input_groups):
                 raise ValueError("semantic operation program source permission drifted")
 
 
-def request_variables_from_readers(witness, structure, facts, core):
-    """逐项验证完整跨度和 alias 物理来源，当前输入不能借同名或旧变量命中。"""
+def request_variables_from_readers(witness, structure, facts, core, *, require_forming_permission=True):
+    """恢复完整当前对象；默认需事实许可，身份模式只能供独立核验的空 UNKNOWN 使用。"""
     if core is None or len(structure.operation_request_bindings) != 1:
         return None
     binding, = structure.operation_request_bindings
@@ -64,7 +64,8 @@ def request_variables_from_readers(witness, structure, facts, core):
             if (fact is None or surface is None or member.projection_kind != 1 or member.span_ref != span
                     or member.candidate_key != target or member.predicate_key != predicate or member.role_key != role
                     or member.source_ref != (surface.source_hash,)
-                    or not set(fact.candidate.forming_sources) <= set(witness.authorized_forming_sources)
+                    or (require_forming_permission and not set(fact.candidate.forming_sources)
+                        <= set(witness.authorized_forming_sources))
                     or fact.definition.predicate.stable_key() != predicate
                     or not any(row.role.stable_key() == role and row.filler.stable_key() == target
                                for row in fact.definition.bindings)):

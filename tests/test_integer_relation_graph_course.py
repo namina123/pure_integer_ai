@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -115,6 +116,29 @@ def test_integer_course_round_trip_preserves_w06_payload_and_rejection(tmp_path)
     assert "raw_text" not in serialized
     assert '"surface":' not in serialized
     assert '"answer"' not in serialized
+
+
+def test_course_source_zero_bytes_round_trip_into_positive_revision_key(tmp_path):
+    """含零完整摘要经过规范读写及真实adapter恢复，旧课程修订身份不变。"""
+    authored = _authored_adapter()
+    identity = (92430, *range(32))
+    course = integer_course_from_w06_adapter(authored,
+        source_identity=identity, license_identity=tuple(map(ord, "CC0-1.0")))
+    path = tmp_path / "zero-byte-source.int.json"
+    write_integer_relation_graph_course(path, course)
+    restored = read_integer_relation_graph_course(path)
+    assert restored == course
+    adapter = integer_relation_graph_course_to_w06_adapter(restored)
+    assert len(adapter.candidates) == len(authored.candidates)
+    from pure_integer_ai.experiments.integer_relation_graph_course import _source_revision_key
+    revision = _source_revision_key(identity)
+    assert revision.components == (1, 99003, len(identity), *(value + 1 for value in identity))
+    assert tuple(value - 1 for value in revision.components[3:]) == identity
+    legacy = (92430, 1, 255)
+    assert _source_revision_key(legacy).components == (1, 99001, *legacy)
+    for invalid in ((), (0, 1), (92430, -1), (92430, False)):
+        with pytest.raises(IntegerRelationGraphCourseError):
+            replace(course, source_identity=invalid)
 
 
 def test_integer_course_rejects_nested_text_and_noncanonical_json(tmp_path):

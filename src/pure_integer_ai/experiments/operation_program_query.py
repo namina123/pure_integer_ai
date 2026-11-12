@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pure_integer_ai.cognition.shared.integer_operation_execution import (
-    READY, execute_integer_operation, operation_context_conflicted,
+    READY, UNKNOWN, execute_integer_operation, operation_context_conflicted,
 )
 from pure_integer_ai.cognition.shared.integer_operation_program import OperationProgramBudget
 from pure_integer_ai.cognition.shared.integer_operation_verifier import verify_integer_operation
@@ -65,6 +65,28 @@ def _request_variables(witness, structure, facts, *, core=None):
     return tuple(sorted(variables.items()))
 
 
+def _unknown_request_variables(witness, structure, facts, *, core=None):
+    """仅恢复完整真实 reader 身份；不授权前提，调用方必须另核空 UNKNOWN。"""
+    if (structure.operation_keys != (witness.program.operation_key,)
+            or not structure.operation_request_bindings):
+        return None
+    from pure_integer_ai.experiments.operation_request_consumer import request_variables_from_readers
+    return request_variables_from_readers(witness, structure, facts, core,
+                                         require_forming_permission=False)
+
+
+def operation_execution_input_matches(execution, structure, facts, *, core=None):
+    """默认来源门保持；许可不足时只接受同对象、零匹配零事实证明的 UNKNOWN。"""
+    variables = _request_variables(execution.witness, structure, facts, core=core)
+    if variables is not None:
+        return execution.variables == variables
+    if (execution.status != UNKNOWN or execution.matches or execution.fact_proofs
+            or execution.outputs):
+        return False
+    variables = _unknown_request_variables(execution.witness, structure, facts, core=core)
+    return variables is not None and execution.variables == variables
+
+
 @observed_relation_phase("core")
 def consume_operation_program(core, witnesses, structure, state, budget=OperationProgramBudget()):
     """No matched fact can be consumed without its exact Evidence in this query."""
@@ -75,6 +97,8 @@ def consume_operation_program(core, witnesses, structure, state, budget=Operatio
         proposition_keys=request_context_proposition_keys(choices[0], structure))
     variables = _request_variables(choices[0], structure, inputs, core=core)
     if variables is None:
+        variables = _unknown_request_variables(choices[0], structure, inputs, core=core)
+    if variables is None:
         return state, None
     facts = read_operation_core_context(core, budget, witness=choices[0], variables=variables)
     reads = len(inputs) + len(facts)
@@ -84,6 +108,8 @@ def consume_operation_program(core, witnesses, structure, state, budget=Operatio
         return state, None
     execution = execute_integer_operation(choices[0], state.query_key, variables, facts, budget=budget)
     verify_integer_operation(execution, facts, witnesses, budget=budget)
+    if not operation_execution_input_matches(execution, structure, inputs, core=core):
+        return state, None
     if not operation_evidence_matches(execution, facts, state.evidence):
         return state, None
     proof = execution.stable_key()

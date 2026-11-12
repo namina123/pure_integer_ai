@@ -15,7 +15,8 @@ from pure_integer_ai.cognition.shared.query_state import (
 )
 from pure_integer_ai.experiments.graph_query_trace_contract import GraphQueryTraceEvidence
 from pure_integer_ai.experiments.operation_program_query import (
-    OPERATION_EXECUTION_ROLE, _request_variables, operation_evidence_matches, operation_plan_trace_matches,
+    OPERATION_EXECUTION_ROLE, operation_execution_input_matches,
+    operation_evidence_matches, operation_plan_trace_matches,
 )
 from pure_integer_ai.experiments.pending_composition_call_audit import _decode_input
 from pure_integer_ai.experiments.query_memory_ohe_audit import _unpack
@@ -156,7 +157,7 @@ def read_consumed_operation_selection(value, facts, witness, prepared, *, core=N
     execution, = selected
     verify_integer_operation(execution, facts, (witness,))
     if (execution.query_key != query
-            or execution.variables != _request_variables(witness, prepared, facts, core=core)):
+            or not operation_execution_input_matches(execution, prepared, facts, core=core)):
         raise ValueError("semantic execution did not consume complete current input variables")
     evidence = []
     for ref in state["evidence"]:
