@@ -205,6 +205,10 @@ def match_open_roles(frames: tuple[OpenRoleFrame, ...], values: tuple[int, ...],
         prefix = frame.gaps[0]
         if values[:len(prefix)] != prefix:
             continue
+        # 完整解析必须精确消费最后间隔；先排除无法结束的框架，避免无效切分耗尽预算。
+        suffix = frame.gaps[-1]
+        if suffix and values[len(values) - len(suffix):] != suffix:
+            continue
         stack = [(0, len(prefix), ())]
         while stack:
             ordinal, start, bindings = stack.pop()
