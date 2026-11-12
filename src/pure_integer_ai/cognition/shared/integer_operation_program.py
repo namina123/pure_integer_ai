@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pure_integer_ai.cognition.shared.identity import ObjectIdentity, SourceRef
+from pure_integer_ai.cognition.shared.integer_operation_permission import OperationSourcePermission
 from pure_integer_ai.cognition.shared.relation_composition import schema_from_key, schema_key
 from pure_integer_ai.cognition.shared.typed_relation import RelationSchema
 from pure_integer_ai.cognition.understanding.query_open_roles import pack_record, unpack_record
@@ -303,6 +304,7 @@ class OperationProgramWitness:
     source_identity: tuple[int, ...]
     license_identity: tuple[int, ...]
     authorized_forming_sources: tuple[SourceRef, ...]
+    source_extensions: tuple[OperationSourcePermission, ...] = ()
 
     def __post_init__(self):
         if not isinstance(self.program, IntegerOperationProgram) or not isinstance(self.source, SourceRef):
@@ -319,20 +321,46 @@ class OperationProgramWitness:
                 or self.authorized_forming_sources != tuple(sorted(set(self.authorized_forming_sources),
                                                                    key=SourceRef.stable_key))):
             raise ValueError("operation needs canonical complete forming-source permission")
+        if (type(self.source_extensions) is not tuple
+                or any(not isinstance(item, OperationSourcePermission) for item in self.source_extensions)
+                or self.source_extensions != tuple(sorted(set(self.source_extensions), key=OperationSourcePermission.stable_key))):
+            raise ValueError("operation source extensions are not canonical")
+        if self.source_extensions:
+            bases = {item.base_witness_key for item in self.source_extensions}
+            if len(bases) != 1:
+                raise ValueError("operation source extensions have different base programs")
+            base = OperationProgramWitness.from_stable_key(next(iter(bases)))
+            if (self.program != base.program or self.source != base.source
+                    or self.source_sha256 != base.source_sha256 or self.source_identity != base.source_identity
+                    or self.license_identity != base.license_identity):
+                raise ValueError("operation source extension changed its original program or permission")
+            schemas = {schema_key(atom.schema) for atom in self.program.atoms}
+            sources = set(base.authorized_forming_sources)
+            for item in self.source_extensions:
+                if item.license_identity != self.license_identity or not set(item.schema_keys) <= schemas:
+                    raise ValueError("operation source extension has a foreign license or schema")
+                sources.update(item.forming_sources)
+            if sources != set(self.authorized_forming_sources):
+                raise ValueError("operation forming permission differs from complete source extensions")
 
     def stable_key(self):
-        return pack_record(WITNESS, self.program.stable_key(), self.source.stable_key(),
+        fields = (self.program.stable_key(), self.source.stable_key(),
             self.source_sha256, self.source_identity, self.license_identity,
             pack_record(SEQUENCE, *(source.stable_key() for source in self.authorized_forming_sources)))
+        if self.source_extensions:
+            fields += (pack_record(SEQUENCE, *(item.stable_key() for item in self.source_extensions)),)
+        return pack_record(WITNESS, *fields)
 
     @classmethod
     def from_stable_key(cls, key):
         fields = unpack_record(key, WITNESS)
-        if len(fields) != 6:
+        if len(fields) not in (6, 7):
             raise ValueError("operation witness is incomplete")
         result = cls(IntegerOperationProgram.from_stable_key(fields[0]),
             SourceRef.from_stable_key(fields[1]), fields[2], fields[3], fields[4],
-            tuple(SourceRef.from_stable_key(source) for source in unpack_record(fields[5], SEQUENCE)))
+            tuple(SourceRef.from_stable_key(source) for source in unpack_record(fields[5], SEQUENCE)),
+            (() if len(fields) == 6 else tuple(OperationSourcePermission.from_stable_key(row)
+                for row in unpack_record(fields[6], SEQUENCE))))
         if result.stable_key() != key:
             raise ValueError("operation witness is not canonical")
         return result

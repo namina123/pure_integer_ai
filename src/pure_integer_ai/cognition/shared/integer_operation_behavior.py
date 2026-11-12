@@ -81,7 +81,8 @@ class OperationSemanticEditReceipt:
         integer_key(self.input_structure_key)
         if (self.before.source_identity != self.after.source_identity
                 or self.before.license_identity != self.after.license_identity
-                or self.before.authorized_forming_sources != self.after.authorized_forming_sources):
+                or self.before.authorized_forming_sources != self.after.authorized_forming_sources
+                or self.before.source_extensions != self.after.source_extensions):
             raise ValueError("semantic edit changes current source/license/forming permission")
         if (type(self.changed_fields) is not tuple
                 or any(type(code) is not int for code in self.changed_fields)
@@ -148,6 +149,7 @@ class OperationOutputBehaviorEditReceipt:
         if (self.before.source_identity != self.after.source_identity
                 or self.before.license_identity != self.after.license_identity
                 or self.before.authorized_forming_sources != self.after.authorized_forming_sources
+                or self.before.source_extensions != self.after.source_extensions
                 or semantic_selection_obligation(before) != semantic_selection_obligation(after)
                 or before_contract.program_witness_key != self.before.stable_key()
                 or (after_contract is not None
