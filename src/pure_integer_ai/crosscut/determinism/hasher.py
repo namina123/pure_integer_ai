@@ -108,6 +108,9 @@ def _fnv1a_int(value: int, state: int) -> int:
     """把严格整数按既有 canonical 编码直接续入 FNV 状态。"""
     state ^= 0x02
     state = (state * _FNV_PRIME) & _MASK64
+    # 原宽度公式仅在此区间产生一个有符号字节；-128必须保留原双字节。
+    if -127 <= value <= 127:
+        return ((state ^ (value & 255)) * _FNV_PRIME) & _MASK64
     size = max(1, (value.bit_length() + 8) // 8)
     return _fnv1a(value.to_bytes(size, "big", signed=True), state)
 

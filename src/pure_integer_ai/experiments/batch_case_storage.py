@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from pure_integer_ai.experiments.batch_trace_storage import (
-    TraceStorageError, ValidatedTraceSnapshot, _read_trace_storage, _relative_path, _trace_projection,
+    TraceStorageError, ValidatedTraceSnapshot, _read_snapshot_trace_storage,
+    _read_trace_storage, _relative_path, _trace_projection,
     read_trace_reference, sha256_bytes, validate_trace_reference,
 )
 from pure_integer_ai.experiments.graph_query_trace_contract import (
@@ -71,7 +72,9 @@ def build_compact_case_provenance(
         # 只复用本次局部结果，不再次解析相同的大型整数记录。
         if sha256_bytes(projection_bytes) != trace_ref["integer_projection_sha256"]:
             raise CaseArtifactStorageError("saved trace integer projection SHA-256 differs")
-        if _read_trace_storage(trace_root, trace_ref) != trace_bytes:
+        saved = (_read_trace_storage(trace_root, trace_ref) if validated_trace is None
+                 else _read_snapshot_trace_storage(trace_root, trace_ref, validated_trace))
+        if saved != trace_bytes:
             raise CaseArtifactStorageError("saved trace differs from the captured original bytes")
         reference = dict(trace_ref)
     without_trace = json.loads(canonical_json_bytes({

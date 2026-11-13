@@ -85,7 +85,7 @@ def test_snapshot_has_no_external_projection_argument_and_is_immutable():
     _captured_record, raw = _captured()
     snapshot = ValidatedTraceSnapshot(raw)
     with pytest.raises(TypeError):
-        ValidatedTraceSnapshot(raw, b'{}')
+        ValidatedTraceSnapshot(raw, projection_bytes=b'{}')
     with pytest.raises(FrozenInstanceError):
         snapshot.raw = b'{}'
     with pytest.raises(FrozenInstanceError):
@@ -114,3 +114,25 @@ def test_snapshot_argument_rejects_unvalidated_lookalike(tmp_path):
     with pytest.raises(CaseArtifactStorageError):
         build_compact_case_provenance(captured, trace_bytes=original,
             trace_ref=ref, trace_root=tmp_path, validated_trace=lookalike)
+
+
+def test_snapshot_encoding_must_match_actual_storage(tmp_path):
+    """相同逻辑bytes和投影也不能借用另一物理编码的见证。"""
+    captured, original = _captured()
+    ref, snapshot = save_case_trace_snapshot(tmp_path, json.loads(original), compressed=True)
+    other_encoding = ValidatedTraceSnapshot(snapshot.raw)
+    with pytest.raises(CaseArtifactStorageError):
+        build_compact_case_provenance(captured, trace_bytes=original,
+            trace_ref=ref, trace_root=tmp_path, validated_trace=other_encoding)
+
+
+def test_snapshot_physical_chunks_cannot_be_injected_or_mutated():
+    """全部规范chunk只能由原始bytes实际编码得到，且不可变。"""
+    _captured_record, raw = _captured()
+    snapshot = ValidatedTraceSnapshot(raw, compressed=True)
+    with pytest.raises(TypeError):
+        ValidatedTraceSnapshot(raw, compressed=True, stored_chunks=(b'forged',))
+    with pytest.raises(FrozenInstanceError):
+        snapshot.stored_chunks = (b'forged',)
+    with pytest.raises(TypeError):
+        snapshot.stored_chunks[0] = b'forged'

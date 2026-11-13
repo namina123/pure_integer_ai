@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 import hashlib
 import json
 from pathlib import Path
@@ -93,12 +93,19 @@ class ValidatedTraceSnapshot:
     """仅本次调用复用完整校验；两个不可变bytes不能由外部注入投影。"""
 
     raw: bytes = field(repr=False)
+    compressed: bool = False
+    checkpoint: InitVar[Callable[[], None] | None] = None
     projection_bytes: bytes = field(init=False, repr=False)
+    stored_chunks: tuple[bytes, ...] = field(init=False, repr=False)
 
-    def __post_init__(self) -> None:
-        """构造即完整核验原记录和整数artifact，绝不以派生hash替代。"""
+    def __post_init__(self, checkpoint: Callable[[], None] | None) -> None:
+        """构造即完整验证逻辑记录并生成全部规范物理字节，不能外部注入。"""
+        if type(self.compressed) is not bool:
+            raise TraceStorageError("snapshot encoding choice must be a strict boolean")
         _projection, projection_bytes = _trace_projection(self.raw)
         object.__setattr__(self, "projection_bytes", projection_bytes)
+        chunks = tuple(iter_encoded_trace_bytes(self.raw, checkpoint=checkpoint)) if self.compressed else (self.raw,)
+        object.__setattr__(self, "stored_chunks", chunks)
 
 
 def validate_trace_reference(ref: Mapping[str, Any]) -> bool:
@@ -141,8 +148,8 @@ def _descriptor_reference(path: Path, root: Path) -> dict[str, Any]:
     return value["trace_ref"]
 
 
-def _read_trace_storage(root: Path, ref: Mapping[str, Any], *, max_trace_bytes: int = MAX_TRACE_BYTES) -> bytes:
-    """完整核验物理路径、编码及原始字节身份；投影由当前调用者另行验证。"""
+def _read_stored_trace_bytes(root: Path, ref: Mapping[str, Any], *, max_trace_bytes: int = MAX_TRACE_BYTES) -> bytes:
+    """完整核验当前物理路径、descriptor、长度和字节身份，不据此宣称已解码。"""
     compressed = validate_trace_reference(ref)
     if type(max_trace_bytes) is not int or max_trace_bytes <= 0:
         raise TraceStorageError("trace byte limit must be a strict positive integer")
@@ -166,6 +173,13 @@ def _read_trace_storage(root: Path, ref: Mapping[str, Any], *, max_trace_bytes: 
     expected_sha = ref["stored_sha256"] if compressed else ref["sha256"]
     if len(raw) != stored_size or sha256_bytes(raw) != expected_sha:
         raise TraceStorageError("trace_ref byte count or SHA-256 differs")
+    return raw
+
+
+def _read_trace_storage(root: Path, ref: Mapping[str, Any], *, max_trace_bytes: int = MAX_TRACE_BYTES) -> bytes:
+    """独立冷读保持完整解码、规范重编码及原始字节身份核验。"""
+    raw = _read_stored_trace_bytes(root, ref, max_trace_bytes=max_trace_bytes)
+    compressed, expected_size = "encoding" in ref, ref["byte_count"]
     if compressed:
         try:
             raw = decode_trace_bytes(raw, max_decoded_bytes=expected_size)
@@ -174,6 +188,20 @@ def _read_trace_storage(root: Path, ref: Mapping[str, Any], *, max_trace_bytes: 
     if len(raw) != expected_size or sha256_bytes(raw) != ref["sha256"]:
         raise TraceStorageError("decoded trace byte count or SHA-256 differs")
     return raw
+
+
+def _read_snapshot_trace_storage(root: Path, ref: Mapping[str, Any], snapshot: ValidatedTraceSnapshot,
+                                 *, max_trace_bytes: int = MAX_TRACE_BYTES) -> bytes:
+    """逐字节回读本次已实际产生的规范编码，原冷解码路径不变。"""
+    if type(snapshot) is not ValidatedTraceSnapshot:
+        raise TraceStorageError("physical trace witness must be a validated snapshot")
+    stored = _read_stored_trace_bytes(root, ref, max_trace_bytes=max_trace_bytes)
+    if (snapshot.compressed != ("encoding" in ref) or len(snapshot.raw) != ref["byte_count"]
+            or sha256_bytes(snapshot.raw) != ref["sha256"]
+            or sha256_bytes(snapshot.projection_bytes) != ref["integer_projection_sha256"]
+            or stored != b"".join(snapshot.stored_chunks)):
+        raise TraceStorageError("saved trace differs from its complete same-call canonical encoding witness")
+    return snapshot.raw
 
 
 def read_trace_reference(root: Path, ref: Mapping[str, Any], *, max_trace_bytes: int = MAX_TRACE_BYTES) -> bytes:
@@ -198,16 +226,15 @@ def save_case_trace_snapshot(root: Path, value: Mapping[str, Any], *, compressed
     raw = canonical_json_bytes(value) + b"\n"
     if len(raw) > max_trace_bytes:
         raise TraceStorageError("trace exceeds decoded byte budget")
-    snapshot = ValidatedTraceSnapshot(raw)
+    snapshot = ValidatedTraceSnapshot(raw, compressed=compressed, checkpoint=checkpoint)
     ref = {"path": "trace.int.lz4" if compressed else "trace.int.json",
            "byte_count": len(raw), "sha256": sha256_bytes(raw),
            "integer_projection_sha256": sha256_bytes(snapshot.projection_bytes)}
     path = root / ref["path"]
-    chunks = iter_encoded_trace_bytes(raw, checkpoint=checkpoint) if compressed else (raw,)
     stored_size = 0
     digest = hashlib.sha256()
     with path.open("xb") as stream:
-        for chunk in chunks:
+        for chunk in snapshot.stored_chunks:
             if before_write is not None:
                 before_write(path, stored_size + len(chunk))
             stream.write(chunk)
