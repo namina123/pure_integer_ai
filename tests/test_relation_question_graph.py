@@ -410,6 +410,7 @@ def test_memory_grounded_dynamic_slot_selects_only_exact_core_identity(
             role=Identity((8, 1)), values=(99,)),
         antecedents=(Identity((1, 1)),),
     ),)
+    bridge._response_contexts = ()
 
     class ReferenceRuntime:
         @staticmethod
@@ -417,7 +418,7 @@ def test_memory_grounded_dynamic_slot_selects_only_exact_core_identity(
             return (99,)
 
         @staticmethod
-        def _semantic_objects(_values):
+        def semantic_objects_for(_antecedent, _contexts):
             if antecedent_identity == (4, 201):
                 return (target_fact.bindings[0].filler,)
             return (Identity(antecedent_identity),)
