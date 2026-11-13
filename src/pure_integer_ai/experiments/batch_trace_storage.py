@@ -127,8 +127,8 @@ def _descriptor_reference(path: Path, root: Path) -> dict[str, Any]:
     return value["trace_ref"]
 
 
-def read_trace_reference(root: Path, ref: Mapping[str, Any], *, max_trace_bytes: int = MAX_TRACE_BYTES) -> bytes:
-    """先验证路径、物理预算与 SHA，再有界解码并核对原始及投影身份。"""
+def _read_trace_storage(root: Path, ref: Mapping[str, Any], *, max_trace_bytes: int = MAX_TRACE_BYTES) -> bytes:
+    """完整核验物理路径、编码及原始字节身份；投影由当前调用者另行验证。"""
     compressed = validate_trace_reference(ref)
     if type(max_trace_bytes) is not int or max_trace_bytes <= 0:
         raise TraceStorageError("trace byte limit must be a strict positive integer")
@@ -159,6 +159,12 @@ def read_trace_reference(root: Path, ref: Mapping[str, Any], *, max_trace_bytes:
             raise TraceStorageError("stored trace codec is invalid") from error
     if len(raw) != expected_size or sha256_bytes(raw) != ref["sha256"]:
         raise TraceStorageError("decoded trace byte count or SHA-256 differs")
+    return raw
+
+
+def read_trace_reference(root: Path, ref: Mapping[str, Any], *, max_trace_bytes: int = MAX_TRACE_BYTES) -> bytes:
+    """先验证物理存储，再完整核验整数投影；普通冷读取不信任派生hash。"""
+    raw = _read_trace_storage(root, ref, max_trace_bytes=max_trace_bytes)
     _projection, projection_bytes = _trace_projection(raw)
     if sha256_bytes(projection_bytes) != ref["integer_projection_sha256"]:
         raise TraceStorageError("trace_ref integer projection SHA-256 differs")

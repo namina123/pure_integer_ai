@@ -113,10 +113,8 @@ def decode_integer_tuple(data: bytes) -> tuple[int, ...]:
         )
     if cursor != len(data):
         raise IntegerCodecError("integer codec data 存在尾随字节")
-    restored = tuple(result)
-    if encode_integer_tuple(restored) != data:
-        raise IntegerCodecError("integer codec data 不是规范编码")
-    return restored
+    # 计数及各值均为最短varint，zigzag为双射；无尾随时已唯一，无须重编码。
+    return tuple(result)
 
 
 def pack_key(result: list[int], value: tuple[int, ...]) -> None:

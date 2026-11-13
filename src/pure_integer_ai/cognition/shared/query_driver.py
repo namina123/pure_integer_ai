@@ -1,7 +1,7 @@
 """统一深度查询驱动：seed -> expand -> bind/filter -> visited -> terminate。
 
 驱动本身不读任何存储；扩展器（Core/Memory/Dialogue 各自实现）把当前
-frontier 的最高优先级边解析为下一层候选并回写 QueryState。深度由数据和
+frontier 中待参与根的种子优先，其余按完整优先级展开并回写 QueryState。深度由数据和
 综合终止谓词决定，禁止固定层数或首跳即出。
 """
 from __future__ import annotations
@@ -9,6 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Callable, Protocol
 
+from pure_integer_ai.cognition.shared.query_frontier_selection import (
+    select_frontier_entry,
+)
 from pure_integer_ai.cognition.shared.query_state import (
     TERMINATION_ANSWER_CLOSED,
     TERMINATION_OPEN,
@@ -113,7 +116,7 @@ def run_query(
             if tracer is not None:
                 tracer.record(final, final.termination)
             return final
-        edge = frontier[0]
+        edge = select_frontier_entry(frontier, state.roots)
         outcome = expander.expand(state, edge)
         if not isinstance(outcome, ExpansionOutcome):
             raise TypeError("expander 必须返回 ExpansionOutcome")
