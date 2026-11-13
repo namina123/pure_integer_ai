@@ -30,7 +30,16 @@ def delivered_question_binding(structure, result):
         raise ValueError('multi-question binding differs from the delivered claim set')
     selected,=candidates
     syntax=lambda item:(item.frame_key,item.operation_key,item.slot_span_refs,item.answer_role_key)
-    if any(syntax(item)!=syntax(selected) for item in bindings):
+    # 其它谓词/答案角色的完整问式是同一短指代输入的独立候选，
+    # 只有与当前 Memory 采用共享 operation、观察跨度和答案角色的候选
+    # 才属于这次原始问式竞争。它们之间仍须逐字段保持同一 frame；
+    # 不用名称、答案对象或最终 claim 把不同语法合并。
+    selected_relation = relations[selected.relation_key]
+    selected_predicate = getattr(selected_relation, 'predicate_key', None)
+    competing = tuple(item for item in bindings
+                      if (getattr(relations[item.relation_key], 'predicate_key', None)
+                          == selected_predicate))
+    if not competing or any(syntax(item)!=syntax(selected) for item in competing):
         raise ValueError('resolved WH alternatives do not share one original syntax/span')
     current=result['input_structure']['relation_question_bindings']
     if len(current)!=1 or set(current[0])!={'integer_key_ref'}:
@@ -46,10 +55,13 @@ def delivered_question_binding(structure, result):
             raise ValueError('resolved WH binding field is truncated')
         fields.append(key[cursor:cursor+size])
         cursor+=size
-    if cursor>=len(key) or key[cursor]!=1:
-        raise ValueError('resolved WH requires one original observed role span')
+    slot_count=len(selected.slot_span_refs)
+    if cursor>=len(key) or key[cursor]!=slot_count:
+        raise ValueError('resolved WH differs from original observed role span count')
     cursor+=1
-    for _ in range(2):
+    for _ in range(slot_count+1):
+        if cursor>=len(key):
+            raise ValueError('resolved WH role/span field is truncated')
         size=key[cursor]
         cursor+=1
         if size<=0 or cursor+size>len(key):
@@ -57,8 +69,8 @@ def delivered_question_binding(structure, result):
         fields.append(key[cursor:cursor+size])
         cursor+=size
     if (cursor!=len(key) or fields[0]!=selected.frame_key
-            or fields[1]!=selected.operation_key or (fields[3],)!=selected.slot_span_refs
-            or fields[4]!=selected.answer_role_key):
+            or fields[1]!=selected.operation_key or tuple(fields[3:-1])!=selected.slot_span_refs
+            or fields[-1]!=selected.answer_role_key):
         raise ValueError('resolved WH differs from the complete original syntax/span')
     positive=tuple(_unpack(trace.resolve_ref(ref),3,6) for ref in result['state_key']['evidence']
                    if trace.resolve_ref(ref)[:2]==(1,1))

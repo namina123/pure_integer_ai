@@ -12,7 +12,7 @@ def _case():
     """构造共享语法的两个来源备选及当前唯一Core/指代决定。"""
     first=InputRelationQuestionBinding((1,),(2,),(31,),((4,),),(5,))
     second=replace(first,relation_key=(32,))
-    relations=tuple(SimpleNamespace(stable_key=lambda key=key:key,proposition_key=(claim,))
+    relations=tuple(SimpleNamespace(stable_key=lambda key=key:key,proposition_key=(claim,),predicate_key=(91,))
                     for key,claim in (((31,),71),((32,),72)))
     structure=SimpleNamespace(relation_question_bindings=(first,second),relation_candidates=relations,
                               discourse_compositions=(),discourse_gaps=())
@@ -39,6 +39,19 @@ def test_complete_compound_claims_keep_their_original_primary():
     structure,value,first=_case()
     value['response_plan']['claim_refs'].append([72])
     value['reference_resolution_refs']=[]
+    assert delivered_question_binding(structure,value)==first
+
+
+def test_unrelated_predicate_alternatives_are_outside_the_selected_slot_group():
+    """Memory选中的答案角色槽可以与其它谓词候选共存，不能把它们误并为同一语法竞争。"""
+    structure,value,first=_case()
+    unrelated=replace(structure.relation_question_bindings[1],
+                      answer_role_key=(99,), slot_span_refs=((98,),))
+    structure.relation_question_bindings=(first,unrelated)
+    structure.relation_candidates=(
+        structure.relation_candidates[0],
+        SimpleNamespace(stable_key=lambda:(32,), proposition_key=(72,), predicate_key=(92,)),
+    )
     assert delivered_question_binding(structure,value)==first
 
 
