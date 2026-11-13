@@ -111,7 +111,8 @@ def audit_saved_relation_memory(database, value, report, prepared, *, captured=N
                                                                             reference_bridge=reference_bridge)
                 reference_transition['input_selection'] = reference_selection
             if captured is not None:
-                ohe = verify_query_memory_ohe(captured, **readers)
+                ohe = verify_query_memory_ohe(captured, **readers,
+                    core_runtime=None if reference_bridge is None else reference_bridge.core_runtime)
             elif value.get('response_plan'):
                 ohe = verify_query_memory_ohe_nonfactual(value, report, **readers,
                     input_structure=prepared,

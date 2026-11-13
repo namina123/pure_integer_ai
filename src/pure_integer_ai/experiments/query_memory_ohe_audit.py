@@ -78,7 +78,7 @@ def verify_query_memory_ohe(
         response_contexts: tuple = (),
         reference_contexts: tuple | None = None,
         reference_candidate_sets: tuple = (), reference_resolutions: tuple = (),
-        revision_cue_records: tuple = (),
+        revision_cue_records: tuple = (), core_runtime=None,
         ) -> dict[str, Any]:
     """Match intake declarations, consumed hops, state members and plan refs.
 
@@ -108,7 +108,7 @@ The caller separately qualifies the delivery proof, split and source license.
         input_role_occurrences=input_role_occurrences, response_contexts=response_contexts,
         reference_contexts=reference_contexts,
         reference_candidate_sets=reference_candidate_sets, reference_resolutions=reference_resolutions,
-        revision_cue_records=revision_cue_records)
+        revision_cue_records=revision_cue_records, core_runtime=core_runtime)
 
 
 def verify_query_memory_ohe_without_plan(
@@ -255,9 +255,22 @@ def _verify_query_memory_state(
 
     if input_ref.object_kind != MEMORY_OBJECT_OBSERVATION or observation(input_source) != input_ref:
         raise QueryMemoryOheEvidenceError("input Observation differs from manifest")
+    compound_evidence = {}
+
+    def evidence_key(raw, label):
+        if not isinstance(raw, (list, tuple)) or len(raw) <= 1_000_000:
+            return _key(raw, label)
+        raw = tuple(raw)
+        if raw not in compound_evidence:
+            from pure_integer_ai.experiments.compound_dialogue_evidence_audit import verify_compound_dialogue_evidence
+            compound_evidence[raw] = verify_compound_dialogue_evidence(raw, trace,
+                core_runtime=core_runtime, key_reader=_key, rows_reader=_rows,
+                max_state_members=max_state_members, error=QueryMemoryOheEvidenceError)
+        return compound_evidence[raw]
+
     evidence = []
     for ref in _rows(state.get("evidence"), "state evidence", max_state_members):
-        key = _key(trace.resolve_ref(ref), "state evidence")
+        key = evidence_key(trace.resolve_ref(ref), "state evidence")
         source, hypothesis, member, scope, payload, supersedes = _unpack(key, 3, 6)
         evidence.append(EvidenceEntry(source, hypothesis, key[0], key[1], key[2],
                                       member, scope, payload, supersedes))
@@ -301,7 +314,7 @@ def _verify_query_memory_state(
         roots.append(QueryRoot(key[0], root, key[1], key[2], source, scope))
     if not any(root.owner_space == 2 and root.status == ROOT_EXPANDED for root in roots):
         raise QueryMemoryOheEvidenceError("Memory root was not expanded")
-    plan_keys = (set() if plan is None else {_key(key, "plan evidence")
+    plan_keys = (set() if plan is None else {evidence_key(key, "plan evidence")
                  for key in _rows(plan.get("evidence_refs"), "plan evidence", max_state_members)})
     if any(entry.polarity != 3 or entry.trust != 1 or entry.supersedes_key
            or (plan is not None and entry.stable_key() not in plan_keys)
