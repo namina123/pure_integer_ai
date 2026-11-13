@@ -104,9 +104,16 @@ def decode_integer_tuple(data: bytes) -> tuple[int, ...]:
         raise IntegerCodecError("integer codec data 必须是非空 bytes")
     cursor = 0
     size, cursor = _read_unsigned(data, cursor)
+    byte_count = len(data)
     result: list[int] = []
     for _ in range(size):
-        unsigned, cursor = _read_unsigned(data, cursor)
+        if cursor >= byte_count:
+            raise IntegerCodecError("unsigned varint 被截断")
+        unsigned = data[cursor]
+        if unsigned < 128:
+            cursor += 1
+        else:
+            unsigned, cursor = _read_unsigned(data, cursor)
         result.append(
             unsigned // 2 if unsigned % 2 == 0
             else -((unsigned + 1) // 2)

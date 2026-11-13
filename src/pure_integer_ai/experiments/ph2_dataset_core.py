@@ -157,15 +157,20 @@ def _validate_json_value(value: Any, *, where: str) -> None:
     raise DatasetContractError(f"{where} 含 JSON 不支持类型 {type(value).__name__}")
 
 
-def canonical_json_bytes(value: Any) -> bytes:
-    """把无浮点 JSON 值编码为排序键、紧凑分隔符的 UTF-8 字节。"""
-    _validate_json_value(value, where="canonical_json")
+def _encode_validated_json_bytes(value: Any) -> bytes:
+    """仅编码调用者已完整核验的局部JSON树，冻结排序、分隔符及UTF-8规则。"""
     return json.dumps(
         value,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """完整核验无浮点JSON树，再编码为排序键、紧凑分隔符的UTF-8字节。"""
+    _validate_json_value(value, where="canonical_json")
+    return _encode_validated_json_bytes(value)
 
 
 def canonical_json_line(value: Any) -> bytes:

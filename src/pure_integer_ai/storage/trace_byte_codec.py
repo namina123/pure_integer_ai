@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from struct import unpack
 
 
 TRACE_BYTE_ENCODING = "PIA_LZ4_BLOCKS_V1"
@@ -21,14 +22,26 @@ def _length(output: bytearray, value: int) -> None:
     output.append(value)
 
 
+def _prefix_words(raw: bytes) -> list[int]:
+    """按四组有界小端展开恢复每个完整四字节窗口，不依赖宿主字节序。"""
+    size = len(raw)
+    words = [0] * max(0, size - 3)
+    for offset in range(min(4, len(words))):
+        count = (size - offset) // 4
+        words[offset::4] = unpack(f"<{count}I", raw[offset:offset + count * 4])
+    return words
+
+
 def _encode_block(raw: bytes) -> bytes:
     """最近四字节位置、贪心最长匹配；登记顺序与 tie break 唯一。"""
-    positions: dict[bytes, int] = {}
+    positions: dict[bytes | int, int] = {}
     output = bytearray()
     cursor = anchor = 0
     size = len(raw)
+    # 窗口值是四字节的双射；大块只批量展开一次，最近位置和登记顺序不变。
+    words = _prefix_words(raw) if size >= 1024 else None
     while cursor <= size - 12:
-        prefix = raw[cursor:cursor + 4]
+        prefix = words[cursor] if words is not None else raw[cursor:cursor + 4]
         previous = positions.get(prefix)
         positions[prefix] = cursor
         if previous is None:
@@ -55,7 +68,8 @@ def _encode_block(raw: bytes) -> bytes:
         # 末尾三个窗口可能跨出匹配区间，必须按原顺序全部登记。
         last_period = max(cursor + 1, end - (cursor - previous) - 3)
         for position in range(last_period, end):
-            positions[raw[position:position + 4]] = position
+            prefix = words[position] if words is not None else raw[position:position + 4]
+            positions[prefix] = position
         cursor = anchor = end
     literal_size = size - anchor
     output.append(min(literal_size, 15) << 4)

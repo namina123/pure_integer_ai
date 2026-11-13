@@ -12,6 +12,7 @@ from typing import Any
 from pure_integer_ai.experiments.batch_case_provenance import CaseProvenanceError, _integer_projection
 from pure_integer_ai.experiments.graph_query_trace_contract import GraphQueryTraceContractError, GraphQueryTraceEvidence
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_bytes
+from pure_integer_ai.experiments.ph2_dataset_core import _encode_validated_json_bytes
 from pure_integer_ai.storage.trace_byte_codec import (
     TRACE_BYTE_ENCODING, TraceByteCodecError, decode_trace_bytes, iter_encoded_trace_bytes,
 )
@@ -74,18 +75,44 @@ def _positive_int(value: object, label: str) -> int:
     return value
 
 
+def _validated_trace_value(value: object) -> tuple[dict[str, Any], bytes, bytes]:
+    """一次完整验证值、整数投影及两份规范JSON bytes，供同次保存复用。"""
+    try:
+        projection = _integer_projection(value)
+        trace = GraphQueryTraceEvidence(value)
+        # 投影已逐项核验整树且保留同一完整key table；复用该表校验，
+        # 再核对投影额外要求的schema4及未被字符串剥离改变的全部envelope。
+        if trace.version != 4:
+            raise GraphQueryTraceContractError("integer artifact profile requires schema 4")
+        trace._validate_compact_artifact_envelope()
+    except (CaseProvenanceError, GraphQueryTraceContractError, TypeError, ValueError) as error:
+        raise TraceStorageError("trace is not a valid integer QueryBridge artifact") from error
+    raw = _encode_validated_json_bytes(value) + b"\n"
+    return projection, raw, _encode_validated_json_bytes(projection)
+
+
 def _trace_projection(raw: bytes) -> tuple[dict[str, Any], bytes]:
     """完整验证原 trace 及整数投影；规范身份仍由原 record 决定。"""
     if not isinstance(raw, bytes) or not raw:
         raise TraceStorageError("trace bytes must be nonempty")
     try:
         value = json.loads(raw)
-        projection = _integer_projection(value)
-        GraphQueryTraceEvidence(value)
-        GraphQueryTraceEvidence.from_integer_artifact(projection)
-    except (CaseProvenanceError, GraphQueryTraceContractError, TypeError, ValueError) as error:
-        raise TraceStorageError("trace is not a valid integer QueryBridge artifact") from error
-    return projection, canonical_json_bytes(projection)
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise TraceStorageError("trace is not valid JSON") from error
+    projection, _canonical_raw, projection_bytes = _validated_trace_value(value)
+    return projection, projection_bytes
+
+
+def _build_validated_snapshot(raw: bytes, projection_bytes: bytes, *, compressed: bool,
+                              checkpoint: Callable[[], None] | None) -> "ValidatedTraceSnapshot":
+    """从同一次完整值校验产生的bytes构造不可变快照，不接受外部投影。"""
+    snapshot = object.__new__(ValidatedTraceSnapshot)
+    object.__setattr__(snapshot, "raw", raw)
+    object.__setattr__(snapshot, "compressed", compressed)
+    object.__setattr__(snapshot, "projection_bytes", projection_bytes)
+    chunks = tuple(iter_encoded_trace_bytes(raw, checkpoint=checkpoint)) if compressed else (raw,)
+    object.__setattr__(snapshot, "stored_chunks", chunks)
+    return snapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,10 +250,10 @@ def save_case_trace_snapshot(root: Path, value: Mapping[str, Any], *, compressed
     if root.drive.upper() != "K:" or not root.is_dir() or type(compressed) is not bool:
         raise TraceStorageError("trace save requires an explicit K case directory and boolean encoding choice")
     _positive_int(max_trace_bytes, "max_trace_bytes")
-    raw = canonical_json_bytes(value) + b"\n"
+    _projection, raw, projection_bytes = _validated_trace_value(value)
     if len(raw) > max_trace_bytes:
         raise TraceStorageError("trace exceeds decoded byte budget")
-    snapshot = ValidatedTraceSnapshot(raw, compressed=compressed, checkpoint=checkpoint)
+    snapshot = _build_validated_snapshot(raw, projection_bytes, compressed=compressed, checkpoint=checkpoint)
     ref = {"path": "trace.int.lz4" if compressed else "trace.int.json",
            "byte_count": len(raw), "sha256": sha256_bytes(raw),
            "integer_projection_sha256": sha256_bytes(snapshot.projection_bytes)}
