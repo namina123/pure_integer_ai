@@ -4360,7 +4360,7 @@ class TrainedGraphQueryBridge:
     def _attach_relation_question_binding(
             self, structure: QueryInputStructure,
             ) -> QueryInputStructure:
-        if structure.assertion_scope_bindings:
+        if structure.assertion_scope_bindings or structure.operation_request_bindings:
             return structure
         if not self.relation_question_frames:
             if (structure.relation_question_bindings
@@ -4901,6 +4901,9 @@ class TrainedGraphQueryBridge:
             self.input_projector.project(tuple(ord(value) for value in surface)))
         structure = self._aggregate_input_provenance(structure)
         structure = attach_assertion_scope_frames(self.assertion_scope_frames, structure)
+        # Complete trained requests own their exact reader scope before a
+        # local WH parse can discard readers belonging to another predicate.
+        structure = self._attach_operation_request_binding(structure)
         structure = self._filter_relation_question_open_scope(structure)
         from pure_integer_ai.cognition.understanding.query_anaphoric_slot_scope import attach_anaphoric_slot_syntax
         structure = attach_anaphoric_slot_syntax(
@@ -5159,6 +5162,7 @@ class TrainedGraphQueryBridge:
             # 直接 query 与 prepare 后 query 在绑定问式前消费同一聚合视图。
             input_structure = self._aggregate_input_provenance(input_structure)
             input_structure = attach_assertion_scope_frames(self.assertion_scope_frames, input_structure)
+            input_structure = self._attach_operation_request_binding(input_structure)
             input_structure = self._filter_relation_question_open_scope(input_structure)
             input_structure = self._attach_relation_question_binding(
                 input_structure)

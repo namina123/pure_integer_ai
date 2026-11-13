@@ -133,7 +133,7 @@ def _verify_plan_fillers(plan, trace, facts, execution):
             raise ValueError("semantic Plan filler differs from current typed fact")
 
 
-def read_consumed_operation_selection(value, facts, witness, prepared, *, core=None):
+def read_consumed_operation_selection(value, facts, witness, prepared, *, core=None, input_facts=None):
     """完整重验原选择证据；READY 选择不等于已经生成或交付。"""
     trace = GraphQueryTraceEvidence(value)
     query = trace.resolve_ref(value["query_ref"])
@@ -156,8 +156,11 @@ def read_consumed_operation_selection(value, facts, witness, prepared, *, core=N
         raise ValueError("semantic trace lacks one exact consumed execution proof")
     execution, = selected
     verify_integer_operation(execution, facts, (witness,))
+    # Reader provenance can exist outside the sparse program join when the
+    # current objects have no connecting proof. It cannot expand that join.
+    readers = facts if input_facts is None else input_facts
     if (execution.query_key != query
-            or not operation_execution_input_matches(execution, prepared, facts, core=core)):
+            or not operation_execution_input_matches(execution, prepared, readers, core=core)):
         raise ValueError("semantic execution did not consume complete current input variables")
     evidence = []
     for ref in state["evidence"]:
@@ -171,9 +174,10 @@ def read_consumed_operation_selection(value, facts, witness, prepared, *, core=N
     return execution
 
 
-def read_consumed_operation_execution(value, facts, witness, prepared, *, core=None):
+def read_consumed_operation_execution(value, facts, witness, prepared, *, core=None, input_facts=None):
     """验证原选择与完整交付/拒答；READY 仍必须有闭合 Plan 和生成。"""
-    execution = read_consumed_operation_selection(value, facts, witness, prepared, core=core)
+    execution = read_consumed_operation_selection(value, facts, witness, prepared,
+                                                 core=core, input_facts=input_facts)
     trace = GraphQueryTraceEvidence(value)
     state = value["state_key"]
     generated, plan = value.get("generation"), value.get("response_plan")

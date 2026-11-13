@@ -54,7 +54,8 @@ def audit_saved_relation_memory(database, value, report, prepared, *, captured=N
                 occurrences.extend(read_input_roles(memory, candidate, observation, ref, required=True))
         occurrences = tuple(sorted(occurrences, key=lambda item: item.stable_key()))
         trace = GraphQueryTraceEvidence(value)
-        if tuple(item.stable_key() for item in occurrences) != tuple(trace.resolve_ref(ref)
+        has_reference = bool(value.get('reference_candidate_set_refs') or value.get('reference_resolution_refs'))
+        if not has_reference and tuple(item.stable_key() for item in occurrences) != tuple(trace.resolve_ref(ref)
                 for ref in value["input_role_occurrence_refs"]):
             raise ValueError("saved input Role occurrences differ from actual Memory graph")
         readers = dict(declaration_reader=declarations, current_manifest_reader=intake.require_current_manifest,
@@ -93,7 +94,12 @@ def audit_saved_relation_memory(database, value, report, prepared, *, captured=N
                         complete_response_contexts, trace, response_role_keys)
                 except ValueError as error:
                     raise QueryMemoryOheEvidenceError(str(error)) from error
-            if value.get('reference_candidate_set_refs') or value.get('reference_resolution_refs'):
+            if has_reference:
+                from pure_integer_ai.experiments.saved_reference_selection_audit import restore_saved_reference_selection
+                selected_input, occurrences, relation_map, reference_selection = restore_saved_reference_selection(
+                    memory, trace, report, prepared, occurrences, complete_response_contexts,
+                    relation_map, reference_bridge=reference_bridge)
+                readers['input_role_occurrences'] = occurrences
                 from pure_integer_ai.experiments.saved_reference_context_audit import read_saved_reference_contexts
                 sets, resolutions = read_saved_reference_contexts(memory, trace, report, prepared,
                     occurrences, complete_response_contexts, relation_map, reference_bridge=reference_bridge)
@@ -101,8 +107,9 @@ def audit_saved_relation_memory(database, value, report, prepared, *, captured=N
                 readers['reference_candidate_sets'] = sets
                 readers['reference_resolutions'] = resolutions
                 from pure_integer_ai.experiments.reference_question_transition_audit import verify_reference_question_transition
-                reference_transition = verify_reference_question_transition(trace, prepared, resolutions,
+                reference_transition = verify_reference_question_transition(trace, selected_input, resolutions,
                                                                             reference_bridge=reference_bridge)
+                reference_transition['input_selection'] = reference_selection
             if captured is not None:
                 ohe = verify_query_memory_ohe(captured, **readers)
             elif value.get('response_plan'):
