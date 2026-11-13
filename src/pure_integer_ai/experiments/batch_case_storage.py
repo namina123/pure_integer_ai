@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from pure_integer_ai.experiments.batch_trace_storage import (
-    TraceStorageError, _read_trace_storage, _relative_path, _trace_projection,
+    TraceStorageError, ValidatedTraceSnapshot, _read_trace_storage, _relative_path, _trace_projection,
     read_trace_reference, sha256_bytes, validate_trace_reference,
 )
 from pure_integer_ai.experiments.graph_query_trace_contract import (
@@ -35,6 +35,7 @@ def build_compact_case_provenance(
         captured: Mapping[str, Any], *, trace_bytes: bytes,
         trace_path: str | None = None, trace_ref: Mapping[str, Any] | None = None,
         trace_root: Path | None = None,
+        validated_trace: ValidatedTraceSnapshot | None = None,
         ) -> dict[str, Any]:
     """把完整V1捕获转换成不复制trace的可验证引用记录。"""
     if not isinstance(captured, Mapping):
@@ -47,7 +48,13 @@ def build_compact_case_provenance(
         raise CaseArtifactStorageError("captured free_dialogue_complete must be the strict integer zero")
     if "trace" not in captured:
         raise CaseArtifactStorageError("captured provenance has no trace to externalize")
-    _projection, projection_bytes = _trace_projection(trace_bytes)
+    if validated_trace is None:
+        _projection, projection_bytes = _trace_projection(trace_bytes)
+    else:
+        if (type(validated_trace) is not ValidatedTraceSnapshot
+                or type(trace_bytes) is not bytes or validated_trace.raw != trace_bytes):
+            raise CaseArtifactStorageError("validated snapshot differs from the current original trace bytes")
+        projection_bytes = validated_trace.projection_bytes
     if canonical_json_bytes(captured["trace"]) != projection_bytes:
         raise CaseArtifactStorageError("captured trace projection differs from the original trace artifact")
     if trace_ref is None:

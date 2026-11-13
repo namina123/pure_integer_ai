@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 import hashlib
 import json
 from pathlib import Path
@@ -85,6 +86,19 @@ def _trace_projection(raw: bytes) -> tuple[dict[str, Any], bytes]:
     except (CaseProvenanceError, GraphQueryTraceContractError, TypeError, ValueError) as error:
         raise TraceStorageError("trace is not a valid integer QueryBridge artifact") from error
     return projection, canonical_json_bytes(projection)
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedTraceSnapshot:
+    """仅本次调用复用完整校验；两个不可变bytes不能由外部注入投影。"""
+
+    raw: bytes = field(repr=False)
+    projection_bytes: bytes = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """构造即完整核验原记录和整数artifact，绝不以派生hash替代。"""
+        _projection, projection_bytes = _trace_projection(self.raw)
+        object.__setattr__(self, "projection_bytes", projection_bytes)
 
 
 def validate_trace_reference(ref: Mapping[str, Any]) -> bool:
@@ -171,11 +185,12 @@ def read_trace_reference(root: Path, ref: Mapping[str, Any], *, max_trace_bytes:
     return raw
 
 
-def save_case_trace(root: Path, value: Mapping[str, Any], *, compressed: bool = False,
+def save_case_trace_snapshot(root: Path, value: Mapping[str, Any], *, compressed: bool = False,
                     max_trace_bytes: int = MAX_TRACE_BYTES,
                     checkpoint: Callable[[], None] | None = None,
-                    before_write: Callable[[Path, int], None] | None = None) -> tuple[dict[str, Any], bytes]:
-    """在新 case 目录独占保存唯一 blob，成功后才发布其 descriptor。"""
+                    before_write: Callable[[Path, int], None] | None = None
+                    ) -> tuple[dict[str, Any], ValidatedTraceSnapshot]:
+    """保存唯一blob和descriptor，并返回本次完整校验的不可变快照。"""
     root = root.resolve(strict=True)
     if root.drive.upper() != "K:" or not root.is_dir() or type(compressed) is not bool:
         raise TraceStorageError("trace save requires an explicit K case directory and boolean encoding choice")
@@ -183,10 +198,10 @@ def save_case_trace(root: Path, value: Mapping[str, Any], *, compressed: bool = 
     raw = canonical_json_bytes(value) + b"\n"
     if len(raw) > max_trace_bytes:
         raise TraceStorageError("trace exceeds decoded byte budget")
-    _projection, projection_bytes = _trace_projection(raw)
+    snapshot = ValidatedTraceSnapshot(raw)
     ref = {"path": "trace.int.lz4" if compressed else "trace.int.json",
            "byte_count": len(raw), "sha256": sha256_bytes(raw),
-           "integer_projection_sha256": sha256_bytes(projection_bytes)}
+           "integer_projection_sha256": sha256_bytes(snapshot.projection_bytes)}
     path = root / ref["path"]
     chunks = iter_encoded_trace_bytes(raw, checkpoint=checkpoint) if compressed else (raw,)
     stored_size = 0
@@ -207,7 +222,18 @@ def save_case_trace(root: Path, value: Mapping[str, Any], *, compressed: bool = 
             before_write(path, len(descriptor))
         with path.open("xb") as stream:
             stream.write(descriptor)
-    return ref, raw
+    return ref, snapshot
+
+
+def save_case_trace(root: Path, value: Mapping[str, Any], *, compressed: bool = False,
+                    max_trace_bytes: int = MAX_TRACE_BYTES,
+                    checkpoint: Callable[[], None] | None = None,
+                    before_write: Callable[[Path, int], None] | None = None
+                    ) -> tuple[dict[str, Any], bytes]:
+    """保留原调用者的ref/bytes接口和全部物理保存校验。"""
+    reference, snapshot = save_case_trace_snapshot(root, value, compressed=compressed,
+        max_trace_bytes=max_trace_bytes, checkpoint=checkpoint, before_write=before_write)
+    return reference, snapshot.raw
 
 
 def load_saved_query_trace(path: Path, *, root: Path | None = None,

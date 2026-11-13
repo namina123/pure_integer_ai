@@ -2154,6 +2154,11 @@ class TrainedGraphQueryBridge:
             self.memory, self._input_observation_ref, self._response_contexts)
         selected = _root_response_context_inputs(
             self.memory, selected, self._response_contexts)
+        if reference_context_required:
+            from pure_integer_ai.experiments.memory_reference_read_scope import retain_reference_role_dependencies
+            selected = retain_reference_role_dependencies(
+                self.memory, selected, self._response_contexts,
+                self._input_observation_ref, self._current_reference_scope)
         _validate_response_context_memory_closure(
             selected, self._response_contexts)
         self._delivered_graph_slot_projections = (

@@ -110,6 +110,17 @@ def audit_saved_relation_memory(database, value, report, prepared, *, captured=N
                 reference_transition = verify_reference_question_transition(trace, selected_input, resolutions,
                                                                             reference_bridge=reference_bridge)
                 reference_transition['input_selection'] = reference_selection
+            if any(route[0] == 6 for route in trace.memory_routes()):
+                if reference_bridge is None:
+                    raise QueryMemoryOheEvidenceError('reference read scope lacks its trained operation reader')
+                from pure_integer_ai.experiments.memory_reference_read_scope import verify_reference_read_scope
+                try:
+                    reference_transition['memory_read_scope'] = verify_reference_read_scope(
+                        memory, trace, complete_response_contexts, observation,
+                        input_structure=reference_bridge.active_memory_input_structure(prepared),
+                        question_frames=reference_bridge.relation_question_frames, declaration=lambda ref: declarations(ref)[0])
+                except (ValueError, IndexError) as error:
+                    raise QueryMemoryOheEvidenceError(str(error)) from error
             if captured is not None:
                 ohe = verify_query_memory_ohe(captured, **readers,
                     core_runtime=None if reference_bridge is None else reference_bridge.core_runtime)

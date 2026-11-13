@@ -8,7 +8,7 @@ from pure_integer_ai.cognition.shared.query_state import TERMINATION_ANSWER_CLOS
 from pure_integer_ai.experiments.batch_case_provenance import capture_factual_case_provenance
 from pure_integer_ai.experiments.batch_case_storage import build_compact_case_provenance
 from pure_integer_ai.experiments.batch_phase_host import current_process_resource_endpoint
-from pure_integer_ai.experiments.batch_trace_storage import save_case_trace
+from pure_integer_ai.experiments.batch_trace_storage import save_case_trace_snapshot
 from pure_integer_ai.experiments.graph_query_trace_contract import GraphQueryTraceEvidence
 from pure_integer_ai.experiments.ph2_dataset_contract import canonical_json_bytes
 from pure_integer_ai.experiments.relation_resource_budget import (
@@ -98,9 +98,10 @@ def _run_natural_relation_case(
         surface, input_structure=structure, input_observation_ref=intake.observation_ref,
         compact_trace=True, max_depth=max_depth, max_nodes=max_nodes,
         max_edges=max_edges, max_reads=max_reads)
-    trace_ref, trace_bytes = save_case_trace(root / relative_root, result, compressed=compress_trace,
+    trace_ref, trace_snapshot = save_case_trace_snapshot(root / relative_root, result, compressed=compress_trace,
         checkpoint=lambda: resource_checkpoint("trace_encode_block", retain=False),
         before_write=before_resource_write)
+    trace_bytes = trace_snapshot.raw
     trace = GraphQueryTraceEvidence(result)
     counts = trace.counts()
     output = result.get("response_surface")
@@ -160,7 +161,8 @@ def _run_natural_relation_case(
                 input_source=appended.source.stable_key(), delivery_summary=delivery.summary())
     if capture is not None:
         compact = build_compact_case_provenance(capture, trace_ref=trace_ref,
-            trace_root=root / relative_root, trace_bytes=trace_bytes)
+            trace_root=root / relative_root, trace_bytes=trace_bytes,
+            validated_trace=trace_snapshot)
         write_preflight_json(root, relative_root + "/case_provenance.json", compact)
     ended = current_process_resource_endpoint()
     from pure_integer_ai.experiments.trained_reference_resolution import (
