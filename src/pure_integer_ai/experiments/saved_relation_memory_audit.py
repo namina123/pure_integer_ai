@@ -71,7 +71,7 @@ def audit_saved_relation_memory(database, value, report, prepared, *, captured=N
             from pure_integer_ai.experiments.operation_request_call_audit import verify_operation_request_memory
             request_memory = verify_operation_request_memory(prepared, value, report, declarations)
         try:
-            from pure_integer_ai.experiments.saved_response_context_audit import read_saved_factual_response_contexts
+            from pure_integer_ai.experiments.saved_response_context_audit import restore_saved_factual_response_contexts
             from pure_integer_ai.experiments.query_memory_ohe_audit import _unpack
             input_role_keys = {item.stable_key() for item in occurrences}
             response_roles_consumed = False
@@ -82,13 +82,16 @@ def audit_saved_relation_memory(database, value, report, prepared, *, captured=N
                 if key[0] == 2 and member[:1] == (91534,) and member not in input_role_keys:
                     response_roles_consumed = True
                     response_role_keys.add(member)
-            if response_roles_consumed or value.get('response_context_refs'):
+            if (response_roles_consumed or value.get('response_context_refs')
+                    or any(route[0] in (1, 5) for route in trace.memory_routes())):
                 try:
-                    complete_response_contexts = read_saved_factual_response_contexts(memory, trace,
+                    restored_contexts = restore_saved_factual_response_contexts(memory, trace,
                         input_observation=observation, declaration_reader=declarations,
                         source_hash_reader=readers["source_hash_reader"],
                         input_candidate_keys=memory_input_candidate_keys(
                             prepared, session_id=owner.session_id, speaker_kind=1))
+                    complete_response_contexts = restored_contexts.contexts
+                    readers['recall_observations'] = restored_contexts.recall_observations
                     from pure_integer_ai.experiments.memory_provenance_inputs import consumed_response_contexts
                     readers["response_contexts"] = consumed_response_contexts(
                         complete_response_contexts, trace, response_role_keys)

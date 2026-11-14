@@ -37,8 +37,24 @@ def retain_context_input_dependencies(inputs,contexts):
 
 def verify_context_input_observations(contexts,*,roots,bindings,declaration,observation,source_hash,error):
     """独立context授权来源O，核对物理声明、完整展开根/绑定并返回实际O hop全集。"""
+    return _verify_source_observations(response_context_input_observations(contexts), roots=roots,
+        bindings=bindings, declaration=declaration, observation=observation, source_hash=source_hash, error=error)
+
+
+def verify_recalled_observations(refs, *, maximum, **readers):
+    """只接收当前输入匹配冷读独立授权的有界唯一来源O，不从实际hop自授权。"""
+    error = readers['error']
+    if (type(refs) is not tuple or len(refs) > maximum
+            or any(not isinstance(ref, MemoryObjectRef) or ref.object_kind != MEMORY_OBJECT_OBSERVATION for ref in refs)
+            or len(set(refs)) != len(refs)):
+        raise error('cold recall Observation references are invalid, duplicated or exceed budget')
+    return _verify_source_observations(refs, **readers)
+
+
+def _verify_source_observations(refs, *, roots, bindings, declaration, observation, source_hash, error):
+    """逐项核对来源O的真实声明、manifest、精确来源根和绑定，返回完整规范hop。"""
     expected=set()
-    for ref in response_context_input_observations(contexts):
+    for ref in refs:
         payload_row=declaration(ref)
         payload=payload_row.event.payload
         if not isinstance(payload,ObservationPayload) or observation(payload.source)!=ref:
@@ -46,10 +62,10 @@ def verify_context_input_observations(contexts,*,roots,bindings,declaration,obse
         source=payload.source
         scope=payload_row.event.scope.stable_key()
         if (ref.owner!=source.owner or ref.versions!=source.versions
-                or not any(root.owner_space==SPACE_MEMORY and root.status==ROOT_EXPANDED
+                or sum(root.owner_space==SPACE_MEMORY and root.status==ROOT_EXPANDED
                     and root.root_key==ref.stable_key()
                     and root.source_ref==(source_hash(source),*source.stable_key())
-                    and root.scope_key==scope for root in roots)
+                    and root.scope_key==scope for root in roots) != 1
                 or BindingEntry((MEMORY_OBJECT_OBSERVATION,),ref.stable_key(),SPACE_MEMORY,scope).stable_key()
                     not in bindings):
             raise error('delivery input provenance lacks its exact current Observation root/binding')

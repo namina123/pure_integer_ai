@@ -79,6 +79,7 @@ def verify_query_memory_ohe(
         reference_contexts: tuple | None = None,
         reference_candidate_sets: tuple = (), reference_resolutions: tuple = (),
         revision_cue_records: tuple = (), core_runtime=None, reference_transition=None,
+        recall_observations: tuple[MemoryObjectRef, ...] = (),
         ) -> dict[str, Any]:
     """Match intake declarations, consumed hops, state members and plan refs.
 
@@ -109,7 +110,7 @@ The caller separately qualifies the delivery proof, split and source license.
         reference_contexts=reference_contexts,
         reference_candidate_sets=reference_candidate_sets, reference_resolutions=reference_resolutions,
         revision_cue_records=revision_cue_records, core_runtime=core_runtime,
-        reference_transition=reference_transition)
+        reference_transition=reference_transition, recall_observations=recall_observations)
 
 
 def verify_query_memory_ohe_without_plan(
@@ -124,6 +125,7 @@ def verify_query_memory_ohe_without_plan(
         reference_contexts: tuple | None = None,
         reference_candidate_sets: tuple = (), reference_resolutions: tuple = (),
         revision_cue_records: tuple = (), reference_transition=None,
+        recall_observations: tuple[MemoryObjectRef, ...] = (),
         ) -> dict[str, Any]:
     """Cold-join an UNKNOWN call to durable intake without inventing a Plan."""
     trace = GraphQueryTraceEvidence(trace_value)
@@ -147,7 +149,8 @@ def verify_query_memory_ohe_without_plan(
         input_role_occurrences=input_role_occurrences, response_contexts=response_contexts,
         reference_contexts=reference_contexts,
         reference_candidate_sets=reference_candidate_sets, reference_resolutions=reference_resolutions,
-        revision_cue_records=revision_cue_records, reference_transition=reference_transition)
+        revision_cue_records=revision_cue_records, reference_transition=reference_transition,
+        recall_observations=recall_observations)
 
 
 def verify_query_memory_ohe_nonfactual(trace_value, call_receipt, *, max_state_members=256,
@@ -189,6 +192,7 @@ def _verify_query_memory_state(
         input_conflict_context=None,
         assertion_scope_frames=(), core_runtime=None, authorized_input=None,
         revision_cue_records: tuple = (), reference_transition=None,
+        recall_observations: tuple[MemoryObjectRef, ...] = (),
         ) -> dict[str, Any]:
     if type(max_state_members) is not int or not 0 < max_state_members <= 4096:
         raise QueryMemoryOheEvidenceError("state member audit budget must be a strict integer from 1 to 4096")
@@ -377,10 +381,13 @@ def _verify_query_memory_state(
     ohe_hops = {(hop.proposition_key, hop.predicate_key, hop.source_hash)
                 for hop in hops if hop.space == 2 and hop.predicate_key in {
                     (MEMORY_EVENT_OBSERVATION,), (MEMORY_EVENT_HYPOTHESIS,), (MEMORY_EVENT_EVIDENCE,)}}
-    from pure_integer_ai.experiments.memory_provenance_inputs import verify_context_input_observations
+    from pure_integer_ai.experiments.memory_provenance_inputs import verify_context_input_observations, verify_recalled_observations
     expected_hops = verify_context_input_observations(response_contexts, roots=roots, bindings=bindings,
         declaration=declaration, observation=observation, source_hash=source_hash,
         error=QueryMemoryOheEvidenceError)
+    expected_hops.update(verify_recalled_observations(recall_observations,
+        maximum=max_ohe_declarations, roots=roots, bindings=bindings, declaration=declaration,
+        observation=observation, source_hash=source_hash, error=QueryMemoryOheEvidenceError))
     chains = []
     appended_chains = []
     for entry in memory_evidence:
@@ -461,6 +468,7 @@ def _verify_query_memory_state(
         "reference_evidence_count":len(reference_evidence),
         "reference_history_context_count":len(reference_history),
         "actually_consumed_context_count":len(response_contexts),
+        "cold_recall_observation_count": len(recall_observations),
         'generic_plan_adoption':generic_adoption,
         "response_role_durable_qualification": ("MATCHED_COLD_PROOF_EPISODE_OCCURRENCE_GRAPH_STRUCTURAL_ONLY"
                                                if response_role_evidence else "NOT_CONSUMED"),

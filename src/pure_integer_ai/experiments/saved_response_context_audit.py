@@ -1,6 +1,7 @@
 """从不可变 O/H/E、proof 与 Episode 恢复事实及通用非事实历史。"""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 from pure_integer_ai.cognition.shared.memory_event import (
@@ -18,12 +19,28 @@ from pure_integer_ai.experiments.trained_response_context import RESPONSE_CONTEX
 
 def read_saved_factual_response_contexts(memory, trace, *, input_observation,
                                        declaration_reader, source_hash_reader, input_candidate_keys=None):
+    """保持原context接口；完整来源锚点由同一独立冷读内核恢复。"""
+    return restore_saved_factual_response_contexts(memory, trace, input_observation=input_observation,
+        declaration_reader=declaration_reader, source_hash_reader=source_hash_reader,
+        input_candidate_keys=input_candidate_keys).contexts
+
+
+@dataclass(frozen=True, slots=True)
+class SavedResponseContextAudit:
+    """完整冷图context和由当前输入匹配独立授权的来源O，不赋予内容真值。"""
+
+    contexts: tuple
+    recall_observations: tuple[MemoryObjectRef, ...]
+
+
+def restore_saved_factual_response_contexts(memory, trace, *, input_observation,
+                                          declaration_reader, source_hash_reader, input_candidate_keys=None):
     """逐项核验来源、深度及物理 proof/Episode，只恢复结构历史而不读取答案。"""
     refs = trace.trace.get("response_context_refs", ())
     if not isinstance(refs, (list, tuple)) or len(refs) > 32:
         raise QueryMemoryOheEvidenceError("saved response contexts exceed cold audit budget")
-    if not refs:
-        return ()
+    if not refs and input_candidate_keys is None:
+        return SavedResponseContextAudit((), ())
     keys = tuple(trace.resolve_ref(ref) for ref in refs)
     if len(set(keys)) != len(keys):
         raise QueryMemoryOheEvidenceError("saved response context is duplicated")
@@ -70,6 +87,9 @@ def read_saved_factual_response_contexts(memory, trace, *, input_observation,
         anchors = read_saved_recall_observation_anchors(memory, trace,
             input_observation=input_observation, input_candidate_keys=input_candidate_keys,
             declaration_reader=declaration_reader)
+    recall_observations = tuple(item.event.object_ref for item in anchors)
+    if not refs:
+        return SavedResponseContextAudit((), recall_observations)
     _rows, depths, _sources, _routes = TrainedDialogueMemoryGraph._observation_closure(
         closure_owner, anchors, (input_observation,), memory.candidate_index.access,
         context_depth_limit=1)
@@ -125,4 +145,4 @@ def read_saved_factual_response_contexts(memory, trace, *, input_observation,
         if len(restored) != 1 or restored[0].stable_key() != original:
             raise QueryMemoryOheEvidenceError("saved response context differs from proof/Episode graph")
         result.extend(restored)
-    return tuple(result)
+    return SavedResponseContextAudit(tuple(result), recall_observations)
