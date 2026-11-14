@@ -3,7 +3,7 @@ from pure_integer_ai.cognition.shared.memory_event import (
     MEMORY_EVENT_OBSERVATION,MEMORY_OBJECT_HYPOTHESIS,MEMORY_OBJECT_OBSERVATION,
     MemoryObjectRef,ObservationPayload,
 )
-from pure_integer_ai.cognition.shared.query_state import BindingEntry,ROOT_EXPANDED,SPACE_MEMORY
+from pure_integer_ai.cognition.shared.query_state import BindingEntry,QueryRoot,ROOT_EXPANDED,ROOT_PENDING,SPACE_MEMORY
 from pure_integer_ai.experiments.trained_response_context import response_context_input_observations
 
 
@@ -41,17 +41,22 @@ def verify_context_input_observations(contexts,*,roots,bindings,declaration,obse
         bindings=bindings, declaration=declaration, observation=observation, source_hash=source_hash, error=error)
 
 
-def verify_recalled_observations(refs, *, maximum, **readers):
+def verify_recalled_observations(refs, *, maximum, denied_roots=(), **readers):
     """只接收当前输入匹配冷读独立授权的有界唯一来源O，不从实际hop自授权。"""
     error = readers['error']
     if (type(refs) is not tuple or len(refs) > maximum
             or any(not isinstance(ref, MemoryObjectRef) or ref.object_kind != MEMORY_OBJECT_OBSERVATION for ref in refs)
             or len(set(refs)) != len(refs)):
         raise error('cold recall Observation references are invalid, duplicated or exceed budget')
-    return _verify_source_observations(refs, **readers)
+    if (type(denied_roots) is not tuple or len(denied_roots)>maximum
+            or any(not isinstance(root,QueryRoot) or root.status!=ROOT_PENDING for root in denied_roots)
+            or len({root.stable_key() for root in denied_roots})!=len(denied_roots)):
+        raise error('denied cold recall requires complete unique original pending roots')
+    return _verify_source_observations(refs, denied_roots=denied_roots, **readers)
 
 
-def _verify_source_observations(refs, *, roots, bindings, declaration, observation, source_hash, error):
+def _verify_source_observations(refs, *, roots, bindings, declaration, observation, source_hash, error,
+                                denied_roots=()):
     """逐项核对来源O的真实声明、manifest、精确来源根和绑定，返回完整规范hop。"""
     expected=set()
     for ref in refs:
@@ -61,6 +66,16 @@ def _verify_source_observations(refs, *, roots, bindings, declaration, observati
             raise error('delivery context input Observation differs from its original manifest')
         source=payload.source
         scope=payload_row.event.scope.stable_key()
+        denied=tuple(root for root in denied_roots
+            if root.owner_space==SPACE_MEMORY and root.root_key==ref.stable_key())
+        if denied:
+            if (len(denied)!=1 or denied[0].source_ref!=(source_hash(source),*source.stable_key())
+                    or denied[0].scope_key!=scope or ref.owner!=source.owner or ref.versions!=source.versions
+                    or any(root.owner_space==SPACE_MEMORY and root.root_key==ref.stable_key() for root in roots)
+                    or BindingEntry((MEMORY_OBJECT_OBSERVATION,),ref.stable_key(),SPACE_MEMORY,scope).stable_key()
+                        in bindings):
+                raise error('denied cold recall differs from its physical source or retains consumption')
+            continue
         if (ref.owner!=source.owner or ref.versions!=source.versions
                 or sum(root.owner_space==SPACE_MEMORY and root.status==ROOT_EXPANDED
                     and root.root_key==ref.stable_key()

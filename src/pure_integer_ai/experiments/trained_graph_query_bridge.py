@@ -6136,6 +6136,17 @@ class TrainedGraphQueryBridge:
             if unbound_event_time_question else (
                 "closed relation does not cover the complete current input"
                 if uncovered_closed_relation_modifier else None))
+        from pure_integer_ai.cognition.understanding.query_unlicensed_relation import (
+            unlicensed_incomplete_relation_input,
+        )
+        if (operation_binding_failure_reason is None
+                and artifact_input is None and not graph_object_keys
+                and not self._event_time_query_bindings
+                and unlicensed_incomplete_relation_input(
+                    input_structure, self.relation_question_frames,
+                    complete_relation=complete_relation)):
+            operation_binding_failure_reason = (
+                "incomplete relation lacks current roles or licensed reference")
         if unanchored_reference and operation_binding_failure_reason is None:
             operation_binding_failure_reason = "trained reference question lacks a source-qualified antecedent"
         from pure_integer_ai.experiments.query_pending_reference import unselected_reference_question

@@ -300,12 +300,11 @@ def _verify_query_memory_state(
     role_keys = {item.stable_key() for item in input_role_occurrences}
     role_evidence = tuple(entry for entry in evidence
                           if entry.space == 2 and entry.evidence_key in role_keys)
-    if (len(role_evidence) != len(input_role_occurrences)
-            or set(role_evidence) != {item.query_evidence() for item in input_role_occurrences}
-            or any(item.observation != input_ref or item.source_ref != (
+    if any(item.observation != input_ref or item.source_ref != (
                 source_hash(input_source), *input_source.stable_key())
-                for item in input_role_occurrences)):
+                for item in input_role_occurrences):
         raise QueryMemoryOheEvidenceError("input role Evidence differs from cold source occurrences")
+    complete_input_roles = input_role_occurrences
     bindings = set()
     for ref in _rows(state.get("bindings"), "state bindings", max_state_members):
         raw = trace.resolve_ref(ref)
@@ -318,13 +317,24 @@ def _verify_query_memory_state(
             key = _key(raw, "state binding")
         role, filler, scope = _unpack(key, 1, 3, 1)
         bindings.add(BindingEntry(role, filler, key[0], scope, key[-1]).stable_key())
-    if any(item.query_binding().stable_key() not in bindings for item in input_role_occurrences):
-        raise QueryMemoryOheEvidenceError("QueryState omits input role occurrence binding")
     roots = []
     for ref in _rows(state.get("roots"), "state roots", max_state_members):
         key = _key(trace.resolve_ref(ref), "state root")
         root, source, scope = _unpack(key, 3, 3)
         roots.append(QueryRoot(key[0], root, key[1], key[2], source, scope))
+    denied_input_roles = {}
+    denied_roots = ()
+    if (len(role_evidence) != len(input_role_occurrences)
+            or set(role_evidence) != {item.query_evidence() for item in input_role_occurrences}):
+        from pure_integer_ai.experiments.denied_input_role_audit import qualify_denied_input_roles
+        denied_input_roles, denied_roots = qualify_denied_input_roles(
+            trace, input_role_occurrences, evidence=evidence, bindings=bindings, roots=roots,
+            input_ref=input_ref, input_structure=(None if input_conflict_context is None
+                else input_conflict_context[0]), nonfactual_plan=nonfactual_plan,
+            max_state_members=max_state_members, error=QueryMemoryOheEvidenceError)
+        input_role_occurrences = ()
+    if any(item.query_binding().stable_key() not in bindings for item in input_role_occurrences):
+        raise QueryMemoryOheEvidenceError("QueryState omits input role occurrence binding")
     if not any(root.owner_space == 2 and root.status == ROOT_EXPANDED for root in roots):
         raise QueryMemoryOheEvidenceError("Memory root was not expanded")
     plan_keys = (set() if plan is None else {evidence_key(key, "plan evidence")
@@ -385,9 +395,11 @@ def _verify_query_memory_state(
     expected_hops = verify_context_input_observations(response_contexts, roots=roots, bindings=bindings,
         declaration=declaration, observation=observation, source_hash=source_hash,
         error=QueryMemoryOheEvidenceError)
-    expected_hops.update(verify_recalled_observations(recall_observations,
+    recalled_hops = verify_recalled_observations(recall_observations,
         maximum=max_ohe_declarations, roots=roots, bindings=bindings, declaration=declaration,
-        observation=observation, source_hash=source_hash, error=QueryMemoryOheEvidenceError))
+        observation=observation, source_hash=source_hash, error=QueryMemoryOheEvidenceError,
+        denied_roots=denied_roots)
+    expected_hops.update(recalled_hops)
     chains = []
     appended_chains = []
     for entry in memory_evidence:
@@ -462,6 +474,8 @@ def _verify_query_memory_state(
         "physical_revision_append_chains": appended_chains,
         "delivered_slot_evidence_count": len(delivered_slot_evidence),
         "unknown_input_role_occurrence_count": len(input_role_occurrences),
+        "declared_input_role_occurrence_count": len(complete_input_roles),
+        "denied_input_roles_qualification": denied_input_roles,
         "unknown_response_role_occurrence_count": len(response_role_evidence),
         "reference_candidate_set_count":len(reference_candidate_sets),
         "reference_resolution_count":len(reference_resolutions),
@@ -469,6 +483,8 @@ def _verify_query_memory_state(
         "reference_history_context_count":len(reference_history),
         "actually_consumed_context_count":len(response_contexts),
         "cold_recall_observation_count": len(recall_observations),
+        "consumed_cold_recall_observation_count": len(recalled_hops),
+        "denied_cold_recall_observation_count": len(recall_observations)-len(recalled_hops),
         'generic_plan_adoption':generic_adoption,
         "response_role_durable_qualification": ("MATCHED_COLD_PROOF_EPISODE_OCCURRENCE_GRAPH_STRUCTURAL_ONLY"
                                                if response_role_evidence else "NOT_CONSUMED"),
