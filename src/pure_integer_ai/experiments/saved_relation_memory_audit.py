@@ -54,6 +54,16 @@ def audit_saved_relation_memory(database, value, report, prepared, *, captured=N
                 occurrences.extend(read_input_roles(memory, candidate, observation, ref, required=True))
         occurrences = tuple(sorted(occurrences, key=lambda item: item.stable_key()))
         trace = GraphQueryTraceEvidence(value)
+        from pure_integer_ai.experiments.symmetric_input_order import verify_saved_symmetric_input_order
+        verify_saved_symmetric_input_order(trace, prepared,
+            {} if reference_bridge is None else reference_bridge.core_fact_index)
+        if captured is not None and (not captured.get('expected_operation') or 'assertion_input_witness' in captured):
+            from pure_integer_ai.experiments.natural_assertion_capture import delivered_assertion_capture_witness
+            claim, witness = delivered_assertion_capture_witness(prepared,
+                {} if reference_bridge is None else reference_bridge.core_fact_index, value)
+            if (captured.get('expected_operation') != [] or captured.get('assertion_input_witness') != list(witness)
+                    or captured['expected_claim'] != list(claim)):
+                raise ValueError('saved assertion capture differs from cold complete input')
         has_reference = bool(value.get('reference_candidate_set_refs') or value.get('reference_resolution_refs'))
         if not has_reference and tuple(item.stable_key() for item in occurrences) != tuple(trace.resolve_ref(ref)
                 for ref in value["input_role_occurrence_refs"]):

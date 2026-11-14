@@ -271,6 +271,9 @@ from pure_integer_ai.experiments.input_projection_conflict import (
     conflicting_input_filler_groups as _conflicting_input_filler_groups,
     retained_projection_conflict_allowed,
 )
+from pure_integer_ai.experiments.symmetric_input_order import (
+    symmetric_input_order_witnesses, unresolved_input_conflict_bindings,
+)
 from pure_integer_ai.experiments.trained_open_response_runtime import (
     GenericResponseConnectorQueryNode,
     _discourse_memory_refs,
@@ -5992,8 +5995,12 @@ class TrainedGraphQueryBridge:
                 selected_required_open = int(bool(slot_question_parts[4]))
         if self._partial_property_core_roots:
             selected_required_open = 0
+        input_order_witnesses = symmetric_input_order_witnesses(
+            input_structure, self.core_fact_index)
+        explained_order_keys = {item.relation.stable_key() for item in input_order_witnesses}
         input_order_conflict = int(any(
             item.state == STRUCTURE_ORDER_CONFLICT
+            and item.stable_key() not in explained_order_keys
             for item in input_structure.relation_candidates))
         for key in dialogue_keys:
             frame = self.dialogue_frame_index[key]
@@ -6110,6 +6117,9 @@ class TrainedGraphQueryBridge:
                     "input semantic filler identity kind drifted")
         initial_bindings = {}
         initial_evidence = {}
+        for witness in input_order_witnesses:
+            evidence = witness.query_evidence()
+            initial_evidence[evidence.stable_key()] = evidence
         for binding, evidence in assertion_scope_query_records(input_structure, query_key):
             initial_bindings[binding.stable_key()] = binding
             initial_evidence[evidence.stable_key()] = evidence
@@ -6838,8 +6848,7 @@ class TrainedGraphQueryBridge:
 
         def generic_conflicts_closed() -> bool:
             """Close only conflicts consumed by an exact Memory/input join."""
-            conflicts = tuple(
-                item for item in state.bindings if item.conflict_kept == 1)
+            conflicts = unresolved_input_conflict_bindings(state, input_order_witnesses)
             if not conflicts:
                 return True
             if generic is None or not generic.graph_surfaces:
@@ -8190,6 +8199,8 @@ class _CrossSpaceExpander(QueryExpander):
         if artifact_input is not None and not isinstance(artifact_input, ArtifactQueryInput):
             raise TypeError("artifact_input 必须是 ArtifactQueryInput 或 None")
         self.owner = owner
+        self.input_order_witnesses = symmetric_input_order_witnesses(
+            input_structure, getattr(owner, 'core_fact_index', {}))
         self.input_structure = input_structure
         self.artifact_input = artifact_input
         self.artifact_bridge_matches = tuple(artifact_bridge_matches)
@@ -9362,13 +9373,14 @@ class _CrossSpaceExpander(QueryExpander):
             competition_stances.setdefault(key, set()).add(item.polarity)
         evidence_conflict = any({1, 2} <= stances
                                 for stances in competition_stances.values())
+        unresolved_input_conflicts = bool(unresolved_input_conflict_bindings(state, self.input_order_witnesses))
         self.operation_logical_conflict = bool(self.input_order_conflict or reference_conflict
-            or any(item.conflict_kept == 1 for item in state.bindings)
+            or unresolved_input_conflicts
             or evidence_conflict or current_memory_refutes_core or reference_open)
         conflict_open = int(
             self.input_order_conflict
                 or reference_conflict
-            or any(item.conflict_kept == 1 for item in state.bindings)
+            or unresolved_input_conflicts
             or evidence_conflict
             or current_memory_refutes_core
             or (bool(state.second_candidate_key)

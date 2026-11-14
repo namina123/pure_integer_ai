@@ -81,9 +81,10 @@ def _compact_key_field(trace: GraphQueryTraceEvidence, value: object,
 
 def capture_factual_case_provenance(
         *, query_result: Mapping[str, Any], query_values: tuple[int, ...],
-        expected_claim: tuple[int, ...], expected_operation: tuple[int, ...],
+        expected_claim: tuple[int, ...], expected_operation: tuple[int, ...] | None,
         input_observation: tuple[int, ...], input_source: tuple[int, ...],
         delivery_summary: Mapping[str, Any],
+        assertion_input=None, core_fact_index=None,
         ) -> dict[str, Any]:
     """Validate and freeze exact call evidence, with explicit unknown limits.
 
@@ -95,7 +96,16 @@ def capture_factual_case_provenance(
         raise CaseProvenanceError("query and delivery evidence must be mappings")
     query_key = _key(query_values, "query")
     claim_key = _key(expected_claim, "expected claim")
-    operation_key = _key(expected_operation, "expected operation")
+    assertion_witness = ()
+    if expected_operation is None:
+        from pure_integer_ai.experiments.natural_assertion_capture import delivered_assertion_capture_witness
+        actual_claim, assertion_witness = delivered_assertion_capture_witness(
+            assertion_input, {} if core_fact_index is None else core_fact_index, query_result)
+        if actual_claim != claim_key:
+            raise CaseProvenanceError('plain assertion differs from the actual selected claim')
+        operation_key = ()
+    else:
+        operation_key = _key(expected_operation, "expected operation")
     observation_key = _key(input_observation, "input Observation")
     input_source_key = _key(input_source, "input source")
     if query_result.get("schema_version") != 4:
@@ -134,8 +144,10 @@ def capture_factual_case_provenance(
     # hops. Preserve that distinction; do not turn active_spaces into a hop.
     inferred = _keys(query_result.get("operation_keys"), "operation keys")
     contracts = trace.operation_contracts()
-    if (operation_key not in inferred or len(set(inferred)) != len(inferred)
-            or set(inferred) != {key for key, _ in contracts}):
+    if (assertion_witness and (inferred or contracts)):
+        raise CaseProvenanceError('plain assertion cannot invent a query operation')
+    if (not assertion_witness and (operation_key not in inferred or len(set(inferred)) != len(inferred)
+            or set(inferred) != {key for key, _ in contracts})):
         raise CaseProvenanceError("requested operation was not consumed")
     plan = query_result.get("response_plan")
     if not isinstance(plan, Mapping):
@@ -196,7 +208,7 @@ def capture_factual_case_provenance(
     if not isinstance(delivery_summary.get("use_event_hashes"), list):
         raise CaseProvenanceError("delivery Use evidence is missing")
     projection = _integer_projection(query_result)
-    return {
+    captured = {
         "format": "PURE_INTEGER_BATCH_CASE_PROVENANCE_V1",
         "status": "CAPTURED_QUERY_PLAN_AND_DELIVERY_REFS",
         "query_values": list(query_key),
@@ -220,3 +232,6 @@ def capture_factual_case_provenance(
         "operation_behavior": "UNKNOWN_requires_counterfactual_audit",
         "free_dialogue_complete": 0,
     }
+    if assertion_witness:
+        captured['assertion_input_witness'] = list(assertion_witness)
+    return captured
