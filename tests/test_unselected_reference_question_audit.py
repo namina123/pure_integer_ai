@@ -7,6 +7,7 @@ import pytest
 from pure_integer_ai.cognition.shared.query_state import BindingEntry, EvidenceEntry
 from pure_integer_ai.experiments.query_memory_ohe_audit import QueryMemoryOheEvidenceError
 from pure_integer_ai.experiments.reference_question_transition_audit import verify_reference_question_transition
+from pure_integer_ai.experiments.reference_question_transition_audit import restore_reference_question_transition
 from test_query_relation_arbitration import _pending_reference_fixture
 
 
@@ -87,3 +88,13 @@ def test_all_existing_question_proofs_keep_the_original_transition_contract():
     result = verify_reference_question_transition(trace, prepared, resolutions, reference_bridge=bridge)
     assert result['initial_question_proofs'] == 2
     assert 'unselected_question_candidates' not in result
+
+
+def test_full_transition_record_keeps_original_report_and_current_input_identity():
+    """新同次值保留完整输入，不给无采用路径制造Core采用资格。"""
+    bridge, prepared, _marker, trace, resolutions = _fixture()
+    restored = restore_reference_question_transition(trace, prepared, resolutions, reference_bridge=bridge)
+    assert restored.report() == verify_reference_question_transition(
+        trace, prepared, resolutions, reference_bridge=bridge)
+    assert restored.final_input_key == prepared.stable_key()
+    assert restored.adoption_evidence_keys == ()

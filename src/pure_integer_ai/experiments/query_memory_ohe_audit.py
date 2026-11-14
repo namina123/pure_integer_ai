@@ -78,7 +78,7 @@ def verify_query_memory_ohe(
         response_contexts: tuple = (),
         reference_contexts: tuple | None = None,
         reference_candidate_sets: tuple = (), reference_resolutions: tuple = (),
-        revision_cue_records: tuple = (), core_runtime=None,
+        revision_cue_records: tuple = (), core_runtime=None, reference_transition=None,
         ) -> dict[str, Any]:
     """Match intake declarations, consumed hops, state members and plan refs.
 
@@ -108,7 +108,8 @@ The caller separately qualifies the delivery proof, split and source license.
         input_role_occurrences=input_role_occurrences, response_contexts=response_contexts,
         reference_contexts=reference_contexts,
         reference_candidate_sets=reference_candidate_sets, reference_resolutions=reference_resolutions,
-        revision_cue_records=revision_cue_records, core_runtime=core_runtime)
+        revision_cue_records=revision_cue_records, core_runtime=core_runtime,
+        reference_transition=reference_transition)
 
 
 def verify_query_memory_ohe_without_plan(
@@ -122,7 +123,7 @@ def verify_query_memory_ohe_without_plan(
         response_contexts: tuple = (),
         reference_contexts: tuple | None = None,
         reference_candidate_sets: tuple = (), reference_resolutions: tuple = (),
-        revision_cue_records: tuple = (),
+        revision_cue_records: tuple = (), reference_transition=None,
         ) -> dict[str, Any]:
     """Cold-join an UNKNOWN call to durable intake without inventing a Plan."""
     trace = GraphQueryTraceEvidence(trace_value)
@@ -146,7 +147,7 @@ def verify_query_memory_ohe_without_plan(
         input_role_occurrences=input_role_occurrences, response_contexts=response_contexts,
         reference_contexts=reference_contexts,
         reference_candidate_sets=reference_candidate_sets, reference_resolutions=reference_resolutions,
-        revision_cue_records=revision_cue_records)
+        revision_cue_records=revision_cue_records, reference_transition=reference_transition)
 
 
 def verify_query_memory_ohe_nonfactual(trace_value, call_receipt, *, max_state_members=256,
@@ -187,7 +188,7 @@ def _verify_query_memory_state(
         nonfactual_plan: bool = False,
         input_conflict_context=None,
         assertion_scope_frames=(), core_runtime=None, authorized_input=None,
-        revision_cue_records: tuple = (),
+        revision_cue_records: tuple = (), reference_transition=None,
         ) -> dict[str, Any]:
     if type(max_state_members) is not int or not 0 < max_state_members <= 4096:
         raise QueryMemoryOheEvidenceError("state member audit budget must be a strict integer from 1 to 4096")
@@ -262,10 +263,18 @@ def _verify_query_memory_state(
             return _key(raw, label)
         raw = tuple(raw)
         if raw not in compound_evidence:
-            from pure_integer_ai.experiments.compound_dialogue_evidence_audit import verify_compound_dialogue_evidence
-            compound_evidence[raw] = verify_compound_dialogue_evidence(raw, trace,
-                core_runtime=core_runtime, key_reader=_key, rows_reader=_rows,
+            readers = dict(core_runtime=core_runtime, key_reader=_key, rows_reader=_rows,
                 max_state_members=max_state_members, error=QueryMemoryOheEvidenceError)
+            if raw[:3] == (3, 1, 1):
+                from pure_integer_ai.experiments.compound_dialogue_evidence_audit import verify_compound_dialogue_evidence
+                restored = verify_compound_dialogue_evidence(raw, trace, **readers)
+            elif raw[:3] == (1, 3, 1):
+                from pure_integer_ai.experiments.compound_reference_adoption_evidence_audit import verify_compound_reference_adoption_evidence
+                restored = verify_compound_reference_adoption_evidence(raw, trace,
+                    transition=reference_transition, resolutions=reference_resolutions, **readers)
+            else:
+                raise QueryMemoryOheEvidenceError('unregistered compound Evidence type')
+            compound_evidence[raw] = restored
         return compound_evidence[raw]
 
     evidence = []

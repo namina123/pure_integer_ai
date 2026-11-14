@@ -1,5 +1,5 @@
 """冷审初始开放问式到完整目标采用及最终闭合输入的精确整数转换。"""
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from pure_integer_ai.cognition.understanding.query_input_structure import (
     InputSemanticCandidate, InputSpan, InputSpanRelation, PROJECTION_FILLER, SPAN_SOURCE, STRUCTURE_CLOSED,
@@ -17,7 +17,26 @@ def _trace_key(trace, value):
     raise QueryMemoryOheEvidenceError('question transition requires complete integer keys')
 
 
+@dataclass(frozen=True, slots=True)
+class ReferenceQuestionTransitionAudit:
+    """当前冷读的完整转换值；完整键供同次消费者比较，计数另行导出。"""
+
+    summary: tuple[tuple[str, int], ...]
+    final_input_key: tuple[int, ...]
+    adoption_evidence_keys: tuple[tuple[int, ...], ...]
+
+    def report(self):
+        """只导出原审计计数，避免把完整大键写入资格摘要。"""
+        return dict(self.summary)
+
+
 def verify_reference_question_transition(trace, prepared, resolutions, *, reference_bridge):
+    """保持既有计数接口，完整转换只由唯一冷读内核检查。"""
+    return restore_reference_question_transition(trace, prepared, resolutions,
+        reference_bridge=reference_bridge).report()
+
+
+def restore_reference_question_transition(trace, prepared, resolutions, *, reference_bridge):
     """重建目标采用的全部 InputStructure 差分，保持初始语法及事实证据独立。"""
     original = tuple(item.stable_key() for item in prepared.relation_question_bindings)
     members = tuple(trace.resolve_ref(ref) for ref in trace.trace['state_key']['evidence'])
@@ -27,11 +46,13 @@ def verify_reference_question_transition(trace, prepared, resolutions, *, refere
         if any(proven):
             raise QueryMemoryOheEvidenceError('original question binding lacks its QueryState proof')
         from pure_integer_ai.experiments.unselected_reference_question_audit import verify_unselected_reference_questions
-        return verify_unselected_reference_questions(trace, prepared, resolutions,
-                                                     reference_bridge=reference_bridge)
+        report = verify_unselected_reference_questions(trace, prepared, resolutions,
+                                                       reference_bridge=reference_bridge)
+        return ReferenceQuestionTransitionAudit(tuple(sorted(report.items())), prepared.stable_key(), ())
     bindings = {trace.resolve_ref(ref) for ref in trace.trace['state_key']['bindings']}
     expected_input = prepared
     adopted = 0
+    adoption_keys = []
     for key in members:
         source, hypothesis, member, scope, payload, supersedes = _unpack(key, 3, 6)
         if key[0] != 1 or member[:2] != (91599, 7):
@@ -109,6 +130,7 @@ def verify_reference_question_transition(trace, prepared, resolutions, *, refere
                 if item.relation_key == relation.stable_key() else item for item in prepared.relation_question_bindings),
                 key=lambda item: item.stable_key())))
         adopted += 1
+        adoption_keys.append(key)
     if adopted > 1:
         raise QueryMemoryOheEvidenceError('multiple target adoptions are outside the current transition contract')
     final = trace.trace['input_structure']
@@ -116,5 +138,7 @@ def verify_reference_question_transition(trace, prepared, resolutions, *, refere
             or tuple(_trace_key(trace, item) for item in final['relation_question_bindings'])
             != tuple(item.stable_key() for item in expected_input.relation_question_bindings)):
         raise QueryMemoryOheEvidenceError('final question/input differs from the exact target adoption transition')
-    return {'initial_question_proofs':len(original), 'target_adoption_count':adopted,
-            'full_input_transition_matches':1, 'query_call_count':0, 'generation_call_count':0}
+    report = {'initial_question_proofs':len(original), 'target_adoption_count':adopted,
+              'full_input_transition_matches':1, 'query_call_count':0, 'generation_call_count':0}
+    return ReferenceQuestionTransitionAudit(tuple(sorted(report.items())),
+        expected_input.stable_key(), tuple(adoption_keys))

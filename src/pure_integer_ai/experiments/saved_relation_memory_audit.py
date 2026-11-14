@@ -106,9 +106,11 @@ def audit_saved_relation_memory(database, value, report, prepared, *, captured=N
                 readers['reference_contexts'] = complete_response_contexts
                 readers['reference_candidate_sets'] = sets
                 readers['reference_resolutions'] = resolutions
-                from pure_integer_ai.experiments.reference_question_transition_audit import verify_reference_question_transition
-                reference_transition = verify_reference_question_transition(trace, selected_input, resolutions,
-                                                                            reference_bridge=reference_bridge)
+                from pure_integer_ai.experiments.reference_question_transition_audit import restore_reference_question_transition
+                transition = restore_reference_question_transition(trace, selected_input, resolutions,
+                                                                    reference_bridge=reference_bridge)
+                readers['reference_transition'] = transition
+                reference_transition = transition.report()
                 reference_transition['input_selection'] = reference_selection
             if any(route[0] == 6 for route in trace.memory_routes()):
                 if reference_bridge is None:
