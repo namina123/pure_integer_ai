@@ -84,7 +84,7 @@ def capture_factual_case_provenance(
         expected_claim: tuple[int, ...], expected_operation: tuple[int, ...] | None,
         input_observation: tuple[int, ...], input_source: tuple[int, ...],
         delivery_summary: Mapping[str, Any],
-        assertion_input=None, core_fact_index=None,
+        assertion_input=None, core_fact_index=None, core_runtime=None,
         ) -> dict[str, Any]:
     """Validate and freeze exact call evidence, with explicit unknown limits.
 
@@ -100,7 +100,8 @@ def capture_factual_case_provenance(
     if expected_operation is None:
         from pure_integer_ai.experiments.natural_assertion_capture import delivered_assertion_capture_witness
         actual_claim, assertion_witness = delivered_assertion_capture_witness(
-            assertion_input, {} if core_fact_index is None else core_fact_index, query_result)
+            assertion_input, {} if core_fact_index is None else core_fact_index, query_result,
+            core_runtime=core_runtime)
         if actual_claim != claim_key:
             raise CaseProvenanceError('plain assertion differs from the actual selected claim')
         operation_key = ()

@@ -161,10 +161,12 @@ def _run_natural_relation_case(
                 input_source=appended.source.stable_key(), delivery_summary=delivery.summary())
         elif delivery is not None and result["generation"].get("kind") == 1:
             from pure_integer_ai.experiments.natural_assertion_capture import delivered_assertion_capture_witness
-            claim, _witness = delivered_assertion_capture_witness(structure, bridge.core_fact_index, result)
+            claim, _witness = delivered_assertion_capture_witness(
+                structure, bridge.core_fact_index, result, core_runtime=bridge.core_runtime)
             capture = capture_factual_case_provenance(
                 query_result=result, query_values=tuple(map(ord, surface)), expected_claim=claim,
                 expected_operation=None, assertion_input=structure, core_fact_index=bridge.core_fact_index,
+                core_runtime=bridge.core_runtime,
                 input_observation=intake.observation_ref.stable_key(),
                 input_source=appended.source.stable_key(), delivery_summary=delivery.summary())
     if capture is not None:

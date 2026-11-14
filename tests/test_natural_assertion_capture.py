@@ -5,9 +5,13 @@ from types import SimpleNamespace
 import pytest
 
 from pure_integer_ai.cognition.shared.query_state import EvidenceEntry
+from pure_integer_ai.cognition.shared.hypothesis import EvidenceRecord, HypothesisKey
+from pure_integer_ai.cognition.shared.identity import SourceRef
+from pure_integer_ai.cognition.shared.scope_identity import document_scope
 from pure_integer_ai.experiments.batch_case_provenance import capture_factual_case_provenance
 from pure_integer_ai.experiments.natural_assertion_capture import delivered_assertion_capture_witness
 from pure_integer_ai.experiments.symmetric_input_order import symmetric_input_order_witnesses
+from pure_integer_ai.experiments.trained_query_evidence import core_query_evidence
 from tests.test_batch_case_provenance import _call
 from tests.test_symmetric_input_order import _fixture
 
@@ -30,8 +34,15 @@ def _assertion():
     query['state_key']['query_ref'] = query['query_ref']
     query['state_key']['scalars'][11] = intern(relation.proposition_key)
     query['state_key']['bindings'] = [intern(item.stable_key()) for item in witness.original_bindings()]
+    fact = facts[relation.proposition_key]
+    source = SourceRef(206, 101, 0, fact.proposition.owner, fact.proposition.versions)
+    hypothesis = HypothesisKey((1,), relation.proposition_key, (99,), document_scope(source), source)
+    history = (EvidenceRecord(1, hypothesis, 1, (7,), source, 1),)
+    registry = SimpleNamespace(find=lambda *args: 71)
+    core = SimpleNamespace(evidence_history=lambda prop: history if prop == fact.proposition else (),
+        context=SimpleNamespace(scoped_identity_store=SimpleNamespace(registry=registry)))
     evidence = (*witness.original_evidence(), witness.query_evidence(),
-        EvidenceEntry(relation.source_ref, relation.proposition_key, evidence_key=(800,)))
+        *core_query_evidence(fact.proposition, history, registry))
     query['state_key']['evidence'] = [intern(item.stable_key()) for item in evidence]
     query['operation_keys'], query['operation_contracts'] = [], []
     query['generation']['kind'] = 1
@@ -40,16 +51,17 @@ def _assertion():
     query['response_plan']['claim_evidence_refs'] = [{'claim': list(relation.proposition_key),
         'evidence': [list(evidence[-1].stable_key())]}]
     delivery['evidence_ref_count'] = len(evidence)
-    return structure, facts, query, delivery, relation.proposition_key
+    return structure, facts, query, delivery, relation.proposition_key, core
 
 
 def test_plain_assertion_gets_same_call_capture_with_explicit_empty_operation():
-    structure, facts, query, delivery, claim = _assertion()
+    structure, facts, query, delivery, claim, core = _assertion()
     before = deepcopy(query)
-    actual, witness = delivered_assertion_capture_witness(structure, facts, query)
+    actual, witness = delivered_assertion_capture_witness(structure, facts, query, core_runtime=core)
     assert actual == claim
     captured = capture_factual_case_provenance(query_result=query, query_values=structure.token_values,
         expected_claim=claim, expected_operation=None, assertion_input=structure, core_fact_index=facts,
+        core_runtime=core,
         input_observation=(103,), input_source=(104,), delivery_summary=delivery)
     assert captured['assertion_input_witness'] == list(witness)
     assert captured['expected_operation'] == []
@@ -58,9 +70,10 @@ def test_plain_assertion_gets_same_call_capture_with_explicit_empty_operation():
 
 
 @pytest.mark.parametrize('drift', ('operation', 'contract', 'input', 'claim', 'primary',
-    'generation_kind', 'positive_missing', 'binding_missing', 'projection_missing', 'core_source', 'core_missing'))
+    'generation_kind', 'positive_missing', 'binding_missing', 'projection_missing', 'core_source', 'core_missing',
+    'core_reader_missing', 'source_header', 'history_payload'))
 def test_assertion_capture_rejects_unproven_operation_claim_input_or_original_evidence(drift):
-    structure, facts, query, delivery, claim = _assertion()
+    structure, facts, query, delivery, claim, core = _assertion()
     if drift == 'operation': query['operation_keys'] = [[999]]
     elif drift == 'contract': query['operation_contracts'] = [[[999], [91672, 3]]]
     elif drift == 'input': query['input_structure']['stable_key']['integer_key_ref'] = 1
@@ -71,8 +84,12 @@ def test_assertion_capture_rejects_unproven_operation_claim_input_or_original_ev
     elif drift == 'binding_missing': query['state_key']['bindings'] = query['state_key']['bindings'][1:]
     elif drift == 'projection_missing': query['state_key']['evidence'] = query['state_key']['evidence'][1:]
     elif drift == 'core_source': facts[claim].source_hash += 1
+    elif drift == 'core_reader_missing': core = None
+    elif drift in ('source_header', 'history_payload'):
+        key = query['integer_key_table'][query['state_key']['evidence'][-1] - 1]
+        key[4 if drift == 'source_header' else -3] += 1
     else: facts.pop(claim)
-    with pytest.raises(ValueError): delivered_assertion_capture_witness(structure, facts, query)
+    with pytest.raises(ValueError): delivered_assertion_capture_witness(structure, facts, query, core_runtime=core)
 
 
 def test_operation_capture_cannot_request_unverified_empty_operation():
@@ -83,7 +100,7 @@ def test_operation_capture_cannot_request_unverified_empty_operation():
 
 
 def test_plain_capture_cannot_drop_another_scope_contract():
-    structure, facts, query, _, _ = _assertion()
+    structure, facts, query, _, _, core = _assertion()
     fields = {name: getattr(structure, name) for name in structure.__dataclass_fields__}
     fields['operation_keys'] = ((999,),)
-    with pytest.raises(ValueError): delivered_assertion_capture_witness(SimpleNamespace(**fields), facts, query)
+    with pytest.raises(ValueError): delivered_assertion_capture_witness(SimpleNamespace(**fields), facts, query, core_runtime=core)

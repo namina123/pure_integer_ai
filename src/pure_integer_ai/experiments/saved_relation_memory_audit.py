@@ -60,7 +60,8 @@ def audit_saved_relation_memory(database, value, report, prepared, *, captured=N
         if captured is not None and (not captured.get('expected_operation') or 'assertion_input_witness' in captured):
             from pure_integer_ai.experiments.natural_assertion_capture import delivered_assertion_capture_witness
             claim, witness = delivered_assertion_capture_witness(prepared,
-                {} if reference_bridge is None else reference_bridge.core_fact_index, value)
+                {} if reference_bridge is None else reference_bridge.core_fact_index, value,
+                core_runtime=None if reference_bridge is None else reference_bridge.core_runtime)
             if (captured.get('expected_operation') != [] or captured.get('assertion_input_witness') != list(witness)
                     or captured['expected_claim'] != list(claim)):
                 raise ValueError('saved assertion capture differs from cold complete input')

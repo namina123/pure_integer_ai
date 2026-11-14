@@ -13,11 +13,12 @@ from pure_integer_ai.experiments.query_relation_arbitration import (
 from pure_integer_ai.experiments.symmetric_input_order import (
     _projection_evidence, symmetric_input_order_witnesses, verify_saved_symmetric_input_order,
 )
+from pure_integer_ai.experiments.trained_query_evidence import core_query_evidence, current_query_evidence
 
 ASSERTION_CAPTURE_VERSION = 92481
 
 
-def delivered_assertion_capture_witness(structure, facts, result):
+def delivered_assertion_capture_witness(structure, facts, result, *, core_runtime=None):
     """从本次完整输入及实际单事实Plan恢复资格，不消费期望答案。"""
     if structure is None or any(getattr(structure, field) for field in (
             'operation_keys', 'relation_question_bindings', 'operation_request_bindings',
@@ -84,8 +85,16 @@ def delivered_assertion_capture_witness(structure, facts, result):
             or any(BindingEntry(role, filler, space=SPACE_CORE, scope_key=structure.source_ref).stable_key()
                 not in bindings for role, filler in ((relation.predicate_key, claim), *expected.items()))):
         raise ValueError('plain assertion lost original projection evidence or bindings')
-    positive = tuple(_unpack(key, 3, 6) for key in evidence if key[:2] == (SPACE_CORE, 1))
-    if not any(parts[0] == (fact.source_hash,) and parts[1] == claim for parts in positive):
-        raise ValueError('plain assertion lacks current positive Core evidence')
+    if core_runtime is None:
+        raise ValueError('plain assertion lacks its complete physical Core evidence reader')
+    cold = core_query_evidence(fact.proposition, core_runtime.evidence_history(fact.proposition),
+                              core_runtime.context.scoped_identity_store.registry)
+    current = current_query_evidence(cold)
+    consumed_truth = {key for key in evidence if key[:2] in ((SPACE_CORE, 1), (SPACE_CORE, 2))
+                      and _unpack(key, 3, 6)[1] == claim}
+    if (not any(item.polarity == 1 for item in current) or any(item.polarity == 2 for item in current)
+            or consumed_truth != {item.stable_key() for item in cold if item.polarity in (1, 2)}
+            or any(item.stable_key() not in evidence for item in cold)):
+        raise ValueError('plain assertion differs from the complete current Core evidence history')
     return claim, frame_key(ASSERTION_CAPTURE_VERSION, (1,), structure.source_ref,
                            structure.stable_key(), relation.stable_key())
